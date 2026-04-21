@@ -1,0 +1,64 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+
+# Virtual environments
+venv/
+.env/
+
+# =========================
+# Environment variables
+# =========================
+.env
+
+# =========================
+# Ansible
+# =========================
+ansible/inventory/inventory.ini
+ansible/inventory/*.retry
+
+# Ansible artifacts
+*.log
+*.retry
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# Secrets / Keys
+# =========================
+*.pem
+*.key
+*.crt
+
+# =========================
+# Build / cache
+# =========================
+.cache/
+dist/
+build/
+
+# =========================
+# Docker (optional)
+# =========================
+*.env.local
