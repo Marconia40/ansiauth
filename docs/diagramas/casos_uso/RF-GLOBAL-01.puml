@@ -1,0 +1,38 @@
+@startuml "Diagrama de caso de uso - RF-GLOBAL-01"
+left to right direction
+
+skinparam packageStyle rectangle
+
+actor "Operador" as Op
+
+package "API" {
+    usecase "Consultar Configuración General" as UC1
+    usecase "Ejecutar Comando de Lectura" as UC2
+    usecase "Parsear Datos de Configuración" as UC3
+    usecase "Manejar Error de Comunicación" as UC4
+    usecase "Registrar Log de Consulta" as UC5
+}
+
+Op --> UC1 : Solicita ver configuración
+UC1 ..> UC2 : <<include>>
+UC1 ..> UC3 : <<include>>
+UC1 ..> UC5 : <<include>> (Al éxito)
+
+Op --> UC4 : (Si el dispositivo no responde)
+
+note right of UC2
+  Requiere: Conexión activa
+  con el dispositivo
+end note
+
+note bottom of UC3
+  Garantía: Devuelve la 
+  configuración actual almacenada
+end note
+
+note right of UC4
+  Excepción: Error de red o
+  timeout del dispositivo
+end note
+
+@enduml

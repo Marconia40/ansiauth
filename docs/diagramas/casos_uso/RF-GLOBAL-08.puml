@@ -1,0 +1,38 @@
+@startuml "Diagrama de caso de uso - RF-GLOBAL-08"
+left to right direction
+
+skinparam packageStyle rectangle
+
+actor "Administrador de Red" as Admin
+
+package "API" {
+    usecase "Modificar Hostname del Dispositivo" as UC1
+    usecase "Validar Caracteres de Hostname" as UC2
+    usecase "Actualizar Nombre de Sistema" as UC3
+    usecase "Notificar Sin Cambios\n(Hostname idéntico)" as UC4
+    usecase "Registrar Log de Operación" as UC5
+}
+
+Admin --> UC1 : Solicita cambio (New Hostname)
+UC1 ..> UC2 : <<include>>
+UC1 ..> UC3 : <<include>> (Si es válido y diferente)
+UC1 ..> UC5 : <<include>> (Al éxito)
+
+Admin --> UC4 : (Si el nombre ya es el actual)
+
+note right of UC2
+  Requiere: Hostname válido
+  sin caracteres prohibidos
+end note
+
+note bottom of UC3
+  Garantía: El cambio se
+  aplica inmediatamente
+end note
+
+note right of UC5
+  Excepciones: Caracteres inválidos
+  o error de comunicación con el dispositivo
+end note
+
+@enduml

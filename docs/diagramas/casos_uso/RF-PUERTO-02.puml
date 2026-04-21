@@ -1,0 +1,42 @@
+@startuml "Diagrama de caso de uso - RF-PUERTO-02"
+left to right direction
+
+skinparam packageStyle rectangle
+
+actor "Administrador de Red" as Admin
+
+package "API" {
+    usecase "Configurar puerto como Trunk" as UC1
+    usecase "Validar Puerto y Rango de VLANs" as UC2
+    usecase "Cambiar Modo de Puerto\n(Access a Trunk)" as UC3
+    usecase "Actualizar VLAN Nativa y\nLista de Permitidas" as UC4
+    usecase "Registrar Log de Configuración" as UC5
+    usecase "Manejar Excepciones de Red" as UC6
+}
+
+Admin --> UC1 : Config puerto como trunk (name, vlan nativa, Lista vlan tag)
+UC1 ..> UC2 : <<include>>
+UC1 ..> UC5 : <<include>>
+
+Admin --> UC3 : (Si el puerto era Access)
+Admin --> UC4 : (Si ya era Trunk)
+Admin --> UC6 : (Errores de formato o comunicación)
+
+note right of UC2
+  - Puerto != Port-Channel
+  - Nativa: 1-4094
+  - Lista: Formato CSV y en rango
+end note
+
+note bottom of UC4
+  Curso alternativo: Actualiza 
+  parámetros si hubo cambios
+end note
+
+note right of UC6
+  Excepciones: Formato incorrecto,
+  VLAN fuera de rango o
+  fallo de escritura/comunicación
+end note
+
+@enduml

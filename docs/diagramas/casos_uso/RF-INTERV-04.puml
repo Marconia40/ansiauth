@@ -1,0 +1,42 @@
+@startuml "Diagrama de caso de uso - RF-INTERV-04"
+left to right direction
+
+skinparam packageStyle rectangle
+
+actor "Administrador de Red" as Admin
+
+package "API" {
+    usecase "Gestionar ACL en Interfaz" as UC1
+    usecase "Validar Existencia de ACL" as UC2
+    usecase "Verificar Interfaz VLAN" as UC3
+    usecase "Aplicar/Remover ACL\n(Inbound/Outbound)" as UC4
+    usecase "Notificar ACL ya Asignada" as UC5
+    usecase "Registrar Log de Configuración" as UC6
+}
+
+Admin --> UC1 : Solicita (VLAN, ACL_ID, Dirección, Acción)
+UC1 ..> UC2 : <<include>>
+UC1 ..> UC3 : <<include>>
+UC1 ..> UC4 : <<include>> (Si validaciones OK)
+UC1 ..> UC6 : <<include>> (Al éxito)
+
+Admin --> UC5 : (Si ya está aplicada)
+Admin --> UC2 : <<extend>> (Error si ACL no existe)
+
+note right of UC2
+  Requiere: ACL previamente
+  creada en el dispositivo
+end note
+
+note bottom of UC4
+  Direcciones: inbound / outbound
+  Acciones: asignar / eliminar
+end note
+
+note right of UC6
+  Excepciones: VLAN fuera de rango,
+  ACL inexistente, error de red
+  o fallo de escritura
+end note
+
+@enduml

@@ -1,0 +1,38 @@
+@startuml "Diagrama de caso de uso - RF-VLAN-01"
+left to right direction
+
+skinparam packageStyle rectangle
+
+actor "Administrador de Red" as Admin
+
+package "API" {
+    usecase "Crear VLAN con ID y Nombre" as UC1
+    usecase "Validar Parámetros\n(ID y Nombre)" as UC2
+    usecase "Registrar Log de Configuración" as UC3
+    usecase "Notificar Error de Duplicado" as UC4
+    usecase "Manejar Error de Comunicación" as UC5
+}
+
+Admin --> UC1 : Solicita creación (ID, Nombre)
+UC1 ..> UC2 : <<include>>
+UC1 ..> UC3 : <<include>> (Al éxito)
+
+Admin --> UC4 : (ID/Nombre ya existen)
+Admin --> UC5 : (Fallo de conexión/escritura)
+
+note right of UC2
+  - ID: 1-4094
+  - Nombre: Único y caracteres válidos
+end note
+
+note bottom of UC3
+  Garantiza: VLAN disponible
+  para asignación a puertos
+end note
+
+note right of UC5
+  Excepciones: Fuera de rango,
+  error de red o fallo de escritura
+end note
+
+@enduml

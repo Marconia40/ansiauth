@@ -1,0 +1,39 @@
+@startuml "Diagrama de caso de uso - RF-PUERTO-01"
+left to right direction
+
+skinparam packageStyle rectangle
+
+actor "Administrador de Red" as Admin
+
+package "API" {
+    usecase "Configurar puerto como Access" as UC1
+    usecase "Validar Puerto y VLAN" as UC2
+    usecase "Cambiar Modo de Puerto\n(Trunk a Access)" as UC3
+    usecase "Registrar Log de Configuración" as UC4
+    usecase "Manejar Error de Dispositivo" as UC5
+}
+
+Admin --> UC1 : Config puerto como access (name, vlan_id)
+UC1 ..> UC2 : <<include>>
+UC1 ..> UC4 : <<include>> (Al éxito)
+
+Admin --> UC3 : (Si el puerto era Trunk)
+Admin --> UC5 : (Puerto inválido / Error de red)
+
+note right of UC2
+  - Puerto != Port-Channel
+  - VLAN ID: 1-4094
+end note
+
+note bottom of UC3
+  Curso alternativo: Reemplaza
+  configuración anterior
+end note
+
+note right of UC5
+  Excepciones: Puerto inválido,
+  VLAN fuera de rango o
+  fallo de escritura.
+end note
+
+@enduml

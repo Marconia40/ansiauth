@@ -1,0 +1,39 @@
+@startuml "Diagrama de caso de uso - RF-PUERTO-06"
+left to right direction
+
+skinparam packageStyle rectangle
+
+actor "Administrador de Red" as Admin
+
+package "API" {
+    usecase "Modificar Descripción de Puerto" as UC1
+    usecase "Validar Puerto y Caracteres" as UC2
+    usecase "Actualizar String de Descripción" as UC3
+    usecase "Notificar Sin Cambios\n(Descripción idéntica)" as UC4
+    usecase "Registrar Log de Configuración" as UC5
+}
+
+Admin --> UC1 : Solicita cambio (Port, Description)
+UC1 ..> UC2 : <<include>>
+UC1 ..> UC3 : <<include>> (Si es válida y diferente)
+UC1 ..> UC5 : <<include>> (Al éxito)
+
+Admin --> UC4 : (Si la descripción ya existe)
+
+note right of UC2
+  - Verificar existencia del puerto
+  - Validar caracteres permitidos
+end note
+
+note bottom of UC3
+  Garantía: El puerto queda
+  con la descripción solicitada
+end note
+
+note right of UC5
+  Excepciones: Puerto inexistente,
+  caracteres inválidos o
+  fallo de escritura/comunicación
+end note
+
+@enduml
