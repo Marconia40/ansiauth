@@ -1,0 +1,16 @@
+I am building a network automation API using FastAPI and Ansible.
+
+I already have a VLAN endpoint.
+
+I want to improve it by adding a validation layer.
+
+Requirements:
+- Create a validators/vlan_validator.py module
+- Validate VLAN ID range (1-4094)
+- Reject reserved VLANs (1, 1002-1005)
+- Validate VLAN name (no spaces, max 32 chars)
+- Integrate validation into the VLAN API endpoint
+- Return HTTP 400 on validation errors
+
+Do not change unrelated files.
+Show me the diff before applying changes.
