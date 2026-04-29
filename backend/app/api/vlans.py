@@ -1,7 +1,9 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+
+from app.core.dependencies import require_role
 from app.schemas.vlan import VLANCreate, VLANUpdate
-from app.validators import vlan_validator
 from app.services import job_service, vlan_service
+from app.validators import vlan_validator
 
 router = APIRouter()
 
@@ -33,12 +35,12 @@ def _run_update_job(job_id: str, vlan_id: int, data: VLANUpdate):
         job_service.update_job(job_id, "completed", {"output": result["stdout"]})
 
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(require_role("observer"))])
 def get_vlans():
     return vlan_service.get_vlans()
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(require_role("operator"))])
 def create_vlan(vlan: VLANCreate, background_tasks: BackgroundTasks):
     try:
         vlan_validator.validate_vlan_id_range(vlan.vlan_id)
@@ -52,7 +54,7 @@ def create_vlan(vlan: VLANCreate, background_tasks: BackgroundTasks):
     return {"job_id": job.job_id, "status": job.status}
 
 
-@router.delete("/{vlan_id}")
+@router.delete("/{vlan_id}", dependencies=[Depends(require_role("admin"))])
 def delete_vlan(vlan_id: int, device: str, background_tasks: BackgroundTasks):
     try:
         vlan_validator.validate_vlan_id_range(vlan_id)
@@ -65,7 +67,7 @@ def delete_vlan(vlan_id: int, device: str, background_tasks: BackgroundTasks):
     return {"job_id": job.job_id, "status": job.status}
 
 
-@router.patch("/{vlan_id}")
+@router.patch("/{vlan_id}", dependencies=[Depends(require_role("operator"))])
 def update_vlan(vlan_id: int, data: VLANUpdate, background_tasks: BackgroundTasks):
     try:
         vlan_validator.validate_vlan_id_range(vlan_id)
