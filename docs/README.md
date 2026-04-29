@@ -63,6 +63,9 @@ pip install -r requirements.txt
 
 Levantar la API:
 
+```bash
+PYTHONPATH=backend uvicorn app.main:app --reload
+```
 
 ```bash
 cd backend/
@@ -167,6 +170,11 @@ return {
     "stderr": ""
 }
 ```
+
+## TEST
+
+# Ejecutar tests
+PYTHONPATH=backend python -m pytest backend/tests -v
 
 ---
 
