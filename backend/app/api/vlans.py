@@ -2,7 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from app.core.dependencies import require_role
 from app.schemas.vlan import VLANCreate, VLANUpdate
-from app.services import job_service, vlan_service
+from app.services import audit_service, job_service, vlan_service
 from app.validators import vlan_validator
 
 router = APIRouter()
@@ -40,8 +40,12 @@ def get_vlans():
     return vlan_service.get_vlans()
 
 
-@router.post("/", dependencies=[Depends(require_role("operator"))])
-def create_vlan(vlan: VLANCreate, background_tasks: BackgroundTasks):
+@router.post("/")
+def create_vlan(
+    vlan: VLANCreate,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("operator")),
+):
     try:
         vlan_validator.validate_vlan_id_range(vlan.vlan_id)
         vlan_validator.validate_vlan_not_reserved(vlan.vlan_id)
@@ -51,11 +55,23 @@ def create_vlan(vlan: VLANCreate, background_tasks: BackgroundTasks):
 
     job = job_service.create_job()
     background_tasks.add_task(_run_create_job, job.job_id, vlan)
+    audit_service.log_action(
+        user=current_user["username"],
+        action="create_vlan",
+        resource="vlan",
+        details={"vlan_id": vlan.vlan_id, "name": vlan.name, "device": vlan.device},
+        job_id=job.job_id,
+    )
     return {"job_id": job.job_id, "status": job.status}
 
 
-@router.delete("/{vlan_id}", dependencies=[Depends(require_role("admin"))])
-def delete_vlan(vlan_id: int, device: str, background_tasks: BackgroundTasks):
+@router.delete("/{vlan_id}")
+def delete_vlan(
+    vlan_id: int,
+    device: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("admin")),
+):
     try:
         vlan_validator.validate_vlan_id_range(vlan_id)
         vlan_validator.validate_vlan_not_reserved(vlan_id)
@@ -64,11 +80,23 @@ def delete_vlan(vlan_id: int, device: str, background_tasks: BackgroundTasks):
 
     job = job_service.create_job()
     background_tasks.add_task(_run_delete_job, job.job_id, vlan_id, device)
+    audit_service.log_action(
+        user=current_user["username"],
+        action="delete_vlan",
+        resource="vlan",
+        details={"vlan_id": vlan_id, "device": device},
+        job_id=job.job_id,
+    )
     return {"job_id": job.job_id, "status": job.status}
 
 
-@router.patch("/{vlan_id}", dependencies=[Depends(require_role("operator"))])
-def update_vlan(vlan_id: int, data: VLANUpdate, background_tasks: BackgroundTasks):
+@router.patch("/{vlan_id}")
+def update_vlan(
+    vlan_id: int,
+    data: VLANUpdate,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("operator")),
+):
     try:
         vlan_validator.validate_vlan_id_range(vlan_id)
         vlan_validator.validate_description(data.description)
@@ -77,4 +105,11 @@ def update_vlan(vlan_id: int, data: VLANUpdate, background_tasks: BackgroundTask
 
     job = job_service.create_job()
     background_tasks.add_task(_run_update_job, job.job_id, vlan_id, data)
+    audit_service.log_action(
+        user=current_user["username"],
+        action="update_vlan",
+        resource="vlan",
+        details={"vlan_id": vlan_id, "description": data.description, "device": data.device},
+        job_id=job.job_id,
+    )
     return {"job_id": job.job_id, "status": job.status}
