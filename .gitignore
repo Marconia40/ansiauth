@@ -62,3 +62,9 @@ build/
 # Docker (optional)
 # =========================
 *.env.local
+
+# =========================
+# Folders
+# =========================
+docs/prompts/
+docs/engineering_rules.md
