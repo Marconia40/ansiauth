@@ -68,4 +68,4 @@ def test_login_then_use_token(unauth_client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert vlan_response.status_code == 200
-    assert isinstance(vlan_response.json(), list)
+    assert isinstance(vlan_response.json()["data"], list)

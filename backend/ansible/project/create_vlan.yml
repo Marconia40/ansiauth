@@ -1,0 +1,16 @@
+---
+- name: Create VLAN on Cisco device
+  hosts: "{{ device }}"
+  gather_facts: no
+
+  tasks:
+    - name: Configure VLAN
+      ios_config:
+        lines:
+          - vlan {{ vlan_id }}
+          - name {{ vlan_name }}
+      register: result
+
+    - name: Save running config
+      ios_config:
+        save_when: always
