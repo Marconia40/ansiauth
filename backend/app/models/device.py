@@ -1,9 +1,14 @@
-from pydantic import BaseModel
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 
-class Device(BaseModel):
-    id: str
-    ip: str
-    type: str
+@dataclass
+class Device:
+    name: str
+    host: str
+    vendor: str
     username: str
-    password: str
+    encrypted_password: str
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

@@ -1,1 +1,0 @@
-{"event": "verbose", "uuid": "73277cea-f674-4010-8c96-2a16d70bcc5f", "counter": 5, "stdout": "\u001b[1;35m[WARNING]: ansible-pylibssh not installed, falling back to paramiko\u001b[0m", "start_line": 4, "end_line": 5, "runner_ident": "c6318dd7-fd76-4410-9902-0746ddec7bf3", "created": "2026-05-01T03:17:40.529952+00:00"}

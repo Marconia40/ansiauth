@@ -1,7 +1,7 @@
 import logging
 
 from app.core.config import EXECUTION_MODE
-from app.services import ansible_service
+from app.services import ansible_service, secret_service
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,8 @@ def create_vlan(data) -> dict:
         return _mock_create_vlan(data.vlan_id, data.device)
     logger.info("Real mode: create VLAN %s on %s", data.vlan_id, data.device)
     dev = _resolve_device(data.device)
-    return _ansible_create_vlan(data.vlan_id, data.name, dev.id, dev.ip, dev.username, dev.password)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    return _ansible_create_vlan(data.vlan_id, data.name, dev.name, dev.host, dev.username, pw)
 
 
 def delete_vlan(vlan_id: int, device_id: str) -> dict:
@@ -96,7 +97,8 @@ def delete_vlan(vlan_id: int, device_id: str) -> dict:
         return _mock_delete_vlan(vlan_id, device_id)
     logger.info("Real mode: delete VLAN %s on %s", vlan_id, device_id)
     dev = _resolve_device(device_id)
-    return _ansible_delete_vlan(vlan_id, dev.id, dev.ip, dev.username, dev.password)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    return _ansible_delete_vlan(vlan_id, dev.name, dev.host, dev.username, pw)
 
 
 def update_vlan_description(vlan_id: int, description: str, device_id: str) -> dict:
@@ -104,7 +106,8 @@ def update_vlan_description(vlan_id: int, description: str, device_id: str) -> d
         return _mock_update_vlan(vlan_id, description, device_id)
     logger.info("Real mode: update VLAN %s on %s", vlan_id, device_id)
     dev = _resolve_device(device_id)
-    return _ansible_update_vlan(vlan_id, description, dev.id, dev.ip, dev.username, dev.password)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    return _ansible_update_vlan(vlan_id, description, dev.name, dev.host, dev.username, pw)
 
 
 def get_vlans(device_id: str | None = None) -> list[dict]:
@@ -113,7 +116,8 @@ def get_vlans(device_id: str | None = None) -> list[dict]:
         return _mock_vlans
     logger.info("Real mode: listing VLANs on %s", device_id)
     dev = _resolve_device(device_id)
-    result = _ansible_get_vlans(dev.id, dev.ip, dev.username, dev.password)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    result = _ansible_get_vlans(dev.name, dev.host, dev.username, pw)
     if result["rc"] != 0:
         raise RuntimeError(result["stderr"] or "get_vlans.yml failed")
     from app.services.parsers.vlan_parser import parse_vlan_brief
