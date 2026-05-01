@@ -35,3 +35,20 @@ def observer_client():
 @pytest.fixture
 def unauth_client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def mock_ansible_service(monkeypatch):
+    """Prevent real Ansible playbook execution in unit tests.
+
+    Returns rc=1 for fail_device so failure-path tests still pass.
+    """
+    from app.services import ansible_service
+
+    def _fake_run_playbook(playbook: str, extravars: dict, inventory: str | None = None) -> dict:
+        device = extravars.get("device", "")
+        if device == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure"}
+        return {"rc": 0, "stdout": "Simulated playbook output", "stderr": ""}
+
+    monkeypatch.setattr(ansible_service, "run_playbook", _fake_run_playbook)

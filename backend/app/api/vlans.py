@@ -49,8 +49,15 @@ def _run_update_job(job_id: str, vlan_id: int, data: VLANUpdate):
 
 
 @router.get("/")
-def get_vlans(current_user: dict = Depends(require_role("observer"))):
-    return {"success": True, "data": vlan_service.get_vlans()}
+def get_vlans(
+    device: str | None = None,
+    current_user: dict = Depends(require_role("observer")),
+):
+    try:
+        data = vlan_service.get_vlans(device)
+    except (ValueError, RuntimeError) as e:
+        raise NotFoundError(str(e))
+    return {"success": True, "data": data}
 
 
 @router.post("/")
@@ -69,7 +76,11 @@ def create_vlan(
     if not device_service.get_device(vlan.device):
         raise NotFoundError(f"Device '{vlan.device}' not found")
 
-    job = job_service.create_job()
+    job = job_service.create_job(
+        playbook="create_vlan.yml",
+        device=vlan.device,
+        parameters={"vlan_id": vlan.vlan_id, "name": vlan.name},
+    )
     background_tasks.add_task(_run_create_job, job.job_id, vlan)
     audit_service.log_action(
         user=current_user["username"],
@@ -97,7 +108,11 @@ def delete_vlan(
     if not device_service.get_device(device):
         raise NotFoundError(f"Device '{device}' not found")
 
-    job = job_service.create_job()
+    job = job_service.create_job(
+        playbook="delete_vlan.yml",
+        device=device,
+        parameters={"vlan_id": vlan_id},
+    )
     background_tasks.add_task(_run_delete_job, job.job_id, vlan_id, device)
     audit_service.log_action(
         user=current_user["username"],
@@ -125,7 +140,11 @@ def update_vlan(
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
 
-    job = job_service.create_job()
+    job = job_service.create_job(
+        playbook="update_vlan.yml",
+        device=data.device,
+        parameters={"vlan_id": vlan_id, "description": data.description},
+    )
     background_tasks.add_task(_run_update_job, job.job_id, vlan_id, data)
     audit_service.log_action(
         user=current_user["username"],

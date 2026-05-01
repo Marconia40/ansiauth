@@ -8,10 +8,14 @@ logger = logging.getLogger(__name__)
 _jobs: dict[str, Job] = {}
 
 
-def create_job() -> Job:
-    job = Job()
+def create_job(
+    playbook: str | None = None,
+    device: str | None = None,
+    parameters: dict | None = None,
+) -> Job:
+    job = Job(playbook=playbook, device=device, parameters=parameters)
     _jobs[job.job_id] = job
-    logger.info("Job %s created", job.job_id)
+    logger.info("Job %s created (playbook=%s device=%s)", job.job_id, playbook, device)
     return job
 
 

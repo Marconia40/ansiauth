@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 _devices: dict[str, Device] = {
     "mock_device": Device(id="mock_device", ip="192.168.1.1", type="cisco", username="admin", password="admin"),
     "fail_device": Device(id="fail_device", ip="192.168.1.2", type="cisco", username="admin", password="admin"),
+    "switch1": Device(id="switch1", ip="10.10.10.10", type="cisco", username="admin", password="cisco123"),
 }
 
 
