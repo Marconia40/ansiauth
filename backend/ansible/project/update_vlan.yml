@@ -1,16 +1,16 @@
 ---
-- name: Update VLAN description on Cisco device
+- name: Update VLAN name on Cisco device
   hosts: "{{ device }}"
   gather_facts: no
 
   tasks:
-    - name: Set VLAN name/description
-      ios_config:
+    - name: Update VLAN name
+      cisco.ios.ios_config:
+        parents: "vlan {{ vlan_id }}"
         lines:
-          - vlan {{ vlan_id }}
           - name {{ description }}
       register: result
 
     - name: Save running config
-      ios_config:
+      cisco.ios.ios_config:
         save_when: always

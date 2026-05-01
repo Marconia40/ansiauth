@@ -5,11 +5,11 @@
 
   tasks:
     - name: Show VLAN brief
-      ios_command:
+      cisco.ios.ios_command:
         commands:
           - show vlan brief
       register: vlan_output
 
-    - name: Display output
+    - name: Return VLAN output
       debug:
-        var: vlan_output.stdout_lines
+        msg: "{{ vlan_output.stdout[0] }}"

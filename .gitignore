@@ -21,6 +21,7 @@ venv/
 # =========================
 ansible/inventory/inventory.ini
 ansible/inventory/*.retry
+backend/ansible/inventory/inventory.ini
 
 # Ansible artifacts
 *.log

@@ -4,13 +4,13 @@
   gather_facts: no
 
   tasks:
-    - name: Configure VLAN
-      ios_config:
+    - name: Ensure VLAN exists with name
+      cisco.ios.ios_config:
+        parents: "vlan {{ vlan_id }}"
         lines:
-          - vlan {{ vlan_id }}
           - name {{ vlan_name }}
       register: result
 
     - name: Save running config
-      ios_config:
+      cisco.ios.ios_config:
         save_when: always
