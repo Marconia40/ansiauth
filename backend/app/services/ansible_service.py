@@ -25,8 +25,10 @@ def run_playbook(
         quiet=True,
     )
     rc = r.rc
-    stdout = _read(r.stdout)
     stderr = _read(r.stderr)
+    # ios_command stores output in events (res.stdout list), not in the text stdout file.
+    # Fall back to text stdout for playbooks that don't produce structured events (ios_config etc).
+    stdout = _extract_ios_command_output(r) or _read(r.stdout)
     if rc != 0:
         logger.error("Playbook %s FAILED on device=%s rc=%s stderr=%s", playbook, device_label, rc, stderr)
     else:
@@ -44,6 +46,26 @@ def build_inventory(device_id: str, ip: str, username: str, password: str) -> st
         f"ansible_network_os=ios "
         f"ansible_connection=network_cli"
     )
+
+
+def _extract_ios_command_output(r) -> str:
+    """Return the first ios_command stdout string from ansible-runner events.
+
+    ios_command stores each command's output in event_data.res.stdout (a list).
+    This is the only reliable way to get the raw device output — the text stdout
+    file embeds it as a JSON-escaped single line inside the debug task output.
+    """
+    try:
+        for event in r.events:
+            if event.get("event") == "runner_on_ok":
+                res = event.get("event_data", {}).get("res", {})
+                stdout_list = res.get("stdout")
+                if isinstance(stdout_list, list) and stdout_list:
+                    logger.debug("Extracted ios_command output from events (%d chars)", len(stdout_list[0]))
+                    return stdout_list[0]
+    except Exception as exc:
+        logger.debug("Could not extract command output from events: %s", exc)
+    return ""
 
 
 def _read(stream) -> str:

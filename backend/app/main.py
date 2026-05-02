@@ -3,10 +3,20 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api import audit, auth, devices, jobs, vlans
+from app.core.config import DATABASE_URL
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
+from app.db.base import Base
+from app.db.session import get_engine, init_db
+import app.db.models  # noqa: F401 — registers models with Base.metadata
 
 logger = logging.getLogger(__name__)
+
+# Initialize database on module load so it is ready before any request.
+init_db(DATABASE_URL)
+Base.metadata.create_all(bind=get_engine())
+logger.info("Database ready: %s", DATABASE_URL)
+
+from app.api import audit, auth, devices, jobs, vlans  # noqa: E402 (must follow DB init)
 
 app = FastAPI()
 

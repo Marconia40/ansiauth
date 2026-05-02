@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends
 
 from app.core.dependencies import require_role
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.schemas.device import DeviceCreate, DevicePublic
 from app.services import audit_service, device_service
 
@@ -36,13 +36,16 @@ def get_device(name: str, current_user: dict = Depends(require_role("observer"))
 
 @router.post("/")
 def create_device(data: DeviceCreate, current_user: dict = Depends(require_role("admin"))):
-    device = device_service.create_device(
-        name=data.name,
-        host=data.host,
-        vendor=data.vendor,
-        username=data.username,
-        password=data.password,
-    )
+    try:
+        device = device_service.create_device(
+            name=data.name,
+            host=data.host,
+            vendor=data.vendor,
+            username=data.username,
+            password=data.password,
+        )
+    except ValueError as e:
+        raise ValidationError(str(e))
     audit_service.log_action(
         user=current_user["username"],
         action="create_device",
