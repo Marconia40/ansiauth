@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import Column, DateTime, Integer, JSON, String, Text, UniqueConstraint
 
 from app.db.base import Base
 
@@ -21,3 +21,17 @@ class DeviceModel(Base):
     )
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_name"),)
+
+
+class AuditLogModel(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    user = Column(String, nullable=False, index=True)
+    action = Column(String, nullable=False, index=True)
+    resource = Column(String, nullable=False, index=True)
+    resource_id = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="success")
+    details = Column(JSON, nullable=False, default=dict)
+    job_id = Column(String, nullable=True)

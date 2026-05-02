@@ -118,6 +118,37 @@ def test_filter_by_action(operator_client, admin_client):
     assert all(e["action"] == "create_vlan" for e in log)
 
 
+def test_filter_by_resource(operator_client, admin_client):
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]})
+    admin_client.delete("/api/v1/vlans/10?device=mock_device")
+    unauth_client_resp = operator_client.patch("/api/v1/vlans/10", json={"description": "x", "device": "mock_device"})
+
+    log = admin_client.get("/api/v1/audit/?resource=vlan").json()
+    assert len(log) > 0
+    assert all(e["resource"] == "vlan" for e in log)
+
+
+# --- Pagination ---
+
+def test_pagination_limit(operator_client, admin_client):
+    for i in range(5):
+        operator_client.post("/api/v1/vlans/", json={"vlan_id": 10 + i, "name": f"V{i}", "devices": ["mock_device"]})
+
+    log_all = admin_client.get("/api/v1/audit/").json()
+    log_limited = admin_client.get("/api/v1/audit/?limit=2").json()
+    assert len(log_limited) == 2
+    assert len(log_all) > 2
+
+
+def test_pagination_skip(operator_client, admin_client):
+    for i in range(4):
+        operator_client.post("/api/v1/vlans/", json={"vlan_id": 20 + i, "name": f"S{i}", "devices": ["mock_device"]})
+
+    log_all = admin_client.get("/api/v1/audit/").json()
+    log_skipped = admin_client.get(f"/api/v1/audit/?skip={len(log_all)}").json()
+    assert log_skipped == []
+
+
 # --- Record structure ---
 
 def test_audit_record_has_required_fields(operator_client, admin_client):
@@ -127,3 +158,29 @@ def test_audit_record_has_required_fields(operator_client, admin_client):
     entry = next(e for e in log if e["action"] == "create_vlan")
     for field in ("id", "timestamp", "user", "action", "resource", "details", "status"):
         assert field in entry
+
+
+# --- DB persistence ---
+
+def test_audit_log_persists_in_db(operator_client, admin_client):
+    """Records are written to DB — direct query proves it is not in-memory."""
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 77, "name": "PERSIST", "devices": ["mock_device"]})
+
+    from app.db.models import AuditLogModel
+    from app.db.session import get_session
+    with get_session() as session:
+        count = session.query(AuditLogModel).filter_by(action="create_vlan").count()
+    assert count > 0
+
+
+def test_audit_survives_service_reimport(operator_client, admin_client):
+    """Re-importing audit_service does not wipe the log (proves no in-memory dependency)."""
+    import importlib
+    from app.services import audit_service as svc
+
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 88, "name": "SURVIVE", "devices": ["mock_device"]})
+
+    importlib.reload(svc)  # simulate module restart — in-memory list would be empty here
+
+    log = admin_client.get("/api/v1/audit/").json()
+    assert any(e["action"] == "create_vlan" for e in log)

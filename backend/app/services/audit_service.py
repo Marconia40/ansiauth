@@ -1,10 +1,26 @@
+import logging
 from datetime import datetime, timezone
 from typing import Optional
-from uuid import uuid4
 
+from app.db.models import AuditLogModel
+from app.db.session import get_session
 from app.models.audit import AuditRecord
 
-_audit_log: list[AuditRecord] = []
+logger = logging.getLogger(__name__)
+
+
+def _to_record(row: AuditLogModel) -> AuditRecord:
+    return AuditRecord(
+        id=str(row.id),
+        timestamp=row.timestamp,
+        user=row.user,
+        action=row.action,
+        resource=row.resource,
+        resource_id=row.resource_id,
+        details=row.details if row.details else {},
+        status=row.status,
+        job_id=row.job_id,
+    )
 
 
 def log_action(
@@ -14,32 +30,47 @@ def log_action(
     details: dict,
     status: str = "success",
     job_id: Optional[str] = None,
+    resource_id: Optional[str] = None,
 ) -> AuditRecord:
-    record = AuditRecord(
-        id=str(uuid4()),
-        timestamp=datetime.now(timezone.utc),
-        user=user,
-        action=action,
-        resource=resource,
-        details=details,
-        status=status,
-        job_id=job_id,
-    )
-    _audit_log.append(record)
+    with get_session() as session:
+        row = AuditLogModel(
+            timestamp=datetime.now(timezone.utc),
+            user=user,
+            action=action,
+            resource=resource,
+            resource_id=resource_id,
+            details=details,
+            status=status,
+            job_id=job_id,
+        )
+        session.add(row)
+        session.flush()
+        record = _to_record(row)
+    logger.info("Audit: user=%s action=%s resource=%s status=%s", user, action, resource, status)
     return record
 
 
 def get_audit_log(
     user: Optional[str] = None,
     action: Optional[str] = None,
+    resource: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
 ) -> list[AuditRecord]:
-    result = list(_audit_log)
-    if user:
-        result = [r for r in result if r.user == user]
-    if action:
-        result = [r for r in result if r.action == action]
-    return result
+    with get_session() as session:
+        q = session.query(AuditLogModel).order_by(AuditLogModel.timestamp.desc())
+        if user:
+            q = q.filter(AuditLogModel.user == user)
+        if action:
+            q = q.filter(AuditLogModel.action == action)
+        if resource:
+            q = q.filter(AuditLogModel.resource == resource)
+        rows = q.offset(skip).limit(limit).all()
+        return [_to_record(r) for r in rows]
 
 
 def clear_audit_log() -> None:
-    _audit_log.clear()
+    """Delete all audit records. Used in tests."""
+    with get_session() as session:
+        session.query(AuditLogModel).delete()
+    logger.debug("Audit log cleared")

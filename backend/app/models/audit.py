@@ -10,6 +10,7 @@ class AuditRecord(BaseModel):
     user: str
     action: str
     resource: str
+    resource_id: Optional[str] = None
     details: dict
     status: str
     job_id: Optional[str] = None
