@@ -92,6 +92,16 @@ def create_vlan(data) -> dict:
     return _ansible_create_vlan(data.vlan_id, data.name, dev.name, dev.host, dev.username, pw)
 
 
+def create_vlan_on_device(vlan_id: int, name: str, device_id: str) -> dict:
+    """Create a VLAN on a single named device. Used for multi-device execution."""
+    if EXECUTION_MODE == "mock":
+        return _mock_create_vlan(vlan_id, device_id)
+    logger.info("Real mode: create VLAN %s on %s", vlan_id, device_id)
+    dev = _resolve_device(device_id)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    return _ansible_create_vlan(vlan_id, name, dev.name, dev.host, dev.username, pw)
+
+
 def delete_vlan(vlan_id: int, device_id: str) -> dict:
     if EXECUTION_MODE == "mock":
         return _mock_delete_vlan(vlan_id, device_id)

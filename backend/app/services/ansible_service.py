@@ -7,10 +7,16 @@ from app.core.config import ANSIBLE_BASE_PATH, INVENTORY_PATH
 logger = logging.getLogger(__name__)
 
 
-def run_playbook(playbook: str, extravars: dict, inventory: str | None = None) -> dict:
+def run_playbook(
+    playbook: str,
+    extravars: dict,
+    inventory: str | None = None,
+    device: str | None = None,
+) -> dict:
     """Execute an Ansible playbook and return rc/stdout/stderr."""
     inv = inventory or INVENTORY_PATH
-    logger.info("Running playbook %s extravars=%s", playbook, extravars)
+    device_label = device or extravars.get("device", "unknown")
+    logger.info("Running playbook=%s device=%s extravars=%s", playbook, device_label, extravars)
     r = _runner.run(
         private_data_dir=ANSIBLE_BASE_PATH,
         playbook=playbook,
@@ -18,9 +24,14 @@ def run_playbook(playbook: str, extravars: dict, inventory: str | None = None) -
         extravars=extravars,
         quiet=True,
     )
-    result = {"rc": r.rc, "stdout": _read(r.stdout), "stderr": _read(r.stderr)}
-    logger.info("Playbook %s finished rc=%s", playbook, r.rc)
-    return result
+    rc = r.rc
+    stdout = _read(r.stdout)
+    stderr = _read(r.stderr)
+    if rc != 0:
+        logger.error("Playbook %s FAILED on device=%s rc=%s stderr=%s", playbook, device_label, rc, stderr)
+    else:
+        logger.info("Playbook %s SUCCESS on device=%s rc=%s", playbook, device_label, rc)
+    return {"rc": rc, "stdout": stdout, "stderr": stderr}
 
 
 def build_inventory(device_id: str, ip: str, username: str, password: str) -> str:

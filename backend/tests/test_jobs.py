@@ -4,10 +4,10 @@ from app.services import job_service
 
 
 def test_job_lifecycle(client):
-    payload = {"vlan_id": 30, "name": "TESTJOB", "device": "mock_device"}
+    payload = {"vlan_id": 30, "name": "TESTJOB", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 200
-    job_id = response.json()["data"]["job_id"]
+    job_id = response.json()["jobs"][0]["job_id"]
 
     response = client.get(f"/api/v1/jobs/{job_id}")
     assert response.status_code == 200
@@ -23,10 +23,10 @@ def test_job_lifecycle(client):
 
 
 def test_job_failed_execution(client):
-    payload = {"vlan_id": 10, "name": "FAILTEST", "device": "fail_device"}
+    payload = {"vlan_id": 10, "name": "FAILTEST", "devices": ["fail_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 200
-    job_id = response.json()["data"]["job_id"]
+    job_id = response.json()["jobs"][0]["job_id"]
 
     time.sleep(1)
 
@@ -60,9 +60,9 @@ def test_cancel_job_success(client):
 
 
 def test_cancel_job_invalid_state(client):
-    payload = {"vlan_id": 60, "name": "DONETEST", "device": "mock_device"}
+    payload = {"vlan_id": 60, "name": "DONETEST", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
-    job_id = response.json()["data"]["job_id"]
+    job_id = response.json()["jobs"][0]["job_id"]
 
     time.sleep(1)
 

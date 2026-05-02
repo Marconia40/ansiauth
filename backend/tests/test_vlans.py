@@ -2,31 +2,33 @@ import time
 
 
 def test_create_vlan_success(client):
-    payload = {"vlan_id": 10, "name": "TEST", "device": "mock_device"}
+    payload = {"vlan_id": 10, "name": "TEST", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert "job_id" in data["data"]
-    assert data["data"]["status"] == "pending"
+    assert "jobs" in data
+    assert len(data["jobs"]) == 1
+    assert "job_id" in data["jobs"][0]
+    assert data["jobs"][0]["status"] in ("pending", "running", "completed")
 
 
 def test_vlan_invalid_id(client):
-    payload = {"vlan_id": 5000, "name": "TEST", "device": "mock_device"}
+    payload = {"vlan_id": 5000, "name": "TEST", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 422
     assert response.json()["detail"][0]["type"] == "less_than_equal"
 
 
 def test_vlan_reserved(client):
-    payload = {"vlan_id": 1, "name": "TEST", "device": "mock_device"}
+    payload = {"vlan_id": 1, "name": "TEST", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 400
     assert "reserved" in response.text
 
 
 def test_vlan_name_invalid(client):
-    payload = {"vlan_id": 20, "name": "INVALID NAME", "device": "mock_device"}
+    payload = {"vlan_id": 20, "name": "INVALID NAME", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 400
 
@@ -68,10 +70,16 @@ def test_update_vlan_description(client):
 
 
 def test_create_vlan_device_not_found(client):
-    payload = {"vlan_id": 50, "name": "TEST", "device": "nonexistent_device"}
+    payload = {"vlan_id": 50, "name": "TEST", "devices": ["nonexistent_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 404
     assert "nonexistent_device" in response.text
+
+
+def test_create_vlan_empty_devices_rejected(client):
+    payload = {"vlan_id": 50, "name": "TEST", "devices": []}
+    response = client.post("/api/v1/vlans/", json=payload)
+    assert response.status_code == 422
 
 
 def test_delete_vlan_failure(client):

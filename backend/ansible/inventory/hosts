@@ -1,1 +1,1 @@
-switch1 ansible_host=10.10.10.10 ansible_user=admin ansible_password=cisco123 ansible_network_os=ios ansible_connection=network_cli
+cisco2 ansible_host=10.10.10.10 ansible_user=admin ansible_password=cisco123 ansible_network_os=ios ansible_connection=network_cli

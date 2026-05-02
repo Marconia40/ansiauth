@@ -86,14 +86,14 @@ def test_observer_cannot_create_device(observer_client):
 
 def test_create_vlan_with_registered_device(admin_client):
     admin_client.post("/api/v1/devices/", json=_PAYLOAD)
-    payload = {"vlan_id": 50, "name": "PROD", "device": "switch1"}
+    payload = {"vlan_id": 50, "name": "PROD", "devices": ["switch1"]}
     response = admin_client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 200
-    assert response.json()["data"]["status"] == "pending"
+    assert response.json()["jobs"][0]["status"] in ("pending", "running", "completed")
 
 
 def test_create_vlan_device_not_registered(admin_client):
-    payload = {"vlan_id": 50, "name": "PROD", "device": "unknown_switch"}
+    payload = {"vlan_id": 50, "name": "PROD", "devices": ["unknown_switch"]}
     response = admin_client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 404
     assert "unknown_switch" in response.text

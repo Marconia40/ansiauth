@@ -29,7 +29,7 @@ def test_access_with_invalid_token(unauth_client):
 
 
 def test_observer_cannot_create_vlan(observer_client):
-    payload = {"vlan_id": 50, "name": "TEST", "device": "mock_device"}
+    payload = {"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]}
 
     response = observer_client.post("/api/v1/vlans/", json=payload)
 
@@ -37,7 +37,7 @@ def test_observer_cannot_create_vlan(observer_client):
 
 
 def test_operator_can_create_vlan(operator_client):
-    payload = {"vlan_id": 50, "name": "TEST", "device": "mock_device"}
+    payload = {"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]}
 
     response = operator_client.post("/api/v1/vlans/", json=payload)
 

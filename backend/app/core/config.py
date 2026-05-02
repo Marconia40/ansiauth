@@ -1,5 +1,10 @@
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "mock")  # mock | real
 
 _ANSIBLE_DIR = os.path.normpath(

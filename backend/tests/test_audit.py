@@ -30,7 +30,7 @@ def test_audit_log_accessible_by_admin(admin_client):
 # --- VLAN auditing ---
 
 def test_create_vlan_is_audited(operator_client, admin_client):
-    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "device": "mock_device"})
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]})
 
     log = admin_client.get("/api/v1/audit/").json()
     entry = next(e for e in log if e["action"] == "create_vlan")
@@ -102,7 +102,7 @@ def test_login_failure_is_audited(unauth_client, admin_client):
 # --- Filters ---
 
 def test_filter_by_user(operator_client, admin_client):
-    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "device": "mock_device"})
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]})
     admin_client.delete("/api/v1/vlans/10?device=mock_device")
 
     log = admin_client.get("/api/v1/audit/?user=operator").json()
@@ -111,7 +111,7 @@ def test_filter_by_user(operator_client, admin_client):
 
 
 def test_filter_by_action(operator_client, admin_client):
-    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "device": "mock_device"})
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]})
     admin_client.delete("/api/v1/vlans/10?device=mock_device")
 
     log = admin_client.get("/api/v1/audit/?action=create_vlan").json()
@@ -121,7 +121,7 @@ def test_filter_by_action(operator_client, admin_client):
 # --- Record structure ---
 
 def test_audit_record_has_required_fields(operator_client, admin_client):
-    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "device": "mock_device"})
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]})
 
     log = admin_client.get("/api/v1/audit/").json()
     entry = next(e for e in log if e["action"] == "create_vlan")
