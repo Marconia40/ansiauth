@@ -72,3 +72,8 @@ build/
 docs/prompts/
 docs/engineering_rules.md
 docs/backups/
+
+# =========================
+# Database files
+# =========================
+backend/app/db/*.db

@@ -1,6 +1,52 @@
 import time
 
 
+def test_multi_device_inventory_matching(admin_client, monkeypatch):
+    """Each device's job must use an inventory whose hostname matches the device name."""
+    from app.services import ansible_service, vlan_service, device_service
+
+    # Ensure the two test devices exist
+    for name, host in [("cisco1", "10.10.10.1"), ("cisco2", "10.10.10.2")]:
+        try:
+            device_service.create_device(name, host, "cisco_ios", "admin", "cisco123")
+        except ValueError:
+            pass  # already seeded
+
+    captured: list[dict] = []
+
+    def _capture(playbook, extravars, inventory=None, device=None):
+        captured.append({"inventory": inventory, "extravars": extravars})
+        return {"rc": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(ansible_service, "run_playbook", _capture)
+    monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
+
+    payload = {"vlan_id": 110, "name": "INVTEST", "devices": ["cisco1", "cisco2"]}
+    response = admin_client.post("/api/v1/vlans/", json=payload)
+    assert response.status_code == 200
+    assert len(response.json()["jobs"]) == 2
+
+    time.sleep(1)
+
+    assert len(captured) == 2, f"Expected 2 playbook calls, got {len(captured)}"
+
+    seen_hosts = set()
+    for call in captured:
+        inv = call["inventory"]
+        assert inv is not None, "Dynamic inventory was not passed to run_playbook"
+        hostname = inv.split()[0]
+        assert hostname in {"cisco1", "cisco2"}, f"Unexpected hostname in inventory: {hostname}"
+        assert "ansible_host=" in inv
+        assert "no hosts matched" not in inv.lower()
+        seen_hosts.add(hostname)
+
+    assert seen_hosts == {"cisco1", "cisco2"}, "Each device must appear in its own inventory"
+
+    # Cleanup
+    device_service.delete_device("cisco1")
+    device_service.delete_device("cisco2")
+
+
 def test_multi_device_vlan(client):
     """Multi-device request creates one independent job per device."""
     payload = {"vlan_id": 100, "name": "MULTI_TEST", "devices": ["mock_device", "mock_device"]}

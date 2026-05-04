@@ -1,6 +1,6 @@
 ---
 - name: Get VLANs from Cisco device
-  hosts: "{{ device }}"
+  hosts: all
   gather_facts: no
 
   tasks:

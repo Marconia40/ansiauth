@@ -1,6 +1,8 @@
 import logging
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.config import DATABASE_URL
@@ -17,8 +19,31 @@ Base.metadata.create_all(bind=get_engine())
 logger.info("Database ready: %s", DATABASE_URL)
 
 from app.api import audit, auth, devices, jobs, vlans  # noqa: E402 (must follow DB init)
+from app.services import audit_service  # noqa: E402
 
 app = FastAPI()
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exc: RequestValidationError):
+    try:
+        body_bytes = await request.body()
+        try:
+            import json
+            body_data = json.loads(body_bytes)
+        except Exception:
+            body_data = body_bytes.decode("utf-8", errors="replace") if body_bytes else None
+    except Exception:
+        body_data = None
+
+    audit_service.log_action(
+        user="anonymous",
+        action="validation_error",
+        resource="request",
+        status="failure",
+        details={"errors": exc.errors(), "body": body_data},
+    )
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.exception_handler(ValidationError)

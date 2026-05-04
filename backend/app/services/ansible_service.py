@@ -7,6 +7,17 @@ from app.core.config import ANSIBLE_BASE_PATH, INVENTORY_PATH
 logger = logging.getLogger(__name__)
 
 
+def validate_inventory(inventory: str) -> None:
+    """Raise ValueError if inventory string is missing required fields."""
+    parts = inventory.split()
+    if not parts:
+        raise ValueError("Inventory string is empty")
+    if not parts[0]:
+        raise ValueError("Inventory hostname is missing")
+    if not any(p.startswith("ansible_host=") for p in parts):
+        raise ValueError("Inventory is missing ansible_host")
+
+
 def run_playbook(
     playbook: str,
     extravars: dict,
@@ -14,9 +25,13 @@ def run_playbook(
     device: str | None = None,
 ) -> dict:
     """Execute an Ansible playbook and return rc/stdout/stderr."""
+    if inventory is None:
+        logger.warning("No dynamic inventory provided for playbook=%s, falling back to %s", playbook, INVENTORY_PATH)
     inv = inventory or INVENTORY_PATH
     device_label = device or extravars.get("device", "unknown")
-    logger.info("Running playbook=%s device=%s extravars=%s", playbook, device_label, extravars)
+    logger.info("Running playbook=%s device=%s", playbook, device_label)
+    logger.info("Extravars: %s", extravars)
+    logger.info("Inventory:\n%s", inv)
     r = _runner.run(
         private_data_dir=ANSIBLE_BASE_PATH,
         playbook=playbook,
@@ -29,6 +44,11 @@ def run_playbook(
     # ios_command stores output in events (res.stdout list), not in the text stdout file.
     # Fall back to text stdout for playbooks that don't produce structured events (ios_config etc).
     stdout = _extract_ios_command_output(r) or _read(r.stdout)
+    combined_output = (stdout + stderr).lower()
+    if "no hosts matched" in combined_output and rc == 0:
+        logger.error("Playbook %s: no hosts matched on device=%s — treating as failure", playbook, device_label)
+        rc = 1
+        stderr = stderr or "No hosts matched in inventory"
     if rc != 0:
         logger.error("Playbook %s FAILED on device=%s rc=%s stderr=%s", playbook, device_label, rc, stderr)
     else:

@@ -53,6 +53,14 @@ def unauth_client():
 
 
 @pytest.fixture(autouse=True)
+def reset_vlan_mock():
+    from app.services import vlan_service
+    vlan_service.reset_mock_vlans()
+    yield
+    vlan_service.reset_mock_vlans()
+
+
+@pytest.fixture(autouse=True)
 def mock_ansible_service(monkeypatch):
     """Prevent real Ansible playbook execution in unit tests."""
     from app.services import ansible_service

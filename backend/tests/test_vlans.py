@@ -107,3 +107,17 @@ def test_update_vlan_failure(client):
     data = response.json()
     assert data["data"]["status"] == "failed"
     assert data["data"]["error"] is not None
+
+
+def test_delete_nonexistent_vlan_returns_404(client):
+    response = client.delete("/api/v1/vlans/99?device=mock_device")
+    assert response.status_code == 404
+    assert "does not exist" in response.text
+
+
+def test_delete_valid_vlan_still_works(client):
+    response = client.delete("/api/v1/vlans/10?device=mock_device")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert "job_id" in data["data"]

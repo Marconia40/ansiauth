@@ -1,6 +1,6 @@
 ---
 - name: Delete VLAN on Cisco device
-  hosts: "{{ device }}"
+  hosts: all
   gather_facts: no
 
   tasks:

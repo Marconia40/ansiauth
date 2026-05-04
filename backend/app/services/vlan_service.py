@@ -5,11 +5,22 @@ from app.services import ansible_service, secret_service
 
 logger = logging.getLogger(__name__)
 
-_mock_vlans = [
+_mock_vlans: list[dict] = [
     {"vlan_id": 10, "name": "MGMT"},
     {"vlan_id": 20, "name": "DATA"},
     {"vlan_id": 30, "name": "VOICE"},
 ]
+
+_INITIAL_MOCK_VLANS = [
+    {"vlan_id": 10, "name": "MGMT"},
+    {"vlan_id": 20, "name": "DATA"},
+    {"vlan_id": 30, "name": "VOICE"},
+]
+
+
+def reset_mock_vlans() -> None:
+    _mock_vlans.clear()
+    _mock_vlans.extend(_INITIAL_MOCK_VLANS)
 
 
 # ── Mock implementations ──────────────────────────────────────────────────────
@@ -24,6 +35,7 @@ def _mock_create_vlan(vlan_id: int, device: str) -> dict:
 def _mock_delete_vlan(vlan_id: int, device: str) -> dict:
     if device == "fail_device":
         return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure"}
+    _mock_vlans[:] = [v for v in _mock_vlans if v["vlan_id"] != vlan_id]
     logger.info("Mock: VLAN %s deleted on %s", vlan_id, device)
     return {"rc": 0, "stdout": f"Simulated VLAN {vlan_id} deleted", "stderr": ""}
 

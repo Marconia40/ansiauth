@@ -27,14 +27,33 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str):
         job_service.update_job(job_id, "failed", error=str(e))
 
 
-def _run_delete_job(job_id: str, vlan_id: int, device: str):
+def _run_delete_job(job_id: str, vlan_id: int, device: str, user: str):
     job_service.update_job(job_id, "running")
     logger.info("Job %s: deleting VLAN %s on device=%s", job_id, vlan_id, device)
     try:
         result = vlan_service.delete_vlan(vlan_id, device)
         if result["rc"] != 0:
             raise DeviceExecutionError(result["stderr"])
-        job_service.update_job(job_id, "completed", {"output": result["stdout"]})
+
+        try:
+            remaining = vlan_service.get_vlans(device)
+        except (ValueError, RuntimeError) as e:
+            logger.warning("Job %s: could not verify VLAN deletion: %s", job_id, str(e))
+            remaining = None
+
+        if remaining is not None and any(v["vlan_id"] == vlan_id for v in remaining):
+            logger.error("Job %s: VLAN %s still present after deletion on %s", job_id, vlan_id, device)
+            audit_service.log_action(
+                user=user,
+                action="delete_vlan",
+                resource="vlan",
+                status="failure",
+                details={"vlan_id": vlan_id, "device": device, "error": "VLAN still present after deletion"},
+                job_id=job_id,
+            )
+            job_service.update_job(job_id, "failed", error="VLAN still present after deletion")
+        else:
+            job_service.update_job(job_id, "completed", {"output": result["stdout"]})
     except Exception as e:
         logger.error("Job %s failed: %s", job_id, str(e))
         job_service.update_job(job_id, "failed", error=str(e))
@@ -121,12 +140,27 @@ def delete_vlan(
     if not device_service.get_device(device):
         raise NotFoundError(f"Device '{device}' not found")
 
+    try:
+        existing_vlans = vlan_service.get_vlans(device)
+    except (ValueError, RuntimeError) as e:
+        raise NotFoundError(str(e))
+
+    if not any(v["vlan_id"] == vlan_id for v in existing_vlans):
+        audit_service.log_action(
+            user=current_user["username"],
+            action="delete_vlan",
+            resource="vlan",
+            status="failure",
+            details={"vlan_id": vlan_id, "device": device, "error": "VLAN does not exist"},
+        )
+        raise NotFoundError(f"VLAN {vlan_id} does not exist on device '{device}'")
+
     job = job_service.create_job(
         playbook="delete_vlan.yml",
         device=device,
         parameters={"vlan_id": vlan_id},
     )
-    background_tasks.add_task(_run_delete_job, job.job_id, vlan_id, device)
+    background_tasks.add_task(_run_delete_job, job.job_id, vlan_id, device, current_user["username"])
     audit_service.log_action(
         user=current_user["username"],
         action="delete_vlan",

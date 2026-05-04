@@ -160,6 +160,30 @@ def test_audit_record_has_required_fields(operator_client, admin_client):
         assert field in entry
 
 
+# --- Validation error auditing ---
+
+def test_validation_error_is_audited(operator_client, admin_client):
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 5000, "name": "X", "devices": ["d"]})
+
+    log = admin_client.get("/api/v1/audit/").json()
+    entry = next((e for e in log if e["action"] == "validation_error"), None)
+    assert entry is not None
+    assert entry["resource"] == "request"
+    assert entry["status"] == "failure"
+    assert "errors" in entry["details"]
+
+
+def test_delete_nonexistent_vlan_audited_as_failure(admin_client):
+    admin_client.delete("/api/v1/vlans/99?device=mock_device")
+
+    log = admin_client.get("/api/v1/audit/").json()
+    entry = next((e for e in log if e["action"] == "delete_vlan" and e["status"] == "failure"), None)
+    assert entry is not None
+    assert entry["resource"] == "vlan"
+    assert entry["details"]["vlan_id"] == 99
+    assert entry["details"]["error"] == "VLAN does not exist"
+
+
 # --- DB persistence ---
 
 def test_audit_log_persists_in_db(operator_client, admin_client):

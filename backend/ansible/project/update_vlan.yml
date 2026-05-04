@@ -1,6 +1,6 @@
 ---
 - name: Update VLAN name on Cisco device
-  hosts: "{{ device }}"
+  hosts: all
   gather_facts: no
 
   tasks:
