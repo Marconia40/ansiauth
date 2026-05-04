@@ -14,3 +14,5 @@ class AuditRecord(BaseModel):
     details: dict
     status: str
     job_id: Optional[str] = None
+    device: Optional[str] = None
+    request_id: Optional[str] = None

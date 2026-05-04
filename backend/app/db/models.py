@@ -35,3 +35,5 @@ class AuditLogModel(Base):
     status = Column(String, nullable=False, default="success")
     details = Column(JSON, nullable=False, default=dict)
     job_id = Column(String, nullable=True)
+    device = Column(String, nullable=True)
+    request_id = Column(String, nullable=True)

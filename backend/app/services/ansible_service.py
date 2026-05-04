@@ -1,4 +1,6 @@
 import logging
+import os
+import tempfile
 
 import ansible_runner as _runner
 
@@ -32,13 +34,32 @@ def run_playbook(
     logger.info("Running playbook=%s device=%s", playbook, device_label)
     logger.info("Extravars: %s", extravars)
     logger.info("Inventory:\n%s", inv)
-    r = _runner.run(
-        private_data_dir=ANSIBLE_BASE_PATH,
-        playbook=playbook,
-        inventory=inv,
-        extravars=extravars,
-        quiet=True,
-    )
+
+    # ansible-runner's dump_artifacts() writes inline inventory strings to
+    # private_data_dir/inventory/hosts. When concurrent calls share the same
+    # private_data_dir (ANSIBLE_BASE_PATH), each call overwrites the previous
+    # one's inventory file, causing both subprocesses to target the same device.
+    # Writing the inventory to a unique temp file makes dump_artifacts treat it
+    # as an absolute path and skip the shared-file write entirely.
+    _temp_inv = None
+    if isinstance(inv, str) and not os.path.exists(inv):
+        _temp_inv = tempfile.NamedTemporaryFile(mode="w", suffix=".ini", delete=False)
+        _temp_inv.write(inv)
+        _temp_inv.close()
+        inv = _temp_inv.name
+
+    try:
+        r = _runner.run(
+            private_data_dir=ANSIBLE_BASE_PATH,
+            playbook=playbook,
+            inventory=inv,
+            extravars=extravars,
+            quiet=True,
+        )
+    finally:
+        if _temp_inv is not None:
+            os.unlink(_temp_inv.name)
+
     rc = r.rc
     stderr = _read(r.stderr)
     # ios_command stores output in events (res.stdout list), not in the text stdout file.

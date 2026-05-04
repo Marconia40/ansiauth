@@ -40,6 +40,32 @@ def test_create_vlan_is_audited(operator_client, admin_client):
     assert entry["details"]["vlan_id"] == 50
     assert entry["details"]["name"] == "TEST"
     assert entry["job_id"] is not None
+    assert entry["device"] == "mock_device"
+    assert entry["request_id"] is not None
+
+
+def test_create_vlan_multi_device_audit_rows(operator_client, admin_client):
+    operator_client.post(
+        "/api/v1/vlans/",
+        json={"vlan_id": 51, "name": "MULTI", "devices": ["mock_device", "mock_device"]},
+    )
+
+    log = admin_client.get("/api/v1/audit/").json()
+    entries = [e for e in log if e["action"] == "create_vlan"]
+    assert len(entries) == 2
+
+    for entry in entries:
+        assert entry["device"] == "mock_device"
+        assert entry["job_id"] is not None
+        assert entry["request_id"] is not None
+
+    # All entries for this request share the same request_id
+    request_ids = {e["request_id"] for e in entries}
+    assert len(request_ids) == 1
+
+    # Each entry links to a distinct job
+    job_ids = {e["job_id"] for e in entries}
+    assert len(job_ids) == 2
 
 
 def test_delete_vlan_is_audited(admin_client):

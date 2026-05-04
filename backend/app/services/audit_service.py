@@ -20,6 +20,8 @@ def _to_record(row: AuditLogModel) -> AuditRecord:
         details=row.details if row.details else {},
         status=row.status,
         job_id=row.job_id,
+        device=row.device,
+        request_id=row.request_id,
     )
 
 
@@ -31,6 +33,8 @@ def log_action(
     status: str = "success",
     job_id: Optional[str] = None,
     resource_id: Optional[str] = None,
+    device: Optional[str] = None,
+    request_id: Optional[str] = None,
 ) -> AuditRecord:
     with get_session() as session:
         row = AuditLogModel(
@@ -42,6 +46,8 @@ def log_action(
             details=details,
             status=status,
             job_id=job_id,
+            device=device,
+            request_id=request_id,
         )
         session.add(row)
         session.flush()

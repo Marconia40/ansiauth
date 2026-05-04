@@ -1,5 +1,6 @@
 import logging
 import threading
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 
@@ -27,7 +28,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str):
         job_service.update_job(job_id, "failed", error=str(e))
 
 
-def _run_delete_job(job_id: str, vlan_id: int, device: str, user: str):
+def _run_delete_job(job_id: str, vlan_id: int, device: str, user: str, request_id: str):
     job_service.update_job(job_id, "running")
     logger.info("Job %s: deleting VLAN %s on device=%s", job_id, vlan_id, device)
     try:
@@ -50,6 +51,8 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, user: str):
                 status="failure",
                 details={"vlan_id": vlan_id, "device": device, "error": "VLAN still present after deletion"},
                 job_id=job_id,
+                device=device,
+                request_id=request_id,
             )
             job_service.update_job(job_id, "failed", error="VLAN still present after deletion")
         else:
@@ -100,6 +103,7 @@ def create_vlan(
         if not device_service.get_device(dev_name):
             raise NotFoundError(f"Device '{dev_name}' not found")
 
+    request_id = str(uuid.uuid4())
     job_entries = []
     for dev_name in vlan.devices:
         job = job_service.create_job(
@@ -112,15 +116,17 @@ def create_vlan(
             args=(job.job_id, vlan.vlan_id, vlan.name, dev_name),
             daemon=True,
         ).start()
+        audit_service.log_action(
+            user=current_user["username"],
+            action="create_vlan",
+            resource="vlan",
+            details={"vlan_id": vlan.vlan_id, "name": vlan.name},
+            job_id=job.job_id,
+            device=dev_name,
+            request_id=request_id,
+        )
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
 
-    audit_service.log_action(
-        user=current_user["username"],
-        action="create_vlan",
-        resource="vlan",
-        details={"vlan_id": vlan.vlan_id, "name": vlan.name, "devices": vlan.devices},
-        job_id=job_entries[0]["job_id"],
-    )
     return {"success": True, "jobs": job_entries}
 
 
@@ -145,6 +151,8 @@ def delete_vlan(
     except (ValueError, RuntimeError) as e:
         raise NotFoundError(str(e))
 
+    request_id = str(uuid.uuid4())
+
     if not any(v["vlan_id"] == vlan_id for v in existing_vlans):
         audit_service.log_action(
             user=current_user["username"],
@@ -152,6 +160,8 @@ def delete_vlan(
             resource="vlan",
             status="failure",
             details={"vlan_id": vlan_id, "device": device, "error": "VLAN does not exist"},
+            device=device,
+            request_id=request_id,
         )
         raise NotFoundError(f"VLAN {vlan_id} does not exist on device '{device}'")
 
@@ -160,13 +170,15 @@ def delete_vlan(
         device=device,
         parameters={"vlan_id": vlan_id},
     )
-    background_tasks.add_task(_run_delete_job, job.job_id, vlan_id, device, current_user["username"])
+    background_tasks.add_task(_run_delete_job, job.job_id, vlan_id, device, current_user["username"], request_id)
     audit_service.log_action(
         user=current_user["username"],
         action="delete_vlan",
         resource="vlan",
         details={"vlan_id": vlan_id, "device": device},
         job_id=job.job_id,
+        device=device,
+        request_id=request_id,
     )
     return {"success": True, "data": {"job_id": job.job_id, "status": job.status}}
 
@@ -187,6 +199,7 @@ def update_vlan(
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
 
+    request_id = str(uuid.uuid4())
     job = job_service.create_job(
         playbook="update_vlan.yml",
         device=data.device,
@@ -199,5 +212,7 @@ def update_vlan(
         resource="vlan",
         details={"vlan_id": vlan_id, "description": data.description, "device": data.device},
         job_id=job.job_id,
+        device=data.device,
+        request_id=request_id,
     )
     return {"success": True, "data": {"job_id": job.job_id, "status": job.status}}

@@ -1,5 +1,33 @@
 import time
 
+from app.services import audit_service
+
+
+def test_multi_device_creates_multiple_audit_rows(client, admin_client):
+    """Multi-device create produces one audit row per device, each with its own job_id."""
+    audit_service.clear_audit_log()
+
+    payload = {"vlan_id": 200, "name": "AUDITCHECK", "devices": ["mock_device", "mock_device"]}
+    response = client.post("/api/v1/vlans/", json=payload)
+    assert response.status_code == 200
+    jobs = {entry["job_id"] for entry in response.json()["jobs"]}
+
+    log = admin_client.get("/api/v1/audit/").json()
+    entries = [e for e in log if e["action"] == "create_vlan"]
+
+    assert len(entries) == 2
+
+    for entry in entries:
+        assert entry["device"] == "mock_device"
+        assert entry["job_id"] in jobs
+        assert entry["request_id"] is not None
+
+    # All rows share the same request_id
+    assert len({e["request_id"] for e in entries}) == 1
+
+    # Each row has a distinct job_id
+    assert len({e["job_id"] for e in entries}) == 2
+
 
 def test_multi_device_inventory_matching(admin_client, monkeypatch):
     """Each device's job must use an inventory whose hostname matches the device name."""
