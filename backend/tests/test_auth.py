@@ -45,13 +45,13 @@ def test_operator_can_create_vlan(operator_client):
 
 
 def test_admin_can_delete_vlan(admin_client):
-    response = admin_client.delete("/api/v1/vlans/10?device=mock_device")
+    response = admin_client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
 
     assert response.status_code == 200
 
 
 def test_operator_cannot_delete_vlan(operator_client):
-    response = operator_client.delete("/api/v1/vlans/10?device=mock_device")
+    response = operator_client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
 
     assert response.status_code == 403
 

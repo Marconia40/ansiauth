@@ -7,6 +7,10 @@ class VLANCreate(BaseModel):
     devices: list[str] = Field(..., min_length=1)
 
 
+class VLANDelete(BaseModel):
+    devices: list[str] = Field(..., min_length=1)
+
+
 class VLANUpdate(BaseModel):
     description: str = Field(..., max_length=64)
-    device: str
+    devices: list[str] = Field(..., min_length=1)

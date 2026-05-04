@@ -45,28 +45,34 @@ def test_get_vlans(client):
 
 
 def test_delete_vlan_success(client):
-    response = client.delete("/api/v1/vlans/10?device=mock_device")
+    response = client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert "job_id" in data["data"]
-    assert data["data"]["status"] == "pending"
+    assert "jobs" in data
+    assert len(data["jobs"]) == 1
+    job = data["jobs"][0]
+    assert "job_id" in job
+    assert job["device"] == "mock_device"
 
 
 def test_delete_vlan_invalid(client):
-    response = client.delete("/api/v1/vlans/1?device=mock_device")
+    response = client.request("DELETE", "/api/v1/vlans/1", json={"devices": ["mock_device"]})
     assert response.status_code == 400
     assert "reserved" in response.text
 
 
 def test_update_vlan_description(client):
-    payload = {"description": "Core network VLAN", "device": "mock_device"}
+    payload = {"description": "Core network VLAN", "devices": ["mock_device"]}
     response = client.patch("/api/v1/vlans/10", json=payload)
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert "job_id" in data["data"]
-    assert data["data"]["status"] == "pending"
+    assert "jobs" in data
+    assert len(data["jobs"]) == 1
+    job = data["jobs"][0]
+    assert "job_id" in job
+    assert job["device"] == "mock_device"
 
 
 def test_create_vlan_device_not_found(client):
@@ -83,12 +89,10 @@ def test_create_vlan_empty_devices_rejected(client):
 
 
 def test_delete_vlan_failure(client):
-    response = client.delete("/api/v1/vlans/10?device=fail_device")
+    response = client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["fail_device"]})
     assert response.status_code == 200
-    job_id = response.json()["data"]["job_id"]
-
-    time.sleep(1)
-
+    # BackgroundTask runs synchronously in TestClient — job is already failed
+    job_id = response.json()["jobs"][0]["job_id"]
     response = client.get(f"/api/v1/jobs/{job_id}")
     data = response.json()
     assert data["data"]["status"] == "failed"
@@ -96,28 +100,55 @@ def test_delete_vlan_failure(client):
 
 
 def test_update_vlan_failure(client):
-    payload = {"description": "Test desc", "device": "fail_device"}
+    payload = {"description": "Test desc", "devices": ["fail_device"]}
     response = client.patch("/api/v1/vlans/10", json=payload)
     assert response.status_code == 200
-    job_id = response.json()["data"]["job_id"]
-
-    time.sleep(1)
-
+    # BackgroundTask runs synchronously in TestClient — job is already failed
+    job_id = response.json()["jobs"][0]["job_id"]
     response = client.get(f"/api/v1/jobs/{job_id}")
     data = response.json()
     assert data["data"]["status"] == "failed"
     assert data["data"]["error"] is not None
 
 
-def test_delete_nonexistent_vlan_returns_404(client):
-    response = client.delete("/api/v1/vlans/99?device=mock_device")
-    assert response.status_code == 404
-    assert "does not exist" in response.text
+def test_delete_nonexistent_vlan_job_fails(client):
+    """Deleting a VLAN that doesn't exist on a device marks that job as failed."""
+    response = client.request("DELETE", "/api/v1/vlans/99", json={"devices": ["mock_device"]})
+    assert response.status_code == 200
+    job_id = response.json()["jobs"][0]["job_id"]
+    response = client.get(f"/api/v1/jobs/{job_id}")
+    assert response.json()["data"]["status"] == "failed"
 
 
-def test_delete_valid_vlan_still_works(client):
-    response = client.delete("/api/v1/vlans/10?device=mock_device")
+def test_delete_multi_device(client):
+    """Delete on multiple devices creates one job per device."""
+    response = client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device", "mock_device"]})
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert "job_id" in data["data"]
+    assert len(data["jobs"]) == 2
+    for job in data["jobs"]:
+        assert "job_id" in job
+        assert job["device"] == "mock_device"
+
+
+def test_update_multi_device(client):
+    """Update on multiple devices creates one job per device."""
+    payload = {"description": "Multi update", "devices": ["mock_device", "mock_device"]}
+    response = client.patch("/api/v1/vlans/10", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert len(data["jobs"]) == 2
+    for job in data["jobs"]:
+        assert "job_id" in job
+        assert job["device"] == "mock_device"
+
+
+def test_delete_valid_vlan_still_works(client):
+    response = client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert "jobs" in data
+    assert len(data["jobs"]) == 1

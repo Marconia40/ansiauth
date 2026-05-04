@@ -97,7 +97,7 @@ def test_audit_status_failed_on_device_error(operator_client, admin_client):
 
 
 def test_delete_vlan_is_audited(admin_client):
-    admin_client.delete("/api/v1/vlans/10?device=mock_device")
+    admin_client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
 
     # BackgroundTasks run synchronously in TestClient, so status is final immediately
     log = admin_client.get("/api/v1/audit/").json()
@@ -110,7 +110,7 @@ def test_delete_vlan_is_audited(admin_client):
 
 
 def test_update_vlan_is_audited(operator_client, admin_client):
-    operator_client.patch("/api/v1/vlans/10", json={"description": "Core VLAN", "device": "mock_device"})
+    operator_client.patch("/api/v1/vlans/10", json={"description": "Core VLAN", "devices": ["mock_device"]})
 
     # BackgroundTasks run synchronously in TestClient, so status is final immediately
     log = admin_client.get("/api/v1/audit/").json()
@@ -161,7 +161,7 @@ def test_login_failure_is_audited(unauth_client, admin_client):
 
 def test_filter_by_user(operator_client, admin_client):
     operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]})
-    admin_client.delete("/api/v1/vlans/10?device=mock_device")
+    admin_client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
 
     log = admin_client.get("/api/v1/audit/?user=operator").json()
     assert all(e["user"] == "operator" for e in log)
@@ -170,7 +170,7 @@ def test_filter_by_user(operator_client, admin_client):
 
 def test_filter_by_action(operator_client, admin_client):
     operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]})
-    admin_client.delete("/api/v1/vlans/10?device=mock_device")
+    admin_client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
 
     log = admin_client.get("/api/v1/audit/?action=create_vlan").json()
     assert all(e["action"] == "create_vlan" for e in log)
@@ -178,8 +178,8 @@ def test_filter_by_action(operator_client, admin_client):
 
 def test_filter_by_resource(operator_client, admin_client):
     operator_client.post("/api/v1/vlans/", json={"vlan_id": 50, "name": "TEST", "devices": ["mock_device"]})
-    admin_client.delete("/api/v1/vlans/10?device=mock_device")
-    unauth_client_resp = operator_client.patch("/api/v1/vlans/10", json={"description": "x", "device": "mock_device"})
+    admin_client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
+    operator_client.patch("/api/v1/vlans/10", json={"description": "x", "devices": ["mock_device"]})
 
     log = admin_client.get("/api/v1/audit/?resource=vlan").json()
     assert len(log) > 0
@@ -232,14 +232,14 @@ def test_validation_error_is_audited(operator_client, admin_client):
 
 
 def test_delete_nonexistent_vlan_audited_as_failure(admin_client):
-    admin_client.delete("/api/v1/vlans/99?device=mock_device")
+    admin_client.request("DELETE", "/api/v1/vlans/99", json={"devices": ["mock_device"]})
 
+    # BackgroundTasks run synchronously in TestClient — job is already failed
     log = admin_client.get("/api/v1/audit/").json()
-    entry = next((e for e in log if e["action"] == "delete_vlan" and e["status"] == "failure"), None)
+    entry = next((e for e in log if e["action"] == "delete_vlan" and e["status"] == "failed"), None)
     assert entry is not None
     assert entry["resource"] == "vlan"
     assert entry["details"]["vlan_id"] == 99
-    assert entry["details"]["error"] == "VLAN does not exist"
 
 
 # --- DB persistence ---
