@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from app.services import audit_service
@@ -36,12 +38,17 @@ def test_create_vlan_is_audited(operator_client, admin_client):
     entry = next(e for e in log if e["action"] == "create_vlan")
     assert entry["resource"] == "vlan"
     assert entry["user"] == "operator"
-    assert entry["status"] == "success"
     assert entry["details"]["vlan_id"] == 50
     assert entry["details"]["name"] == "TEST"
     assert entry["job_id"] is not None
     assert entry["device"] == "mock_device"
     assert entry["request_id"] is not None
+
+    # After background thread finishes, status must reflect execution result
+    time.sleep(1)
+    log = admin_client.get("/api/v1/audit/").json()
+    entry = next(e for e in log if e["action"] == "create_vlan")
+    assert entry["status"] == "completed"
 
 
 def test_create_vlan_multi_device_audit_rows(operator_client, admin_client):
@@ -50,6 +57,7 @@ def test_create_vlan_multi_device_audit_rows(operator_client, admin_client):
         json={"vlan_id": 51, "name": "MULTI", "devices": ["mock_device", "mock_device"]},
     )
 
+    time.sleep(1)
     log = admin_client.get("/api/v1/audit/").json()
     entries = [e for e in log if e["action"] == "create_vlan"]
     assert len(entries) == 2
@@ -58,6 +66,7 @@ def test_create_vlan_multi_device_audit_rows(operator_client, admin_client):
         assert entry["device"] == "mock_device"
         assert entry["job_id"] is not None
         assert entry["request_id"] is not None
+        assert entry["status"] == "completed"
 
     # All entries for this request share the same request_id
     request_ids = {e["request_id"] for e in entries}
@@ -68,26 +77,49 @@ def test_create_vlan_multi_device_audit_rows(operator_client, admin_client):
     assert len(job_ids) == 2
 
 
+def test_audit_status_updates_after_execution(operator_client, admin_client):
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 52, "name": "STATUSTEST", "devices": ["mock_device"]})
+
+    time.sleep(1)
+    log = admin_client.get("/api/v1/audit/").json()
+    entry = next(e for e in log if e["action"] == "create_vlan" and e["details"]["vlan_id"] == 52)
+    assert entry["status"] == "completed"
+
+
+def test_audit_status_failed_on_device_error(operator_client, admin_client):
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 53, "name": "FAILAUDIT", "devices": ["fail_device"]})
+
+    time.sleep(1)
+    log = admin_client.get("/api/v1/audit/").json()
+    entry = next(e for e in log if e["action"] == "create_vlan" and e["details"]["vlan_id"] == 53)
+    assert entry["status"] == "failed"
+    assert entry["device"] == "fail_device"
+
+
 def test_delete_vlan_is_audited(admin_client):
     admin_client.delete("/api/v1/vlans/10?device=mock_device")
 
+    # BackgroundTasks run synchronously in TestClient, so status is final immediately
     log = admin_client.get("/api/v1/audit/").json()
-    entry = next(e for e in log if e["action"] == "delete_vlan")
+    entry = next(e for e in log if e["action"] == "delete_vlan" and e["job_id"] is not None)
     assert entry["resource"] == "vlan"
     assert entry["user"] == "admin"
     assert entry["details"]["vlan_id"] == 10
     assert entry["job_id"] is not None
+    assert entry["status"] == "completed"
 
 
 def test_update_vlan_is_audited(operator_client, admin_client):
     operator_client.patch("/api/v1/vlans/10", json={"description": "Core VLAN", "device": "mock_device"})
 
+    # BackgroundTasks run synchronously in TestClient, so status is final immediately
     log = admin_client.get("/api/v1/audit/").json()
     entry = next(e for e in log if e["action"] == "update_vlan")
     assert entry["resource"] == "vlan"
     assert entry["user"] == "operator"
     assert entry["details"]["description"] == "Core VLAN"
     assert entry["job_id"] is not None
+    assert entry["status"] == "completed"
 
 
 # --- Jobs auditing ---

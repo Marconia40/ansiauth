@@ -41,10 +41,12 @@ def update_job(job_id: str, status: str, result: dict | None = None, error: str 
         logger.info("Job %s started", job_id)
     elif status == "completed":
         job.finished_at = datetime.now(timezone.utc)
-        logger.info("Job %s completed", job_id)
+        duration = (job.finished_at - job.started_at).total_seconds() if job.started_at else 0.0
+        logger.info("Job %s completed in %.2fs", job_id, duration)
     elif status == "failed":
         job.finished_at = datetime.now(timezone.utc)
-        logger.warning("Job %s failed: %s", job_id, error or result)
+        duration = (job.finished_at - job.started_at).total_seconds() if job.started_at else 0.0
+        logger.warning("Job %s failed after %.2fs: %s", job_id, duration, error or result)
 
 
 def cancel_job(job_id: str) -> Job | None:
