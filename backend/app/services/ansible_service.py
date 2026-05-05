@@ -44,7 +44,8 @@ def run_playbook(
     _temp_inv = None
     if isinstance(inv, str) and not os.path.exists(inv):
         _temp_inv = tempfile.NamedTemporaryFile(mode="w", suffix=".ini", delete=False)
-        _temp_inv.write(inv)
+        _temp_inv.write("[all]\n")
+        _temp_inv.write(inv + "\n")
         _temp_inv.close()
         inv = _temp_inv.name
 

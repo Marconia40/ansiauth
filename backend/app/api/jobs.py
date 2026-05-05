@@ -19,6 +19,12 @@ def _format_job(job) -> dict:
         "created_at": job.created_at.isoformat(),
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "retry_count": job.retry_count,
+        "max_retries": job.max_retries,
+        "rollback_performed": job.rollback_performed,
+        "pre_state": job.pre_state,
+        "last_error": job.last_error,
+        "current_step": job.current_step,
     }
 
 

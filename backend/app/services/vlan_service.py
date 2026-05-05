@@ -144,3 +144,13 @@ def get_vlans(device_id: str | None = None) -> list[dict]:
         raise RuntimeError(result["stderr"] or "get_vlans.yml failed")
     from app.services.parsers.vlan_parser import parse_vlan_brief
     return parse_vlan_brief(result["stdout"])
+
+
+def vlan_exists(device_id: str, vlan_id: int) -> bool:
+    """Return True if the given VLAN is already configured on the device."""
+    try:
+        vlans = get_vlans(device_id)
+        return any(v["vlan_id"] == vlan_id for v in vlans)
+    except Exception as exc:
+        logger.warning("vlan_exists check failed for device=%s vlan=%s: %s — treating as unknown", device_id, vlan_id, exc)
+        return False

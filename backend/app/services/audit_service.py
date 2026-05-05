@@ -84,6 +84,31 @@ def update_audit_status(audit_id: str, status: str) -> None:
     logger.debug("Audit %s status → %s", audit_id, status)
 
 
+def update_audit_record(
+    audit_id: str,
+    status: str,
+    extra_details: Optional[dict] = None,
+) -> None:
+    """Update status and merge execution metadata into the audit record details."""
+    with get_session() as session:
+        row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
+        if row:
+            row.status = status
+            if extra_details:
+                row.details = {**(row.details or {}), **extra_details}
+    logger.debug("Audit %s: status=%s extra=%s", audit_id, status, extra_details)
+
+
+def ensure_audit_final_state(audit_id: str) -> None:
+    """Force any pending/stuck audit record to failed. Called in finally blocks."""
+    with get_session() as session:
+        row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
+        if row and row.status not in ("completed", "failed"):
+            logger.warning("Audit %s stuck in '%s' — forcing to failed", audit_id, row.status)
+            row.status = "failed"
+            row.details = {**(row.details or {}), "error": {"type": "unexpected_termination"}}
+
+
 def clear_audit_log() -> None:
     """Delete all audit records. Used in tests."""
     with get_session() as session:

@@ -61,9 +61,17 @@ def reset_vlan_mock():
 
 
 @pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    from app.services import rate_limiter
+    rate_limiter.reset()
+    yield
+    rate_limiter.reset()
+
+
+@pytest.fixture(autouse=True)
 def mock_ansible_service(monkeypatch):
     """Prevent real Ansible playbook execution in unit tests."""
-    from app.services import ansible_service
+    from app.services import ansible_service, vlan_service
 
     def _fake_run_playbook(playbook: str, extravars: dict, inventory: str | None = None, device: str | None = None) -> dict:
         dev = device or extravars.get("device", "")
@@ -72,3 +80,8 @@ def mock_ansible_service(monkeypatch):
         return {"rc": 0, "stdout": "Simulated playbook output", "stderr": ""}
 
     monkeypatch.setattr(ansible_service, "run_playbook", _fake_run_playbook)
+    # Patch get_vlans to return current in-memory mock state — prevents any get_vlans.yml
+    # Ansible call in tests that patch EXECUTION_MODE="real". Override per-test as needed.
+    monkeypatch.setattr(vlan_service, "get_vlans", lambda device_id=None: vlan_service._mock_vlans[:])
+    # Keep vlan_exists patched as well for tests that still reference it directly.
+    monkeypatch.setattr(vlan_service, "vlan_exists", lambda device_id, vlan_id: False)
