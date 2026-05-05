@@ -196,21 +196,17 @@ def test_rollback_attempted_on_create_failure(client, monkeypatch):
 
 
 def test_no_rollback_when_vlan_already_existed(client, monkeypatch):
-    """If VLAN existed before a failed create, rollback must NOT be triggered."""
+    """If VLAN exists with a different name, validation fails immediately with no rollback."""
     rollback_called = [False]
-
-    def failing_create(vlan_id, name, device_id):
-        return {"rc": 1, "stdout": "", "stderr": "VLAN already exists"}
 
     def track_delete(vlan_id, device_id):
         rollback_called[0] = True
         return {"rc": 0, "stdout": "", "stderr": ""}
 
-    monkeypatch.setattr(vlan_service, "create_vlan_on_device", failing_create)
     monkeypatch.setattr(vlan_service, "delete_vlan", track_delete)
 
-    # VLAN 10 already exists in mock state
-    response = client.post("/api/v1/vlans/", json={"vlan_id": 10, "name": "MGMT", "devices": ["mock_device"]})
+    # VLAN 10 exists in mock as "MGMT"; requesting a different name triggers validation error
+    response = client.post("/api/v1/vlans/", json={"vlan_id": 10, "name": "DIFFERENT", "devices": ["mock_device"]})
     assert response.status_code == 200
     job_id = response.json()["jobs"][0]["job_id"]
 

@@ -114,3 +114,114 @@ def test_update_existing_vlan_succeeds(operator_client, client):
     # BackgroundTasks run synchronously in TestClient
     job = client.get(f"/api/v1/jobs/{job_id}").json()["data"]
     assert job["status"] == "completed"
+
+
+# ── pre-state unknown (existed=None) ──────────────────────────────────────────
+
+def _patch_unknown_state(monkeypatch):
+    """Make _capture_pre_state_vlan return {existed: None} for every call."""
+    import app.api.vlans as vlans_module
+    monkeypatch.setattr(
+        vlans_module,
+        "_capture_pre_state_vlan",
+        lambda vlan_id, device: {"existed": None, "vlan_data": None},
+    )
+
+
+def test_create_aborts_when_prestate_unknown(operator_client, client, monkeypatch):
+    """create_vlan must fail immediately when VLAN state cannot be determined."""
+    _patch_unknown_state(monkeypatch)
+
+    response = operator_client.post(
+        "/api/v1/vlans/", json={"vlan_id": 700, "name": "UNKNOWN", "devices": ["mock_device"]}
+    )
+    assert response.status_code == 200
+    job_id = response.json()["jobs"][0]["job_id"]
+
+    time.sleep(0.5)
+
+    job = client.get(f"/api/v1/jobs/{job_id}").json()["data"]
+    assert job["status"] == "failed"
+    assert job["retry_count"] == 0
+    assert job["rollback_performed"] is False
+    assert "aborting" in job["error"]
+
+    log = audit_service.get_audit_log()
+    entry = next(e for e in log if e.job_id == job_id)
+    assert entry.status == "failed"
+    assert entry.details["error"]["type"] == "precheck_failed"
+    assert entry.details["error_type"] == "permanent"
+    assert entry.details["pre_state"] == {"existed": None, "vlan_data": None}
+
+
+def test_delete_aborts_when_prestate_unknown(client, monkeypatch):
+    """delete_vlan must fail immediately when VLAN state cannot be determined."""
+    _patch_unknown_state(monkeypatch)
+
+    response = client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
+    assert response.status_code == 200
+    job_id = response.json()["jobs"][0]["job_id"]
+
+    time.sleep(0.5)
+
+    job = client.get(f"/api/v1/jobs/{job_id}").json()["data"]
+    assert job["status"] == "failed"
+    assert job["retry_count"] == 0
+    assert job["rollback_performed"] is False
+    assert "aborting" in job["error"]
+
+    log = audit_service.get_audit_log()
+    entry = next(e for e in log if e.job_id == job_id)
+    assert entry.status == "failed"
+    assert entry.details["error"]["type"] == "precheck_failed"
+    assert entry.details["error_type"] == "permanent"
+
+
+def test_update_aborts_when_prestate_unknown(operator_client, client, monkeypatch):
+    """update_vlan must fail immediately when VLAN state cannot be determined."""
+    _patch_unknown_state(monkeypatch)
+
+    response = operator_client.patch(
+        "/api/v1/vlans/10", json={"description": "Anything", "devices": ["mock_device"]}
+    )
+    assert response.status_code == 200
+    job_id = response.json()["jobs"][0]["job_id"]
+
+    # BackgroundTasks run synchronously in TestClient
+    job = client.get(f"/api/v1/jobs/{job_id}").json()["data"]
+    assert job["status"] == "failed"
+    assert job["retry_count"] == 0
+    assert job["rollback_performed"] is False
+    assert "aborting" in job["error"]
+
+    log = audit_service.get_audit_log()
+    entry = next(e for e in log if e.job_id == job_id)
+    assert entry.status == "failed"
+    assert entry.details["error"]["type"] == "precheck_failed"
+    assert entry.details["error_type"] == "permanent"
+
+
+def test_ansible_not_called_when_prestate_unknown(operator_client, client, monkeypatch):
+    """Ansible must not be invoked when pre-state check fails."""
+    _patch_unknown_state(monkeypatch)
+    from app.services import vlan_service as vs
+
+    ansible_called = [False]
+
+    def track_create(vlan_id, name, device_id):
+        ansible_called[0] = True
+        return {"rc": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(vs, "create_vlan_on_device", track_create)
+
+    response = operator_client.post(
+        "/api/v1/vlans/", json={"vlan_id": 701, "name": "NOOP", "devices": ["mock_device"]}
+    )
+    assert response.status_code == 200
+    job_id = response.json()["jobs"][0]["job_id"]
+
+    time.sleep(0.5)
+
+    assert ansible_called[0] is False
+    job = client.get(f"/api/v1/jobs/{job_id}").json()["data"]
+    assert job["status"] == "failed"

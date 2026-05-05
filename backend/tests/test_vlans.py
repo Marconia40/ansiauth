@@ -2,7 +2,7 @@ import time
 
 
 def test_create_vlan_success(client):
-    payload = {"vlan_id": 10, "name": "TEST", "devices": ["mock_device"]}
+    payload = {"vlan_id": 800, "name": "TEST", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 200
     data = response.json()

@@ -117,9 +117,19 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
             pre_state = _capture_pre_state_vlan(vlan_id, device)
             job_service.update_job(job_id, pre_state=pre_state)
 
-            # Idempotency: check current VLAN state before applying (real mode only —
-            # mock mode uses a fixed VLAN list for lifecycle testing, not state enforcement)
-            if getattr(vlan_service, "EXECUTION_MODE", "mock") == "real" and pre_state.get("existed") is True:
+            if pre_state.get("existed") is None:
+                error_msg = f"Cannot determine VLAN state on device '{device}' — aborting operation"
+                logger.error("Job %s: pre-state check failed on device=%s", job_id, device)
+                job_service.update_job(job_id, "failed", error=error_msg, retry_count=0, rollback_performed=False)
+                audit_service.update_audit_record(audit_id, "failed", {
+                    "error": {"type": "precheck_failed", "message": error_msg},
+                    "error_type": "permanent",
+                    "pre_state": pre_state,
+                })
+                return
+
+            # Idempotency: compare desired vs current state before applying
+            if pre_state.get("existed") is True:
                 existing_name = (pre_state.get("vlan_data") or {}).get("name", "")
                 if existing_name.lower() == name.lower():
                     # Same name already configured — no-op success
@@ -141,8 +151,8 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
                     return
                 else:
                     # VLAN exists with a different name — fail; caller must delete first
-                    error_msg = f"VLAN {vlan_id} already exists on device '{device}'"
-                    logger.warning("Job %s: validation failed — %s", job_id, error_msg)
+                    error_msg = "VLAN already exists with a different name"
+                    logger.warning("Job %s: validation failed — %s on device=%s", job_id, error_msg, device)
                     job_service.update_job(job_id, "failed", error=error_msg)
                     audit_service.update_audit_record(audit_id, "failed", {
                         "validation": "failed",
@@ -240,6 +250,18 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
 
             pre_state = _capture_pre_state_vlan(vlan_id, device)
             job_service.update_job(job_id, pre_state=pre_state)
+
+            if pre_state.get("existed") is None:
+                error_msg = f"Cannot determine VLAN state on device '{device}' — aborting operation"
+                logger.error("Job %s: pre-state check failed on device=%s", job_id, device)
+                job_service.update_job(job_id, "failed", error=error_msg, retry_count=0, rollback_performed=False)
+                audit_service.update_audit_record(audit_id, "failed", {
+                    "error": {"type": "precheck_failed", "message": error_msg},
+                    "error_type": "permanent",
+                    "pre_state": pre_state,
+                })
+                return
+
             retry_count = 0
             rollback_performed = False
             success = False
@@ -374,6 +396,17 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
             pre_state = _capture_pre_state_vlan(vlan_id, device)
             job_service.update_job(job_id, pre_state=pre_state)
 
+            if pre_state.get("existed") is None:
+                error_msg = f"Cannot determine VLAN state on device '{device}' — aborting operation"
+                logger.error("Job %s: pre-state check failed on device=%s", job_id, device)
+                job_service.update_job(job_id, "failed", error=error_msg, retry_count=0, rollback_performed=False)
+                audit_service.update_audit_record(audit_id, "failed", {
+                    "error": {"type": "precheck_failed", "message": error_msg},
+                    "error_type": "permanent",
+                    "pre_state": pre_state,
+                })
+                return
+
             # Validate: fail early if VLAN does not exist
             vlan_present: bool | None = pre_state.get("existed")
             if vlan_present is False:
@@ -384,6 +417,23 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
                     "validation": "failed",
                     "reason": "vlan_not_found",
                     "error": {"type": "validation_error", "message": error_msg},
+                    "pre_state": pre_state,
+                })
+                return
+
+            # Idempotency: if name is already the same, no update needed
+            existing_name = (pre_state.get("vlan_data") or {}).get("name", "")
+            if existing_name and existing_name.lower() == description.lower():
+                duration = time.time() - start_time
+                logger.info("Job %s: VLAN %s on %s already named '%s' — no-op", job_id, vlan_id, device, description)
+                job_service.update_job(
+                    job_id, "completed",
+                    result={"output": f"VLAN {vlan_id} already has this name, no changes needed"},
+                    current_step="completed",
+                )
+                audit_service.update_audit_record(audit_id, "completed", {
+                    "reason": "vlan_name_unchanged_no_op",
+                    "duration_seconds": round(duration, 2),
                     "pre_state": pre_state,
                 })
                 return

@@ -4,7 +4,7 @@ from app.services import job_service
 
 
 def test_job_lifecycle(client):
-    payload = {"vlan_id": 30, "name": "TESTJOB", "devices": ["mock_device"]}
+    payload = {"vlan_id": 800, "name": "TESTJOB", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 200
     job_id = response.json()["jobs"][0]["job_id"]
