@@ -71,11 +71,14 @@ def run_playbook(
         logger.error("Playbook %s: no hosts matched on device=%s — treating as failure", playbook, device_label)
         rc = 1
         stderr = stderr or "No hosts matched in inventory"
+    result = {"rc": rc, "stdout": stdout, "stderr": stderr}
+    logger.debug("Ansible raw result: %s", result)
     if rc != 0:
-        logger.error("Playbook %s FAILED on device=%s rc=%s stderr=%s", playbook, device_label, rc, stderr)
+        error_output = (stderr + " " + stdout).strip()
+        logger.error("Playbook %s FAILED on device=%s rc=%s error=%s", playbook, device_label, rc, error_output[:300])
     else:
         logger.info("Playbook %s SUCCESS on device=%s rc=%s", playbook, device_label, rc)
-    return {"rc": rc, "stdout": stdout, "stderr": stderr}
+    return result
 
 
 def build_inventory(device_id: str, ip: str, username: str, password: str) -> str:

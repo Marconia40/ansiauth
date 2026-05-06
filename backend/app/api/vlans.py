@@ -17,6 +17,14 @@ router = APIRouter()
 # Controls the base wait between retries (1s × 2^attempt). Override in tests.
 _RETRY_BASE_DELAY: float = 1.0
 
+# Ansible exits with rc=4 when hosts are unreachable, rc=6 when unreachable+failed.
+# rc=255 covers ansible-runner connection errors. These are always transient.
+_TRANSIENT_RC_CODES = frozenset({4, 6, 255})
+
+# Keyword fallback for rc=2 errors that are still connection-related (e.g. timeout
+# during a task, SSH refused mid-session). "unreachable" is intentionally excluded:
+# Ansible's PLAY RECAP always prints "unreachable=0" even on healthy runs, which
+# would cause every task failure to be misclassified as transient.
 _RETRYABLE_KEYWORDS = (
     "timeout",
     "timed out",
@@ -24,18 +32,25 @@ _RETRYABLE_KEYWORDS = (
     "unable to connect",
     "ssh failure",
     "ssh error",
-    "ssh",
     "network is unreachable",
-    "unreachable",
     "no route to host",
 )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _is_retryable(error: str) -> bool:
-    err = (error or "").lower()
-    return any(kw in err for kw in _RETRYABLE_KEYWORDS)
+def classify_error(result: dict) -> str:
+    """
+    Returns:
+        'transient' → retryable (network/SSH issues)
+        'permanent' → non-retryable (validation, logic, fail task)
+    """
+    if result.get("rc") in _TRANSIENT_RC_CODES:
+        return "transient"
+    error_text = _combined_error(result).lower()
+    if any(kw in error_text for kw in _RETRYABLE_KEYWORDS):
+        return "transient"
+    return "permanent"
 
 
 def _capture_pre_state_vlan(vlan_id: int, device: str) -> dict:
@@ -68,11 +83,16 @@ def _execute_with_retry(fn, job_id: str, max_retries: int = 3) -> tuple[dict, in
             result = {"rc": 1, "stdout": "", "stderr": str(exc)}
         if result["rc"] == 0:
             break
-        error = _combined_error(result)
-        if attempt >= max_retries or not _is_retryable(error):
+        error_type = classify_error(result)
+        error_text = _combined_error(result)
+        logger.info("Job %s classified error as %s: %s", job_id, error_type, error_text[:200])
+        if error_type == "permanent":
+            break
+        if attempt >= max_retries:
             break
         delay = _RETRY_BASE_DELAY * (2 ** attempt)
         retry_count += 1
+        error = _combined_error(result)
         job_service.update_job(
             job_id,
             retry_count=retry_count,
@@ -93,7 +113,7 @@ def _structured_error(result: dict) -> dict:
         "type": "ansible_error",
         "rc": result.get("rc", -1),
         "stderr": stderr,
-        "error_type": "transient" if _is_retryable(_combined_error(result)) else "permanent",
+        "error_type": classify_error(result),
     }
 
 
@@ -174,18 +194,36 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
                 if pre_state.get("existed") is False:
                     try:
                         rb = vlan_service.delete_vlan(vlan_id, device)
-                        rollback_performed = rb["rc"] == 0
+                        logger.info("Rollback raw result: %s", rb)
+                        if isinstance(rb, dict):
+                            rollback_performed = rb.get("rc", 1) == 0
+                        else:
+                            rollback_performed = False
+                        if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
+                            try:
+                                post_vlans = vlan_service.get_vlans(device)
+                                rollback_performed = not any(v["vlan_id"] == vlan_id for v in post_vlans)
+                                logger.info("Rollback state check: VLAN %s %s on %s", vlan_id, "absent" if rollback_performed else "still present", device)
+                            except Exception:
+                                pass
                         logger.warning(
                             "Job %s: rollback executed for VLAN %s — %s",
                             job_id, vlan_id, "succeeded" if rollback_performed else "failed",
                         )
                     except Exception as rb_exc:
-                        logger.error("Job %s: rollback error: %s", job_id, rb_exc)
+                        logger.error("Rollback exception: %s", rb_exc)
+                        rollback_performed = False
+                rollback_performed = bool(rollback_performed)
+                logger.info(
+                    "Rollback decision — existed=%s rollback_performed=%s",
+                    pre_state.get("existed"), rollback_performed,
+                )
 
                 error_msg = result.get("stderr") or result.get("stdout") or "Execution failed"
+                error_output = _combined_error(result)
                 logger.error(
-                    "Job %s: failed — create VLAN %s on device=%s rc=%d stderr=%s",
-                    job_id, vlan_id, device, result.get("rc", -1), result.get("stderr", ""),
+                    "Job %s: failed — create VLAN %s on device=%s rc=%d error=%s",
+                    job_id, vlan_id, device, result.get("rc", -1), error_output.strip()[:300],
                 )
                 job_service.update_job(
                     job_id, "failed", error=error_msg,
@@ -196,7 +234,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
                     "rollback_performed": rollback_performed,
                     "duration_seconds": round(duration, 2),
                     "error": _structured_error(result),
-                    "error_type": "transient" if _is_retryable(_combined_error(result)) else "permanent",
+                    "error_type": classify_error(result),
                     "pre_state": pre_state,
                 })
             else:
@@ -335,13 +373,30 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
                         rb = vlan_service.create_vlan_on_device(
                             vlan_id, vlan_data.get("name", ""), device
                         )
-                        rollback_performed = rb["rc"] == 0
+                        logger.info("Rollback raw result: %s", rb)
+                        if isinstance(rb, dict):
+                            rollback_performed = rb.get("rc", 1) == 0
+                        else:
+                            rollback_performed = False
+                        if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
+                            try:
+                                post_vlans = vlan_service.get_vlans(device)
+                                rollback_performed = any(v["vlan_id"] == vlan_id for v in post_vlans)
+                                logger.info("Rollback state check: VLAN %s %s on %s", vlan_id, "present" if rollback_performed else "absent", device)
+                            except Exception:
+                                pass
                         logger.warning(
                             "Job %s: rollback executed for VLAN %s — %s",
                             job_id, vlan_id, "succeeded" if rollback_performed else "failed",
                         )
                     except Exception as rb_exc:
-                        logger.error("Job %s: rollback error: %s", job_id, rb_exc)
+                        logger.error("Rollback exception: %s", rb_exc)
+                        rollback_performed = False
+                rollback_performed = bool(rollback_performed)
+                logger.info(
+                    "Rollback decision — existed=%s rollback_performed=%s",
+                    pre_state.get("existed"), rollback_performed,
+                )
 
                 logger.error(
                     "Job %s: failed — delete VLAN %s on device=%s: %s",
@@ -356,7 +411,7 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
                     "rollback_performed": rollback_performed,
                     "duration_seconds": round(duration, 2),
                     "error": _structured_error(last_result),
-                    "error_type": "transient" if _is_retryable(_combined_error(last_result)) else "permanent",
+                    "error_type": classify_error(last_result),
                     "pre_state": pre_state,
                 })
 
@@ -451,18 +506,37 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
                 if prev_name is not None:
                     try:
                         rb = vlan_service.update_vlan_description(vlan_id, prev_name, device)
-                        rollback_performed = rb["rc"] == 0
+                        logger.info("Rollback raw result: %s", rb)
+                        if isinstance(rb, dict):
+                            rollback_performed = rb.get("rc", 1) == 0
+                        else:
+                            rollback_performed = False
+                        if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
+                            try:
+                                post_vlans = vlan_service.get_vlans(device)
+                                match = next((v for v in post_vlans if v["vlan_id"] == vlan_id), None)
+                                rollback_performed = bool(match and match.get("name", "").lower() == prev_name.lower())
+                                logger.info("Rollback state check: VLAN %s name=%s expected=%s", vlan_id, match.get("name") if match else None, prev_name)
+                            except Exception:
+                                pass
                         logger.warning(
                             "Job %s: rollback executed for VLAN %s — %s (restored name '%s')",
                             job_id, vlan_id, "succeeded" if rollback_performed else "failed", prev_name,
                         )
                     except Exception as rb_exc:
-                        logger.error("Job %s: rollback error: %s", job_id, rb_exc)
+                        logger.error("Rollback exception: %s", rb_exc)
+                        rollback_performed = False
+                rollback_performed = bool(rollback_performed)
+                logger.info(
+                    "Rollback decision — existed=%s rollback_performed=%s",
+                    pre_state.get("existed"), rollback_performed,
+                )
 
                 error_msg = result.get("stderr") or result.get("stdout") or "Execution failed"
+                error_output = _combined_error(result)
                 logger.error(
-                    "Job %s: failed — update VLAN %s on device=%s: rc=%d stderr=%s",
-                    job_id, vlan_id, device, result.get("rc", -1), result.get("stderr", ""),
+                    "Job %s: failed — update VLAN %s on device=%s: rc=%d error=%s",
+                    job_id, vlan_id, device, result.get("rc", -1), error_output.strip()[:300],
                 )
                 job_service.update_job(
                     job_id, "failed", error=error_msg,
@@ -473,7 +547,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
                     "rollback_performed": rollback_performed,
                     "duration_seconds": round(duration, 2),
                     "error": _structured_error(result),
-                    "error_type": "transient" if _is_retryable(_combined_error(result)) else "permanent",
+                    "error_type": classify_error(result),
                     "pre_state": pre_state,
                 })
             else:

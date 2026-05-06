@@ -17,6 +17,10 @@
           - name {{ description }}
       register: result
 
+#    - name: FORCE FAILURE
+#      fail:
+#        msg: "Fail after update"
+
     - name: Save running config
       cisco.ios.ios_config:
         save_when: always

@@ -17,6 +17,10 @@
           - name {{ vlan_name }}
       register: result
 
+#    - name: FORCE FAILURE
+#      fail:
+#        msg: "Intentional failure after config"
+
     - name: Save running config
       cisco.ios.ios_config:
         save_when: always
