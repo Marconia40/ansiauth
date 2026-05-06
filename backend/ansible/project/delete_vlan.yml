@@ -10,9 +10,10 @@
           - no vlan {{ vlan_id }}
       register: result
 
-    - name: FORCE FAILURE
-      fail:
-        msg: "Intentional failure after config"
+# For testing failure handling, uncomment the following block to simulate a failure after configuration changes
+#    - name: FORCE FAILURE
+#      fail:
+#        msg: "Intentional failure after config"
 
     - name: Save running config
       cisco.ios.ios_config:

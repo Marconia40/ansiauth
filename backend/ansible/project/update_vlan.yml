@@ -17,6 +17,7 @@
           - name {{ description }}
       register: result
 
+# For testing failure handling, uncomment the following block to simulate a failure after configuration changes
 #    - name: FORCE FAILURE
 #      fail:
 #        msg: "Fail after update"
