@@ -127,10 +127,20 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
     logger.info("Job %s: queued — create VLAN %s on device=%s", job_id, vlan_id, device)
 
     try:
+        _job = job_service.get_job(job_id)
+        if _job and _job.status == "cancelled":
+            audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+            return
+
         rate_limiter.wait_for_slot(device)
 
         lock = device_locks.get_device_lock(device)
         with lock:
+            _job = job_service.get_job(job_id)
+            if _job and _job.status == "cancelled":
+                audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+                return
+
             job_service.update_job(job_id, "running")
             logger.info("Job %s: started — create VLAN %s on device=%s", job_id, vlan_id, device)
 
@@ -279,10 +289,20 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
     logger.info("Job %s: queued — delete VLAN %s on device=%s", job_id, vlan_id, device)
 
     try:
+        _job = job_service.get_job(job_id)
+        if _job and _job.status == "cancelled":
+            audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+            return
+
         rate_limiter.wait_for_slot(device)
 
         lock = device_locks.get_device_lock(device)
         with lock:
+            _job = job_service.get_job(job_id)
+            if _job and _job.status == "cancelled":
+                audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+                return
+
             job_service.update_job(job_id, "running")
             logger.info("Job %s: started — delete VLAN %s on device=%s", job_id, vlan_id, device)
 
@@ -441,10 +461,20 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
     logger.info("Job %s: queued — update VLAN %s on device=%s", job_id, vlan_id, device)
 
     try:
+        _job = job_service.get_job(job_id)
+        if _job and _job.status == "cancelled":
+            audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+            return
+
         rate_limiter.wait_for_slot(device)
 
         lock = device_locks.get_device_lock(device)
         with lock:
+            _job = job_service.get_job(job_id)
+            if _job and _job.status == "cancelled":
+                audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+                return
+
             job_service.update_job(job_id, "running")
             logger.info("Job %s: started — update VLAN %s on device=%s", job_id, vlan_id, device)
 

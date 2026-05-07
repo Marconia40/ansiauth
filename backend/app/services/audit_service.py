@@ -103,7 +103,7 @@ def ensure_audit_final_state(audit_id: str) -> None:
     """Force any pending/stuck audit record to failed. Called in finally blocks."""
     with get_session() as session:
         row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
-        if row and row.status not in ("completed", "failed"):
+        if row and row.status not in ("completed", "failed", "cancelled"):
             logger.warning("Audit %s stuck in '%s' — forcing to failed", audit_id, row.status)
             row.status = "failed"
             row.details = {**(row.details or {}), "error": {"type": "unexpected_termination"}}

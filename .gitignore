@@ -69,6 +69,7 @@ build/
 # =========================
 # Folders
 # =========================
+docs/prompts/old/
 docs/prompts/
 docs/engineering_rules.md
 docs/backups/
