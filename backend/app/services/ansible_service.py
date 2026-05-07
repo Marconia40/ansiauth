@@ -81,15 +81,22 @@ def run_playbook(
     return result
 
 
-def build_inventory(device_id: str, ip: str, username: str, password: str) -> str:
+def build_inventory(
+    device_id: str,
+    ip: str,
+    username: str,
+    password: str,
+    network_os: str = "ios",
+    connection: str = "network_cli",
+) -> str:
     """Build a single-host inline inventory string from device credentials."""
     return (
         f"{device_id} "
         f"ansible_host={ip} "
         f"ansible_user={username} "
         f"ansible_password={password} "
-        f"ansible_network_os=ios "
-        f"ansible_connection=network_cli"
+        f"ansible_network_os={network_os} "
+        f"ansible_connection={connection}"
     )
 
 

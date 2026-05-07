@@ -18,6 +18,7 @@ def _to_domain(row: DeviceModel) -> Device:
         name=row.name,
         host=row.host,
         vendor=row.vendor,
+        platform=row.platform or "ios",  # default for rows added before platform existed
         username=row.username,
         encrypted_password=row.encrypted_password,
         id=str(row.id),
@@ -25,7 +26,14 @@ def _to_domain(row: DeviceModel) -> Device:
     )
 
 
-def create_device(name: str, host: str, vendor: str, username: str, password: str) -> Device:
+def create_device(
+    name: str,
+    host: str,
+    vendor: str,
+    username: str,
+    password: str,
+    platform: str = "ios",
+) -> Device:
     if vendor not in _VALID_VENDORS:
         raise ValueError(f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}")
     encrypted = secret_service.encrypt_password(password)
@@ -33,6 +41,7 @@ def create_device(name: str, host: str, vendor: str, username: str, password: st
         name=name,
         host=host,
         vendor=vendor,
+        platform=platform,
         username=username,
         encrypted_password=encrypted,
         created_at=datetime.now(timezone.utc),
@@ -84,6 +93,7 @@ def seed_defaults() -> None:
                     name=name,
                     host=host,
                     vendor="cisco_ios",
+                    platform="ios",
                     username="admin",
                     encrypted_password=secret_service.encrypt_password("admin"),
                     created_at=datetime.now(timezone.utc),

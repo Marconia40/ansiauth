@@ -1,7 +1,7 @@
 import logging
 
 from app.core.config import EXECUTION_MODE
-from app.services import ansible_service, secret_service
+from app.services import secret_service
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def _mock_update_vlan(vlan_id: int, description: str, device: str) -> dict:
     return {"rc": 0, "stdout": f"Simulated VLAN {vlan_id} description updated to '{description}'", "stderr": ""}
 
 
-# ── Real (Ansible) implementations ───────────────────────────────────────────
+# ── Device resolution & driver dispatch ──────────────────────────────────────
 
 def _resolve_device(device_id: str):
     from app.services.device_service import get_device
@@ -57,40 +57,9 @@ def _resolve_device(device_id: str):
     return device
 
 
-def _ansible_create_vlan(vlan_id: int, name: str, device_id: str, device_ip: str, username: str, password: str) -> dict:
-    inventory = ansible_service.build_inventory(device_id, device_ip, username, password)
-    return ansible_service.run_playbook(
-        playbook="create_vlan.yml",
-        extravars={"vlan_id": vlan_id, "vlan_name": name, "device": device_id},
-        inventory=inventory,
-    )
-
-
-def _ansible_delete_vlan(vlan_id: int, device_id: str, device_ip: str, username: str, password: str) -> dict:
-    inventory = ansible_service.build_inventory(device_id, device_ip, username, password)
-    return ansible_service.run_playbook(
-        playbook="delete_vlan.yml",
-        extravars={"vlan_id": vlan_id, "device": device_id},
-        inventory=inventory,
-    )
-
-
-def _ansible_update_vlan(vlan_id: int, description: str, device_id: str, device_ip: str, username: str, password: str) -> dict:
-    inventory = ansible_service.build_inventory(device_id, device_ip, username, password)
-    return ansible_service.run_playbook(
-        playbook="update_vlan.yml",
-        extravars={"vlan_id": vlan_id, "description": description, "device": device_id},
-        inventory=inventory,
-    )
-
-
-def _ansible_get_vlans(device_id: str, device_ip: str, username: str, password: str) -> dict:
-    inventory = ansible_service.build_inventory(device_id, device_ip, username, password)
-    return ansible_service.run_playbook(
-        playbook="get_vlans.yml",
-        extravars={"device": device_id},
-        inventory=inventory,
-    )
+def _get_driver(device):
+    from app.services.vendors.dispatcher import get_vendor_driver
+    return get_vendor_driver(device.vendor, device.platform)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -98,52 +67,68 @@ def _ansible_get_vlans(device_id: str, device_ip: str, username: str, password: 
 def create_vlan(data) -> dict:
     if EXECUTION_MODE == "mock":
         return _mock_create_vlan(data.vlan_id, data.device)
-    logger.info("Real mode: create VLAN %s on %s", data.vlan_id, data.device)
     dev = _resolve_device(data.device)
     pw = secret_service.decrypt_password(dev.encrypted_password)
-    return _ansible_create_vlan(data.vlan_id, data.name, dev.name, dev.host, dev.username, pw)
+    driver = _get_driver(dev)
+    logger.info(
+        "Real mode: create VLAN %s on %s vendor=%s platform=%s",
+        data.vlan_id, dev.name, dev.vendor, dev.platform,
+    )
+    return driver.create_vlan(data.vlan_id, data.name, dev, pw)
 
 
 def create_vlan_on_device(vlan_id: int, name: str, device_id: str) -> dict:
     """Create a VLAN on a single named device. Used for multi-device execution."""
     if EXECUTION_MODE == "mock":
         return _mock_create_vlan(vlan_id, device_id)
-    logger.info("Real mode: create VLAN %s on %s", vlan_id, device_id)
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
-    return _ansible_create_vlan(vlan_id, name, dev.name, dev.host, dev.username, pw)
+    driver = _get_driver(dev)
+    logger.info(
+        "Real mode: create VLAN %s on %s vendor=%s platform=%s",
+        vlan_id, dev.name, dev.vendor, dev.platform,
+    )
+    return driver.create_vlan(vlan_id, name, dev, pw)
 
 
 def delete_vlan(vlan_id: int, device_id: str) -> dict:
     if EXECUTION_MODE == "mock":
         return _mock_delete_vlan(vlan_id, device_id)
-    logger.info("Real mode: delete VLAN %s on %s", vlan_id, device_id)
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
-    return _ansible_delete_vlan(vlan_id, dev.name, dev.host, dev.username, pw)
+    driver = _get_driver(dev)
+    logger.info(
+        "Real mode: delete VLAN %s on %s vendor=%s platform=%s",
+        vlan_id, dev.name, dev.vendor, dev.platform,
+    )
+    return driver.delete_vlan(vlan_id, dev, pw)
 
 
 def update_vlan_description(vlan_id: int, description: str, device_id: str) -> dict:
     if EXECUTION_MODE == "mock":
         return _mock_update_vlan(vlan_id, description, device_id)
-    logger.info("Real mode: update VLAN %s on %s", vlan_id, device_id)
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
-    return _ansible_update_vlan(vlan_id, description, dev.name, dev.host, dev.username, pw)
+    driver = _get_driver(dev)
+    logger.info(
+        "Real mode: update VLAN %s on %s vendor=%s platform=%s",
+        vlan_id, dev.name, dev.vendor, dev.platform,
+    )
+    return driver.update_vlan(vlan_id, description, dev, pw)
 
 
 def get_vlans(device_id: str | None = None) -> list[dict]:
     if EXECUTION_MODE == "mock" or not device_id:
         logger.info("Mock: returning hardcoded VLAN list")
         return _mock_vlans
-    logger.info("Real mode: listing VLANs on %s", device_id)
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
-    result = _ansible_get_vlans(dev.name, dev.host, dev.username, pw)
-    if result["rc"] != 0:
-        raise RuntimeError(result["stderr"] or "get_vlans.yml failed")
-    from app.services.parsers.vlan_parser import parse_vlan_brief
-    return parse_vlan_brief(result["stdout"])
+    driver = _get_driver(dev)
+    logger.info(
+        "Real mode: listing VLANs on %s vendor=%s platform=%s",
+        dev.name, dev.vendor, dev.platform,
+    )
+    return driver.get_vlans(dev, pw)
 
 
 def vlan_exists(device_id: str, vlan_id: int) -> bool:
@@ -152,5 +137,8 @@ def vlan_exists(device_id: str, vlan_id: int) -> bool:
         vlans = get_vlans(device_id)
         return any(v["vlan_id"] == vlan_id for v in vlans)
     except Exception as exc:
-        logger.warning("vlan_exists check failed for device=%s vlan=%s: %s — treating as unknown", device_id, vlan_id, exc)
+        logger.warning(
+            "vlan_exists check failed for device=%s vlan=%s: %s — treating as unknown",
+            device_id, vlan_id, exc,
+        )
         return False

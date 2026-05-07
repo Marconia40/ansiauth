@@ -12,6 +12,7 @@ class DeviceModel(Base):
     name = Column(String, nullable=False, unique=True, index=True)
     host = Column(String, nullable=False)
     vendor = Column(String, nullable=False)
+    platform = Column(String, nullable=True)  # nullable for backward compat with existing rows
     username = Column(String, nullable=False)
     encrypted_password = Column(String, nullable=False)
     created_at = Column(

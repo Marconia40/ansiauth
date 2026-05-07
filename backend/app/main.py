@@ -18,6 +18,21 @@ init_db(DATABASE_URL)
 Base.metadata.create_all(bind=get_engine())
 logger.info("Database ready: %s", DATABASE_URL)
 
+
+def _migrate_device_platform(engine) -> None:
+    """Add the platform column to devices if it was not present in an older DB."""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "devices" in inspector.get_table_names():
+        existing_cols = {c["name"] for c in inspector.get_columns("devices")}
+        if "platform" not in existing_cols:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE devices ADD COLUMN platform VARCHAR DEFAULT 'ios'"))
+                conn.commit()
+            logger.info("Migration applied: added 'platform' column to devices")
+
+_migrate_device_platform(get_engine())
+
 from app.api import audit, auth, devices, jobs, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service  # noqa: E402
 

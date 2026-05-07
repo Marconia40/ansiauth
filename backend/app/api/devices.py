@@ -17,6 +17,7 @@ def _to_public(device) -> dict:
         name=device.name,
         host=device.host,
         vendor=device.vendor,
+        platform=device.platform,
         username=device.username,
     ).model_dump()
 
@@ -41,6 +42,7 @@ def create_device(data: DeviceCreate, current_user: dict = Depends(require_role(
             name=data.name,
             host=data.host,
             vendor=data.vendor,
+            platform=data.platform,
             username=data.username,
             password=data.password,
         )
