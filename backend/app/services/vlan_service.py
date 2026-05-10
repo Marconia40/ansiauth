@@ -64,19 +64,6 @@ def _get_driver(device):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def create_vlan(data) -> dict:
-    if EXECUTION_MODE == "mock":
-        return _mock_create_vlan(data.vlan_id, data.device)
-    dev = _resolve_device(data.device)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
-    driver = _get_driver(dev)
-    logger.info(
-        "Real mode: create VLAN %s on %s vendor=%s platform=%s",
-        data.vlan_id, dev.name, dev.vendor, dev.platform,
-    )
-    return driver.create_vlan(data.vlan_id, data.name, dev, pw)
-
-
 def create_vlan_on_device(vlan_id: int, name: str, device_id: str) -> dict:
     """Create a VLAN on a single named device. Used for multi-device execution."""
     if EXECUTION_MODE == "mock":

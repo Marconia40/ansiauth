@@ -75,15 +75,6 @@ def get_audit_log(
         return [_to_record(r) for r in rows]
 
 
-def update_audit_status(audit_id: str, status: str) -> None:
-    """Update the status of an existing audit record after job execution."""
-    with get_session() as session:
-        row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
-        if row:
-            row.status = status
-    logger.debug("Audit %s status → %s", audit_id, status)
-
-
 def update_audit_record(
     audit_id: str,
     status: str,
