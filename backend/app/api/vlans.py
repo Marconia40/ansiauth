@@ -1,5 +1,4 @@
 import logging
-import threading
 import time
 import uuid
 
@@ -644,6 +643,7 @@ def get_vlans(
 @router.post("/")
 def create_vlan(
     vlan: VLANCreate,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     try:
@@ -676,11 +676,10 @@ def create_vlan(
             device=dev_name,
             request_id=request_id,
         )
-        threading.Thread(
-            target=_run_device_create_job,
-            args=(job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id),
-            daemon=True,
-        ).start()
+        background_tasks.add_task(
+            _run_device_create_job,
+            job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id,
+        )
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
 
     return {"success": True, "jobs": job_entries}
