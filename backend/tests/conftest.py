@@ -1,7 +1,8 @@
 import os
 
-# Must be set before app imports so config.py picks up the test URL.
+# Must be set before app imports so config.py picks up these values.
 os.environ["DATABASE_URL"] = "sqlite:///./test.db"
+os.environ["JWT_SECRET_KEY"] = "test_jwt_secret_key_not_for_production"
 
 import pytest
 from fastapi.testclient import TestClient

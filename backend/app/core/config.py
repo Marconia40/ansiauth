@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "mock")  # mock | real
 
 _DB_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "db"))
