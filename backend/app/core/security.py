@@ -3,13 +3,17 @@ from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-from app.core.config import JWT_SECRET_KEY
+from app.core.config import ACCESS_TOKEN_EXPIRE_MINUTES, JWT_SECRET_KEY
 
 if not JWT_SECRET_KEY:
     raise RuntimeError("JWT_SECRET_KEY must be set in .env")
 
+if ACCESS_TOKEN_EXPIRE_MINUTES <= 0 or ACCESS_TOKEN_EXPIRE_MINUTES > 15:
+    raise RuntimeError(
+        f"ACCESS_TOKEN_EXPIRE_MINUTES must be between 1 and 15, got: {ACCESS_TOKEN_EXPIRE_MINUTES}"
+    )
+
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 5
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 

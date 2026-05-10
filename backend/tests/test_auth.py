@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_login_success(unauth_client):
     response = unauth_client.post("/api/v1/auth/login", data={"username": "admin", "password": "admin123"})
 
@@ -54,6 +57,73 @@ def test_operator_cannot_delete_vlan(operator_client):
     response = operator_client.request("DELETE", "/api/v1/vlans/10", json={"devices": ["mock_device"]})
 
     assert response.status_code == 403
+
+
+def test_token_accepted_within_expiry_window(unauth_client):
+    import os
+    from jose import jwt as jose_jwt
+    from datetime import datetime, timezone, timedelta
+
+    # A fresh token using the configured 15-minute window must be accepted immediately
+    token = jose_jwt.encode(
+        {
+            "sub": "admin",
+            "role": "admin",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=15),
+        },
+        os.environ["JWT_SECRET_KEY"],
+        algorithm="HS256",
+    )
+    response = unauth_client.get("/api/v1/vlans/", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+
+
+def test_token_rejected_after_expiry(unauth_client):
+    import os
+    from jose import jwt as jose_jwt
+    from datetime import datetime, timezone, timedelta
+
+    expired_token = jose_jwt.encode(
+        {
+            "sub": "admin",
+            "role": "admin",
+            "exp": datetime.now(timezone.utc) - timedelta(seconds=1),
+        },
+        os.environ["JWT_SECRET_KEY"],
+        algorithm="HS256",
+    )
+    response = unauth_client.get("/api/v1/vlans/", headers={"Authorization": f"Bearer {expired_token}"})
+    assert response.status_code == 401
+
+
+def test_startup_fails_when_expiry_exceeds_ceiling():
+    import importlib
+    import app.core.config as cfg
+    import app.core.security as sec
+
+    original = cfg.ACCESS_TOKEN_EXPIRE_MINUTES
+    cfg.ACCESS_TOKEN_EXPIRE_MINUTES = 20
+    try:
+        with pytest.raises(RuntimeError, match="ACCESS_TOKEN_EXPIRE_MINUTES must be between"):
+            importlib.reload(sec)
+    finally:
+        cfg.ACCESS_TOKEN_EXPIRE_MINUTES = original
+        importlib.reload(sec)
+
+
+def test_startup_fails_when_expiry_is_zero():
+    import importlib
+    import app.core.config as cfg
+    import app.core.security as sec
+
+    original = cfg.ACCESS_TOKEN_EXPIRE_MINUTES
+    cfg.ACCESS_TOKEN_EXPIRE_MINUTES = 0
+    try:
+        with pytest.raises(RuntimeError, match="ACCESS_TOKEN_EXPIRE_MINUTES must be between"):
+            importlib.reload(sec)
+    finally:
+        cfg.ACCESS_TOKEN_EXPIRE_MINUTES = original
+        importlib.reload(sec)
 
 
 def test_login_then_use_token(unauth_client):
