@@ -737,6 +737,7 @@ def update_vlan(
 ):
     try:
         vlan_validator.validate_vlan_id_range(vlan_id)
+        vlan_validator.validate_vlan_not_reserved(vlan_id)
         vlan_validator.validate_description(data.description)
     except ValueError as e:
         raise ValidationError(str(e))

@@ -62,6 +62,20 @@ def test_delete_vlan_invalid(client):
     assert "reserved" in response.text
 
 
+def test_update_vlan_reserved_id(client):
+    payload = {"description": "Should be blocked", "devices": ["mock_device"]}
+    response = client.patch("/api/v1/vlans/1", json=payload)
+    assert response.status_code == 400
+    assert "reserved" in response.text
+
+
+def test_update_vlan_reserved_id_range(client):
+    payload = {"description": "Should be blocked", "devices": ["mock_device"]}
+    response = client.patch("/api/v1/vlans/1002", json=payload)
+    assert response.status_code == 400
+    assert "reserved" in response.text
+
+
 def test_update_vlan_description(client):
     payload = {"description": "Core network VLAN", "devices": ["mock_device"]}
     response = client.patch("/api/v1/vlans/10", json=payload)
