@@ -631,6 +631,8 @@ def get_vlans(
             except RuntimeError as e:
                 raise DeviceExecutionError(str(e))
         return {"success": True, "data": result}
+    if device is None and vlan_service.EXECUTION_MODE != "mock":
+        raise ValidationError("'device' query parameter is required")
     try:
         data = vlan_service.get_vlans(device)
     except ValueError as e:

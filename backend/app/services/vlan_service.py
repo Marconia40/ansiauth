@@ -105,9 +105,11 @@ def update_vlan_description(vlan_id: int, description: str, device_id: str) -> d
 
 
 def get_vlans(device_id: str | None = None) -> list[dict]:
-    if EXECUTION_MODE == "mock" or not device_id:
+    if EXECUTION_MODE == "mock":
         logger.info("Mock: returning hardcoded VLAN list")
         return _mock_vlans
+    if device_id is None:
+        raise ValueError("device_id is required in real mode")
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
     driver = _get_driver(dev)
