@@ -89,9 +89,10 @@ def test_ensure_final_state_clears_stuck_pending():
 
     job_service.ensure_final_state(job.job_id)
 
-    assert job.status == "failed"
-    assert job.error == "Unexpected termination"
-    assert job.finished_at is not None
+    updated = job_service.get_job(job.job_id)
+    assert updated.status == "failed"
+    assert updated.error == "Unexpected termination"
+    assert updated.finished_at is not None
 
 
 def test_ensure_final_state_does_not_touch_completed():
@@ -101,7 +102,8 @@ def test_ensure_final_state_does_not_touch_completed():
 
     job_service.ensure_final_state(job.job_id)
 
-    assert job.status == "completed"
+    updated = job_service.get_job(job.job_id)
+    assert updated.status == "completed"
 
 
 def test_ensure_final_state_clears_stuck_running():
@@ -111,7 +113,8 @@ def test_ensure_final_state_clears_stuck_running():
 
     job_service.ensure_final_state(job.job_id)
 
-    assert job.status == "failed"
+    updated = job_service.get_job(job.job_id)
+    assert updated.status == "failed"
 
 
 def test_ensure_audit_final_state_clears_stuck_pending(admin_client):

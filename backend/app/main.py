@@ -34,7 +34,9 @@ def _migrate_device_platform(engine) -> None:
 _migrate_device_platform(get_engine())
 
 from app.api import audit, auth, devices, jobs, vlans  # noqa: E402 (must follow DB init)
-from app.services import audit_service  # noqa: E402
+from app.services import audit_service, job_service  # noqa: E402
+
+job_service.mark_orphaned_jobs_failed()
 
 app = FastAPI()
 

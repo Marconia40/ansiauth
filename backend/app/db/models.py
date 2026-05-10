@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, Integer, JSON, String, Text, UniqueConstraint
 
 from app.db.base import Base
 
@@ -22,6 +22,28 @@ class DeviceModel(Base):
     )
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_name"),)
+
+
+class JobModel(Base):
+    __tablename__ = "jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String, nullable=False, unique=True, index=True)
+    status = Column(String, nullable=False, default="pending", index=True)
+    playbook = Column(String, nullable=True)
+    device = Column(String, nullable=True)
+    parameters = Column(JSON, nullable=True)
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    max_retries = Column(Integer, nullable=False, default=3)
+    rollback_performed = Column(Boolean, nullable=False, default=False)
+    pre_state = Column(JSON, nullable=True)
+    last_error = Column(Text, nullable=True)
+    current_step = Column(String, nullable=True)
 
 
 class AuditLogModel(Base):
