@@ -34,7 +34,7 @@ def list_jobs(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     job = job_service.get_job(job_id)
     if not job:
         raise NotFoundError(f"Job '{job_id}' not found")

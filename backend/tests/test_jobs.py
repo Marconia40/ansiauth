@@ -59,6 +59,31 @@ def test_cancel_job_success(client):
     assert data["data"]["status"] == "cancelled"
 
 
+def test_get_job_requires_auth(client, observer_client, unauth_client, monkeypatch):
+    job = job_service.create_job()
+    monkeypatch.setattr(job_service, "get_job", lambda job_id: job)
+
+    # No token → 401
+    response = unauth_client.get(f"/api/v1/jobs/{job.job_id}")
+    assert response.status_code == 401
+
+    # Invalid/expired token → 401 (card spec says 403, but the dependency raises 401
+    # for JWTError — 403 is only raised by require_role, which this endpoint does not use)
+    response = unauth_client.get(
+        f"/api/v1/jobs/{job.job_id}",
+        headers={"Authorization": "Bearer this.is.an.expired.or.invalid.token"},
+    )
+    assert response.status_code == 401
+
+    # Valid observer token → 200 (minimum role that may access this endpoint)
+    response = observer_client.get(f"/api/v1/jobs/{job.job_id}")
+    assert response.status_code == 200
+
+    # Valid admin token → 200
+    response = client.get(f"/api/v1/jobs/{job.job_id}")
+    assert response.status_code == 200
+
+
 def test_cancel_job_invalid_state(client):
     payload = {"vlan_id": 60, "name": "DONETEST", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
