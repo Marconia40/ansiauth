@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 
 from app.db.base import Base
 
@@ -60,3 +60,4 @@ class AuditLogModel(Base):
     job_id = Column(String, nullable=True)
     device = Column(String, nullable=True)
     request_id = Column(String, nullable=True)
+    parent_audit_id = Column(Integer, ForeignKey("audit_logs.id"), nullable=True, index=True)

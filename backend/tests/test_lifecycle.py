@@ -126,13 +126,17 @@ def test_ensure_audit_final_state_clears_stuck_pending(admin_client):
 
     audit_service.ensure_audit_final_state(record.id)
 
+    # Append-only: the original row stays "pending"; a new follow-up row is inserted.
     from app.db.models import AuditLogModel
     from app.db.session import get_session
     with get_session() as session:
-        row = session.query(AuditLogModel).filter_by(id=int(record.id)).first()
-        status = row.status
-        details = dict(row.details or {})
-    assert status == "failed"
+        follow_up = (
+            session.query(AuditLogModel)
+            .filter_by(parent_audit_id=int(record.id), status="failed")
+            .first()
+        )
+        assert follow_up is not None
+        details = dict(follow_up.details or {})
     assert details.get("error", {}).get("type") == "unexpected_termination"
 
 

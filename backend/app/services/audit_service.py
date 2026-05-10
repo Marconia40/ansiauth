@@ -22,6 +22,7 @@ def _to_record(row: AuditLogModel) -> AuditRecord:
         job_id=row.job_id,
         device=row.device,
         request_id=row.request_id,
+        parent_audit_id=str(row.parent_audit_id) if row.parent_audit_id is not None else None,
     )
 
 
@@ -86,29 +87,52 @@ def get_audit_log(
         return [_to_record(r) for r in rows]
 
 
-def update_audit_record(
-    audit_id: str,
+def append_audit_event(
+    parent_audit_id: str,
     status: str,
     extra_details: Optional[dict] = None,
-) -> None:
-    """Update status and merge execution metadata into the audit record details."""
+) -> Optional[AuditRecord]:
+    """Append a new status-event row linked to an existing audit record. Never mutates."""
     with get_session() as session:
-        row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
-        if row:
-            row.status = status
-            if extra_details:
-                row.details = {**(row.details or {}), **extra_details}
-    logger.debug("Audit %s: status=%s extra=%s", audit_id, status, extra_details)
+        parent = session.query(AuditLogModel).filter_by(id=int(parent_audit_id)).first()
+        if not parent:
+            logger.warning("append_audit_event: parent %s not found", parent_audit_id)
+            return None
+        row = AuditLogModel(
+            timestamp=datetime.now(timezone.utc),
+            user=parent.user,
+            action=parent.action,
+            resource=parent.resource,
+            resource_id=parent.resource_id,
+            details={**(parent.details or {}), **(extra_details or {})},
+            status=status,
+            job_id=parent.job_id,
+            device=parent.device,
+            request_id=parent.request_id,
+            parent_audit_id=int(parent_audit_id),
+        )
+        session.add(row)
+        session.flush()
+        record = _to_record(row)
+    logger.debug("Audit %s: appended event status=%s parent=%s", record.id, status, parent_audit_id)
+    return record
 
 
 def ensure_audit_final_state(audit_id: str) -> None:
-    """Force any pending/stuck audit record to failed. Called in finally blocks."""
+    """Append a 'failed' event if no terminal follow-up exists yet. Safety net for unexpected exits."""
     with get_session() as session:
-        row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
-        if row and row.status not in ("completed", "failed", "cancelled"):
-            logger.warning("Audit %s stuck in '%s' — forcing to failed", audit_id, row.status)
-            row.status = "failed"
-            row.details = {**(row.details or {}), "error": {"type": "unexpected_termination"}}
+        already_terminal = (
+            session.query(AuditLogModel)
+            .filter(
+                AuditLogModel.parent_audit_id == int(audit_id),
+                AuditLogModel.status.in_(["completed", "failed", "cancelled"]),
+            )
+            .first()
+        )
+        if already_terminal:
+            return
+    logger.warning("Audit %s: no terminal event found — appending 'failed'", audit_id)
+    append_audit_event(audit_id, "failed", {"error": {"type": "unexpected_termination"}})
 
 
 def clear_audit_log() -> None:

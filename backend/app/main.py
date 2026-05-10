@@ -33,6 +33,23 @@ def _migrate_device_platform(engine) -> None:
 
 _migrate_device_platform(get_engine())
 
+
+def _install_audit_immutability_trigger(engine) -> None:
+    """Create a BEFORE UPDATE trigger that prevents any mutation of audit_logs rows."""
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TRIGGER IF NOT EXISTS audit_log_immutable
+            BEFORE UPDATE ON audit_logs
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_logs rows are immutable — use append_audit_event() instead');
+            END
+        """))
+        conn.commit()
+    logger.info("Audit immutability trigger installed")
+
+_install_audit_immutability_trigger(get_engine())
+
 from app.api import audit, auth, devices, jobs, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service, job_service  # noqa: E402
 

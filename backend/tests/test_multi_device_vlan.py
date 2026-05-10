@@ -13,7 +13,9 @@ def test_multi_device_creates_multiple_audit_rows(client, admin_client):
     jobs = {entry["job_id"] for entry in response.json()["jobs"]}
 
     log = admin_client.get("/api/v1/audit/").json()
-    entries = [e for e in log if e["action"] == "create_vlan"]
+    # With append-only each device produces 2 rows (pending + follow-up).
+    # Filter to follow-up events to count one final outcome per device.
+    entries = [e for e in log if e["action"] == "create_vlan" and e["parent_audit_id"] is not None]
 
     assert len(entries) == 2
 

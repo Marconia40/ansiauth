@@ -60,7 +60,9 @@ def test_create_vlan_multi_device_audit_rows(operator_client, admin_client):
 
     time.sleep(1)
     log = admin_client.get("/api/v1/audit/").json()
-    entries = [e for e in log if e["action"] == "create_vlan"]
+    # With append-only each device produces 2 rows (pending + completed follow-up).
+    # Filter to follow-up events (parent_audit_id set) to count one outcome per device.
+    entries = [e for e in log if e["action"] == "create_vlan" and e["parent_audit_id"] is not None]
     assert len(entries) == 2
 
     for entry in entries:
@@ -368,3 +370,76 @@ def test_filter_combined_device_and_date_range(admin_client):
     assert len(log) >= 1
     assert all(e["device"] == "mock_device" for e in log)
     assert not any(e["device"] == "fail_device" for e in log)
+
+
+# ── AUD-001: append-only audit log ────────────────────────────────────────────
+
+def test_status_progression_creates_separate_rows(operator_client, admin_client):
+    """A VLAN create must produce two audit rows: initial 'pending' and follow-up terminal event."""
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 90, "name": "CHAIN", "devices": ["mock_device"]})
+
+    log = admin_client.get("/api/v1/audit/").json()
+    vlan_entries = [e for e in log if e["action"] == "create_vlan" and e["details"].get("vlan_id") == 90]
+
+    assert len(vlan_entries) == 2
+    statuses = {e["status"] for e in vlan_entries}
+    assert "pending" in statuses
+    assert "completed" in statuses
+
+
+def test_follow_up_row_links_to_parent(operator_client, admin_client):
+    """The follow-up event row must have parent_audit_id pointing to the initial row."""
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 91, "name": "LINK", "devices": ["mock_device"]})
+
+    log = admin_client.get("/api/v1/audit/").json()
+    vlan_entries = [e for e in log if e["action"] == "create_vlan" and e["details"].get("vlan_id") == 91]
+
+    initial = next(e for e in vlan_entries if e["parent_audit_id"] is None)
+    follow_up = next(e for e in vlan_entries if e["parent_audit_id"] is not None)
+
+    assert follow_up["parent_audit_id"] == initial["id"]
+
+
+def test_follow_up_row_inherits_fields_from_parent(operator_client, admin_client):
+    """Follow-up rows must carry user, device, job_id, request_id copied from the initial row."""
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 92, "name": "INHERIT", "devices": ["mock_device"]})
+
+    log = admin_client.get("/api/v1/audit/").json()
+    vlan_entries = [e for e in log if e["action"] == "create_vlan" and e["details"].get("vlan_id") == 92]
+
+    initial = next(e for e in vlan_entries if e["parent_audit_id"] is None)
+    follow_up = next(e for e in vlan_entries if e["parent_audit_id"] is not None)
+
+    for field in ("user", "action", "resource", "device", "job_id", "request_id"):
+        assert follow_up[field] == initial[field], f"field {field!r} not inherited"
+
+
+def test_no_update_issued_on_audit_log(operator_client, admin_client):
+    """The DB trigger must block any direct UPDATE on audit_logs."""
+    from app.db.models import AuditLogModel
+    from app.db.session import get_session
+    import sqlalchemy.exc
+
+    record = audit_service.log_action("admin", "test_action", "test", {})
+
+    with pytest.raises((sqlalchemy.exc.OperationalError, sqlalchemy.exc.IntegrityError)):
+        with get_session() as session:
+            row = session.query(AuditLogModel).filter_by(id=int(record.id)).first()
+            row.status = "tampered"
+
+
+def test_append_audit_event_merges_details(admin_client):
+    """append_audit_event must merge extra_details on top of the parent's details."""
+    record = audit_service.log_action("admin", "create_vlan", "vlan", {"vlan_id": 93, "name": "MERGE"})
+
+    audit_service.append_audit_event(record.id, "completed", {"retries": 0, "duration_seconds": 0.5})
+
+    log = audit_service.get_audit_log()
+    follow_up = next(
+        e for e in log
+        if e.parent_audit_id == record.id and e.status == "completed"
+    )
+    assert follow_up.details["vlan_id"] == 93
+    assert follow_up.details["name"] == "MERGE"
+    assert follow_up.details["retries"] == 0
+    assert follow_up.details["duration_seconds"] == 0.5
