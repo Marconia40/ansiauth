@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone, timedelta
 
 import pytest
 
@@ -266,3 +267,104 @@ def test_audit_survives_service_reimport(operator_client, admin_client):
 
     log = admin_client.get("/api/v1/audit/").json()
     assert any(e["action"] == "create_vlan" for e in log)
+
+
+# ── AUD-002: date range filter ─────────────────────────────────────────────────
+
+def test_filter_by_from_date_excludes_old_records(admin_client):
+    """from_date in the future returns no records."""
+    audit_service.log_action("admin", "create_vlan", "vlan", {"vlan_id": 1})
+
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    log = admin_client.get("/api/v1/audit/", params={"from_date": future.isoformat()}).json()
+    assert log == []
+
+
+def test_filter_by_to_date_excludes_new_records(admin_client):
+    """to_date before the record was created returns no records."""
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    audit_service.log_action("admin", "create_vlan", "vlan", {"vlan_id": 2})
+
+    log = admin_client.get("/api/v1/audit/", params={"to_date": past.isoformat()}).json()
+    assert log == []
+
+
+def test_filter_date_range_inclusive(admin_client):
+    """Records created inside the window are returned; the range is inclusive."""
+    before = datetime.now(timezone.utc) - timedelta(seconds=5)
+    audit_service.log_action("admin", "create_vlan", "vlan", {"vlan_id": 3})
+    after = datetime.now(timezone.utc) + timedelta(seconds=5)
+
+    log = admin_client.get(
+        "/api/v1/audit/",
+        params={"from_date": before.isoformat(), "to_date": after.isoformat()},
+    ).json()
+    assert len(log) >= 1
+    assert any(e["action"] == "create_vlan" for e in log)
+
+
+def test_filter_from_date_after_to_date_returns_422(admin_client):
+    """`from_date` after `to_date` is rejected with 422."""
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    response = admin_client.get(
+        "/api/v1/audit/",
+        params={"from_date": future.isoformat(), "to_date": past.isoformat()},
+    )
+    assert response.status_code == 422
+
+
+def test_filter_invalid_date_string_returns_422(admin_client):
+    """A non-ISO date string is rejected at the schema level with 422."""
+    response = admin_client.get("/api/v1/audit/", params={"from_date": "not-a-date"})
+    assert response.status_code == 422
+
+
+def test_filter_omit_both_dates_returns_all(admin_client):
+    """Omitting both date params returns all records (no filtering)."""
+    audit_service.log_action("admin", "create_vlan", "vlan", {"vlan_id": 4})
+    audit_service.log_action("admin", "delete_vlan", "vlan", {"vlan_id": 5})
+
+    log = admin_client.get("/api/v1/audit/").json()
+    assert len(log) >= 2
+
+
+# ── AUD-003: device_id filter ─────────────────────────────────────────────────
+
+def test_filter_by_device_id(operator_client, admin_client):
+    """device_id filter returns only records for that device."""
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 60, "name": "DEV_A", "devices": ["mock_device"]})
+    operator_client.post("/api/v1/vlans/", json={"vlan_id": 61, "name": "DEV_B", "devices": ["fail_device"]})
+
+    log = admin_client.get("/api/v1/audit/", params={"device_id": "mock_device"}).json()
+    assert len(log) >= 1
+    assert all(e["device"] == "mock_device" for e in log)
+    assert not any(e["device"] == "fail_device" for e in log)
+
+
+def test_filter_unknown_device_returns_empty_list(admin_client):
+    """An unknown device_id returns an empty list, not 404."""
+    audit_service.log_action("admin", "create_vlan", "vlan", {"vlan_id": 6}, device="mock_device")
+
+    log = admin_client.get("/api/v1/audit/", params={"device_id": "no_such_device"}).json()
+    assert log == []
+
+
+def test_filter_combined_device_and_date_range(admin_client):
+    """device_id and date range filters combine with AND logic."""
+    before = datetime.now(timezone.utc) - timedelta(seconds=5)
+    audit_service.log_action("admin", "create_vlan", "vlan", {"vlan_id": 7}, device="mock_device")
+    audit_service.log_action("admin", "create_vlan", "vlan", {"vlan_id": 8}, device="fail_device")
+    after = datetime.now(timezone.utc) + timedelta(seconds=5)
+
+    log = admin_client.get(
+        "/api/v1/audit/",
+        params={
+            "device_id": "mock_device",
+            "from_date": before.isoformat(),
+            "to_date": after.isoformat(),
+        },
+    ).json()
+    assert len(log) >= 1
+    assert all(e["device"] == "mock_device" for e in log)
+    assert not any(e["device"] == "fail_device" for e in log)

@@ -60,6 +60,9 @@ def get_audit_log(
     user: Optional[str] = None,
     action: Optional[str] = None,
     resource: Optional[str] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    device_id: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
 ) -> list[AuditRecord]:
@@ -71,6 +74,14 @@ def get_audit_log(
             q = q.filter(AuditLogModel.action == action)
         if resource:
             q = q.filter(AuditLogModel.resource == resource)
+        if from_date is not None:
+            _from = from_date if from_date.tzinfo else from_date.replace(tzinfo=timezone.utc)
+            q = q.filter(AuditLogModel.timestamp >= _from)
+        if to_date is not None:
+            _to = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
+            q = q.filter(AuditLogModel.timestamp <= _to)
+        if device_id is not None:
+            q = q.filter(AuditLogModel.device == device_id)
         rows = q.offset(skip).limit(limit).all()
         return [_to_record(r) for r in rows]
 
