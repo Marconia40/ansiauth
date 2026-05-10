@@ -627,13 +627,17 @@ def get_vlans(
         for dev in devices:
             try:
                 result[dev] = vlan_service.get_vlans(dev)
-            except (ValueError, RuntimeError) as e:
+            except ValueError as e:
                 raise NotFoundError(str(e))
+            except RuntimeError as e:
+                raise DeviceExecutionError(str(e))
         return {"success": True, "data": result}
     try:
         data = vlan_service.get_vlans(device)
-    except (ValueError, RuntimeError) as e:
+    except ValueError as e:
         raise NotFoundError(str(e))
+    except RuntimeError as e:
+        raise DeviceExecutionError(str(e))
     return {"success": True, "data": data}
 
 

@@ -63,9 +63,16 @@ def run_playbook(
 
     rc = r.rc
     stderr = _read(r.stderr)
-    # ios_command stores output in events (res.stdout list), not in the text stdout file.
-    # Fall back to text stdout for playbooks that don't produce structured events (ios_config etc).
-    stdout = _extract_ios_command_output(r) or _read(r.stdout)
+    # When rc != 0, prefer the actual task failure message over ios_command output
+    # so ios_config errors aren't masked by an earlier ios_command's stdout.
+    failure_reason = _extract_failure_reason(r) if rc != 0 else ""
+    ios_cmd_output = _extract_ios_command_output(r)
+    if rc != 0 and failure_reason:
+        stdout = failure_reason
+    elif ios_cmd_output:
+        stdout = ios_cmd_output
+    else:
+        stdout = _read(r.stdout)
     combined_output = (stdout + stderr).lower()
     if "no hosts matched" in combined_output and rc == 0:
         logger.error("Playbook %s: no hosts matched on device=%s — treating as failure", playbook, device_label)
@@ -75,7 +82,7 @@ def run_playbook(
     logger.debug("Ansible raw result: %s", result)
     if rc != 0:
         error_output = (stderr + " " + stdout).strip()
-        logger.error("Playbook %s FAILED on device=%s rc=%s error=%s", playbook, device_label, rc, error_output[:300])
+        logger.error("Playbook %s FAILED on device=%s rc=%s error=%s", playbook, device_label, rc, error_output[:1000])
     else:
         logger.info("Playbook %s SUCCESS on device=%s rc=%s", playbook, device_label, rc)
     return result
@@ -117,6 +124,27 @@ def _extract_ios_command_output(r) -> str:
                     return stdout_list[0]
     except Exception as exc:
         logger.debug("Could not extract command output from events: %s", exc)
+    return ""
+
+
+def _extract_failure_reason(r) -> str:
+    """Return the failure message from the first runner_on_failed event.
+
+    ios_config and other modules store the error in event_data.res.msg.
+    This is checked before ios_command output so actual errors aren't masked
+    by a successful earlier task's stdout.
+    """
+    try:
+        for event in r.events:
+            if event.get("event") == "runner_on_failed":
+                data = event.get("event_data", {})
+                res = data.get("res", {})
+                msg = res.get("msg") or res.get("stdout") or data.get("task", "")
+                if msg:
+                    logger.debug("Extracted failure reason from events: %s", str(msg)[:200])
+                    return str(msg)
+    except Exception as exc:
+        logger.debug("Could not extract failure reason from events: %s", exc)
     return ""
 
 

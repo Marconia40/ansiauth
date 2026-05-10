@@ -78,6 +78,7 @@ class CiscoVlanDriver(BaseVendorDriver):
             inventory=inventory,
         )
         if result["rc"] != 0:
-            raise RuntimeError(result["stderr"] or "get_vlans playbook failed")
+            error = result.get("stderr") or result.get("stdout") or "get_vlans playbook failed"
+            raise RuntimeError(error)
         from app.services.parsers.vlan_parser import parse_vlan_brief
         return parse_vlan_brief(result["stdout"])

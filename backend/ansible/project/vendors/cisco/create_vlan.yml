@@ -4,24 +4,16 @@
   gather_facts: no
 
   tasks:
-    - name: Get current VLAN state
-      cisco.ios.ios_command:
-        commands:
-          - show vlan brief
-      register: vlan_state
-
     - name: Ensure VLAN exists with name
       cisco.ios.ios_config:
         parents: "vlan {{ vlan_id }}"
         lines:
           - name {{ vlan_name }}
       register: result
-
 # For testing failure handling, uncomment the following block to simulate a failure after configuration changes
 #    - name: FORCE FAILURE
 #      fail:
 #        msg: "Intentional failure after config"
-
     - name: Save running config
       cisco.ios.ios_config:
         save_when: always
