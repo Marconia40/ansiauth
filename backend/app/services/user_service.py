@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 _pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-VALID_ROLES = frozenset({"admin", "operator", "observer"})
+VALID_ROLES = frozenset({"super-admin", "admin", "operator", "observer"})
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -48,6 +48,19 @@ def _is_last_active_admin(user_id: int, session) -> bool:
         .count()
     )
     return active_admin_count <= 1
+
+
+def _is_last_active_super_admin(user_id: int, session) -> bool:
+    """Return True if this user is the only remaining active super-admin."""
+    row = _get_row_by_id(user_id, session)
+    if row is None or row.role != "super-admin":
+        return False
+    active_super_admin_count = (
+        session.query(UserModel)
+        .filter_by(role="super-admin", is_active=True)
+        .count()
+    )
+    return active_super_admin_count <= 1
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -126,6 +139,8 @@ def update_user(user_id: int, data: UserUpdate) -> UserRead:
         if data.is_active is False:
             if _is_last_active_admin(user_id, session):
                 raise ValueError("Cannot deactivate the last active admin account")
+            if _is_last_active_super_admin(user_id, session):
+                raise ValueError("Cannot deactivate the last active super-admin account")
             row.is_active = False
         elif data.is_active is True:
             row.is_active = True

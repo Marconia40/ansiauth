@@ -49,6 +49,11 @@ def observer_client():
 
 
 @pytest.fixture
+def super_admin_client():
+    return _make_client("super-admin")
+
+
+@pytest.fixture
 def unauth_client():
     return TestClient(app)
 

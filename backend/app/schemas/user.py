@@ -4,7 +4,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-_VALID_ROLES = {"admin", "operator", "observer"}
+_VALID_ROLES = {"super-admin", "admin", "operator", "observer"}
 
 
 class UserCreate(BaseModel):
