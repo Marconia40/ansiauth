@@ -50,7 +50,7 @@ def _install_audit_immutability_trigger(engine) -> None:
 
 _install_audit_immutability_trigger(get_engine())
 
-from app.api import audit, auth, devices, jobs, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, devices, jobs, users, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service, job_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
@@ -156,6 +156,7 @@ app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"])
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"])
 app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
+app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
 
 
 @app.get("/")
