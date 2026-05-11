@@ -131,6 +131,9 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=_lifespan)
 
+from app.core.rate_limit_middleware import RateLimitMiddleware  # noqa: E402
+app.add_middleware(RateLimitMiddleware)
+
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_error_handler(request: Request, exc: RequestValidationError):

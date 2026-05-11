@@ -77,6 +77,17 @@ class JobModel(Base):
     )
 
 
+class RefreshTokenModel(Base):
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+    username = Column(String, nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class LoginAttemptModel(Base):
     __tablename__ = "login_attempts"
 

@@ -51,25 +51,31 @@ def test_first_five_failures_return_401(unauth_client):
 
 
 def test_sixth_failed_attempt_returns_429(unauth_client):
+    from app.core import rate_limit_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
+    rl.reset()  # isolate brute-force lockout from HTTP rate limiter
     r = _do_failed_login(unauth_client)
     assert r.status_code == 429
 
 
 def test_429_has_correct_detail(unauth_client):
+    from app.core import rate_limit_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
+    rl.reset()
     r = _do_failed_login(unauth_client)
     assert r.json()["detail"] == "Too many requests"
 
 
 def test_account_remains_locked_on_correct_password(unauth_client):
+    from app.core import rate_limit_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
+    rl.reset()  # isolate: test that account lockout (not rate limit) blocks correct password
     r = unauth_client.post("/api/v1/auth/login", data={"username": "brute_user", "password": "correct_password_123"})
     assert r.status_code == 429
 
@@ -97,14 +103,17 @@ def test_different_ips_share_per_username_counter(unauth_client):
 
 
 def test_successful_login_resets_failure_counter(unauth_client):
+    from app.core import rate_limit_middleware as rl
     for _ in range(4):
         _do_failed_login(unauth_client)
 
-    # Successful login clears the failure counter
     r = unauth_client.post("/api/v1/auth/login", data={"username": "brute_user", "password": "correct_password_123"})
     assert r.status_code == 200
 
-    # Counter is reset; next 5 failures should give 401, not 429
+    # Reset rate limiter so the next 5 failures aren't blocked by HTTP rate limit
+    rl.reset()
+
+    # Brute-force counter was cleared by successful login; next 5 failures return 401
     for _ in range(5):
         r = _do_failed_login(unauth_client)
         assert r.status_code == 401
@@ -147,13 +156,13 @@ def test_expired_ip_failures_do_not_block(unauth_client):
 # ── Admin unlock endpoint ─────────────────────────────────────────────────────
 
 def test_admin_can_unlock_locked_account(admin_client, unauth_client):
+    from app.core import rate_limit_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
-    # Confirm locked
+    rl.reset()
     assert _do_failed_login(unauth_client).status_code == 429
 
-    # Admin unlocks
     r = admin_client.post("/api/v1/auth/unlock/brute_user")
     assert r.status_code == 200
     data = r.json()
@@ -161,7 +170,8 @@ def test_admin_can_unlock_locked_account(admin_client, unauth_client):
     assert data["data"]["username"] == "brute_user"
     assert data["data"]["attempts_cleared"] >= 5
 
-    # Login succeeds after unlock
+    # Login succeeds after unlock; reset rate limiter first so it's not still full
+    rl.reset()
     r = unauth_client.post("/api/v1/auth/login", data={"username": "brute_user", "password": "correct_password_123"})
     assert r.status_code == 200
 

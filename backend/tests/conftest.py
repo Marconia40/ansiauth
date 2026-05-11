@@ -83,6 +83,25 @@ def reset_login_attempts():
 
 
 @pytest.fixture(autouse=True)
+def reset_rate_limit_middleware():
+    from app.core import rate_limit_middleware as rl
+    rl.reset()
+    yield
+    rl.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_refresh_tokens():
+    from app.db.models import RefreshTokenModel
+    from app.db.session import get_session
+    with get_session() as session:
+        session.query(RefreshTokenModel).delete(synchronize_session=False)
+    yield
+    with get_session() as session:
+        session.query(RefreshTokenModel).delete(synchronize_session=False)
+
+
+@pytest.fixture(autouse=True)
 def mock_ansible_service(monkeypatch):
     """Prevent real Ansible playbook execution in unit tests."""
     from app.services import ansible_service, vlan_service

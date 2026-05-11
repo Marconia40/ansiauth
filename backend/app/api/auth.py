@@ -3,8 +3,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from app.core.dependencies import require_role
 from app.core.security import create_access_token
-from app.schemas.auth import TokenResponse
-from app.services import audit_service, login_attempt_service
+from app.schemas.auth import LogoutRequest, RefreshRequest, TokenResponse
+from app.services import audit_service, login_attempt_service, refresh_token_service
 from app.services.auth_service import authenticate_user
 
 router = APIRouter()
@@ -51,7 +51,8 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
 
     login_attempt_service.record_attempt(username, ip, succeeded=True)
     login_attempt_service.reset_username_failures(username)
-    token = create_access_token({"sub": user.username, "role": user.role})
+    access_token = create_access_token({"sub": user.username, "role": user.role})
+    refresh_token = refresh_token_service.create(user.username)
     audit_service.log_action(
         user=user.username,
         action="login",
@@ -59,7 +60,36 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
         details={"username": user.username},
         status="success",
     )
-    return {"access_token": token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token}
+
+
+@router.post("/refresh", response_model=TokenResponse)
+def refresh(body: RefreshRequest):
+    try:
+        new_refresh_token, username = refresh_token_service.validate_and_rotate(body.refresh_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    from app.services import user_service
+    user = user_service.get_by_username(username)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    access_token = create_access_token({"sub": user.username, "role": user.role})
+    audit_service.log_action(
+        user=user.username,
+        action="token_refresh",
+        resource="auth",
+        details={"username": user.username},
+        status="success",
+    )
+    return {"access_token": access_token, "token_type": "bearer", "refresh_token": new_refresh_token}
+
+
+@router.post("/logout", status_code=200)
+def logout(body: LogoutRequest):
+    revoked = refresh_token_service.revoke(body.refresh_token)
+    return {"success": True, "data": {"revoked": revoked}}
 
 
 @router.post("/unlock/{username}", status_code=200)

@@ -30,6 +30,22 @@ PLAYBOOKS_PATH = os.path.join(_ANSIBLE_DIR, "project")
 BOOTSTRAP_ADMIN_USER = os.getenv("BOOTSTRAP_ADMIN_USER", "admin")
 BOOTSTRAP_ADMIN_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD")
 
+def _parse_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+        if value < minimum:
+            raise ValueError
+        return value
+    except ValueError:
+        raise RuntimeError(f"{name} must be an integer >= {minimum}, got: {raw!r}")
+
+
+RATE_LIMIT_PER_IP: int = _parse_int("RATE_LIMIT_PER_IP", 20)
+RATE_LIMIT_PER_USER: int = _parse_int("RATE_LIMIT_PER_USER", 200)
+RATE_LIMIT_LOGIN: int = _parse_int("RATE_LIMIT_LOGIN", 5)
+REFRESH_TOKEN_EXPIRE_DAYS: int = _parse_int("REFRESH_TOKEN_EXPIRE_DAYS", 7)
+
 _raw_retention = os.getenv("AUDIT_RETENTION_DAYS", "90")
 try:
     AUDIT_RETENTION_DAYS = int(_raw_retention)
