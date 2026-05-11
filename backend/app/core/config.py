@@ -26,3 +26,6 @@ _ANSIBLE_DIR = os.path.normpath(
 ANSIBLE_BASE_PATH = _ANSIBLE_DIR
 INVENTORY_PATH = os.path.join(_ANSIBLE_DIR, "inventory", "inventory.ini")
 PLAYBOOKS_PATH = os.path.join(_ANSIBLE_DIR, "project")
+
+BOOTSTRAP_ADMIN_USER = os.getenv("BOOTSTRAP_ADMIN_USER", "admin")
+BOOTSTRAP_ADMIN_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD")

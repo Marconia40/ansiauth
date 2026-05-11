@@ -51,9 +51,56 @@ def _install_audit_immutability_trigger(engine) -> None:
 _install_audit_immutability_trigger(get_engine())
 
 from app.api import audit, auth, devices, jobs, vlans  # noqa: E402 (must follow DB init)
-from app.services import audit_service, job_service  # noqa: E402
+from app.services import audit_service, job_service, user_service  # noqa: E402
+from app.schemas.user import UserCreate  # noqa: E402
 
 job_service.mark_orphaned_jobs_failed()
+
+
+def _bootstrap_admin() -> None:
+    """Create the initial admin user from env vars if no admin exists in the DB."""
+    from app.core.config import BOOTSTRAP_ADMIN_USER, BOOTSTRAP_ADMIN_PASSWORD
+    from app.db.models import UserModel
+    from app.db.session import get_session
+
+    with get_session() as session:
+        has_admin = session.query(UserModel).filter_by(role="admin", is_active=True).first() is not None
+
+    if has_admin:
+        logger.info("Bootstrap skipped: active admin already exists")
+        return
+
+    if not BOOTSTRAP_ADMIN_PASSWORD:
+        logger.warning(
+            "No active admin exists and BOOTSTRAP_ADMIN_PASSWORD is not set — "
+            "set this env var to seed an initial admin on first boot."
+        )
+        return
+
+    if len(BOOTSTRAP_ADMIN_PASSWORD) < 12:
+        raise RuntimeError(
+            "BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters"
+        )
+
+    user = user_service.create_user(
+        UserCreate(
+            username=BOOTSTRAP_ADMIN_USER,
+            password=BOOTSTRAP_ADMIN_PASSWORD,
+            role="admin",
+        )
+    )
+    audit_service.log_action(
+        user="system",
+        action="bootstrap_admin",
+        resource="user",
+        resource_id=str(user.id),
+        details={"username": user.username},
+        status="success",
+    )
+    logger.info("Bootstrap: created admin user '%s' (id=%d)", user.username, user.id)
+
+
+_bootstrap_admin()
 
 app = FastAPI()
 
