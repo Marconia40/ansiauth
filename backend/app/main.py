@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.core.config import AUDIT_RETENTION_DAYS, DATABASE_URL
+from app.core.config import AUDIT_RETENTION_DAYS, DATABASE_URL, SSL_CERTFILE
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
 from app.schemas.error import ErrorResponse, make_error  # noqa: F401 — re-exported for OpenAPI
 from app.db.base import Base
@@ -154,7 +154,13 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(lifespan=_lifespan)
 
 from app.core.rate_limit_middleware import RateLimitMiddleware  # noqa: E402
+from app.core.tls_middleware import HSTSMiddleware, HTTPSRedirectMiddleware  # noqa: E402
+
 app.add_middleware(RateLimitMiddleware)
+
+if SSL_CERTFILE:
+    app.add_middleware(HTTPSRedirectMiddleware)
+    app.add_middleware(HSTSMiddleware)
 
 
 @app.exception_handler(HTTPException)
