@@ -35,6 +35,28 @@ def _migrate_device_platform(engine) -> None:
 _migrate_device_platform(get_engine())
 
 
+def _migrate_audit_log_columns(engine) -> None:
+    """Add columns to audit_logs that were introduced after the initial schema."""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "audit_logs" not in inspector.get_table_names():
+        return
+    existing_cols = {c["name"] for c in inspector.get_columns("audit_logs")}
+    additions = []
+    if "parent_audit_id" not in existing_cols:
+        additions.append("ALTER TABLE audit_logs ADD COLUMN parent_audit_id INTEGER REFERENCES audit_logs(id)")
+    if "request_id" not in existing_cols:
+        additions.append("ALTER TABLE audit_logs ADD COLUMN request_id VARCHAR")
+    if additions:
+        with engine.connect() as conn:
+            for stmt in additions:
+                conn.execute(text(stmt))
+            conn.commit()
+        logger.info("Migration applied: added columns to audit_logs: %s", [s.split("ADD COLUMN ")[1].split()[0] for s in additions])
+
+_migrate_audit_log_columns(get_engine())
+
+
 def _install_audit_immutability_trigger(engine) -> None:
     """Create a BEFORE UPDATE trigger that prevents any mutation of audit_logs rows."""
     from sqlalchemy import text
