@@ -17,6 +17,7 @@ _buckets: dict[str, list[float]] = {}
 _lock = threading.Lock()
 
 _LOGIN_PATH = "/api/v1/auth/login"
+_EXCLUDED_PATHS: frozenset[str] = frozenset({"/health"})
 
 
 def _get_now() -> float:
@@ -44,6 +45,9 @@ def _check_and_record(key: str, limit: int) -> tuple[bool, int]:
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        if request.url.path in _EXCLUDED_PATHS:
+            return await call_next(request)
+
         ip = request.client.host if request.client else "unknown"
 
         username = None
@@ -68,9 +72,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         allowed, retry_after = _check_and_record(key, limit)
         if not allowed:
+            from app.schemas.error import make_error
             return JSONResponse(
                 status_code=429,
-                content={"detail": "Too many requests"},
+                content=make_error(429, "Too many requests", "RATE_LIMIT_EXCEEDED"),
                 headers={"Retry-After": str(retry_after)},
             )
 

@@ -103,7 +103,7 @@ def test_expired_refresh_token_returns_401(unauth_client):
 
     r = _refresh(unauth_client, raw)
     assert r.status_code == 401
-    assert "expired" in r.json()["detail"].lower()
+    assert "expired" in r.json()["message"].lower()
 
 
 # ── Single-use (rotation) ─────────────────────────────────────────────────────

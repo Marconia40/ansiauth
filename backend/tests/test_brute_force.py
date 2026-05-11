@@ -67,7 +67,7 @@ def test_429_has_correct_detail(unauth_client):
 
     rl.reset()
     r = _do_failed_login(unauth_client)
-    assert r.json()["detail"] == "Too many requests"
+    assert r.json()["message"] == "Too many requests"
 
 
 def test_account_remains_locked_on_correct_password(unauth_client):

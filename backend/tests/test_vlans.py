@@ -19,7 +19,7 @@ def test_vlan_invalid_id(client):
     payload = {"vlan_id": 5000, "name": "TEST", "devices": ["mock_device"]}
     response = client.post("/api/v1/vlans/", json=payload)
     assert response.status_code == 422
-    assert response.json()["detail"][0]["type"] == "less_than_equal"
+    assert response.json()["details"]["errors"][0]["type"] == "less_than_equal"
 
 
 def test_vlan_reserved(client):
@@ -177,7 +177,7 @@ def test_get_vlans_no_device_real_mode_returns_400(client, monkeypatch):
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
     response = client.get("/api/v1/vlans/")
     assert response.status_code == 400
-    assert "device" in response.json()["error"].lower()
+    assert "device" in response.json()["message"].lower()
 
 
 def test_get_vlans_no_device_mock_mode_returns_list(client):
