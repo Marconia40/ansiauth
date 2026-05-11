@@ -75,6 +75,14 @@ def reset_rate_limiter():
 
 
 @pytest.fixture(autouse=True)
+def reset_login_attempts():
+    from app.services import login_attempt_service
+    login_attempt_service.reset_all()
+    yield
+    login_attempt_service.reset_all()
+
+
+@pytest.fixture(autouse=True)
 def mock_ansible_service(monkeypatch):
     """Prevent real Ansible playbook execution in unit tests."""
     from app.services import ansible_service, vlan_service

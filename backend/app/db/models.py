@@ -77,6 +77,16 @@ class JobModel(Base):
     )
 
 
+class LoginAttemptModel(Base):
+    __tablename__ = "login_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String, nullable=False, index=True)
+    ip_address = Column(String, nullable=False, index=True)
+    attempted_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    succeeded = Column(Boolean, nullable=False, default=False)
+
+
 class AuditLogModel(Base):
     __tablename__ = "audit_logs"
 
