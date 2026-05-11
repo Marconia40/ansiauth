@@ -1,5 +1,33 @@
 import pytest
 
+from app.db.models import UserModel
+from app.db.session import get_session
+from app.schemas.user import UserCreate
+from app.services import user_service
+
+
+# ── Seed DB users that auth tests rely on ─────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def seed_auth_users():
+    """Ensure the three test accounts exist before each auth test."""
+    for username, password, role in [
+        ("admin", "admin123", "admin"),
+        ("operator", "operator123", "operator"),
+        ("observer", "observer123", "observer"),
+    ]:
+        if user_service.get_by_username(username) is None:
+            user_service.create_user(
+                UserCreate(username=username, password=password, role=role)
+            )
+    yield
+    with get_session() as session:
+        session.query(UserModel).filter(
+            UserModel.username.in_(["admin", "operator", "observer"])
+        ).delete(synchronize_session=False)
+
+
+# ── Login ─────────────────────────────────────────────────────────────────────
 
 def test_login_success(unauth_client):
     response = unauth_client.post("/api/v1/auth/login", data={"username": "admin", "password": "admin123"})
@@ -15,6 +43,38 @@ def test_login_invalid_credentials(unauth_client):
 
     assert response.status_code == 401
 
+
+def test_login_unknown_user_returns_401(unauth_client):
+    response = unauth_client.post("/api/v1/auth/login", data={"username": "ghost", "password": "anything"})
+
+    assert response.status_code == 401
+
+
+def test_login_inactive_user_returns_401(unauth_client):
+    user = user_service.get_by_username("observer")
+    user_service.deactivate_user(user.id)
+
+    response = unauth_client.post("/api/v1/auth/login", data={"username": "observer", "password": "observer123"})
+
+    assert response.status_code == 401
+
+
+def test_login_then_use_token(unauth_client):
+    login_response = unauth_client.post(
+        "/api/v1/auth/login", data={"username": "operator", "password": "operator123"}
+    )
+    assert login_response.status_code == 200
+    token = login_response.json()["access_token"]
+
+    vlan_response = unauth_client.get(
+        "/api/v1/vlans/",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert vlan_response.status_code == 200
+    assert isinstance(vlan_response.json()["data"], list)
+
+
+# ── Token / access guards ─────────────────────────────────────────────────────
 
 def test_access_without_token(unauth_client):
     response = unauth_client.get("/api/v1/vlans/")
@@ -64,7 +124,6 @@ def test_token_accepted_within_expiry_window(unauth_client):
     from jose import jwt as jose_jwt
     from datetime import datetime, timezone, timedelta
 
-    # A fresh token using the configured 15-minute window must be accepted immediately
     token = jose_jwt.encode(
         {
             "sub": "admin",
@@ -124,18 +183,3 @@ def test_startup_fails_when_expiry_is_zero():
     finally:
         cfg.ACCESS_TOKEN_EXPIRE_MINUTES = original
         importlib.reload(sec)
-
-
-def test_login_then_use_token(unauth_client):
-    login_response = unauth_client.post(
-        "/api/v1/auth/login", data={"username": "operator", "password": "operator123"}
-    )
-    assert login_response.status_code == 200
-    token = login_response.json()["access_token"]
-
-    vlan_response = unauth_client.get(
-        "/api/v1/vlans/",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert vlan_response.status_code == 200
-    assert isinstance(vlan_response.json()["data"], list)

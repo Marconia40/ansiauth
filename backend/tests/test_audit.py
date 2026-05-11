@@ -3,7 +3,8 @@ from datetime import datetime, timezone, timedelta
 
 import pytest
 
-from app.services import audit_service
+from app.schemas.user import UserCreate
+from app.services import audit_service, user_service
 
 
 @pytest.fixture(autouse=True)
@@ -11,6 +12,18 @@ def clear_log():
     audit_service.clear_audit_log()
     yield
     audit_service.clear_audit_log()
+
+
+@pytest.fixture(autouse=True)
+def seed_users():
+    """Ensure test accounts exist for login-audit tests."""
+    for username, password, role in [
+        ("operator", "operator123", "operator"),
+    ]:
+        if user_service.get_by_username(username) is None:
+            user_service.create_user(
+                UserCreate(username=username, password=password, role=role)
+            )
 
 
 # --- Access control ---

@@ -22,12 +22,12 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
         )
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_access_token({"sub": user["username"], "role": user["role"]})
+    token = create_access_token({"sub": user.username, "role": user.role})
     audit_service.log_action(
-        user=user["username"],
+        user=user.username,
         action="login",
         resource="auth",
-        details={"username": user["username"]},
+        details={"username": user.username},
         status="success",
     )
     return {"access_token": token, "token_type": "bearer"}
