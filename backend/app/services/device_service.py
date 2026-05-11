@@ -69,6 +69,36 @@ def get_devices() -> list[Device]:
         return [_to_domain(r) for r in rows]
 
 
+def update_device(
+    name: str,
+    host: str | None = None,
+    vendor: str | None = None,
+    platform: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> Device:
+    with get_session() as session:
+        row = session.query(DeviceModel).filter_by(name=name).first()
+        if not row:
+            raise ValueError(f"Device '{name}' not found")
+        if host is not None:
+            row.host = host
+        if vendor is not None:
+            if vendor not in _VALID_VENDORS:
+                raise ValueError(f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}")
+            row.vendor = vendor
+        if platform is not None:
+            row.platform = platform
+        if username is not None:
+            row.username = username
+        if password is not None:
+            row.encrypted_password = secret_service.encrypt_password(password)
+        session.flush()
+        domain = _to_domain(row)
+    logger.info("Device %s updated", name)
+    return domain
+
+
 def delete_device(name: str) -> Device | None:
     with get_session() as session:
         row = session.query(DeviceModel).filter_by(name=name).first()

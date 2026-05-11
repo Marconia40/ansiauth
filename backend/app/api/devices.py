@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 
 from app.core.dependencies import require_role
 from app.core.exceptions import NotFoundError, ValidationError
-from app.schemas.device import DeviceCreate, DevicePublic
+from app.schemas.device import DeviceCreate, DevicePublic, DeviceUpdate
 from app.services import audit_service, device_service
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,32 @@ def create_device(data: DeviceCreate, current_user: dict = Depends(require_role(
         action="create_device",
         resource="device",
         details={"id": device.id, "name": device.name, "host": device.host, "vendor": device.vendor},
+    )
+    return {"success": True, "data": _to_public(device)}
+
+
+@router.put("/{name}")
+def update_device(name: str, data: DeviceUpdate, current_user: dict = Depends(require_role("admin"))):
+    changed = data.model_dump(exclude_none=True)
+    if not changed:
+        raise ValidationError("No fields provided for update")
+    try:
+        device = device_service.update_device(
+            name=name,
+            host=data.host,
+            vendor=data.vendor,
+            platform=data.platform,
+            username=data.username,
+            password=data.password,
+        )
+    except ValueError as e:
+        raise ValidationError(str(e))
+    audit_fields = {k: v for k, v in changed.items() if k != "password"}
+    audit_service.log_action(
+        user=current_user["username"],
+        action="update_device",
+        resource="device",
+        details={"name": name, "updated_fields": audit_fields},
     )
     return {"success": True, "data": _to_public(device)}
 

@@ -117,12 +117,17 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
     except Exception:
         body_data = None
 
+    import json as _json
+    try:
+        errors_data = _json.loads(_json.dumps(exc.errors(), default=str))
+    except Exception:
+        errors_data = str(exc)
     audit_service.log_action(
         user="anonymous",
         action="validation_error",
         resource="request",
         status="failure",
-        details={"errors": exc.errors(), "body": body_data},
+        details={"errors": errors_data, "body": body_data},
     )
     return await request_validation_exception_handler(request, exc)
 
