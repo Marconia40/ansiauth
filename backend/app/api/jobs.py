@@ -1,6 +1,8 @@
 import logging
+from datetime import datetime
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.dependencies import get_current_user
 from app.core.exceptions import NotFoundError
@@ -9,11 +11,15 @@ from app.services import audit_service, job_service
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+_VALID_STATUSES = frozenset({"pending", "running", "completed", "failed", "cancelled"})
+
 
 def _format_job(job) -> dict:
     return {
         "job_id": job.job_id,
         "status": job.status,
+        "playbook": job.playbook,
+        "device": job.device,
         "error": job.error,
         "result": job.result,
         "created_at": job.created_at.isoformat(),
@@ -28,9 +34,48 @@ def _format_job(job) -> dict:
     }
 
 
+def _ensure_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    from datetime import timezone
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 @router.get("/")
-def list_jobs(current_user: dict = Depends(get_current_user)):
-    return {"success": True, "data": [_format_job(j) for j in job_service.get_all_jobs()]}
+def list_jobs(
+    current_user: dict = Depends(get_current_user),
+    status: Optional[str] = Query(default=None),
+    device_id: Optional[str] = Query(default=None),
+    from_date: Optional[datetime] = Query(default=None),
+    to_date: Optional[datetime] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+):
+    if status is not None and status not in _VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"status must be one of {sorted(_VALID_STATUSES)}",
+        )
+    from_date = _ensure_aware(from_date)
+    to_date = _ensure_aware(to_date)
+    if from_date is not None and to_date is not None and from_date > to_date:
+        raise HTTPException(status_code=422, detail="from_date must not be after to_date")
+
+    jobs, total = job_service.query_jobs(
+        status=status,
+        device=device_id,
+        from_date=from_date,
+        to_date=to_date,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "success": True,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": [_format_job(j) for j in jobs],
+    }
 
 
 @router.get("/{job_id}")

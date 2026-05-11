@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 
 from app.db.base import Base
 
@@ -71,6 +71,10 @@ class JobModel(Base):
     pre_state = Column(JSON, nullable=True)
     last_error = Column(Text, nullable=True)
     current_step = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_jobs_status_created_at", "status", "created_at"),
+    )
 
 
 class AuditLogModel(Base):

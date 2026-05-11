@@ -49,7 +49,10 @@ def test_list_jobs(client):
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert isinstance(data["data"], list)
+    assert isinstance(data["items"], list)
+    assert "total" in data
+    assert "page" in data
+    assert "page_size" in data
 
 
 def test_cancel_job_success(client):

@@ -74,6 +74,36 @@ def get_all_jobs() -> list[Job]:
         return [_to_job(r) for r in rows]
 
 
+def query_jobs(
+    status: Optional[str] = None,
+    device: Optional[str] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[Job], int]:
+    with get_session() as session:
+        q = session.query(JobModel)
+        if status is not None:
+            q = q.filter(JobModel.status == status)
+        if device is not None:
+            q = q.filter(JobModel.device == device)
+        if from_date is not None:
+            fd = from_date if from_date.tzinfo else from_date.replace(tzinfo=timezone.utc)
+            q = q.filter(JobModel.created_at >= fd)
+        if to_date is not None:
+            td = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
+            q = q.filter(JobModel.created_at <= td)
+        total = q.count()
+        rows = (
+            q.order_by(JobModel.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+            .all()
+        )
+        return [_to_job(r) for r in rows], total
+
+
 def update_job(
     job_id: str,
     status: Optional[str] = None,

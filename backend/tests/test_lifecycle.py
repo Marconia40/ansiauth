@@ -173,7 +173,7 @@ def test_jobs_endpoint_returns_all_created_jobs(operator_client, client):
     assert response.status_code == 200
     created_ids = {e["job_id"] for e in response.json()["jobs"]}
 
-    all_jobs = {j["job_id"] for j in client.get("/api/v1/jobs/").json()["data"]}
+    all_jobs = {j["job_id"] for j in client.get("/api/v1/jobs/").json()["items"]}
     assert created_ids.issubset(all_jobs)
 
 
