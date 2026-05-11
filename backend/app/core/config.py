@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SECRET_KEY = os.getenv("SECRET_KEY")
+FERNET_KEY = os.getenv("FERNET_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 _raw_expiry = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15")
