@@ -3,10 +3,24 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.config import AUDIT_RETENTION_DAYS
 from app.core.dependencies import require_role
 from app.services import audit_service
 
 router = APIRouter()
+
+
+@router.post("/purge")
+def purge_audit_log(
+    retention_days: Optional[int] = Query(default=None, ge=1),
+    current_user: dict = Depends(require_role("super-admin")),
+):
+    days = retention_days if retention_days is not None else AUDIT_RETENTION_DAYS
+    deleted = audit_service.purge_old_records(
+        retention_days=days,
+        triggered_by=current_user["username"],
+    )
+    return {"success": True, "data": {"deleted": deleted, "retention_days": days}}
 
 
 @router.get("/")

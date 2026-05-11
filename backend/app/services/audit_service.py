@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.db.models import AuditLogModel
@@ -133,6 +133,63 @@ def ensure_audit_final_state(audit_id: str) -> None:
             return
     logger.warning("Audit %s: no terminal event found — appending 'failed'", audit_id)
     append_audit_event(audit_id, "failed", {"error": {"type": "unexpected_termination"}})
+
+
+def purge_old_records(retention_days: int, triggered_by: str = "scheduler") -> int:
+    """Delete audit records older than retention_days. Returns the number of rows deleted.
+
+    Deletes in chunks of 1000 to avoid long table locks on SQLite.
+    Records that are parents of newer rows are preserved to keep chain integrity.
+    Logs a system audit event after purge.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    total_deleted = 0
+
+    while True:
+        with get_session() as session:
+            # Find IDs that are referenced as parent_audit_id — never delete these
+            referenced_ids = {
+                row[0]
+                for row in session.query(AuditLogModel.parent_audit_id)
+                .filter(AuditLogModel.parent_audit_id.isnot(None))
+                .all()
+            }
+            batch_ids = [
+                row[0]
+                for row in session.query(AuditLogModel.id)
+                .filter(
+                    AuditLogModel.timestamp < cutoff,
+                    AuditLogModel.id.notin_(referenced_ids) if referenced_ids else True,
+                )
+                .limit(1000)
+                .all()
+            ]
+            if not batch_ids:
+                break
+            deleted = (
+                session.query(AuditLogModel)
+                .filter(AuditLogModel.id.in_(batch_ids))
+                .delete(synchronize_session=False)
+            )
+            total_deleted += deleted
+
+    if total_deleted > 0 or triggered_by != "scheduler":
+        log_action(
+            user="system",
+            action="audit_purge",
+            resource="audit_log",
+            details={
+                "retention_days": retention_days,
+                "deleted_count": total_deleted,
+                "triggered_by": triggered_by,
+            },
+            status="success",
+        )
+        logger.info(
+            "Audit purge complete: deleted=%d retention_days=%d triggered_by=%s",
+            total_deleted, retention_days, triggered_by,
+        )
+    return total_deleted
 
 
 def clear_audit_log() -> None:

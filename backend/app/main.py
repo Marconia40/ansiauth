@@ -1,11 +1,12 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.core.config import DATABASE_URL
+from app.core.config import AUDIT_RETENTION_DAYS, DATABASE_URL
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
 from app.db.base import Base
 from app.db.session import get_engine, init_db
@@ -102,7 +103,33 @@ def _bootstrap_admin() -> None:
 
 _bootstrap_admin()
 
-app = FastAPI()
+
+def _make_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.services import audit_service as _audit
+
+    scheduler = BackgroundScheduler(timezone="UTC")
+    scheduler.add_job(
+        lambda: _audit.purge_old_records(AUDIT_RETENTION_DAYS, triggered_by="scheduler"),
+        trigger="cron",
+        hour=2,
+        minute=0,
+        id="audit_purge_daily",
+    )
+    return scheduler
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    scheduler = _make_scheduler()
+    scheduler.start()
+    logger.info("Audit retention scheduler started (retention=%d days, runs daily at 02:00 UTC)", AUDIT_RETENTION_DAYS)
+    yield
+    scheduler.shutdown(wait=False)
+    logger.info("Audit retention scheduler stopped")
+
+
+app = FastAPI(lifespan=_lifespan)
 
 
 @app.exception_handler(RequestValidationError)

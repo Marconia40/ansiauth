@@ -29,3 +29,13 @@ PLAYBOOKS_PATH = os.path.join(_ANSIBLE_DIR, "project")
 
 BOOTSTRAP_ADMIN_USER = os.getenv("BOOTSTRAP_ADMIN_USER", "admin")
 BOOTSTRAP_ADMIN_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD")
+
+_raw_retention = os.getenv("AUDIT_RETENTION_DAYS", "90")
+try:
+    AUDIT_RETENTION_DAYS = int(_raw_retention)
+    if AUDIT_RETENTION_DAYS < 1:
+        raise ValueError
+except ValueError:
+    raise RuntimeError(
+        f"AUDIT_RETENTION_DAYS must be a positive integer, got: {_raw_retention!r}"
+    )
