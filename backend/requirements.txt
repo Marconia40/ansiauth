@@ -30,3 +30,4 @@ uvicorn==0.44.0
 pytest==7.4.0
 httpx==0.28.1
 sqlalchemy>=2.0
+alembic>=1.13
