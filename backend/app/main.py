@@ -151,7 +151,56 @@ async def _lifespan(app: FastAPI):
     logger.info("Audit retention scheduler stopped")
 
 
-app = FastAPI(lifespan=_lifespan)
+app = FastAPI(
+    title="AnsiAuth — Network Automation API",
+    version="1.0.0",
+    description=(
+        "Ansible-powered network automation platform for VLAN lifecycle management, "
+        "multi-device orchestration, and audit-compliant configuration changes on "
+        "Cisco IOS switches.\n\n"
+        "## Authentication\n"
+        "All endpoints except `/health` require a **Bearer JWT** in the `Authorization` header.\n"
+        "Obtain a token from `POST /api/v1/auth/login` and click **Authorize** above.\n\n"
+        "## Role hierarchy\n"
+        "| Role | Permissions |\n"
+        "|------|-------------|\n"
+        "| `observer` | Read-only (VLANs, devices, jobs) |\n"
+        "| `operator` | observer + create/update VLANs |\n"
+        "| `admin` | operator + delete VLANs, manage devices and users |\n"
+        "| `super-admin` | admin + manage users, purge audit log |"
+    ),
+    contact={"name": "Network Operations"},
+    lifespan=_lifespan,
+)
+
+
+def _custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": (
+                "JWT access token obtained from `POST /api/v1/auth/login`. "
+                "Include as `Authorization: Bearer <token>`."
+            ),
+        }
+    }
+    schema["security"] = [{"BearerAuth": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi
 
 from app.core.rate_limit_middleware import RateLimitMiddleware  # noqa: E402
 from app.core.tls_middleware import HSTSMiddleware, HTTPSRedirectMiddleware  # noqa: E402

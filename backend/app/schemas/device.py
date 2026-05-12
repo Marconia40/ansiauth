@@ -2,7 +2,7 @@ import ipaddress
 import re
 from typing import Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 _HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$")
 _IPV4_LIKE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
@@ -23,6 +23,17 @@ def _validate_host(v: str) -> str:
 
 
 class DeviceCreate(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "name": "switch-01",
+            "host": "192.168.1.10",
+            "vendor": "cisco",
+            "platform": "ios",
+            "username": "admin",
+            "password": "s3cr3tpass",
+        }
+    })
+
     name: str
     host: str
     vendor: str
@@ -32,6 +43,10 @@ class DeviceCreate(BaseModel):
 
 
 class DeviceUpdate(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"host": "192.168.1.20", "username": "netops"}
+    })
+
     host: Optional[str] = None
     vendor: Optional[str] = None
     platform: Optional[str] = None

@@ -17,7 +17,15 @@ router = APIRouter()
 _RETRY_BASE_DELAY: float = 1.0
 
 
-@router.get("/")
+@router.get(
+    "/",
+    summary="List VLANs",
+    description=(
+        "Retrieve the VLAN table from one or more devices. "
+        "Pass `device=switch-01` for a single device or `devices=switch-01&devices=switch-02` "
+        "for multiple. Requires observer role or higher."
+    ),
+)
 def get_vlans(
     device: str | None = None,
     devices: list[str] | None = Query(default=None),
@@ -44,7 +52,16 @@ def get_vlans(
     return {"success": True, "data": data}
 
 
-@router.post("/")
+@router.post(
+    "/",
+    summary="Create VLAN",
+    description=(
+        "Create a new VLAN on one or more devices via Ansible. "
+        "Each device gets its own background job — the response contains a job ID per device. "
+        "Poll `GET /api/v1/jobs/{job_id}` for execution status. "
+        "Requires operator role or higher."
+    ),
+)
 def create_vlan(
     vlan: VLANCreate,
     background_tasks: BackgroundTasks,
@@ -63,7 +80,15 @@ def create_vlan(
     return {"success": True, "jobs": jobs}
 
 
-@router.delete("/{vlan_id}")
+@router.delete(
+    "/{vlan_id}",
+    summary="Delete VLAN",
+    description=(
+        "Remove a VLAN from one or more devices via Ansible. "
+        "Returns a job ID per device. Reserved VLANs (1, 1002–1005) cannot be deleted. "
+        "Requires admin role."
+    ),
+)
 def delete_vlan(
     vlan_id: int,
     data: VLANDelete,
@@ -82,7 +107,14 @@ def delete_vlan(
     return {"success": True, "jobs": jobs}
 
 
-@router.patch("/{vlan_id}")
+@router.patch(
+    "/{vlan_id}",
+    summary="Update VLAN",
+    description=(
+        "Update the description of an existing VLAN on one or more devices. "
+        "Returns a job ID per device. Requires operator role or higher."
+    ),
+)
 def update_vlan(
     vlan_id: int,
     data: VLANUpdate,
