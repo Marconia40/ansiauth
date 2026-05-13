@@ -12,6 +12,7 @@ _PLAYBOOK_CREATE = "vendors/huawei/create_vlan.yml"
 _PLAYBOOK_DELETE = "vendors/huawei/delete_vlan.yml"
 _PLAYBOOK_GET = "vendors/huawei/get_vlans.yml"
 _PLAYBOOK_UPDATE = "vendors/huawei/update_vlan.yml"
+_PLAYBOOK_SAVE = "vendors/huawei/save_config.yml"
 
 
 class HuaweiVlanDriver(BaseVendorDriver):
@@ -73,3 +74,15 @@ class HuaweiVlanDriver(BaseVendorDriver):
             raise RuntimeError(error)
         from app.services.parsers.vlan_parser import parse_vrp_vlan_display
         return parse_vrp_vlan_display(result["stdout"])
+
+    def save_config(self, device, password: str) -> dict:
+        logger.info("HuaweiVlanDriver.save_config device=%s", device.name)
+        inventory = ansible_service.build_inventory(
+            device.name, device.host, device.username, password,
+            network_os=_NETWORK_OS, connection=_CONNECTION,
+        )
+        return ansible_service.run_playbook(
+            playbook=_PLAYBOOK_SAVE,
+            extravars={"device": device.name},
+            inventory=inventory,
+        )

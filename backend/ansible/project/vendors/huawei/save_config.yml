@@ -1,0 +1,10 @@
+---
+- name: Save configuration on Huawei VRP device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Persist running config to flash
+      community.network.ce_command:
+        commands:
+          - save force
