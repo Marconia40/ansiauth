@@ -1,0 +1,11 @@
+---
+- name: Update VLAN name on Huawei VRP device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Update VLAN name
+      community.network.ce_vlan:
+        vlan_id: "{{ vlan_id }}"
+        name: "{{ description }}"
+        state: present
