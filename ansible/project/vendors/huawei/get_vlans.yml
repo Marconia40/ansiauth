@@ -1,0 +1,9 @@
+---
+- name: Get VLANs from Huawei CE device
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Display VLAN table
+      community.network.ce_command:
+        commands:
+          - display vlan

@@ -196,6 +196,12 @@ def _custom_openapi():
         }
     }
     schema["security"] = [{"BearerAuth": []}]
+    # Remove per-endpoint security overrides that reference the now-replaced
+    # OAuth2PasswordBearer scheme — global BearerAuth must apply instead.
+    for path_item in schema.get("paths", {}).values():
+        for operation in path_item.values():
+            if isinstance(operation, dict):
+                operation.pop("security", None)
     app.openapi_schema = schema
     return schema
 

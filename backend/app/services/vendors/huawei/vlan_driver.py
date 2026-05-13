@@ -5,7 +5,7 @@ from app.services.vendors.base import BaseVendorDriver
 
 logger = logging.getLogger(__name__)
 
-_NETWORK_OS = "ce"
+_NETWORK_OS = "community.network.ce"
 _CONNECTION = "network_cli"
 
 _PLAYBOOK_CREATE = "vendors/huawei/create_vlan.yml"

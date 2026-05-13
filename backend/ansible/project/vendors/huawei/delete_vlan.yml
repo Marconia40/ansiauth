@@ -5,6 +5,6 @@
 
   tasks:
     - name: Remove VLAN
-      community.network.ce_vlan:
-        vlan_id: "{{ vlan_id }}"
-        state: absent
+      community.network.ce_config:
+        lines:
+          - undo vlan {{ vlan_id }}

@@ -5,7 +5,7 @@
 
   tasks:
     - name: Ensure VLAN exists with name
-      community.network.ce_vlan:
-        vlan_id: "{{ vlan_id }}"
-        name: "{{ vlan_name }}"
-        state: present
+      community.network.ce_config:
+        lines:
+          - description {{ vlan_name }}
+        parents: vlan {{ vlan_id }}

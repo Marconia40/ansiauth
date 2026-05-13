@@ -5,7 +5,7 @@
 
   tasks:
     - name: Update VLAN name
-      community.network.ce_vlan:
-        vlan_id: "{{ vlan_id }}"
-        name: "{{ description }}"
-        state: present
+      community.network.ce_config:
+        lines:
+          - description {{ description }}
+        parents: vlan {{ vlan_id }}
