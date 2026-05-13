@@ -21,6 +21,9 @@ venv/
 # =========================
 ansible/inventory/inventory.ini
 ansible/inventory/*.retry
+backend/ansible/inventory/inventory.ini
+backend/ansible/artifacts/
+backend/ansible/env/
 
 # Ansible artifacts
 *.log
@@ -62,3 +65,20 @@ build/
 # Docker (optional)
 # =========================
 *.env.local
+
+# =========================
+# Folders
+# =========================
+docs/prompts/old/
+docs/prompts/
+docs/engineering_rules.md
+docs/backups/
+docs/pull-req/
+docs/project-management/
+docs/script-trello/
+
+
+# =========================
+# Database files
+# =========================
+backend/app/db/*.db

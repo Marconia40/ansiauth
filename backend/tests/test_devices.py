@@ -1,0 +1,120 @@
+import pytest
+
+from app.services import audit_service, device_service
+
+
+@pytest.fixture(autouse=True)
+def reset_devices():
+    device_service.clear_devices()
+    yield
+    device_service.clear_devices()
+
+
+_PAYLOAD = {
+    "name": "switch1",
+    "host": "192.168.1.10",
+    "vendor": "cisco_ios",
+    "username": "admin",
+    "password": "admin",
+}
+
+
+def test_create_device(admin_client):
+    response = admin_client.post("/api/v1/devices/", json=_PAYLOAD)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["data"]["name"] == "switch1"
+    assert data["data"]["host"] == "192.168.1.10"
+    assert "password" not in data["data"]
+    assert "encrypted_password" not in data["data"]
+
+
+def test_create_device_no_plaintext_password(admin_client):
+    response = admin_client.post("/api/v1/devices/", json=_PAYLOAD)
+    body = response.text
+    assert "admin" not in body or '"username": "admin"' not in body or "password" not in body
+    # Verify no plaintext password field is ever returned
+    assert "encrypted_password" not in body
+    assert response.json()["data"].get("password") is None
+
+
+def test_get_devices(admin_client):
+    response = admin_client.get("/api/v1/devices/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert isinstance(data["data"], list)
+    for device in data["data"]:
+        assert "password" not in device
+        assert "encrypted_password" not in device
+
+
+def test_get_device_by_name(admin_client):
+    admin_client.post("/api/v1/devices/", json=_PAYLOAD)
+    response = admin_client.get("/api/v1/devices/switch1")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["data"]["name"] == "switch1"
+    assert "password" not in data["data"]
+
+
+def test_get_device_not_found(admin_client):
+    response = admin_client.get("/api/v1/devices/nonexistent")
+    assert response.status_code == 404
+
+
+def test_delete_device(admin_client):
+    admin_client.post("/api/v1/devices/", json=_PAYLOAD)
+    response = admin_client.delete("/api/v1/devices/switch1")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["data"]["name"] == "switch1"
+
+
+def test_delete_device_not_found(admin_client):
+    response = admin_client.delete("/api/v1/devices/nonexistent")
+    assert response.status_code == 404
+    assert "nonexistent" in response.text
+
+
+def test_observer_cannot_create_device(observer_client):
+    response = observer_client.post("/api/v1/devices/", json=_PAYLOAD)
+    assert response.status_code == 403
+
+
+def test_create_vlan_with_registered_device(admin_client):
+    admin_client.post("/api/v1/devices/", json=_PAYLOAD)
+    payload = {"vlan_id": 50, "name": "PROD", "devices": ["switch1"]}
+    response = admin_client.post("/api/v1/vlans/", json=payload)
+    assert response.status_code == 200
+    assert response.json()["jobs"][0]["status"] in ("pending", "running", "completed")
+
+
+def test_create_vlan_device_not_registered(admin_client):
+    payload = {"vlan_id": 50, "name": "PROD", "devices": ["unknown_switch"]}
+    response = admin_client.post("/api/v1/vlans/", json=payload)
+    assert response.status_code == 404
+    assert "unknown_switch" in response.text
+
+
+def test_device_creation_is_audited(admin_client):
+    audit_service.clear_audit_log()
+    admin_client.post("/api/v1/devices/", json={**_PAYLOAD, "name": "sw2"})
+    log = admin_client.get("/api/v1/audit/").json()
+    entry = next(e for e in log if e["action"] == "create_device")
+    assert entry["resource"] == "device"
+    assert entry["details"]["name"] == "sw2"
+    audit_service.clear_audit_log()
+
+
+def test_password_encryption(admin_client):
+    """Password stored in memory must not be plaintext."""
+    from app.services import device_service, secret_service
+
+    admin_client.post("/api/v1/devices/", json=_PAYLOAD)
+    device = device_service.get_device("switch1")
+    assert device is not None
+    assert device.encrypted_password != "admin"
+    assert secret_service.decrypt_password(device.encrypted_password) == "admin"

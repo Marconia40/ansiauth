@@ -1,0 +1,19 @@
+---
+- name: Create VLAN on Cisco device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Ensure VLAN exists with name
+      cisco.ios.ios_config:
+        parents: "vlan {{ vlan_id }}"
+        lines:
+          - name {{ vlan_name }}
+      register: result
+# For testing failure handling, uncomment the following block to simulate a failure after configuration changes
+#    - name: FORCE FAILURE
+#      fail:
+#        msg: "Intentional failure after config"
+    - name: Save running config
+      cisco.ios.ios_config:
+        save_when: always

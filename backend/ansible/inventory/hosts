@@ -1,0 +1,1 @@
+cisco2 ansible_host=10.10.10.11 ansible_user=admin ansible_password=cisco321 ansible_network_os=ios ansible_connection=network_cli

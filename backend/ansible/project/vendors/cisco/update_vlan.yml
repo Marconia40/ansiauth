@@ -1,0 +1,27 @@
+---
+- name: Update VLAN name on Cisco device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Get current VLAN state
+      cisco.ios.ios_command:
+        commands:
+          - show vlan brief
+      register: vlan_state
+
+    - name: Update VLAN name
+      cisco.ios.ios_config:
+        parents: "vlan {{ vlan_id }}"
+        lines:
+          - name {{ description }}
+      register: result
+
+# For testing failure handling, uncomment the following block to simulate a failure after configuration changes
+#    - name: FORCE FAILURE
+#      fail:
+#        msg: "Fail after update"
+
+    - name: Save running config
+      cisco.ios.ios_config:
+        save_when: always
