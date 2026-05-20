@@ -210,11 +210,8 @@ export async function getJobs(params?: {
   page?: number;
   page_size?: number;
 }) {
-  return unwrap(
-    client.get('/jobs/', {
-      params,
-    }),
-  );
+  const { data } = await client.get<{ items: unknown[]; total: number }>('/jobs/', { params });
+  return data.items ?? [];
 }
 
 export async function getJob(jobId: string) {
