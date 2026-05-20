@@ -210,12 +210,26 @@ app.openapi = _custom_openapi
 
 from app.core.rate_limit_middleware import RateLimitMiddleware  # noqa: E402
 from app.core.tls_middleware import HSTSMiddleware, HTTPSRedirectMiddleware  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 app.add_middleware(RateLimitMiddleware)
 
 if SSL_CERTFILE:
     app.add_middleware(HTTPSRedirectMiddleware)
     app.add_middleware(HSTSMiddleware)
+
+# CORS must be outermost so preflight OPTIONS requests are handled before
+# rate limiting or auth middleware can reject them.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(HTTPException)
