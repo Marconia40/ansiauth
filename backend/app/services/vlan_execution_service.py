@@ -155,10 +155,14 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
                 existing_name = (pre_state.get("vlan_data") or {}).get("name", "")
                 if existing_name.lower() == name.lower():
                     duration = time.time() - start_time
-                    logger.info("Job %s: VLAN %s already exists on %s with same name — no-op", job_id, vlan_id, device)
+                    logger.info("Job %s: no-op — VLAN %s already exists with same configuration on device=%s", job_id, vlan_id, device)
                     job_service.update_job(
                         job_id, "completed",
-                        result={"output": f"VLAN {vlan_id} already configured, no changes needed"},
+                        result={
+                            "output": f"VLAN {vlan_id} already configured, no changes needed",
+                            "operation_result": "noop",
+                            "message": "VLAN already exists (no changes needed)",
+                        },
                         current_step="completed",
                     )
                     audit_service.append_audit_event(audit_id, "completed", {
@@ -495,10 +499,14 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
             existing_name = (pre_state.get("vlan_data") or {}).get("name", "")
             if existing_name and existing_name.lower() == description.lower():
                 duration = time.time() - start_time
-                logger.info("Job %s: VLAN %s on %s already named '%s' — no-op", job_id, vlan_id, device, description)
+                logger.info("Job %s: no-op — VLAN %s already has requested name on device=%s", job_id, vlan_id, device)
                 job_service.update_job(
                     job_id, "completed",
-                    result={"output": f"VLAN {vlan_id} already has this name, no changes needed"},
+                    result={
+                        "output": f"VLAN {vlan_id} already has this name, no changes needed",
+                        "operation_result": "noop",
+                        "message": "VLAN already has requested name (no changes needed)",
+                    },
                     current_step="completed",
                 )
                 audit_service.append_audit_event(audit_id, "completed", {

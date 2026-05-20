@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getVlans, createVlan, deleteVlan } from '@/services/api';
+import { getDevices, getVlans, createVlan, updateVlan, deleteVlan, getJob } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { VlanEntry } from '@/types/vlan';
 
@@ -17,9 +17,12 @@ function extractMessage(error: unknown, fallback: string): string {
 export default function VlansPage() {
   const [selectedDevice, setSelectedDevice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [actionError, setActionError] = useState('');
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [newVlanId, setNewVlanId] = useState('');
   const [newVlanName, setNewVlanName] = useState('');
+  const [editingVlanId, setEditingVlanId] = useState<number | null>(null);
+  const [editingName, setEditingName] = useState('');
 
   const {
     data: devices,
@@ -47,14 +50,95 @@ export default function VlansPage() {
     e.preventDefault();
     if (!newVlanId || !newVlanName) return;
     setIsSubmitting(true);
-    setActionError('');
+    setSuccessMessage(null);
+    setErrorMessage(null);
     try {
-      await createVlan({ vlan_id: Number(newVlanId), name: newVlanName, devices: [effectiveDevice] });
+      const jobs = await createVlan({ vlan_id: Number(newVlanId), name: newVlanName, devices: [effectiveDevice] });
       setNewVlanId('');
       setNewVlanName('');
       await refetch();
+
+      // Poll the job briefly to detect fast-path outcomes (no-op, early failure).
+      // No-op jobs complete in milliseconds; real Ansible jobs take much longer
+      // and will still be running — those just get the generic success message.
+      let successMsg = 'VLAN created successfully';
+      if (jobs.length > 0) {
+        for (let i = 0; i < 6; i++) {
+          await new Promise<void>((r) => setTimeout(r, 300));
+          const job = await getJob(jobs[0].job_id) as {
+            status: string;
+            error?: string | null;
+            result?: { operation_result?: string };
+          } | null;
+          if (!job) break;
+          if (job.status === 'completed') {
+            if (job.result?.operation_result === 'noop') {
+              successMsg = 'VLAN already exists (no changes needed)';
+            }
+            break;
+          }
+          if (job.status === 'failed') {
+            throw new Error(job.error || 'Create failed');
+          }
+          if (job.status === 'cancelled') break;
+        }
+      }
+      setSuccessMessage(successMsg);
     } catch (err) {
-      setActionError(extractMessage(err, 'Create failed'));
+      setErrorMessage(extractMessage(err, 'Create failed'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  function handleEditStart(vlan: VlanEntry) {
+    setEditingVlanId(vlan.vlan_id);
+    setEditingName(vlan.name);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+  }
+
+  function handleEditCancel() {
+    setEditingVlanId(null);
+    setEditingName('');
+  }
+
+  async function handleUpdate() {
+    if (!editingName.trim()) return;
+    setIsSubmitting(true);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    try {
+      const jobs = await updateVlan(editingVlanId!, { description: editingName.trim(), devices: [effectiveDevice] });
+      setEditingVlanId(null);
+      setEditingName('');
+      await refetch();
+
+      let successMsg = 'VLAN updated successfully';
+      if (jobs.length > 0) {
+        for (let i = 0; i < 6; i++) {
+          await new Promise<void>((r) => setTimeout(r, 300));
+          const job = await getJob(jobs[0].job_id) as {
+            status: string;
+            error?: string | null;
+            result?: { operation_result?: string };
+          } | null;
+          if (!job) break;
+          if (job.status === 'completed') {
+            if (job.result?.operation_result === 'noop') {
+              successMsg = 'VLAN already has requested name (no changes needed)';
+            }
+            break;
+          }
+          if (job.status === 'failed') {
+            throw new Error(job.error || 'Operation failed');
+          }
+          if (job.status === 'cancelled') break;
+        }
+      }
+      setSuccessMessage(successMsg);
+    } catch (err) {
+      setErrorMessage(extractMessage(err, 'Operation failed'));
     } finally {
       setIsSubmitting(false);
     }
@@ -63,12 +147,14 @@ export default function VlansPage() {
   async function handleDelete(vlan: VlanEntry) {
     if (!window.confirm(`Delete VLAN ${vlan.vlan_id} from ${effectiveDevice}?`)) return;
     setIsSubmitting(true);
-    setActionError('');
+    setSuccessMessage(null);
+    setErrorMessage(null);
     try {
       await deleteVlan(vlan.vlan_id, { devices: [effectiveDevice] });
       await refetch();
+      setSuccessMessage('VLAN deleted successfully');
     } catch (err) {
-      setActionError(extractMessage(err, 'Delete failed'));
+      setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
       setIsSubmitting(false);
     }
@@ -142,9 +228,12 @@ export default function VlansPage() {
             </button>
           </form>
 
-          {actionError && (
+          {successMessage && (
+            <div className="mb-4 text-sm text-green-700">&#10003; {successMessage}</div>
+          )}
+          {errorMessage && (
             <div className="mb-4">
-              <ErrorMessage error={actionError} />
+              <ErrorMessage error={`✗ ${errorMessage}`} />
             </div>
           )}
 
@@ -173,21 +262,63 @@ export default function VlansPage() {
               </thead>
               <tbody>
                 {vlans && vlans.length > 0 ? (
-                  vlans.map((vlan) => (
-                    <tr key={vlan.vlan_id} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="px-4 py-2 text-gray-900">{vlan.vlan_id}</td>
-                      <td className="px-4 py-2 text-gray-900">{vlan.name}</td>
-                      <td className="px-4 py-2">
-                        <button
-                          onClick={() => handleDelete(vlan)}
-                          disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                  vlans.map((vlan) => {
+                    const isEditing = editingVlanId === vlan.vlan_id;
+                    return (
+                      <tr key={vlan.vlan_id} className="border-b border-gray-100 hover:bg-gray-50">
+                        <td className="px-4 py-2 text-gray-900">{vlan.vlan_id}</td>
+                        <td className="px-4 py-2 text-gray-900">
+                          {isEditing ? (
+                            <input
+                              type="text"
+                              value={editingName}
+                              onChange={(e) => setEditingName(e.target.value)}
+                              disabled={isSubmitting}
+                              autoFocus
+                              className="border border-gray-300 rounded-md px-2 py-1 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                            />
+                          ) : (
+                            vlan.name
+                          )}
+                        </td>
+                        <td className="px-4 py-2 flex gap-2 items-center">
+                          {isEditing ? (
+                            <>
+                              <button
+                                onClick={handleUpdate}
+                                disabled={isSubmitting || !editingName.trim()}
+                                className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                Save
+                              </button>
+                              <button
+                                onClick={handleEditCancel}
+                                disabled={isSubmitting}
+                                className="px-2 py-1 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => handleEditStart(vlan)}
+                              disabled={isSubmitting || editingVlanId !== null}
+                              className="px-2 py-1 text-xs text-blue-600 border border-blue-300 rounded hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              Edit
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleDelete(vlan)}
+                            disabled={isSubmitting}
+                            className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 ) : (
                   <tr>
                     <td colSpan={3} className="px-4 py-8 text-center text-gray-400">

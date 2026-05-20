@@ -164,12 +164,14 @@ export async function getVlans(device?: string) {
   );
 }
 
-export async function createVlan(body: VlanCreate) {
-  return unwrap(client.post('/vlans/', body));
+export async function createVlan(body: VlanCreate): Promise<VlanJobResult[]> {
+  const { data } = await client.post<{ success: boolean; jobs: VlanJobResult[] }>('/vlans/', body);
+  return data.jobs ?? [];
 }
 
-export async function updateVlan(vlanId: number, body: VlanUpdate) {
-  return unwrap(client.patch(`/vlans/${vlanId}`, body));
+export async function updateVlan(vlanId: number, body: VlanUpdate): Promise<VlanJobResult[]> {
+  const { data } = await client.patch<{ success: boolean; jobs: VlanJobResult[] }>(`/vlans/${vlanId}`, body);
+  return data.jobs ?? [];
 }
 
 export async function deleteVlan(vlanId: number, body: VlanDelete) {

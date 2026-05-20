@@ -1,5 +1,8 @@
 import re
 
+_VLAN_NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+_VLAN_NAME_ERROR = 'Invalid VLAN name. Only letters, numbers, ".", "_" and "-" are allowed.'
+
 
 def validate_vlan_id_range(vlan_id: int):
     if vlan_id < 1 or vlan_id > 4094:
@@ -13,14 +16,14 @@ def validate_vlan_not_reserved(vlan_id: int):
 
 
 def validate_vlan_name(name: str):
-    if " " in name:
-        raise ValueError("VLAN name must not contain spaces")
     if len(name) > 32:
         raise ValueError("VLAN name must not exceed 32 characters")
+    if not _VLAN_NAME_RE.match(name):
+        raise ValueError(_VLAN_NAME_ERROR)
 
 
 def validate_description(description: str):
     if len(description) > 64:
         raise ValueError("Description must not exceed 64 characters")
-    if not re.match(r'^[a-zA-Z0-9 _\-\.]*$', description):
-        raise ValueError("Description contains invalid characters")
+    if not _VLAN_NAME_RE.match(description):
+        raise ValueError(_VLAN_NAME_ERROR)
