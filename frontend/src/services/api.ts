@@ -1,6 +1,6 @@
 import axios from 'axios';
 import type { TokenResponse, AuthUser } from '@/types/auth';
-import type { VlanCreate, VlanUpdate, VlanDelete } from '@/types/vlan';
+import type { VlanCreate, VlanUpdate, VlanDelete, VlanJobResult } from '@/types/vlan';
 import type { DeviceCreate, DeviceUpdate } from '@/types/device';
 import type { UserCreate, UserUpdate } from '@/types/user';
 
