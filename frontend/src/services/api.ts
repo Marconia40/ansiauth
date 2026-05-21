@@ -3,6 +3,7 @@ import type { TokenResponse, AuthUser } from '@/types/auth';
 import type { VlanCreate, VlanUpdate, VlanDelete, VlanJobResult } from '@/types/vlan';
 import type { DeviceCreate, DeviceUpdate } from '@/types/device';
 import type { UserCreate, UserUpdate } from '@/types/user';
+import type { AuditLog } from '@/types/audit';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -249,12 +250,9 @@ export async function getAuditLogs(params?: {
   action?: string;
   skip?: number;
   limit?: number;
-}) {
-  return unwrap(
-    client.get('/audit/', {
-      params,
-    }),
-  );
+}): Promise<AuditLog[]> {
+  const { data } = await client.get<AuditLog[]>('/audit/', { params });
+  return Array.isArray(data) ? data : [];
 }
 
 // ── Device Groups ─────────────────────────────────────────────────────────────
