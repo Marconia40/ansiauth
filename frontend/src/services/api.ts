@@ -1,8 +1,9 @@
 import axios from 'axios';
 import type { TokenResponse, AuthUser } from '@/types/auth';
-import type { VlanCreate, VlanUpdate, VlanDelete, VlanJobResult } from '@/types/vlan';
-import type { DeviceCreate, DeviceUpdate } from '@/types/device';
-import type { UserCreate, UserUpdate } from '@/types/user';
+import type { VlanEntry, VlanCreate, VlanUpdate, VlanDelete, VlanJobResult } from '@/types/vlan';
+import type { Device, DeviceCreate, DeviceUpdate } from '@/types/device';
+import type { User, UserCreate, UserUpdate } from '@/types/user';
+import type { Job } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
@@ -157,9 +158,9 @@ export async function logout(): Promise<void> {
 
 // ── VLANs ─────────────────────────────────────────────────────────────────────
 
-export async function getVlans(device?: string) {
+export async function getVlans(device?: string): Promise<VlanEntry[]> {
   return unwrap(
-    client.get('/vlans/', {
+    client.get<ApiResponse<VlanEntry[]>>('/vlans/', {
       params: device ? { device } : {},
     }),
   );
@@ -185,12 +186,12 @@ export async function deleteVlan(vlanId: number, body: VlanDelete) {
 
 // ── Devices ───────────────────────────────────────────────────────────────────
 
-export async function getDevices() {
-  return unwrap(client.get('/devices/'));
+export async function getDevices(): Promise<Device[]> {
+  return unwrap(client.get<ApiResponse<Device[]>>('/devices/'));
 }
 
-export async function getDevice(name: string) {
-  return unwrap(client.get(`/devices/${name}`));
+export async function getDevice(name: string): Promise<Device> {
+  return unwrap(client.get<ApiResponse<Device>>(`/devices/${name}`));
 }
 
 export async function createDevice(body: DeviceCreate) {
@@ -217,8 +218,8 @@ export async function getJobs(params?: {
   return data.items ?? [];
 }
 
-export async function getJob(jobId: string) {
-  return unwrap(client.get(`/jobs/${jobId}`));
+export async function getJob(jobId: string): Promise<Job> {
+  return unwrap(client.get<ApiResponse<Job>>(`/jobs/${jobId}`));
 }
 
 export async function cancelJob(jobId: string) {
@@ -227,8 +228,8 @@ export async function cancelJob(jobId: string) {
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 
-export async function getUsers() {
-  return unwrap(client.get('/users/'));
+export async function getUsers(): Promise<User[]> {
+  return unwrap(client.get<ApiResponse<User[]>>('/users/'));
 }
 
 export async function createUser(body: UserCreate) {

@@ -64,14 +64,10 @@ export default function VlansPage() {
       if (jobs.length > 0) {
         for (let i = 0; i < 6; i++) {
           await new Promise<void>((r) => setTimeout(r, 300));
-          const job = await getJob(jobs[0].job_id) as {
-            status: string;
-            error?: string | null;
-            result?: { operation_result?: string };
-          } | null;
-          if (!job) break;
+          const job = await getJob(jobs[0].job_id);
           if (job.status === 'completed') {
-            if (job.result?.operation_result === 'noop') {
+            const opResult = (job.result as { operation_result?: string } | null)?.operation_result;
+            if (opResult === 'noop') {
               successMsg = `Nothing changed — VLAN ${capturedVlanId} already exists with same configuration`;
             }
             break;
@@ -118,14 +114,10 @@ export default function VlansPage() {
       if (jobs.length > 0) {
         for (let i = 0; i < 6; i++) {
           await new Promise<void>((r) => setTimeout(r, 300));
-          const job = await getJob(jobs[0].job_id) as {
-            status: string;
-            error?: string | null;
-            result?: { operation_result?: string };
-          } | null;
-          if (!job) break;
+          const job = await getJob(jobs[0].job_id);
           if (job.status === 'completed') {
-            if (job.result?.operation_result === 'noop') {
+            const opResult = (job.result as { operation_result?: string } | null)?.operation_result;
+            if (opResult === 'noop') {
               successMsg = 'Nothing changed — VLAN name already matches current configuration';
             }
             break;

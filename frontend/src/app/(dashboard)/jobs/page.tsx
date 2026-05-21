@@ -79,7 +79,7 @@ export default function JobsPage() {
     },
   });
 
-  const detail = selectedJob as Job | undefined;
+  const detail = selectedJob;
 
   return (
     <div>
@@ -88,7 +88,7 @@ export default function JobsPage() {
         actions={
           <button
             onClick={() => refetch()}
-            disabled={isFetching}
+            disabled={jobsLoading || isFetching}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isFetching ? 'Refreshing...' : 'Refresh'}
