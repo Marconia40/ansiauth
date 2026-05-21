@@ -90,12 +90,15 @@ def update_user(user_id: int, data: UserUpdate, current_user: dict = Depends(req
         user = user_service.update_user(user_id, data)
     except ValueError as e:
         raise ValidationError(str(e))
+    audit_fields = {k: v for k, v in data.model_dump(exclude_none=True).items() if k != "password"}
+    if data.password is not None:
+        audit_fields["password_changed"] = True
     audit_service.log_action(
         user=current_user["username"],
         action="update_user",
         resource="user",
         resource_id=str(user_id),
-        details={"updated_fields": data.model_dump(exclude_none=True)},
+        details={"updated_fields": audit_fields},
     )
     return {"success": True, "data": user.model_dump()}
 
