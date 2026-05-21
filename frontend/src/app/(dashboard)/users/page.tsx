@@ -11,8 +11,8 @@ import type { User, UserUpdate } from '@/types/user';
 import type { Role } from '@/types/auth';
 
 function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.message ?? fallback;
+  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
+  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
 }
 
 function normalizeUsers(data: unknown): User[] {
@@ -64,9 +64,10 @@ export default function UsersPage() {
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
+    const username = newUsername.trim();
     try {
       await createUser({
-        username: newUsername.trim(),
+        username,
         password: newPassword.trim(),
         role: newRole,
       });
@@ -74,7 +75,7 @@ export default function UsersPage() {
       setNewPassword('');
       setNewRole('observer');
       await refetch();
-      setSuccessMessage('User created successfully');
+      setSuccessMessage(`User ${username} created successfully`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Create failed'));
     } finally {
@@ -102,6 +103,7 @@ export default function UsersPage() {
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
+    const username = editingUsername;
     try {
       const body: UserUpdate = { role: editingRole };
       if (editingPassword.trim()) {
@@ -113,7 +115,7 @@ export default function UsersPage() {
       setEditingRole('observer');
       setEditingPassword('');
       await refetch();
-      setSuccessMessage('User updated successfully');
+      setSuccessMessage(`User ${username} updated successfully`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Operation failed'));
     } finally {
@@ -122,13 +124,14 @@ export default function UsersPage() {
   }
 
   async function handleDelete(user: User) {
+    if (!window.confirm(`Delete user ${user.username}?`)) return;
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
     try {
       await deleteUser(user.id);
       await refetch();
-      setSuccessMessage('User deleted successfully');
+      setSuccessMessage(`User ${user.username} deleted successfully`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
@@ -146,7 +149,7 @@ export default function UsersPage() {
             disabled={isLoading || isFetching}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isFetching ? 'Refreshing…' : 'Refresh'}
+            {isFetching ? 'Refreshing...' : 'Refresh'}
           </button>
         }
       />
@@ -188,7 +191,7 @@ export default function UsersPage() {
             disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
             className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isSubmitting ? 'Working…' : 'Create User'}
+            {isSubmitting ? 'Creating...' : 'Create User'}
           </button>
         </form>
       </RequireRole>
@@ -276,7 +279,7 @@ export default function UsersPage() {
                           disabled={isSubmitting}
                           className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          Save
+                          {isSubmitting ? 'Saving...' : 'Save'}
                         </button>
                         <button
                           onClick={handleEditCancel}
@@ -303,7 +306,7 @@ export default function UsersPage() {
                             disabled={isSubmitting}
                             className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            Delete
+                            {isSubmitting ? 'Deleting...' : 'Delete'}
                           </button>
                         </RequireRole>
                       </div>

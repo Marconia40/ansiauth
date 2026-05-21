@@ -10,8 +10,8 @@ import type { Device } from '@/types/device';
 import type { VlanEntry } from '@/types/vlan';
 
 function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.message ?? fallback;
+  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
+  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
 }
 
 export default function VlansPage() {
@@ -38,6 +38,7 @@ export default function VlansPage() {
   const {
     data: vlans,
     isLoading: vlansLoading,
+    isFetching: vlansFetching,
     error: vlansError,
     refetch,
   } = useQuery<VlanEntry[]>({
@@ -52,16 +53,14 @@ export default function VlansPage() {
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
+    const capturedVlanId = newVlanId;
     try {
       const jobs = await createVlan({ vlan_id: Number(newVlanId), name: newVlanName, devices: [effectiveDevice] });
       setNewVlanId('');
       setNewVlanName('');
       await refetch();
 
-      // Poll the job briefly to detect fast-path outcomes (no-op, early failure).
-      // No-op jobs complete in milliseconds; real Ansible jobs take much longer
-      // and will still be running — those just get the generic success message.
-      let successMsg = 'VLAN created successfully';
+      let successMsg = `VLAN ${capturedVlanId} created successfully`;
       if (jobs.length > 0) {
         for (let i = 0; i < 6; i++) {
           await new Promise<void>((r) => setTimeout(r, 300));
@@ -73,7 +72,7 @@ export default function VlansPage() {
           if (!job) break;
           if (job.status === 'completed') {
             if (job.result?.operation_result === 'noop') {
-              successMsg = 'VLAN already exists (no changes needed)';
+              successMsg = `Nothing changed — VLAN ${capturedVlanId} already exists with same configuration`;
             }
             break;
           }
@@ -108,13 +107,14 @@ export default function VlansPage() {
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
+    const capturedVlanId = editingVlanId!;
     try {
       const jobs = await updateVlan(editingVlanId!, { description: editingName.trim(), devices: [effectiveDevice] });
       setEditingVlanId(null);
       setEditingName('');
       await refetch();
 
-      let successMsg = 'VLAN updated successfully';
+      let successMsg = `VLAN ${capturedVlanId} updated successfully`;
       if (jobs.length > 0) {
         for (let i = 0; i < 6; i++) {
           await new Promise<void>((r) => setTimeout(r, 300));
@@ -126,7 +126,7 @@ export default function VlansPage() {
           if (!job) break;
           if (job.status === 'completed') {
             if (job.result?.operation_result === 'noop') {
-              successMsg = 'VLAN already has requested name (no changes needed)';
+              successMsg = 'Nothing changed — VLAN name already matches current configuration';
             }
             break;
           }
@@ -152,7 +152,7 @@ export default function VlansPage() {
     try {
       await deleteVlan(vlan.vlan_id, { devices: [effectiveDevice] });
       await refetch();
-      setSuccessMessage('VLAN deleted successfully');
+      setSuccessMessage(`VLAN ${vlan.vlan_id} deleted successfully`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
@@ -167,10 +167,10 @@ export default function VlansPage() {
         actions={
           <button
             onClick={() => refetch()}
-            disabled={vlansLoading || !effectiveDevice || isSubmitting}
+            disabled={vlansLoading || vlansFetching || !effectiveDevice || isSubmitting}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Refresh
+            {vlansFetching ? 'Refreshing...' : 'Refresh'}
           </button>
         }
       />
@@ -224,7 +224,7 @@ export default function VlansPage() {
               disabled={isSubmitting || !newVlanId || !newVlanName}
               className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isSubmitting ? 'Working…' : 'Create'}
+              {isSubmitting ? 'Creating...' : 'Create'}
             </button>
           </form>
 
@@ -289,7 +289,7 @@ export default function VlansPage() {
                                 disabled={isSubmitting || !editingName.trim()}
                                 className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
-                                Save
+                                {isSubmitting ? 'Saving...' : 'Save'}
                               </button>
                               <button
                                 onClick={handleEditCancel}
@@ -313,7 +313,7 @@ export default function VlansPage() {
                             disabled={isSubmitting}
                             className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            Delete
+                            {isSubmitting ? 'Deleting...' : 'Delete'}
                           </button>
                         </td>
                       </tr>

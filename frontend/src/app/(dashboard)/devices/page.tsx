@@ -9,8 +9,8 @@ import { getDevices, createDevice, updateDevice, deleteDevice } from '@/services
 import type { Device, DeviceUpdate, Vendor } from '@/types/device';
 
 function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.message ?? fallback;
+  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
+  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
 }
 
 const VENDOR_LABELS: Record<Vendor, string> = {
@@ -42,6 +42,7 @@ export default function DevicesPage() {
   const {
     data: devices,
     isLoading,
+    isFetching,
     error: devicesError,
     refetch,
   } = useQuery<Device[]>({
@@ -58,9 +59,10 @@ export default function DevicesPage() {
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
+    const deviceName = newName.trim();
     try {
       await createDevice({
-        name: newName.trim(),
+        name: deviceName,
         host: newHost.trim(),
         vendor: newVendor,
         platform: newPlatform.trim(),
@@ -74,7 +76,7 @@ export default function DevicesPage() {
       setNewUsername('');
       setNewPassword('');
       await refetch();
-      setSuccessMessage('Device created successfully');
+      setSuccessMessage(`Device ${deviceName} created successfully`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Create failed'));
     } finally {
@@ -107,6 +109,7 @@ export default function DevicesPage() {
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
+    const deviceName = editingDeviceName!;
     try {
       const body: DeviceUpdate = {
         host: editingHost.trim(),
@@ -117,7 +120,7 @@ export default function DevicesPage() {
       if (editingPassword.trim()) {
         body.password = editingPassword.trim();
       }
-      await updateDevice(editingDeviceName!, body);
+      await updateDevice(deviceName, body);
       setEditingDeviceName(null);
       setEditingHost('');
       setEditingVendor('cisco');
@@ -125,7 +128,7 @@ export default function DevicesPage() {
       setEditingUsername('');
       setEditingPassword('');
       await refetch();
-      setSuccessMessage('Device updated successfully');
+      setSuccessMessage(`Device ${deviceName} updated successfully`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Update failed'));
     } finally {
@@ -134,13 +137,14 @@ export default function DevicesPage() {
   }
 
   async function handleDelete(device: Device) {
+    if (!window.confirm(`Delete device ${device.name}?`)) return;
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
     try {
       await deleteDevice(device.name);
       await refetch();
-      setSuccessMessage('Device deleted successfully');
+      setSuccessMessage(`Device ${device.name} deleted successfully`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
@@ -155,10 +159,10 @@ export default function DevicesPage() {
         actions={
           <button
             onClick={() => refetch()}
-            disabled={isLoading || isSubmitting}
+            disabled={isLoading || isFetching || isSubmitting}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Refresh
+            {isFetching ? 'Refreshing...' : 'Refresh'}
           </button>
         }
       />
@@ -228,7 +232,7 @@ export default function DevicesPage() {
           }
           className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {isSubmitting ? 'Working…' : 'Add Device'}
+          {isSubmitting ? 'Creating...' : 'Add Device'}
         </button>
       </form>
 
@@ -348,7 +352,7 @@ export default function DevicesPage() {
                             }
                             className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            Save
+                            {isSubmitting ? 'Saving...' : 'Save'}
                           </button>
                           <button
                             onClick={handleEditCancel}
@@ -372,7 +376,7 @@ export default function DevicesPage() {
                             disabled={isSubmitting}
                             className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            Delete
+                            {isSubmitting ? 'Deleting...' : 'Delete'}
                           </button>
                         </div>
                       )}
@@ -383,7 +387,7 @@ export default function DevicesPage() {
             ) : (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
-                  No devices found. Add one above.
+                  No devices registered.
                 </td>
               </tr>
             )}

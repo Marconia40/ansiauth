@@ -9,8 +9,8 @@ import { getJobs, getJob } from '@/services/api';
 import type { Job, JobStatus } from '@/types/job';
 
 function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.message ?? fallback;
+  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
+  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
 }
 
 function statusClass(status: JobStatus | string): string {
@@ -55,7 +55,11 @@ export default function JobsPage() {
   } = useQuery({
     queryKey: ['jobs'],
     queryFn: () => getJobs(),
-    refetchInterval: 3000,
+    refetchInterval: (query) => {
+      const jobs = normalizeJobs(query.state.data);
+      const hasActive = jobs.some((j) => j.status === 'pending' || j.status === 'running');
+      return hasActive ? 5000 : false;
+    },
   });
 
   const jobs = normalizeJobs(jobsRaw);
@@ -68,7 +72,11 @@ export default function JobsPage() {
     queryKey: ['job', selectedJobId],
     queryFn: () => getJob(selectedJobId!),
     enabled: !!selectedJobId,
-    refetchInterval: 3000,
+    refetchInterval: (query) => {
+      const job = query.state.data as Job | undefined;
+      if (!job) return false;
+      return (job.status === 'pending' || job.status === 'running') ? 5000 : false;
+    },
   });
 
   const detail = selectedJob as Job | undefined;
@@ -83,7 +91,7 @@ export default function JobsPage() {
             disabled={isFetching}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isFetching ? 'Refreshing…' : 'Refresh'}
+            {isFetching ? 'Refreshing...' : 'Refresh'}
           </button>
         }
       />
@@ -104,7 +112,7 @@ export default function JobsPage() {
           </button>
         </div>
       ) : jobs.length === 0 ? (
-        <p className="py-12 text-center text-gray-400 text-sm">No jobs found.</p>
+        <p className="py-12 text-center text-gray-400 text-sm">No jobs executed yet.</p>
       ) : (
         <table className="w-full border-collapse text-sm">
           <thead>
@@ -113,6 +121,9 @@ export default function JobsPage() {
               <th className="text-left px-4 py-2 font-medium text-gray-700">Playbook</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Device</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Status</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Retries</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Rollback</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Error</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Duration</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Created</th>
             </tr>
@@ -135,6 +146,15 @@ export default function JobsPage() {
                 <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
                 <td className={`px-4 py-2 font-medium ${statusClass(job.status)}`}>
                   {job.status}
+                </td>
+                <td className="px-4 py-2 text-gray-600">
+                  {job.retry_count} / {job.max_retries}
+                </td>
+                <td className="px-4 py-2 text-gray-600">
+                  {job.rollback_performed ? 'Yes' : 'No'}
+                </td>
+                <td className="px-4 py-2 text-gray-600 max-w-[160px] truncate">
+                  {job.error ?? job.last_error ?? '—'}
                 </td>
                 <td className="px-4 py-2 text-gray-600">{formatDuration(job)}</td>
                 <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
@@ -178,19 +198,16 @@ export default function JobsPage() {
               <dd className="text-gray-900">{detail.current_step ?? 'N/A'}</dd>
 
               <dt className="text-gray-500">Retry Count</dt>
-              <dd className="text-gray-900">{detail.retry_count}</dd>
-
-              <dt className="text-gray-500">Max Retries</dt>
-              <dd className="text-gray-900">{detail.max_retries}</dd>
+              <dd className="text-gray-900">{detail.retry_count} / {detail.max_retries}</dd>
 
               <dt className="text-gray-500">Rollback Performed</dt>
               <dd className="text-gray-900">{detail.rollback_performed ? 'Yes' : 'No'}</dd>
 
               <dt className="text-gray-500">Error</dt>
-              <dd className="text-red-600">{detail.error ?? 'N/A'}</dd>
+              <dd className="text-red-600">{detail.error ?? '—'}</dd>
 
               <dt className="text-gray-500">Last Error</dt>
-              <dd className="text-red-600">{detail.last_error ?? 'N/A'}</dd>
+              <dd className="text-red-600">{detail.last_error ?? '—'}</dd>
 
               <dt className="text-gray-500">Started At</dt>
               <dd className="text-gray-900">{formatDate(detail.started_at)}</dd>
