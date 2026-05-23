@@ -85,7 +85,7 @@ export default function DashboardPage() {
     );
   }
 
-  const firstError = devicesError || jobsError || auditError;
+  const firstError = devicesError || jobsError;
   if (firstError) {
     return (
       <div className="py-8">
@@ -116,7 +116,7 @@ export default function DashboardPage() {
     (j) => j.status !== 'pending' && j.status !== 'running' && j.status !== 'retrying',
   ).length;
   const successRate = finishedJobs === 0 ? 'N/A' : `${Math.round((completedJobs / finishedJobs) * 100)}%`;
-  const auditCount = logs.length;
+  const auditCount = auditError ? null : logs.length;
 
   const recentJobs = jobs.slice(0, 5);
   const recentLogs = logs.slice(0, 5);
@@ -185,11 +185,13 @@ export default function DashboardPage() {
           <p className="text-xs text-gray-400 mt-1">Completed jobs success rate</p>
         </div>
 
-        <div className="border border-gray-200 rounded-md p-4">
-          <p className="text-xs text-gray-500 uppercase tracking-wide">Audit Events</p>
-          <p className="text-3xl font-semibold text-gray-900 mt-1">{auditCount}</p>
-          <p className="text-xs text-gray-400 mt-1">Recent audit entries</p>
-        </div>
+        {auditCount !== null && (
+          <div className="border border-gray-200 rounded-md p-4">
+            <p className="text-xs text-gray-500 uppercase tracking-wide">Audit Events</p>
+            <p className="text-3xl font-semibold text-gray-900 mt-1">{auditCount}</p>
+            <p className="text-xs text-gray-400 mt-1">Recent audit entries</p>
+          </div>
+        )}
       </div>
 
       {/* Recent Jobs */}
@@ -225,7 +227,8 @@ export default function DashboardPage() {
         )}
       </div>
 
-      {/* Recent Activity */}
+      {/* Recent Activity — only shown to roles with audit access */}
+      {!auditError && (
       <div>
         <h2 className="text-sm font-semibold text-gray-700 mb-3">Recent Activity</h2>
         {recentLogs.length === 0 ? (
@@ -255,6 +258,7 @@ export default function DashboardPage() {
           </table>
         )}
       </div>
+      )}
     </div>
   );
 }

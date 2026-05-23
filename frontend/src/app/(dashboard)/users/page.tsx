@@ -1,6 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
@@ -30,6 +32,9 @@ const ROLE_LABELS: Record<Role, string> = {
 };
 
 export default function UsersPage() {
+  const { user } = useAuth();
+  const router = useRouter();
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -57,6 +62,14 @@ export default function UsersPage() {
   });
 
   const users = normalizeUsers(usersRaw);
+
+  useEffect(() => {
+    if (user && user.role !== 'admin' && user.role !== 'super-admin') {
+      router.push('/');
+    }
+  }, [user, router]);
+
+  if (!user || (user.role !== 'admin' && user.role !== 'super-admin')) return null;
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();

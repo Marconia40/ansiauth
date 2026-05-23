@@ -1,5 +1,8 @@
 'use client';
 
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
@@ -24,6 +27,9 @@ function statusClass(status: string): string {
 }
 
 export default function AuditPage() {
+  const { user } = useAuth();
+  const router = useRouter();
+
   const {
     data: logs,
     isLoading,
@@ -34,6 +40,14 @@ export default function AuditPage() {
     queryKey: ['audit-logs'],
     queryFn: () => getAuditLogs({ limit: 100 }),
   });
+
+  useEffect(() => {
+    if (user && user.role !== 'super-admin') {
+      router.push('/');
+    }
+  }, [user, router]);
+
+  if (!user || user.role !== 'super-admin') return null;
 
   return (
     <div>

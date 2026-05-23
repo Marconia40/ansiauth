@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useAuth } from '@/context/AuthContext';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
@@ -19,6 +20,9 @@ const VENDOR_LABELS: Record<Vendor, string> = {
 };
 
 export default function DevicesPage() {
+  const { user } = useAuth();
+  const canMutate = !!user && user.role !== 'observer';
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -168,6 +172,7 @@ export default function DevicesPage() {
       />
       <p className="text-sm text-gray-500 mb-6">Manage network devices in the inventory</p>
 
+      {canMutate && (
       <form onSubmit={handleCreate} className="flex flex-wrap gap-2 mb-6 items-center">
         <input
           type="text"
@@ -235,6 +240,7 @@ export default function DevicesPage() {
           {isSubmitting ? 'Creating...' : 'Add Device'}
         </button>
       </form>
+      )}
 
       {successMessage && (
         <div className="mb-4 text-sm text-green-700">&#10003; {successMessage}</div>
@@ -334,7 +340,7 @@ export default function DevicesPage() {
                       )}
                     </td>
                     <td className="px-4 py-2">
-                      {isEditing ? (
+                      {canMutate && (isEditing ? (
                         <div className="flex flex-wrap gap-2 items-center">
                           <input
                             type="password"
@@ -379,7 +385,7 @@ export default function DevicesPage() {
                             {isSubmitting ? 'Deleting...' : 'Delete'}
                           </button>
                         </div>
-                      )}
+                      ))}
                     </td>
                   </tr>
                 );

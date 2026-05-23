@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useAuth } from '@/context/AuthContext';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
@@ -15,6 +16,9 @@ function extractMessage(error: unknown, fallback: string): string {
 }
 
 export default function VlansPage() {
+  const { user } = useAuth();
+  const canMutate = !!user && user.role !== 'observer';
+
   const [selectedDevice, setSelectedDevice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -192,33 +196,35 @@ export default function VlansPage() {
 
       {effectiveDevice && (
         <>
-          <form onSubmit={handleCreate} className="flex gap-2 mb-6 items-center">
-            <input
-              type="number"
-              placeholder="VLAN ID"
-              value={newVlanId}
-              onChange={(e) => setNewVlanId(e.target.value)}
-              disabled={isSubmitting}
-              required
-              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            />
-            <input
-              type="text"
-              placeholder="VLAN Name"
-              value={newVlanName}
-              onChange={(e) => setNewVlanName(e.target.value)}
-              disabled={isSubmitting}
-              required
-              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              disabled={isSubmitting || !newVlanId || !newVlanName}
-              className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isSubmitting ? 'Creating...' : 'Create'}
-            </button>
-          </form>
+          {canMutate && (
+            <form onSubmit={handleCreate} className="flex gap-2 mb-6 items-center">
+              <input
+                type="number"
+                placeholder="VLAN ID"
+                value={newVlanId}
+                onChange={(e) => setNewVlanId(e.target.value)}
+                disabled={isSubmitting}
+                required
+                className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              />
+              <input
+                type="text"
+                placeholder="VLAN Name"
+                value={newVlanName}
+                onChange={(e) => setNewVlanName(e.target.value)}
+                disabled={isSubmitting}
+                required
+                className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={isSubmitting || !newVlanId || !newVlanName}
+                className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSubmitting ? 'Creating...' : 'Create'}
+              </button>
+            </form>
+          )}
 
           {successMessage && (
             <div className="mb-4 text-sm text-green-700">&#10003; {successMessage}</div>
@@ -274,7 +280,7 @@ export default function VlansPage() {
                           )}
                         </td>
                         <td className="px-4 py-2 flex gap-2 items-center">
-                          {isEditing ? (
+                          {canMutate && (isEditing ? (
                             <>
                               <button
                                 onClick={handleUpdate}
@@ -299,14 +305,16 @@ export default function VlansPage() {
                             >
                               Edit
                             </button>
+                          ))}
+                          {canMutate && (
+                            <button
+                              onClick={() => handleDelete(vlan)}
+                              disabled={isSubmitting}
+                              className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {isSubmitting ? 'Deleting...' : 'Delete'}
+                            </button>
                           )}
-                          <button
-                            onClick={() => handleDelete(vlan)}
-                            disabled={isSubmitting}
-                            className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {isSubmitting ? 'Deleting...' : 'Delete'}
-                          </button>
                         </td>
                       </tr>
                     );
