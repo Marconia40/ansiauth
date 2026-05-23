@@ -258,17 +258,46 @@ export async function getAuditLogs(params?: {
 
 // ── Device Groups ─────────────────────────────────────────────────────────────
 
-export async function getDeviceGroups() {
-  return unwrap(client.get('/device-groups/'));
+export interface DeviceGroup {
+  id: number;
+  name: string;
+  description: string | null;
+  member_count: number;
+  created_at: string;
+}
+
+export async function getDeviceGroups(): Promise<DeviceGroup[]> {
+  return unwrap(client.get<ApiResponse<DeviceGroup[]>>('/device-groups/'));
 }
 
 export async function createDeviceGroup(body: {
   name: string;
   description?: string;
-}) {
-  return unwrap(client.post('/device-groups/', body));
+}): Promise<DeviceGroup> {
+  return unwrap(client.post<ApiResponse<DeviceGroup>>('/device-groups/', body));
 }
 
-export async function deleteDeviceGroup(name: string) {
-  return unwrap(client.delete(`/device-groups/${name}`));
+export async function deleteDeviceGroup(groupId: number): Promise<void> {
+  return unwrap(client.delete(`/device-groups/${groupId}`));
+}
+
+export async function getDeviceGroupDevices(groupId: number): Promise<string[]> {
+  const { data } = await client.get(`/device-groups/${groupId}/devices`);
+  return Array.isArray(data)
+    ? data
+    : Array.isArray(data.data)
+      ? data.data
+      : Array.isArray(data.devices)
+        ? data.devices
+        : Array.isArray(data.data?.devices)
+          ? data.data.devices
+          : [];
+}
+
+export async function addDeviceToGroup(groupId: number, deviceName: string): Promise<unknown> {
+  return unwrap(client.post(`/device-groups/${groupId}/members`, { device_name: deviceName }));
+}
+
+export async function removeDeviceFromGroup(groupId: number, deviceName: string): Promise<void> {
+  return unwrap(client.delete(`/device-groups/${groupId}/members/${deviceName}`));
 }

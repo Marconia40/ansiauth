@@ -1,10 +1,378 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
+import { LoadingSpinner } from '@/components/LoadingSpinner';
+import { ErrorMessage } from '@/components/ErrorMessage';
+import { useHasRole } from '@/components/RequireRole';
+import {
+  getDeviceGroups,
+  getDevices,
+  createDeviceGroup,
+  deleteDeviceGroup,
+  getDeviceGroupDevices,
+  addDeviceToGroup,
+  removeDeviceFromGroup,
+} from '@/services/api';
+import type { DeviceGroup } from '@/services/api';
+import type { Device } from '@/types/device';
+
+function extractMessage(error: unknown, fallback: string): string {
+  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
+  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
+}
 
 export default function DeviceGroupsPage() {
+  const canMutate = useHasRole('operator');
+
+  // Create form
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupDescription, setNewGroupDescription] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+
+  // Per-operation submitting state
+  const [addingToGroup, setAddingToGroup] = useState<number | null>(null);
+  const [removingMember, setRemovingMember] = useState<string | null>(null);
+  const [deletingGroupId, setDeletingGroupId] = useState<number | null>(null);
+
+  // Feedback
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Members cache: groupId → device names
+  const [groupMembers, setGroupMembers] = useState<Record<number, string[]>>({});
+
+  // Per-row selected device for the add-device select
+  const [selectedDevice, setSelectedDevice] = useState<Record<number, string>>({});
+
+  const {
+    data: groups,
+    isLoading: groupsLoading,
+    isFetching: groupsFetching,
+    error: groupsError,
+    refetch: refetchGroups,
+  } = useQuery<DeviceGroup[]>({
+    queryKey: ['device-groups'],
+    queryFn: getDeviceGroups,
+  });
+
+  const {
+    data: devices,
+    isLoading: devicesLoading,
+    isFetching: devicesFetching,
+    error: devicesError,
+    refetch: refetchDevices,
+  } = useQuery<Device[]>({
+    queryKey: ['devices'],
+    queryFn: getDevices,
+  });
+
+  const isFetching = groupsFetching || devicesFetching;
+  const isLoading = groupsLoading || devicesLoading;
+
+  // Fetch all group members whenever the groups list changes
+  useEffect(() => {
+    if (!groups || groups.length === 0) {
+      setGroupMembers({});
+      return;
+    }
+    Promise.all(
+      groups.map((g) =>
+        getDeviceGroupDevices(g.id)
+          .then((members) => ({ id: g.id, members }))
+          .catch(() => ({ id: g.id, members: [] as string[] })),
+      ),
+    ).then((results) => {
+      const map: Record<number, string[]> = {};
+      results.forEach(({ id, members }) => {
+        map[id] = members;
+      });
+      setGroupMembers(map);
+    });
+  }, [groups]);
+
+  function handleRefresh() {
+    refetchGroups();
+    refetchDevices();
+  }
+
+  // Refresh only a single group's member list (after add/remove)
+  async function refreshGroupMembers(groupId: number) {
+    try {
+      const members = await getDeviceGroupDevices(groupId);
+      setGroupMembers((prev) => ({ ...prev, [groupId]: members }));
+    } catch {
+      // non-fatal — table will still show stale data until next full refresh
+    }
+  }
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newGroupName.trim()) return;
+    setIsCreating(true);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    const groupName = newGroupName.trim();
+    try {
+      await createDeviceGroup({
+        name: groupName,
+        description: newGroupDescription.trim() || undefined,
+      });
+      setNewGroupName('');
+      setNewGroupDescription('');
+      await refetchGroups();
+      setSuccessMessage(`Device group ${groupName} created successfully`);
+    } catch (err) {
+      setErrorMessage(extractMessage(err, 'Create failed'));
+    } finally {
+      setIsCreating(false);
+    }
+  }
+
+  async function handleDeleteGroup(group: DeviceGroup) {
+    if (!window.confirm(`Delete device group ${group.name}?`)) return;
+    setDeletingGroupId(group.id);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    try {
+      await deleteDeviceGroup(group.id);
+      setGroupMembers((prev) => {
+        const next = { ...prev };
+        delete next[group.id];
+        return next;
+      });
+      await refetchGroups();
+      setSuccessMessage(`Device group ${group.name} deleted successfully`);
+    } catch (err) {
+      setErrorMessage(extractMessage(err, 'Delete failed'));
+    } finally {
+      setDeletingGroupId(null);
+    }
+  }
+
+  async function handleAddDevice(group: DeviceGroup) {
+    const deviceName = selectedDevice[group.id];
+    if (!deviceName) return;
+    setAddingToGroup(group.id);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    try {
+      await addDeviceToGroup(group.id, deviceName);
+      setSelectedDevice((prev) => ({ ...prev, [group.id]: '' }));
+      await refreshGroupMembers(group.id);
+      await refetchGroups();
+      setSuccessMessage(`Device ${deviceName} added to group ${group.name}`);
+    } catch (err) {
+      setErrorMessage(extractMessage(err, 'Add failed'));
+    } finally {
+      setAddingToGroup(null);
+    }
+  }
+
+  async function handleRemoveDevice(group: DeviceGroup, deviceName: string) {
+    if (!window.confirm(`Remove ${deviceName} from ${group.name}?`)) return;
+    const key = `${group.id}-${deviceName}`;
+    setRemovingMember(key);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    try {
+      await removeDeviceFromGroup(group.id, deviceName);
+      await refreshGroupMembers(group.id);
+      await refetchGroups();
+      setSuccessMessage(`Device ${deviceName} removed from group`);
+    } catch (err) {
+      setErrorMessage(extractMessage(err, 'Remove failed'));
+    } finally {
+      setRemovingMember(null);
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex justify-center py-24">
+        <LoadingSpinner size="lg" />
+      </div>
+    );
+  }
+
+  const firstError = groupsError || devicesError;
+  if (firstError) {
+    return (
+      <div className="py-8">
+        <ErrorMessage error={extractMessage(firstError, 'Could not load data')} />
+        <button
+          onClick={handleRefresh}
+          className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  const groupList = groups ?? [];
+  const deviceList = devices ?? [];
+
   return (
     <div>
-      <PageHeader title="Device Groups" />
-      <p className="text-gray-500 text-sm">Device groups — coming in step 3.</p>
+      <PageHeader
+        title="Device Groups"
+        actions={
+          <button
+            onClick={handleRefresh}
+            disabled={isFetching}
+            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isFetching ? 'Refreshing...' : 'Refresh'}
+          </button>
+        }
+      />
+      <p className="text-sm text-gray-500 mb-6">Manage logical device groupings</p>
+
+      {/* Create group form — operator and above only */}
+      {canMutate && (
+        <div className="border border-gray-200 rounded-md p-4 mb-6">
+          <h2 className="text-sm font-semibold text-gray-700 mb-3">Create Group</h2>
+          <form onSubmit={handleCreate} className="flex flex-wrap gap-2 items-center">
+            <input
+              type="text"
+              placeholder="Group name"
+              value={newGroupName}
+              onChange={(e) => setNewGroupName(e.target.value)}
+              disabled={isCreating}
+              required
+              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-44 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            />
+            <input
+              type="text"
+              placeholder="Description (optional)"
+              value={newGroupDescription}
+              onChange={(e) => setNewGroupDescription(e.target.value)}
+              disabled={isCreating}
+              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            />
+            <button
+              type="submit"
+              disabled={isCreating || !newGroupName.trim()}
+              className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isCreating ? 'Creating...' : 'Create Group'}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {successMessage && (
+        <div className="mb-4 text-sm text-green-700">&#10003; {successMessage}</div>
+      )}
+      {errorMessage && (
+        <div className="mb-4">
+          <ErrorMessage error={`✗ ${errorMessage}`} />
+        </div>
+      )}
+
+      {groupList.length === 0 ? (
+        <p className="text-sm text-gray-400 py-8">No device groups created yet.</p>
+      ) : (
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-b border-gray-200 bg-gray-50">
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Name</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Description</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Members</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700 whitespace-nowrap">Created</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Devices</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {groupList.map((group) => {
+              const members = groupMembers[group.id] ?? [];
+              const isAdding = addingToGroup === group.id;
+              const isDeletingThis = deletingGroupId === group.id;
+              const groupSelectedDevice = selectedDevice[group.id] ?? '';
+
+              return (
+                <tr key={group.id} className="border-b border-gray-100 hover:bg-gray-50 align-top">
+                  <td className="px-4 py-3 text-gray-900 font-medium">{group.name}</td>
+                  <td className="px-4 py-3 text-gray-600">{group.description ?? '—'}</td>
+                  <td className="px-4 py-3 text-gray-600">{group.member_count}</td>
+                  <td className="px-4 py-3 text-gray-600 whitespace-nowrap text-xs">
+                    {new Date(group.created_at).toLocaleString()}
+                  </td>
+                  <td className="px-4 py-3">
+                    {/* Member list with remove buttons */}
+                    {members.length === 0 ? (
+                      <span className="text-gray-400 text-xs">No devices</span>
+                    ) : (
+                      <div className="flex flex-col gap-1 mb-2">
+                        {members.map((device) => {
+                          const removeKey = `${group.id}-${device}`;
+                          const isRemoving = removingMember === removeKey;
+                          return (
+                            <div key={device} className="flex items-center gap-2">
+                              <span className="font-mono text-xs text-gray-900">{device}</span>
+                              {canMutate && (
+                                <button
+                                  onClick={() => handleRemoveDevice(group, device)}
+                                  disabled={isRemoving || isDeletingThis || isAdding}
+                                  className="px-1.5 py-0.5 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {isRemoving ? 'Removing...' : 'Remove'}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Add device form */}
+                    {canMutate && (
+                      <div className="flex gap-1 items-center mt-1">
+                        <select
+                          value={groupSelectedDevice}
+                          onChange={(e) =>
+                            setSelectedDevice((prev) => ({ ...prev, [group.id]: e.target.value }))
+                          }
+                          disabled={isAdding || isDeletingThis}
+                          className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+                        >
+                          <option value="">Select device...</option>
+                          {deviceList.map((d) => (
+                            <option key={d.name} value={d.name}>
+                              {d.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => handleAddDevice(group)}
+                          disabled={!groupSelectedDevice || isAdding || isDeletingThis}
+                          className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isAdding ? 'Adding...' : 'Add'}
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    {canMutate && (
+                      <button
+                        onClick={() => handleDeleteGroup(group)}
+                        disabled={isDeletingThis || isAdding}
+                        className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isDeletingThis ? 'Deleting...' : 'Delete'}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
