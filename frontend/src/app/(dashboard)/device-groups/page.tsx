@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
@@ -26,25 +26,37 @@ function extractMessage(error: unknown, fallback: string): string {
 export default function DeviceGroupsPage() {
   const canMutate = useHasRole('operator');
 
-  // Create form
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
   const [isCreating, setIsCreating] = useState(false);
 
-  // Per-operation submitting state
   const [addingToGroup, setAddingToGroup] = useState<number | null>(null);
   const [removingMember, setRemovingMember] = useState<string | null>(null);
   const [deletingGroupId, setDeletingGroupId] = useState<number | null>(null);
 
-  // Feedback
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Members cache: groupId → device names
   const [groupMembers, setGroupMembers] = useState<Record<number, string[]>>({});
-
-  // Per-row selected device for the add-device select
   const [selectedDevice, setSelectedDevice] = useState<Record<number, string>>({});
+
+  const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (msgTimerRef.current !== null) {
+      clearTimeout(msgTimerRef.current);
+      msgTimerRef.current = null;
+    }
+    if (!successMessage && !errorMessage) return;
+    msgTimerRef.current = setTimeout(() => {
+      setSuccessMessage(null);
+      setErrorMessage(null);
+      msgTimerRef.current = null;
+    }, 4000);
+    return () => {
+      if (msgTimerRef.current !== null) clearTimeout(msgTimerRef.current);
+    };
+  }, [successMessage, errorMessage]);
 
   const {
     data: groups,
@@ -70,8 +82,8 @@ export default function DeviceGroupsPage() {
 
   const isFetching = groupsFetching || devicesFetching;
   const isLoading = groupsLoading || devicesLoading;
+  const isAnyOperationRunning = isCreating || !!addingToGroup || !!removingMember || !!deletingGroupId;
 
-  // Fetch all group members whenever the groups list changes
   useEffect(() => {
     if (!groups || groups.length === 0) {
       setGroupMembers({});
@@ -97,19 +109,18 @@ export default function DeviceGroupsPage() {
     refetchDevices();
   }
 
-  // Refresh only a single group's member list (after add/remove)
   async function refreshGroupMembers(groupId: number) {
     try {
       const members = await getDeviceGroupDevices(groupId);
       setGroupMembers((prev) => ({ ...prev, [groupId]: members }));
     } catch {
-      // non-fatal — table will still show stale data until next full refresh
+      // non-fatal
     }
   }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!newGroupName.trim()) return;
+    if (!newGroupName.trim()) { setErrorMessage('Group name is required'); return; }
     setIsCreating(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -221,7 +232,7 @@ export default function DeviceGroupsPage() {
         actions={
           <button
             onClick={handleRefresh}
-            disabled={isFetching}
+            disabled={isFetching || isAnyOperationRunning}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isFetching ? 'Refreshing...' : 'Refresh'}
@@ -230,7 +241,6 @@ export default function DeviceGroupsPage() {
       />
       <p className="text-sm text-gray-500 mb-6">Manage logical device groupings</p>
 
-      {/* Create group form — operator and above only */}
       {canMutate && (
         <div className="border border-gray-200 rounded-md p-4 mb-6">
           <h2 className="text-sm font-semibold text-gray-700 mb-3">Create Group</h2>
@@ -254,7 +264,7 @@ export default function DeviceGroupsPage() {
             />
             <button
               type="submit"
-              disabled={isCreating || !newGroupName.trim()}
+              disabled={isCreating || isAnyOperationRunning || !newGroupName.trim()}
               className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isCreating ? 'Creating...' : 'Create Group'}
@@ -302,7 +312,6 @@ export default function DeviceGroupsPage() {
                     {new Date(group.created_at).toLocaleString()}
                   </td>
                   <td className="px-4 py-3">
-                    {/* Member list with remove buttons */}
                     {members.length === 0 ? (
                       <span className="text-gray-400 text-xs">No devices</span>
                     ) : (
@@ -328,7 +337,6 @@ export default function DeviceGroupsPage() {
                       </div>
                     )}
 
-                    {/* Add device form */}
                     {canMutate && (
                       <div className="flex gap-1 items-center mt-1">
                         <select

@@ -20,6 +20,13 @@ function statusClass(status: JobStatus | string): string {
   return 'text-gray-600';
 }
 
+function statusBadge(status: JobStatus | string): string {
+  if (status === 'completed') return 'bg-green-100 text-green-700';
+  if (status === 'failed' || status === 'cancelled') return 'bg-red-100 text-red-700';
+  if (status === 'running' || status === 'retrying' || status === 'pending') return 'bg-amber-100 text-amber-700';
+  return 'bg-gray-100 text-gray-700';
+}
+
 function formatDuration(job: Job): string {
   if (job.started_at && job.finished_at) {
     const ms = new Date(job.finished_at).getTime() - new Date(job.started_at).getTime();
@@ -144,8 +151,10 @@ export default function JobsPage() {
                 </td>
                 <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
                 <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
-                <td className={`px-4 py-2 font-medium ${statusClass(job.status)}`}>
-                  {job.status}
+                <td className="px-4 py-2">
+                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${statusBadge(job.status)}`}>
+                    {job.status}
+                  </span>
                 </td>
                 <td className="px-4 py-2 text-gray-600">
                   {job.retry_count} / {job.max_retries}

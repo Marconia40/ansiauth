@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
@@ -21,12 +21,31 @@ export default function VlansPage() {
 
   const [selectedDevice, setSelectedDevice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deletingVlanId, setDeletingVlanId] = useState<number | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [newVlanId, setNewVlanId] = useState('');
   const [newVlanName, setNewVlanName] = useState('');
   const [editingVlanId, setEditingVlanId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
+
+  const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (msgTimerRef.current !== null) {
+      clearTimeout(msgTimerRef.current);
+      msgTimerRef.current = null;
+    }
+    if (!successMessage && !errorMessage) return;
+    msgTimerRef.current = setTimeout(() => {
+      setSuccessMessage(null);
+      setErrorMessage(null);
+      msgTimerRef.current = null;
+    }, 4000);
+    return () => {
+      if (msgTimerRef.current !== null) clearTimeout(msgTimerRef.current);
+    };
+  }, [successMessage, errorMessage]);
 
   const {
     data: devices,
@@ -53,13 +72,14 @@ export default function VlansPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!newVlanId || !newVlanName) return;
+    if (!newVlanId) { setErrorMessage('VLAN ID is required'); return; }
+    if (!newVlanName.trim()) { setErrorMessage('VLAN name is required'); return; }
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
     const capturedVlanId = newVlanId;
     try {
-      const jobs = await createVlan({ vlan_id: Number(newVlanId), name: newVlanName, devices: [effectiveDevice] });
+      const jobs = await createVlan({ vlan_id: Number(newVlanId), name: newVlanName.trim(), devices: [effectiveDevice] });
       setNewVlanId('');
       setNewVlanName('');
       await refetch();
@@ -103,7 +123,7 @@ export default function VlansPage() {
   }
 
   async function handleUpdate() {
-    if (!editingName.trim()) return;
+    if (!editingName.trim()) { setErrorMessage('VLAN name is required'); return; }
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -142,6 +162,7 @@ export default function VlansPage() {
 
   async function handleDelete(vlan: VlanEntry) {
     if (!window.confirm(`Delete VLAN ${vlan.vlan_id} from ${effectiveDevice}?`)) return;
+    setDeletingVlanId(vlan.vlan_id);
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -153,6 +174,7 @@ export default function VlansPage() {
       setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
       setIsSubmitting(false);
+      setDeletingVlanId(null);
     }
   }
 
@@ -221,7 +243,7 @@ export default function VlansPage() {
                 disabled={isSubmitting || !newVlanId || !newVlanName}
                 className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isSubmitting ? 'Creating...' : 'Create'}
+                {isSubmitting && deletingVlanId === null && editingVlanId === null ? 'Creating...' : 'Create'}
               </button>
             </form>
           )}
@@ -287,7 +309,7 @@ export default function VlansPage() {
                                 disabled={isSubmitting || !editingName.trim()}
                                 className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
-                                {isSubmitting ? 'Saving...' : 'Save'}
+                                {isSubmitting && deletingVlanId === null ? 'Saving...' : 'Save'}
                               </button>
                               <button
                                 onClick={handleEditCancel}
@@ -312,7 +334,7 @@ export default function VlansPage() {
                               disabled={isSubmitting}
                               className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                              {isSubmitting ? 'Deleting...' : 'Delete'}
+                              {deletingVlanId === vlan.vlan_id ? 'Deleting...' : 'Delete'}
                             </button>
                           )}
                         </td>
@@ -322,7 +344,7 @@ export default function VlansPage() {
                 ) : (
                   <tr>
                     <td colSpan={3} className="px-4 py-8 text-center text-gray-400">
-                      No VLANs found for this device.
+                      No VLANs found for the selected device.
                     </td>
                   </tr>
                 )}

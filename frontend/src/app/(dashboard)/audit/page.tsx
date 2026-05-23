@@ -80,7 +80,7 @@ export default function AuditPage() {
           </button>
         </div>
       ) : !logs || logs.length === 0 ? (
-        <p className="py-12 text-center text-gray-400 text-sm">No audit logs found.</p>
+        <p className="py-12 text-center text-gray-400 text-sm">No audit activity available.</p>
       ) : (
         <table className="w-full border-collapse text-sm">
           <thead>

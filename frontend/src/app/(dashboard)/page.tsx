@@ -1,9 +1,11 @@
 'use client';
 
+import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
+import { useAuth } from '@/context/AuthContext';
 import { getDevices, getJobs, getAuditLogs } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Job } from '@/types/job';
@@ -21,6 +23,13 @@ function statusColor(status: string): string {
   return 'text-gray-600';
 }
 
+function statusBadge(status: string): string {
+  if (status === 'completed' || status === 'success') return 'bg-green-100 text-green-700';
+  if (status === 'failed' || status === 'error' || status === 'cancelled') return 'bg-red-100 text-red-700';
+  if (status === 'pending' || status === 'running' || status === 'retrying') return 'bg-amber-100 text-amber-700';
+  return 'bg-gray-100 text-gray-700';
+}
+
 function formatDuration(job: Job): string {
   if (job.started_at && job.finished_at) {
     const ms = new Date(job.finished_at).getTime() - new Date(job.started_at).getTime();
@@ -35,6 +44,8 @@ function formatDate(ts: string | null | undefined): string {
 }
 
 export default function DashboardPage() {
+  const { user } = useAuth();
+
   const {
     data: devices,
     isLoading: devicesLoading,
@@ -104,7 +115,6 @@ export default function DashboardPage() {
   const jobs = (Array.isArray(jobsRaw) ? jobsRaw : []) as Job[];
   const logs = auditLogs ?? [];
 
-  // Stats
   const totalDevices = deviceList.length;
   const ciscoDevices = deviceList.filter((d) => d.vendor.toLowerCase().includes('cisco')).length;
   const huaweiDevices = deviceList.filter((d) => d.vendor.toLowerCase().includes('huawei')).length;
@@ -194,6 +204,45 @@ export default function DashboardPage() {
         )}
       </div>
 
+      {/* Quick Actions */}
+      <div className="mb-10">
+        <h2 className="text-sm font-semibold text-gray-700 mb-3">Quick Actions</h2>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            href="/vlans"
+            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            Go to VLANs
+          </Link>
+          <Link
+            href="/devices"
+            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            Go to Devices
+          </Link>
+          <Link
+            href="/jobs"
+            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            Go to Jobs
+          </Link>
+          {(user?.role === 'admin' || user?.role === 'super-admin') && (
+            <Link
+              href="/users"
+              className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+            >
+              Go to Users
+            </Link>
+          )}
+          <Link
+            href="/device-groups"
+            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            Go to Device Groups
+          </Link>
+        </div>
+      </div>
+
       {/* Recent Jobs */}
       <div className="mb-10">
         <h2 className="text-sm font-semibold text-gray-700 mb-3">Recent Jobs</h2>
@@ -217,7 +266,11 @@ export default function DashboardPage() {
                   <td className="px-4 py-2 font-mono text-xs text-gray-700">{job.job_id.slice(0, 8)}…</td>
                   <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
                   <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
-                  <td className={`px-4 py-2 font-medium ${statusColor(job.status)}`}>{job.status}</td>
+                  <td className="px-4 py-2">
+                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${statusBadge(job.status)}`}>
+                      {job.status}
+                    </span>
+                  </td>
                   <td className="px-4 py-2 text-gray-600">{formatDuration(job)}</td>
                   <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
                 </tr>

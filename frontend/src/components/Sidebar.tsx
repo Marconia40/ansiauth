@@ -55,10 +55,10 @@ function NavItem({
   return (
     <Link
       href={href}
-      className={`block px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+      className={`block px-3 py-2 rounded-md text-sm transition-colors ${
         active
-          ? 'bg-gray-700 text-white'
-          : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+          ? 'bg-gray-700 text-white font-semibold'
+          : 'text-gray-300 hover:bg-gray-700 hover:text-white font-medium'
       }`}
     >
       {label}

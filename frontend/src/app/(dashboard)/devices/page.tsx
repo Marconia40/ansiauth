@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
@@ -24,10 +24,10 @@ export default function DevicesPage() {
   const canMutate = !!user && user.role !== 'observer';
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deletingDeviceName, setDeletingDeviceName] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Create form
   const [newName, setNewName] = useState('');
   const [newHost, setNewHost] = useState('');
   const [newVendor, setNewVendor] = useState<Vendor>('cisco');
@@ -35,13 +35,30 @@ export default function DevicesPage() {
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
 
-  // Edit state
   const [editingDeviceName, setEditingDeviceName] = useState<string | null>(null);
   const [editingHost, setEditingHost] = useState('');
   const [editingVendor, setEditingVendor] = useState<Vendor>('cisco');
   const [editingPlatform, setEditingPlatform] = useState('');
   const [editingUsername, setEditingUsername] = useState('');
   const [editingPassword, setEditingPassword] = useState('');
+
+  const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (msgTimerRef.current !== null) {
+      clearTimeout(msgTimerRef.current);
+      msgTimerRef.current = null;
+    }
+    if (!successMessage && !errorMessage) return;
+    msgTimerRef.current = setTimeout(() => {
+      setSuccessMessage(null);
+      setErrorMessage(null);
+      msgTimerRef.current = null;
+    }, 4000);
+    return () => {
+      if (msgTimerRef.current !== null) clearTimeout(msgTimerRef.current);
+    };
+  }, [successMessage, errorMessage]);
 
   const {
     data: devices,
@@ -56,10 +73,11 @@ export default function DevicesPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (
-      !newName.trim() || !newHost.trim() || !newPlatform.trim() ||
-      !newUsername.trim() || !newPassword.trim()
-    ) return;
+    if (!newName.trim()) { setErrorMessage('Device name is required'); return; }
+    if (!newHost.trim()) { setErrorMessage('Host is required'); return; }
+    if (!newPlatform.trim()) { setErrorMessage('Platform is required'); return; }
+    if (!newUsername.trim()) { setErrorMessage('Username is required'); return; }
+    if (!newPassword.trim()) { setErrorMessage('Password is required'); return; }
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -109,7 +127,9 @@ export default function DevicesPage() {
   }
 
   async function handleUpdate() {
-    if (!editingHost.trim() || !editingPlatform.trim() || !editingUsername.trim()) return;
+    if (!editingHost.trim()) { setErrorMessage('Host is required'); return; }
+    if (!editingPlatform.trim()) { setErrorMessage('Platform is required'); return; }
+    if (!editingUsername.trim()) { setErrorMessage('Username is required'); return; }
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -142,6 +162,7 @@ export default function DevicesPage() {
 
   async function handleDelete(device: Device) {
     if (!window.confirm(`Delete device ${device.name}?`)) return;
+    setDeletingDeviceName(device.name);
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -153,6 +174,7 @@ export default function DevicesPage() {
       setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
       setIsSubmitting(false);
+      setDeletingDeviceName(null);
     }
   }
 
@@ -237,7 +259,7 @@ export default function DevicesPage() {
           }
           className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {isSubmitting ? 'Creating...' : 'Add Device'}
+          {isSubmitting && deletingDeviceName === null && editingDeviceName === null ? 'Creating...' : 'Add Device'}
         </button>
       </form>
       )}
@@ -358,7 +380,7 @@ export default function DevicesPage() {
                             }
                             className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            {isSubmitting ? 'Saving...' : 'Save'}
+                            {isSubmitting && deletingDeviceName === null ? 'Saving...' : 'Save'}
                           </button>
                           <button
                             onClick={handleEditCancel}
@@ -382,7 +404,7 @@ export default function DevicesPage() {
                             disabled={isSubmitting}
                             className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            {isSubmitting ? 'Deleting...' : 'Delete'}
+                            {deletingDeviceName === device.name ? 'Deleting...' : 'Delete'}
                           </button>
                         </div>
                       ))}
@@ -393,7 +415,7 @@ export default function DevicesPage() {
             ) : (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
-                  No devices registered.
+                  No devices registered yet.
                 </td>
               </tr>
             )}

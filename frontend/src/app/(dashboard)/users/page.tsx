@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useQuery } from '@tanstack/react-query';
@@ -36,19 +36,36 @@ export default function UsersPage() {
   const router = useRouter();
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Create form
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newRole, setNewRole] = useState<Role>('observer');
 
-  // Edit state
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
   const [editingUsername, setEditingUsername] = useState('');
   const [editingRole, setEditingRole] = useState<Role>('observer');
   const [editingPassword, setEditingPassword] = useState('');
+
+  const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (msgTimerRef.current !== null) {
+      clearTimeout(msgTimerRef.current);
+      msgTimerRef.current = null;
+    }
+    if (!successMessage && !errorMessage) return;
+    msgTimerRef.current = setTimeout(() => {
+      setSuccessMessage(null);
+      setErrorMessage(null);
+      msgTimerRef.current = null;
+    }, 4000);
+    return () => {
+      if (msgTimerRef.current !== null) clearTimeout(msgTimerRef.current);
+    };
+  }, [successMessage, errorMessage]);
 
   const {
     data: usersRaw,
@@ -73,7 +90,8 @@ export default function UsersPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!newUsername.trim() || !newPassword.trim()) return;
+    if (!newUsername.trim()) { setErrorMessage('Username is required'); return; }
+    if (!newPassword.trim()) { setErrorMessage('Password is required'); return; }
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -138,6 +156,7 @@ export default function UsersPage() {
 
   async function handleDelete(user: User) {
     if (!window.confirm(`Delete user ${user.username}?`)) return;
+    setDeletingUserId(user.id);
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -149,6 +168,7 @@ export default function UsersPage() {
       setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
       setIsSubmitting(false);
+      setDeletingUserId(null);
     }
   }
 
@@ -168,7 +188,6 @@ export default function UsersPage() {
       />
       <p className="text-sm text-gray-500 mb-6">Manage platform users and permissions</p>
 
-      {/* Create form — operator and above */}
       <RequireRole roles={['operator', 'admin', 'super-admin']}>
         <form onSubmit={handleCreate} className="flex flex-wrap gap-2 mb-6 items-center">
           <input
@@ -204,7 +223,7 @@ export default function UsersPage() {
             disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
             className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isSubmitting ? 'Creating...' : 'Create User'}
+            {isSubmitting && deletingUserId === null && editingUserId === null ? 'Creating...' : 'Create User'}
           </button>
         </form>
       </RequireRole>
@@ -233,7 +252,7 @@ export default function UsersPage() {
           </button>
         </div>
       ) : users.length === 0 ? (
-        <p className="py-12 text-center text-gray-400 text-sm">No users found.</p>
+        <p className="py-12 text-center text-gray-400 text-sm">No users available.</p>
       ) : (
         <table className="w-full border-collapse text-sm">
           <thead>
@@ -292,7 +311,7 @@ export default function UsersPage() {
                           disabled={isSubmitting}
                           className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          {isSubmitting ? 'Saving...' : 'Save'}
+                          {isSubmitting && deletingUserId === null ? 'Saving...' : 'Save'}
                         </button>
                         <button
                           onClick={handleEditCancel}
@@ -319,7 +338,7 @@ export default function UsersPage() {
                             disabled={isSubmitting}
                             className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            {isSubmitting ? 'Deleting...' : 'Delete'}
+                            {deletingUserId === user.id ? 'Deleting...' : 'Delete'}
                           </button>
                         </RequireRole>
                       </div>
