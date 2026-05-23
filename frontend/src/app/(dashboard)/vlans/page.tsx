@@ -2,11 +2,12 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getVlans, createVlan, updateVlan, deleteVlan, getJob } from '@/services/api';
+import { getDevices, getVlans, createVlan, updateVlan, deleteVlan } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { VlanEntry } from '@/types/vlan';
 
@@ -17,12 +18,12 @@ function extractMessage(error: unknown, fallback: string): string {
 
 export default function VlansPage() {
   const { user } = useAuth();
+  const { trackJob } = useJobNotifications();
   const canMutate = !!user && user.role !== 'observer';
 
   const [selectedDevice, setSelectedDevice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingVlanId, setDeletingVlanId] = useState<number | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [newVlanId, setNewVlanId] = useState('');
   const [newVlanName, setNewVlanName] = useState('');
@@ -36,16 +37,15 @@ export default function VlansPage() {
       clearTimeout(msgTimerRef.current);
       msgTimerRef.current = null;
     }
-    if (!successMessage && !errorMessage) return;
+    if (!errorMessage) return;
     msgTimerRef.current = setTimeout(() => {
-      setSuccessMessage(null);
       setErrorMessage(null);
       msgTimerRef.current = null;
     }, 4000);
     return () => {
       if (msgTimerRef.current !== null) clearTimeout(msgTimerRef.current);
     };
-  }, [successMessage, errorMessage]);
+  }, [errorMessage]);
 
   const {
     data: devices,
@@ -75,7 +75,6 @@ export default function VlansPage() {
     if (!newVlanId) { setErrorMessage('VLAN ID is required'); return; }
     if (!newVlanName.trim()) { setErrorMessage('VLAN name is required'); return; }
     setIsSubmitting(true);
-    setSuccessMessage(null);
     setErrorMessage(null);
     const capturedVlanId = newVlanId;
     try {
@@ -83,26 +82,9 @@ export default function VlansPage() {
       setNewVlanId('');
       setNewVlanName('');
       await refetch();
-
-      let successMsg = `VLAN ${capturedVlanId} created successfully`;
       if (jobs.length > 0) {
-        for (let i = 0; i < 6; i++) {
-          await new Promise<void>((r) => setTimeout(r, 300));
-          const job = await getJob(jobs[0].job_id);
-          if (job.status === 'completed') {
-            const opResult = (job.result as { operation_result?: string } | null)?.operation_result;
-            if (opResult === 'noop') {
-              successMsg = `Nothing changed — VLAN ${capturedVlanId} already exists with same configuration`;
-            }
-            break;
-          }
-          if (job.status === 'failed') {
-            throw new Error(job.error || 'Create failed');
-          }
-          if (job.status === 'cancelled') break;
-        }
+        trackJob(jobs[0].job_id, `Create VLAN ${capturedVlanId}`, effectiveDevice);
       }
-      setSuccessMessage(successMsg);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Create failed'));
     } finally {
@@ -113,7 +95,6 @@ export default function VlansPage() {
   function handleEditStart(vlan: VlanEntry) {
     setEditingVlanId(vlan.vlan_id);
     setEditingName(vlan.name);
-    setSuccessMessage(null);
     setErrorMessage(null);
   }
 
@@ -125,7 +106,6 @@ export default function VlansPage() {
   async function handleUpdate() {
     if (!editingName.trim()) { setErrorMessage('VLAN name is required'); return; }
     setIsSubmitting(true);
-    setSuccessMessage(null);
     setErrorMessage(null);
     const capturedVlanId = editingVlanId!;
     try {
@@ -133,26 +113,9 @@ export default function VlansPage() {
       setEditingVlanId(null);
       setEditingName('');
       await refetch();
-
-      let successMsg = `VLAN ${capturedVlanId} updated successfully`;
       if (jobs.length > 0) {
-        for (let i = 0; i < 6; i++) {
-          await new Promise<void>((r) => setTimeout(r, 300));
-          const job = await getJob(jobs[0].job_id);
-          if (job.status === 'completed') {
-            const opResult = (job.result as { operation_result?: string } | null)?.operation_result;
-            if (opResult === 'noop') {
-              successMsg = 'Nothing changed — VLAN name already matches current configuration';
-            }
-            break;
-          }
-          if (job.status === 'failed') {
-            throw new Error(job.error || 'Operation failed');
-          }
-          if (job.status === 'cancelled') break;
-        }
+        trackJob(jobs[0].job_id, `Update VLAN ${capturedVlanId}`, effectiveDevice);
       }
-      setSuccessMessage(successMsg);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Operation failed'));
     } finally {
@@ -164,12 +127,13 @@ export default function VlansPage() {
     if (!window.confirm(`Delete VLAN ${vlan.vlan_id} from ${effectiveDevice}?`)) return;
     setDeletingVlanId(vlan.vlan_id);
     setIsSubmitting(true);
-    setSuccessMessage(null);
     setErrorMessage(null);
     try {
-      await deleteVlan(vlan.vlan_id, { devices: [effectiveDevice] });
+      const jobs = await deleteVlan(vlan.vlan_id, { devices: [effectiveDevice] });
       await refetch();
-      setSuccessMessage(`VLAN ${vlan.vlan_id} deleted successfully`);
+      if (jobs.length > 0) {
+        trackJob(jobs[0].job_id, `Delete VLAN ${vlan.vlan_id}`, effectiveDevice);
+      }
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
@@ -248,9 +212,6 @@ export default function VlansPage() {
             </form>
           )}
 
-          {successMessage && (
-            <div className="mb-4 text-sm text-green-700">&#10003; {successMessage}</div>
-          )}
           {errorMessage && (
             <div className="mb-4">
               <ErrorMessage error={`✗ ${errorMessage}`} />

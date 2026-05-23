@@ -172,12 +172,11 @@ export async function updateVlan(vlanId: number, body: VlanUpdate): Promise<Vlan
   return data.jobs ?? [];
 }
 
-export async function deleteVlan(vlanId: number, body: VlanDelete) {
-  return unwrap(
-    client.delete(`/vlans/${vlanId}`, {
-      data: body,
-    }),
-  );
+export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<VlanJobResult[]> {
+  const { data } = await client.delete<{ success: boolean; jobs: VlanJobResult[] }>(`/vlans/${vlanId}`, {
+    data: body,
+  });
+  return data.jobs ?? [];
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────

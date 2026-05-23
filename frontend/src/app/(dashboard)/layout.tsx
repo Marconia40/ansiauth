@@ -6,6 +6,7 @@ import { useAuth } from '@/context/AuthContext';
 import { AppShell } from '@/components/AppShell';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
+import { JobNotifications } from '@/components/JobNotifications';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { user, isInitializing } = useAuth();
@@ -28,6 +29,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <ErrorBoundary>
       <AppShell>{children}</AppShell>
+      <JobNotifications />
     </ErrorBoundary>
   );
 }

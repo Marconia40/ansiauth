@@ -6,6 +6,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
 import { getJobs, getJob } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Job, JobStatus } from '@/types/job';
 
 function extractMessage(error: unknown, fallback: string): string {
@@ -52,6 +53,8 @@ function normalizeJobs(data: unknown): Job[] {
 
 export default function JobsPage() {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const { jobs: trackedJobs } = useJobNotifications();
+  const trackedIds = new Set(trackedJobs.map((n) => n.jobId));
 
   const {
     data: jobsRaw,
@@ -147,7 +150,12 @@ export default function JobsPage() {
                 }`}
               >
                 <td className="px-4 py-2 font-mono text-xs text-gray-700">
-                  {job.job_id.slice(0, 8)}…
+                  <span>{job.job_id.slice(0, 8)}…</span>
+                  {trackedIds.has(job.job_id) && (
+                    <span className="ml-1.5 px-1 py-0.5 rounded text-xs bg-blue-100 text-blue-600 font-sans font-medium">
+                      tracked
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
                 <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
