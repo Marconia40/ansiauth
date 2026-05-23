@@ -1,12 +1,11 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-// Guard all dashboard routes behind a session cookie.
-// The cookie is set by the login page after a successful API login
-// and cleared on logout. It carries no credential — it is a presence flag only.
+// Guard all dashboard routes behind the httpOnly refresh_token cookie set by the backend.
+// The backend sets it on login and clears it on logout — the frontend never touches it.
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const isLoggedIn = request.cookies.has('session');
+  const isLoggedIn = request.cookies.has('refresh_token');
   const isAuthRoute = pathname === '/login';
 
   if (!isLoggedIn && !isAuthRoute) {

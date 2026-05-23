@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { TokenResponse, AuthUser } from '@/types/auth';
+import type { AuthUser } from '@/types/auth';
 import type { VlanEntry, VlanCreate, VlanUpdate, VlanDelete, VlanJobResult } from '@/types/vlan';
 import type { Device, DeviceCreate, DeviceUpdate } from '@/types/device';
 import type { User, UserCreate, UserUpdate } from '@/types/user';
@@ -18,16 +18,13 @@ type ApiResponse<T> = {
 // ── Token storage ─────────────────────────────────────────────────────────────
 
 let _accessToken: string | null = null;
-let _refreshToken: string | null = null;
 
-export function setTokens(access: string, refresh: string): void {
+export function setAccessToken(access: string): void {
   _accessToken = access;
-  _refreshToken = refresh;
 }
 
-export function clearTokens(): void {
+export function clearAccessToken(): void {
   _accessToken = null;
-  _refreshToken = null;
 }
 
 // ── Axios instance ────────────────────────────────────────────────────────────
@@ -55,7 +52,7 @@ client.interceptors.response.use(
   async (error) => {
     const original = error.config;
 
-    if (error.response?.status !== 401 || original._retry || !_refreshToken) {
+    if (error.response?.status !== 401 || original._retry) {
       return Promise.reject(error);
     }
 
@@ -73,13 +70,13 @@ client.interceptors.response.use(
     _isRefreshing = true;
 
     try {
-      const { data } = await axios.post<TokenResponse>(
+      const { data } = await axios.post<{ access_token: string }>(
         `${BASE_URL}/api/v1/auth/refresh`,
-        { refresh_token: _refreshToken },
+        undefined,
+        { withCredentials: true },
       );
 
       _accessToken = data.access_token;
-      _refreshToken = data.refresh_token;
 
       _refreshQueue.forEach((cb) => cb(data.access_token));
       _refreshQueue = [];
@@ -88,7 +85,7 @@ client.interceptors.response.use(
 
       return client(original);
     } catch {
-      clearTokens();
+      clearAccessToken();
 
       if (typeof window !== 'undefined') {
         window.location.href = '/login';
@@ -116,17 +113,16 @@ export async function login(
 ): Promise<AuthUser> {
   const form = new URLSearchParams({ username, password });
 
-  const { data } = await axios.post<TokenResponse>(
+  const { data } = await axios.post<{ access_token: string }>(
     `${BASE_URL}/api/v1/auth/login`,
     form,
     {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      withCredentials: true,
     },
   );
 
-  setTokens(data.access_token, data.refresh_token);
+  setAccessToken(data.access_token);
 
   const payload = JSON.parse(atob(data.access_token.split('.')[1]));
 
@@ -136,24 +132,24 @@ export async function login(
   };
 }
 
+export async function restoreSession(): Promise<AuthUser | null> {
+  try {
+    const { data } = await axios.post<{ access_token: string }>(
+      `${BASE_URL}/api/v1/auth/refresh`,
+      undefined,
+      { withCredentials: true },
+    );
+    setAccessToken(data.access_token);
+    const payload = JSON.parse(atob(data.access_token.split('.')[1]));
+    return { username: payload.sub, role: payload.role };
+  } catch {
+    return null;
+  }
+}
+
 export async function logout(): Promise<void> {
-  if (_refreshToken) {
-    await client
-      .post('/auth/logout', {
-        refresh_token: _refreshToken,
-      })
-      .catch(() => {});
-  }
-
-  clearTokens();
-
-  if (typeof window !== 'undefined') {
-    const secure =
-      window.location.protocol === 'https:' ? '; Secure' : '';
-
-    document.cookie =
-      `session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Strict${secure}`;
-  }
+  await client.post('/auth/logout').catch(() => {});
+  clearAccessToken();
 }
 
 // ── VLANs ─────────────────────────────────────────────────────────────────────

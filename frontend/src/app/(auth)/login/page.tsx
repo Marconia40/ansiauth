@@ -10,13 +10,14 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const { user, setUser } = useAuth();
+  const { user, setUser, isInitializing } = useAuth();
   const router = useRouter();
 
-  // Redirect to dashboard if already logged in (same-tab navigation to /login).
   useEffect(() => {
-    if (user) router.push('/');
-  }, [user, router]);
+    if (!isInitializing && user) router.push('/');
+  }, [user, isInitializing, router]);
+
+  if (isInitializing) return null;
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -26,10 +27,6 @@ export default function LoginPage() {
     try {
       const user = await login(username, password);
       setUser(user);
-      // Set a session flag cookie so the proxy can gate dashboard routes.
-      // This is not a credential — it is only a presence indicator.
-      const secure = window.location.protocol === 'https:' ? '; Secure' : '';
-      document.cookie = `session=1; path=/; SameSite=Strict${secure}`;
       router.push('/');
     } catch {
       setError('Invalid username or password');

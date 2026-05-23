@@ -8,16 +8,16 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
+  const { user, isInitializing } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
-    if (user === null) {
+    if (!isInitializing && user === null) {
       router.push('/login');
     }
-  }, [user, router]);
+  }, [user, isInitializing, router]);
 
-  if (user === null) {
+  if (isInitializing || user === null) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <LoadingSpinner size="lg" />

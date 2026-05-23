@@ -5,9 +5,7 @@ export interface AuthUser {
   role: Role;
 }
 
-// Matches backend TokenResponse schema
 export interface TokenResponse {
   access_token: string;
   token_type: string;
-  refresh_token: string;
 }
