@@ -19,6 +19,7 @@ class Job:
     retry_count: int = 0
     max_retries: int = 3
     rollback_performed: bool = False
+    rollback_success: Optional[bool] = None
     pre_state: Optional[dict] = None
     last_error: Optional[str] = None
     current_step: Optional[str] = None

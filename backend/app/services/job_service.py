@@ -31,6 +31,7 @@ def _to_job(row: JobModel) -> Job:
         retry_count=row.retry_count,
         max_retries=row.max_retries,
         rollback_performed=row.rollback_performed,
+        rollback_success=row.rollback_success,
         pre_state=row.pre_state,
         last_error=row.last_error,
         current_step=row.current_step,
@@ -111,6 +112,7 @@ def update_job(
     error: Optional[str] = None,
     retry_count: Optional[int] = None,
     rollback_performed: Optional[bool] = None,
+    rollback_success: Optional[bool] = None,
     pre_state: Optional[dict] = None,
     last_error: Optional[str] = None,
     current_step: Optional[str] = None,
@@ -129,12 +131,12 @@ def update_job(
             row.retry_count = retry_count
         if rollback_performed is not None:
             row.rollback_performed = rollback_performed
+        if rollback_success is not None:
+            row.rollback_success = rollback_success
         if pre_state is not None:
             row.pre_state = pre_state
         if last_error is not None:
             row.last_error = last_error
-        if current_step is not None:
-            row.current_step = current_step
 
         now = datetime.now(timezone.utc)
         if status == "running":
@@ -156,6 +158,10 @@ def update_job(
                 "Job %s failed after %.2fs (retries=%d rollback=%s): %s",
                 job_id, duration, row.retry_count, row.rollback_performed, error or result,
             )
+
+        # Explicit current_step overrides the status-derived value above
+        if current_step is not None:
+            row.current_step = current_step
 
 
 def ensure_final_state(job_id: str) -> None:

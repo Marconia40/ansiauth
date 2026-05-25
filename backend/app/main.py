@@ -48,6 +48,21 @@ def _migrate_device_platform(engine) -> None:
 _migrate_device_platform(get_engine())
 
 
+def _migrate_rollback_success(engine) -> None:
+    """Add the rollback_success column to jobs if it was not present in an older DB."""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "jobs" in inspector.get_table_names():
+        existing_cols = {c["name"] for c in inspector.get_columns("jobs")}
+        if "rollback_success" not in existing_cols:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN rollback_success BOOLEAN DEFAULT NULL"))
+                conn.commit()
+            logger.info("Migration applied: added 'rollback_success' column to jobs")
+
+_migrate_rollback_success(get_engine())
+
+
 def _migrate_audit_log_columns(engine) -> None:
     """Add columns to audit_logs that were introduced after the initial schema."""
     from sqlalchemy import inspect as sa_inspect, text

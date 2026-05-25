@@ -49,7 +49,9 @@ def test_ssh_failure_retries_and_fails(operator_client, client, monkeypatch):
     assert job["retry_count"] == 3
     # 4 create attempts (1 initial + 3 retries) + 1 rollback delete attempt = 5
     assert call_count["n"] == 5
-    assert job["rollback_performed"] is False  # rollback also failed (SSH still down)
+    # Rollback was attempted but the delete also failed (SSH still down)
+    assert job["rollback_performed"] is True
+    assert job["rollback_success"] is False
 
     log = audit_service.get_audit_log()
     entry = next(e for e in log if e.job_id == job_id)
@@ -135,7 +137,9 @@ def test_permanent_ansible_error_no_retries(operator_client, client, monkeypatch
     assert job["retry_count"] == 0
     # 1 create attempt (no retries — permanent error) + 1 rollback delete attempt = 2
     assert call_count["n"] == 2
-    assert job["rollback_performed"] is False  # rollback also failed
+    # Rollback was attempted but the delete also failed (same Ansible failure)
+    assert job["rollback_performed"] is True
+    assert job["rollback_success"] is False
 
     log = audit_service.get_audit_log()
     entry = next(e for e in log if e.job_id == job_id)

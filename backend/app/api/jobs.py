@@ -15,6 +15,12 @@ _VALID_STATUSES = frozenset({"pending", "running", "completed", "failed", "cance
 
 
 def _format_job(job) -> dict:
+    started = _ensure_aware(job.started_at)
+    finished = _ensure_aware(job.finished_at)
+    duration_ms = (
+        round((finished - started).total_seconds() * 1000)
+        if started and finished else None
+    )
     return {
         "job_id": job.job_id,
         "status": job.status,
@@ -28,9 +34,16 @@ def _format_job(job) -> dict:
         "retry_count": job.retry_count,
         "max_retries": job.max_retries,
         "rollback_performed": job.rollback_performed,
+        "rollback_success": job.rollback_success,
         "pre_state": job.pre_state,
         "last_error": job.last_error,
         "current_step": job.current_step,
+        "execution_summary": {
+            "attempts": job.retry_count + 1 if job.status in ("completed", "failed") else None,
+            "rollback_performed": job.rollback_performed,
+            "rollback_success": job.rollback_success,
+            "duration_ms": duration_ms,
+        },
     }
 
 

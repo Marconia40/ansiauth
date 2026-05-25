@@ -75,6 +75,7 @@ class JobModel(Base):
     retry_count = Column(Integer, nullable=False, default=0)
     max_retries = Column(Integer, nullable=False, default=3)
     rollback_performed = Column(Boolean, nullable=False, default=False)
+    rollback_success = Column(Boolean, nullable=True)
     pre_state = Column(JSON, nullable=True)
     last_error = Column(Text, nullable=True)
     current_step = Column(String, nullable=True)

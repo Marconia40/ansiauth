@@ -142,12 +142,12 @@ def test_retry_log_format(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="app.services.vlan_execution_service"):
         svc._execute_with_retry(fn, "log-test", max_retries=3, retry_base_delay=1.0)
 
-    retry_lines = [r.message for r in caplog.records if "Retrying job" in r.message]
+    retry_lines = [r.message for r in caplog.records if "retry attempt" in r.message]
     assert len(retry_lines) == 2
     assert "attempt 1/3" in retry_lines[0]
     assert "attempt 2/3" in retry_lines[1]
-    assert "in 1s" in retry_lines[0]
-    assert "in 2s" in retry_lines[1]
+    assert "waiting 1s" in retry_lines[0]
+    assert "waiting 2s" in retry_lines[1]
 
 
 def test_exhausted_retries_log(monkeypatch, caplog):
