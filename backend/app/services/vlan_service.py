@@ -1,7 +1,13 @@
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 from app.core.config import EXECUTION_MODE
 from app.services import secret_service
+
+if TYPE_CHECKING:
+    from app.services.vendors.base import BaseVendorDriver
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +63,14 @@ def _resolve_device(device_id: str):
     return device
 
 
-def _get_driver(device):
-    from app.services.vendors.dispatcher import get_vendor_driver
-    return get_vendor_driver(device.vendor, device.platform)
+def _get_driver(device) -> BaseVendorDriver:
+    """Resolve the vendor driver for *device* via the dispatcher.
+
+    The service layer has no knowledge of vendor strings or platform details —
+    all routing logic lives in the dispatcher.
+    """
+    from app.services.vendors.dispatcher import get_driver
+    return get_driver(device)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -71,10 +82,7 @@ def create_vlan_on_device(vlan_id: int, name: str, device_id: str) -> dict:
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
     driver = _get_driver(dev)
-    logger.info(
-        "Real mode: create VLAN %s on %s vendor=%s platform=%s",
-        vlan_id, dev.name, dev.vendor, dev.platform,
-    )
+    logger.info("Real mode: create VLAN %s on device=%s", vlan_id, dev.name)
     return driver.create_vlan(vlan_id, name, dev, pw)
 
 
@@ -84,10 +92,7 @@ def delete_vlan(vlan_id: int, device_id: str) -> dict:
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
     driver = _get_driver(dev)
-    logger.info(
-        "Real mode: delete VLAN %s on %s vendor=%s platform=%s",
-        vlan_id, dev.name, dev.vendor, dev.platform,
-    )
+    logger.info("Real mode: delete VLAN %s on device=%s", vlan_id, dev.name)
     return driver.delete_vlan(vlan_id, dev, pw)
 
 
@@ -97,10 +102,7 @@ def update_vlan_description(vlan_id: int, description: str, device_id: str) -> d
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
     driver = _get_driver(dev)
-    logger.info(
-        "Real mode: update VLAN %s on %s vendor=%s platform=%s",
-        vlan_id, dev.name, dev.vendor, dev.platform,
-    )
+    logger.info("Real mode: update VLAN %s on device=%s", vlan_id, dev.name)
     return driver.update_vlan(vlan_id, description, dev, pw)
 
 
@@ -113,11 +115,8 @@ def get_vlans(device_id: str | None = None) -> list[dict]:
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
     driver = _get_driver(dev)
-    logger.info(
-        "Real mode: listing VLANs on %s vendor=%s platform=%s",
-        dev.name, dev.vendor, dev.platform,
-    )
-    return driver.get_vlans(dev, pw)
+    logger.info("Real mode: listing VLANs on device=%s", dev.name)
+    return driver.list_vlans(dev, pw)
 
 
 def save_config_on_device(device_id: str) -> dict:
@@ -127,7 +126,7 @@ def save_config_on_device(device_id: str) -> dict:
     dev = _resolve_device(device_id)
     pw = secret_service.decrypt_password(dev.encrypted_password)
     driver = _get_driver(dev)
-    logger.info("Real mode: save config on %s vendor=%s platform=%s", dev.name, dev.vendor, dev.platform)
+    logger.info("Real mode: save config on device=%s", dev.name)
     return driver.save_config(dev, pw)
 
 
