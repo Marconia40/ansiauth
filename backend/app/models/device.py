@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 @dataclass
 class Device:
+    """Domain model for a managed network device."""
     name: str
     host: str
     vendor: str

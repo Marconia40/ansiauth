@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from app.models.device import Device
     from app.models.vlan import VLANInfo
 
 
@@ -30,7 +31,7 @@ class BaseVendorDriver(ABC):
     # ── Mutation operations (must be implemented by every driver) ────────────
 
     @abstractmethod
-    def create_vlan(self, vlan_id: int, name: str, device, password: str) -> dict:
+    def create_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
         """Provision a new VLAN on the target device.
 
         Parameters
@@ -51,7 +52,7 @@ class BaseVendorDriver(ABC):
         """
 
     @abstractmethod
-    def delete_vlan(self, vlan_id: int, device, password: str) -> dict:
+    def delete_vlan(self, vlan_id: int, device: Device, password: str) -> dict:
         """Remove an existing VLAN from the target device.
 
         Parameters
@@ -70,7 +71,7 @@ class BaseVendorDriver(ABC):
         """
 
     @abstractmethod
-    def update_vlan(self, vlan_id: int, name: str, device, password: str) -> dict:
+    def update_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
         """Rename / update the description of an existing VLAN.
 
         Parameters
@@ -91,7 +92,7 @@ class BaseVendorDriver(ABC):
         """
 
     @abstractmethod
-    def save_config(self, device, password: str) -> dict:
+    def save_config(self, device: Device, password: str) -> dict:
         """Persist the running configuration to non-volatile storage.
 
         On platforms where changes are committed automatically (e.g. some
@@ -114,7 +115,7 @@ class BaseVendorDriver(ABC):
     # ── Query operations (abstract core + concrete normalized surface) ────────
 
     @abstractmethod
-    def get_vlans(self, device, password: str) -> list[VLANInfo]:
+    def get_vlans(self, device: Device, password: str) -> list[VLANInfo]:
         """Return VLANs configured on *device*.
 
         Backward-compatible entry point.  New code should call
@@ -142,7 +143,7 @@ class BaseVendorDriver(ABC):
             If the playbook fails or returns unparseable output.
         """
 
-    def list_vlans(self, device, password: str) -> list[VLANInfo]:
+    def list_vlans(self, device: Device, password: str) -> list[VLANInfo]:
         """Normalized entry point for listing VLANs on *device*.
 
         Preferred over ``get_vlans()`` in new code.  The default
@@ -165,7 +166,7 @@ class BaseVendorDriver(ABC):
         """
         return self.get_vlans(device, password)
 
-    def get_vlan(self, vlan_id: int, device, password: str) -> VLANInfo | None:
+    def get_vlan(self, vlan_id: int, device: Device, password: str) -> VLANInfo | None:
         """Return the ``VLANInfo`` for *vlan_id* on *device*, or ``None`` if absent.
 
         Default implementation performs a full ``list_vlans()`` scan.

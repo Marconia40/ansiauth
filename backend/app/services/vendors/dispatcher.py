@@ -10,6 +10,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# To add a new vendor:
+#   1. Create app/services/vendors/<vendor>/vlan_driver.py with a class that
+#      extends BaseVendorDriver and implements all abstract methods.
+#   2. Add the vendor string(s) to a new frozenset below.
+#   3. Add an ``if vendor in _<VENDOR>_VENDORS:`` branch in get_vendor_driver.
+#   No changes are required anywhere else in the service or API layers.
 _CISCO_VENDORS = frozenset({"cisco", "cisco_ios"})
 _HUAWEI_VENDORS = frozenset({"huawei", "huawei_vrp"})
 
