@@ -6,43 +6,37 @@ from fastapi import BackgroundTasks
 
 from app.core.exceptions import DeviceExecutionError
 from app.services import audit_service, job_service, vlan_service
+from app.services.retry_policy import RetryDecision, classify_error as _classify_error_string
 
 logger = logging.getLogger(__name__)
 
 # Ansible exits with rc=4 when hosts are unreachable, rc=6 when unreachable+failed.
-# rc=255 covers ansible-runner connection errors. These are always transient.
+# rc=255 covers ansible-runner connection errors. These are always transient at the
+# Ansible level regardless of the error text.
 _TRANSIENT_RC_CODES = frozenset({4, 6, 255})
 
-# Keyword fallback for rc=2 errors that are still connection-related (e.g. timeout
-# during a task, SSH refused mid-session). "unreachable" is intentionally excluded:
-# Ansible's PLAY RECAP always prints "unreachable=0" even on healthy runs, which
-# would cause every task failure to be misclassified as transient.
-_RETRYABLE_KEYWORDS = (
-    "timeout",
-    "timed out",
-    "connection refused",
-    "connection reset",
-    "unable to connect",
-    "ssh failure",
-    "ssh error",
-    "ssh connect",
-    "network is unreachable",
-    "no route to host",
-)
+
+def _classify_result(result: dict) -> RetryDecision:
+    """Classify an Ansible result dict.
+
+    rc-code check takes priority; string classification is delegated to
+    retry_policy so both paths share the same keyword tables.
+    """
+    if result.get("rc") in _TRANSIENT_RC_CODES:
+        return RetryDecision(
+            should_retry=True,
+            classification="transient",
+            reason=f"ansible rc={result.get('rc')}",
+        )
+    return _classify_error_string(_combined_error(result))
 
 
 def classify_error(result: dict) -> str:
+    """Return 'transient' or 'permanent' for an Ansible result dict.
+
+    Kept for backward compat — used by _structured_error and audit events.
     """
-    Returns:
-        'transient' → retryable (network/SSH issues)
-        'permanent' → non-retryable (validation, logic, fail task)
-    """
-    if result.get("rc") in _TRANSIENT_RC_CODES:
-        return "transient"
-    error_text = _combined_error(result).lower()
-    if any(kw in error_text for kw in _RETRYABLE_KEYWORDS):
-        return "transient"
-    return "permanent"
+    return _classify_result(result).classification
 
 
 def _combined_error(result: dict) -> str:
@@ -91,10 +85,12 @@ def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay:
             result = {"rc": 1, "stdout": "", "stderr": str(exc)}
         if result["rc"] == 0:
             break
-        error_type = classify_error(result)
-        error_text = _combined_error(result)
-        logger.info("Job %s classified error as %s: %s", job_id, error_type, error_text[:200])
-        if error_type == "permanent":
+        decision = _classify_result(result)
+        logger.info(
+            "Job %s classified error as %s: %s",
+            job_id, decision.classification, decision.reason,
+        )
+        if not decision.should_retry:
             break
         if attempt >= max_retries:
             break
