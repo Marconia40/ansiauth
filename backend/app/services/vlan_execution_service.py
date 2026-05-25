@@ -21,9 +21,11 @@ _RETRYABLE_KEYWORDS = (
     "timeout",
     "timed out",
     "connection refused",
+    "connection reset",
     "unable to connect",
     "ssh failure",
     "ssh error",
+    "ssh connect",
     "network is unreachable",
     "no route to host",
 )
@@ -112,11 +114,10 @@ def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay:
     return result, retry_count
 
 
-def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: str, retry_base_delay: float = 1.0):
+def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None):
     from app.services import device_locks, rate_limiter
 
     start_time = time.time()
-    pre_state: dict | None = None
     logger.info("Job %s: queued — create VLAN %s on device=%s", job_id, vlan_id, device)
 
     try:
@@ -127,8 +128,7 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
 
         rate_limiter.wait_for_slot(device)
 
-        lock = device_locks.get_device_lock(device)
-        with lock:
+        with device_locks.acquire(device):
             _job = job_service.get_job(job_id)
             if _job and _job.status == "cancelled":
                 audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
@@ -137,7 +137,8 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
             job_service.update_job(job_id, "running")
             logger.info("Job %s: started — create VLAN %s on device=%s", job_id, vlan_id, device)
 
-            pre_state = _get_pre_state(vlan_id, device)
+            if pre_state is None:
+                pre_state = _get_pre_state(vlan_id, device)
             job_service.update_job(job_id, pre_state=pre_state)
 
             if pre_state.get("existed") is None:
@@ -274,11 +275,10 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
         job_service.ensure_final_state(job_id)
 
 
-def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_base_delay: float = 1.0):
+def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None):
     from app.services import device_locks, rate_limiter
 
     start_time = time.time()
-    pre_state: dict | None = None
     logger.info("Job %s: queued — delete VLAN %s on device=%s", job_id, vlan_id, device)
 
     try:
@@ -289,8 +289,7 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
 
         rate_limiter.wait_for_slot(device)
 
-        lock = device_locks.get_device_lock(device)
-        with lock:
+        with device_locks.acquire(device):
             _job = job_service.get_job(job_id)
             if _job and _job.status == "cancelled":
                 audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
@@ -299,7 +298,8 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
             job_service.update_job(job_id, "running")
             logger.info("Job %s: started — delete VLAN %s on device=%s", job_id, vlan_id, device)
 
-            pre_state = _get_pre_state(vlan_id, device)
+            if pre_state is None:
+                pre_state = _get_pre_state(vlan_id, device)
             job_service.update_job(job_id, pre_state=pre_state)
 
             if pre_state.get("existed") is None:
@@ -444,11 +444,10 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
         job_service.ensure_final_state(job_id)
 
 
-def run_update_job(job_id: str, vlan_id: int, description: str, device: str, audit_id: str, retry_base_delay: float = 1.0):
+def run_update_job(job_id: str, vlan_id: int, description: str, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None):
     from app.services import device_locks, rate_limiter
 
     start_time = time.time()
-    pre_state: dict | None = None
     logger.info("Job %s: queued — update VLAN %s on device=%s", job_id, vlan_id, device)
 
     try:
@@ -459,8 +458,7 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
 
         rate_limiter.wait_for_slot(device)
 
-        lock = device_locks.get_device_lock(device)
-        with lock:
+        with device_locks.acquire(device):
             _job = job_service.get_job(job_id)
             if _job and _job.status == "cancelled":
                 audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
@@ -469,7 +467,8 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
             job_service.update_job(job_id, "running")
             logger.info("Job %s: started — update VLAN %s on device=%s", job_id, vlan_id, device)
 
-            pre_state = _get_pre_state(vlan_id, device)
+            if pre_state is None:
+                pre_state = _get_pre_state(vlan_id, device)
             job_service.update_job(job_id, pre_state=pre_state)
 
             if pre_state.get("existed") is None:
@@ -617,8 +616,7 @@ def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: floa
 
     try:
         rate_limiter.wait_for_slot(device)
-        lock = device_locks.get_device_lock(device)
-        with lock:
+        with device_locks.acquire(device):
             job_service.update_job(job_id, "running")
             logger.info("Job %s: started — save config on device=%s", job_id, device)
 
@@ -665,6 +663,7 @@ def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: floa
 # ── Enqueue helpers (called by route handlers) ────────────────────────────────
 
 def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> list[dict]:
+    from app.services import device_locks
     request_id = str(uuid.uuid4())
     job_entries = []
     for dev_name in vlan.devices:
@@ -678,14 +677,22 @@ def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, 
             details={"vlan_id": vlan.vlan_id, "name": vlan.name},
             status="pending", job_id=job.job_id, device=dev_name, request_id=request_id,
         )
+        try:
+            with device_locks.acquire(dev_name, timeout=30):
+                pre_state = _get_pre_state(vlan.vlan_id, dev_name)
+        except TimeoutError:
+            logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan.vlan_id)
+            pre_state = {"existed": None, "vlan_data": None}
         background_tasks.add_task(
             run_create_job, job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id, retry_base_delay,
+            pre_state=pre_state,
         )
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
     return job_entries
 
 
 def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> list[dict]:
+    from app.services import device_locks
     request_id = str(uuid.uuid4())
     job_entries = []
     for dev_name in devices:
@@ -699,8 +706,15 @@ def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, backgro
             details={"vlan_id": vlan_id, "device": dev_name},
             status="pending", job_id=job.job_id, device=dev_name, request_id=request_id,
         )
+        try:
+            with device_locks.acquire(dev_name, timeout=30):
+                pre_state = _get_pre_state(vlan_id, dev_name)
+        except TimeoutError:
+            logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan_id)
+            pre_state = {"existed": None, "vlan_data": None}
         background_tasks.add_task(
             run_delete_job, job.job_id, vlan_id, dev_name, audit.id, retry_base_delay,
+            pre_state=pre_state,
         )
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
     return job_entries
@@ -722,6 +736,7 @@ def enqueue_save_job(device_name: str, username: str, background_tasks: Backgrou
 
 
 def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> list[dict]:
+    from app.services import device_locks
     request_id = str(uuid.uuid4())
     job_entries = []
     for dev_name in data.devices:
@@ -735,8 +750,15 @@ def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: Bac
             details={"vlan_id": vlan_id, "description": data.description, "device": dev_name},
             status="pending", job_id=job.job_id, device=dev_name, request_id=request_id,
         )
+        try:
+            with device_locks.acquire(dev_name, timeout=30):
+                pre_state = _get_pre_state(vlan_id, dev_name)
+        except TimeoutError:
+            logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan_id)
+            pre_state = {"existed": None, "vlan_data": None}
         background_tasks.add_task(
             run_update_job, job.job_id, vlan_id, data.description, dev_name, audit.id, retry_base_delay,
+            pre_state=pre_state,
         )
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
     return job_entries

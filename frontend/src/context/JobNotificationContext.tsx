@@ -110,7 +110,7 @@ export function JobNotificationProvider({ children }: { children: ReactNode }) {
     };
 
     poll();
-    const iv = setInterval(poll, 5000);
+    const iv = setInterval(poll, 2500);
     intervalsRef.current.set(jobId, iv);
   }, []);
 

@@ -8,6 +8,27 @@ from app.core.config import ANSIBLE_BASE_PATH, INVENTORY_PATH
 
 logger = logging.getLogger(__name__)
 
+# Ansible SSH / persistent-connection timeouts (seconds).
+# Defaults are raised from Ansible's 30s to 60s to give Huawei VRP devices
+# more time to respond.  Override with environment variables if needed.
+_ANSIBLE_TIMEOUT = os.environ.get("ANSIBLE_TIMEOUT", "60")
+_ANSIBLE_PERSISTENT_COMMAND_TIMEOUT = os.environ.get("ANSIBLE_PERSISTENT_COMMAND_TIMEOUT", "60")
+_ANSIBLE_PERSISTENT_CONNECT_TIMEOUT = os.environ.get("ANSIBLE_PERSISTENT_CONNECT_TIMEOUT", "60")
+
+
+def _mask_inventory(inv_str: str) -> str:
+    """Redact ansible_password value from inventory strings for safe logging."""
+    marker = "ansible_password="
+    idx = inv_str.find(marker)
+    if idx == -1:
+        return inv_str
+    value_start = idx + len(marker)
+    # Value ends at the next space (inline format) or end of string (ini format)
+    value_end = inv_str.find(" ", value_start)
+    if value_end == -1:
+        value_end = len(inv_str)
+    return inv_str[:value_start] + "***REDACTED***" + inv_str[value_end:]
+
 
 def validate_inventory(inventory: str) -> None:
     """Raise ValueError if inventory string is missing required fields."""
@@ -31,9 +52,45 @@ def run_playbook(
         logger.warning("No dynamic inventory provided for playbook=%s, falling back to %s", playbook, INVENTORY_PATH)
     inv = inventory or INVENTORY_PATH
     device_label = device or extravars.get("device", "unknown")
-    logger.info("Running playbook=%s device=%s", playbook, device_label)
-    logger.info("Extravars: %s", extravars)
-    logger.info("Inventory:\n%s", inv)
+
+    # ── Pre-execution diagnostics ──────────────────────────────────────────────
+    resolved_playbook = os.path.join(ANSIBLE_BASE_PATH, "project", playbook)
+    logger.info(
+        "[DIAG] Running playbook=%s device=%s private_data_dir=%s extravars=%s",
+        playbook,
+        device_label,
+        ANSIBLE_BASE_PATH,
+        extravars,
+    )
+    logger.info(
+        "[DIAG] Resolved playbook path: %s",
+        resolved_playbook,
+    )
+    logger.info(
+        "[DIAG] Execution cwd=%s",
+        os.getcwd(),
+    )
+    logger.info(
+        "[DIAG] Path existence: private_data_dir=%s  resolved_playbook=%s",
+        os.path.exists(ANSIBLE_BASE_PATH),
+        os.path.exists(resolved_playbook),
+    )
+    logger.info(
+        "[DIAG] Ansible timeout config: ANSIBLE_TIMEOUT=%s  ANSIBLE_PERSISTENT_COMMAND_TIMEOUT=%s  ANSIBLE_PERSISTENT_CONNECT_TIMEOUT=%s",
+        _ANSIBLE_TIMEOUT,
+        _ANSIBLE_PERSISTENT_COMMAND_TIMEOUT,
+        _ANSIBLE_PERSISTENT_CONNECT_TIMEOUT,
+    )
+
+    # Log inventory content before the temp-file write so the inline string is visible
+    if isinstance(inv, str) and not os.path.exists(inv):
+        logger.info(
+            "[DIAG] Generated inventory for device=%s (inline, will be written to temp file):\n%s",
+            device_label,
+            _mask_inventory(inv),
+        )
+    else:
+        logger.info("[DIAG] Using existing inventory path: %s", inv)
 
     # ansible-runner's dump_artifacts() writes inline inventory strings to
     # private_data_dir/inventory/hosts. When concurrent calls share the same
@@ -48,6 +105,15 @@ def run_playbook(
         _temp_inv.write(inv + "\n")
         _temp_inv.close()
         inv = _temp_inv.name
+        logger.info("[DIAG] Temp inventory file written to: %s  exists=%s", inv, os.path.exists(inv))
+
+    logger.info(
+        "[DIAG] ansible_runner.run args: playbook=%s  private_data_dir=%s  inventory=%s  extravars=%s  quiet=True",
+        playbook,
+        ANSIBLE_BASE_PATH,
+        inv,
+        extravars,
+    )
 
     try:
         r = _runner.run(
@@ -56,13 +122,32 @@ def run_playbook(
             inventory=inv,
             extravars=extravars,
             quiet=True,
+            envvars={
+                "ANSIBLE_TIMEOUT": _ANSIBLE_TIMEOUT,
+                "ANSIBLE_PERSISTENT_COMMAND_TIMEOUT": _ANSIBLE_PERSISTENT_COMMAND_TIMEOUT,
+                "ANSIBLE_PERSISTENT_CONNECT_TIMEOUT": _ANSIBLE_PERSISTENT_CONNECT_TIMEOUT,
+            },
         )
     finally:
         if _temp_inv is not None:
             os.unlink(_temp_inv.name)
 
     rc = r.rc
-    stderr = _read(r.stderr)
+    raw_stderr = _read(r.stderr)
+    raw_stdout = _read(r.stdout)
+
+    # ── Post-execution diagnostics ─────────────────────────────────────────────
+    logger.info(
+        "[DIAG] Playbook completed: playbook=%s device=%s rc=%s status=%s",
+        playbook,
+        device_label,
+        rc,
+        getattr(r, "status", "unknown"),
+    )
+    logger.info("[DIAG] Playbook stdout:\n%s", raw_stdout)
+    logger.info("[DIAG] Playbook stderr:\n%s", raw_stderr)
+
+    stderr = raw_stderr
     # When rc != 0, prefer the actual task failure message over ios_command output
     # so ios_config errors aren't masked by an earlier ios_command's stdout.
     failure_reason = _extract_failure_reason(r) if rc != 0 else ""
@@ -72,7 +157,7 @@ def run_playbook(
     elif ios_cmd_output:
         stdout = ios_cmd_output
     else:
-        stdout = _read(r.stdout)
+        stdout = raw_stdout
     combined_output = (stdout + stderr).lower()
     if "no hosts matched" in combined_output and rc == 0:
         logger.error("Playbook %s: no hosts matched on device=%s — treating as failure", playbook, device_label)
@@ -95,9 +180,19 @@ def build_inventory(
     password: str,
     network_os: str = "ios",
     connection: str = "network_cli",
+    port: int | None = None,
 ) -> str:
     """Build a single-host inline inventory string from device credentials."""
-    return (
+    logger.info(
+        "[DIAG] Inventory host vars for %s: host=%s user=%s network_os=%s connection=%s port=%s",
+        device_id,
+        ip,
+        username,
+        network_os,
+        connection,
+        port,
+    )
+    inv = (
         f"{device_id} "
         f"ansible_host={ip} "
         f"ansible_user={username} "
@@ -105,23 +200,31 @@ def build_inventory(
         f"ansible_network_os={network_os} "
         f"ansible_connection={connection}"
     )
+    if port is not None:
+        inv += f" ansible_port={port}"
+    return inv
 
 
 def _extract_ios_command_output(r) -> str:
-    """Return the first ios_command stdout string from ansible-runner events.
+    """Return the first command stdout string from ansible-runner events.
 
-    ios_command stores each command's output in event_data.res.stdout (a list).
-    This is the only reliable way to get the raw device output — the text stdout
-    file embeds it as a JSON-escaped single line inside the debug task output.
+    Handles two result formats:
+    - ios_command / ce_command: res.stdout is a list; return stdout[0]
+    - cli_command (netcommon): res.stdout is a plain string; return it directly
+    Config modules (ios_config, cli_config) produce no stdout field here, so
+    they fall through and return "" as expected.
     """
     try:
         for event in r.events:
             if event.get("event") == "runner_on_ok":
                 res = event.get("event_data", {}).get("res", {})
-                stdout_list = res.get("stdout")
-                if isinstance(stdout_list, list) and stdout_list:
-                    logger.debug("Extracted ios_command output from events (%d chars)", len(stdout_list[0]))
-                    return stdout_list[0]
+                stdout_val = res.get("stdout")
+                if isinstance(stdout_val, list) and stdout_val:
+                    logger.debug("Extracted list-format command output from events (%d chars)", len(stdout_val[0]))
+                    return stdout_val[0]
+                if isinstance(stdout_val, str) and stdout_val:
+                    logger.debug("Extracted string-format command output from events (%d chars)", len(stdout_val))
+                    return stdout_val
     except Exception as exc:
         logger.debug("Could not extract command output from events: %s", exc)
     return ""

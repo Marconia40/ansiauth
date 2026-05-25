@@ -68,7 +68,7 @@ export default function JobsPage() {
     refetchInterval: (query) => {
       const jobs = normalizeJobs(query.state.data);
       const hasActive = jobs.some((j) => j.status === 'pending' || j.status === 'running');
-      return hasActive ? 5000 : false;
+      return hasActive ? 2500 : false;
     },
   });
 
@@ -85,7 +85,7 @@ export default function JobsPage() {
     refetchInterval: (query) => {
       const job = query.state.data as Job | undefined;
       if (!job) return false;
-      return (job.status === 'pending' || job.status === 'running') ? 5000 : false;
+      return (job.status === 'pending' || job.status === 'running') ? 2500 : false;
     },
   });
 

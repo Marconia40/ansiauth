@@ -1,4 +1,17 @@
 import logging
+
+# uvicorn's dictConfig only configures its own loggers and leaves the root
+# logger at WARNING with no handlers, so all app INFO/DEBUG output is silently
+# dropped when running via `uvicorn app.main:app`. Calling basicConfig here
+# (after uvicorn has already run its dictConfig) adds a stderr handler at INFO
+# to the root logger. uvicorn's own loggers are unaffected because they set
+# propagate=False and have their own handlers.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+    force=True,
+)
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request

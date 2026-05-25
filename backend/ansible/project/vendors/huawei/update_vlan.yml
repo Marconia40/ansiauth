@@ -1,11 +1,15 @@
 ---
-- name: Update VLAN name on Huawei VRP device
+- name: Update VLAN description on Huawei VRP device
   hosts: all
   gather_facts: no
 
   tasks:
-    - name: Update VLAN name
-      community.network.ce_config:
-        lines:
-          - description {{ description }}
-        parents: vlan {{ vlan_id }}
+    - name: Update VLAN description
+      ansible.netcommon.cli_command:
+        command: |
+          system-view
+          vlan {{ vlan_id }}
+          description {{ description }}
+          quit
+          commit
+          quit
