@@ -3,6 +3,7 @@ import time
 
 import pytest
 
+from app.models.vlan import VLANInfo
 from app.services import audit_service, job_service, vlan_service
 
 
@@ -20,7 +21,7 @@ def test_create_existing_vlan_fails(operator_client, client, monkeypatch):
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
     # VLAN 50 exists on device with name "OLD_NAME"; request uses "DUPLICATE"
     monkeypatch.setattr(vlan_service, "get_vlans",
-                        lambda device_id=None: [{"vlan_id": 50, "name": "OLD_NAME"}])
+                        lambda device_id=None: [VLANInfo(vlan_id=50, name="OLD_NAME")])
 
     response = operator_client.post(
         "/api/v1/vlans/", json={"vlan_id": 50, "name": "DUPLICATE", "devices": ["mock_device"]}
@@ -46,7 +47,7 @@ def test_create_existing_vlan_same_name_noop(operator_client, client, monkeypatc
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
     # VLAN 50 already exists with exactly the same name being requested
     monkeypatch.setattr(vlan_service, "get_vlans",
-                        lambda device_id=None: [{"vlan_id": 50, "name": "MGMT50"}])
+                        lambda device_id=None: [VLANInfo(vlan_id=50, name="MGMT50")])
 
     response = operator_client.post(
         "/api/v1/vlans/", json={"vlan_id": 50, "name": "MGMT50", "devices": ["mock_device"]}

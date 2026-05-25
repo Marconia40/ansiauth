@@ -63,8 +63,9 @@ def _capture_pre_state_vlan(vlan_id: int, device: str) -> dict:
     """Return VLAN pre-state for idempotency checks and rollback."""
     try:
         vlans = vlan_service.get_vlans(device)
-        match = next((v for v in vlans if v["vlan_id"] == vlan_id), None)
-        return {"existed": match is not None, "vlan_data": match}
+        match = next((v for v in vlans if v.vlan_id == vlan_id), None)
+        # Convert to plain dict so pre_state is JSON-serializable for DB storage
+        return {"existed": match is not None, "vlan_data": match.to_dict() if match else None}
     except Exception as exc:
         logger.warning("Could not capture pre-state for VLAN %s on %s: %s", vlan_id, device, exc)
         return {"existed": None, "vlan_data": None}
@@ -205,7 +206,7 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
                         if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
                             try:
                                 post_vlans = vlan_service.get_vlans(device)
-                                rollback_performed = not any(v["vlan_id"] == vlan_id for v in post_vlans)
+                                rollback_performed = not any(v.vlan_id == vlan_id for v in post_vlans)
                                 logger.info(
                                     "Rollback state check: VLAN %s %s on %s",
                                     vlan_id, "absent" if rollback_performed else "still present", device,
@@ -323,7 +324,7 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
             try:
                 try:
                     existing = vlan_service.get_vlans(device)
-                    if not any(v["vlan_id"] == vlan_id for v in existing):
+                    if not any(v.vlan_id == vlan_id for v in existing):
                         raise DeviceExecutionError(
                             f"VLAN {vlan_id} does not exist on device '{device}'"
                         )
@@ -350,7 +351,7 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
                     logger.warning("Job %s: could not verify VLAN deletion: %s", job_id, exc)
                     remaining = None
 
-                if remaining is not None and any(v["vlan_id"] == vlan_id for v in remaining):
+                if remaining is not None and any(v.vlan_id == vlan_id for v in remaining):
                     logger.error("Job %s: VLAN %s still present after deletion on %s", job_id, vlan_id, device)
                     raise DeviceExecutionError("VLAN still present after deletion")
 
@@ -391,7 +392,7 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
                         if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
                             try:
                                 post_vlans = vlan_service.get_vlans(device)
-                                rollback_performed = any(v["vlan_id"] == vlan_id for v in post_vlans)
+                                rollback_performed = any(v.vlan_id == vlan_id for v in post_vlans)
                                 logger.info(
                                     "Rollback state check: VLAN %s %s on %s",
                                     vlan_id, "present" if rollback_performed else "absent", device,
@@ -537,11 +538,11 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
                         if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
                             try:
                                 post_vlans = vlan_service.get_vlans(device)
-                                match = next((v for v in post_vlans if v["vlan_id"] == vlan_id), None)
-                                rollback_performed = bool(match and match.get("name", "").lower() == prev_name.lower())
+                                match = next((v for v in post_vlans if v.vlan_id == vlan_id), None)
+                                rollback_performed = bool(match and match.name.lower() == prev_name.lower())
                                 logger.info(
                                     "Rollback state check: VLAN %s name=%s expected=%s",
-                                    vlan_id, match.get("name") if match else None, prev_name,
+                                    vlan_id, match.name if match else None, prev_name,
                                 )
                             except Exception:
                                 pass

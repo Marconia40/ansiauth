@@ -38,7 +38,7 @@ def get_vlans(
         for dev in devices:
             try:
                 with device_locks.acquire(dev, timeout=10):
-                    result[dev] = vlan_service.get_vlans(dev)
+                    result[dev] = [v.to_dict() for v in vlan_service.get_vlans(dev)]
             except TimeoutError:
                 raise HTTPException(
                     status_code=503,
@@ -56,9 +56,9 @@ def get_vlans(
     try:
         if device is not None:
             with device_locks.acquire(device, timeout=10):
-                data = vlan_service.get_vlans(device)
+                data = [v.to_dict() for v in vlan_service.get_vlans(device)]
         else:
-            data = vlan_service.get_vlans(device)
+            data = [v.to_dict() for v in vlan_service.get_vlans(device)]
     except TimeoutError:
         raise HTTPException(
             status_code=503,

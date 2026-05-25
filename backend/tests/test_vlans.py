@@ -1,5 +1,6 @@
 import time
 
+from app.models.vlan import VLANInfo
 from app.services import vlan_service
 
 
@@ -196,7 +197,7 @@ def test_get_vlans_with_device_real_mode(client, monkeypatch):
 
     def _fake_get_vlans(device_id=None):
         captured["device_id"] = device_id
-        return [{"vlan_id": 10, "name": "MGMT"}]
+        return [VLANInfo(vlan_id=10, name="MGMT")]
 
     monkeypatch.setattr(vlan_service, "get_vlans", _fake_get_vlans)
     response = client.get("/api/v1/vlans/?device=some_device")

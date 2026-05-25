@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.core.config import EXECUTION_MODE
+from app.models.vlan import VLANInfo
 from app.services import secret_service
 
 if TYPE_CHECKING:
@@ -11,16 +12,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_mock_vlans: list[dict] = [
-    {"vlan_id": 10, "name": "MGMT"},
-    {"vlan_id": 20, "name": "DATA"},
-    {"vlan_id": 30, "name": "VOICE"},
+_mock_vlans: list[VLANInfo] = [
+    VLANInfo(vlan_id=10, name="MGMT"),
+    VLANInfo(vlan_id=20, name="DATA"),
+    VLANInfo(vlan_id=30, name="VOICE"),
 ]
 
-_INITIAL_MOCK_VLANS = [
-    {"vlan_id": 10, "name": "MGMT"},
-    {"vlan_id": 20, "name": "DATA"},
-    {"vlan_id": 30, "name": "VOICE"},
+_INITIAL_MOCK_VLANS: list[VLANInfo] = [
+    VLANInfo(vlan_id=10, name="MGMT"),
+    VLANInfo(vlan_id=20, name="DATA"),
+    VLANInfo(vlan_id=30, name="VOICE"),
 ]
 
 
@@ -41,7 +42,7 @@ def _mock_create_vlan(vlan_id: int, device: str) -> dict:
 def _mock_delete_vlan(vlan_id: int, device: str) -> dict:
     if device == "fail_device":
         return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure"}
-    _mock_vlans[:] = [v for v in _mock_vlans if v["vlan_id"] != vlan_id]
+    _mock_vlans[:] = [v for v in _mock_vlans if v.vlan_id != vlan_id]
     logger.info("Mock: VLAN %s deleted on %s", vlan_id, device)
     return {"rc": 0, "stdout": f"Simulated VLAN {vlan_id} deleted", "stderr": ""}
 
@@ -106,7 +107,16 @@ def update_vlan_description(vlan_id: int, description: str, device_id: str) -> d
     return driver.update_vlan(vlan_id, description, dev, pw)
 
 
-def get_vlans(device_id: str | None = None) -> list[dict]:
+def get_vlans(device_id: str | None = None) -> list[VLANInfo]:
+    """Return VLANs configured on *device_id* as normalized ``VLANInfo`` objects.
+
+    In mock mode the in-memory ``_mock_vlans`` list is returned directly.
+    In real mode the vendor driver fetches live data from the device.
+
+    Callers at the API boundary must convert to dicts via
+    ``[v.to_dict() for v in get_vlans(device_id)]`` before including the
+    result in HTTP responses.
+    """
     if EXECUTION_MODE == "mock":
         logger.info("Mock: returning hardcoded VLAN list")
         return _mock_vlans
@@ -134,7 +144,7 @@ def vlan_exists(device_id: str, vlan_id: int) -> bool:
     """Return True if the given VLAN is already configured on the device."""
     try:
         vlans = get_vlans(device_id)
-        return any(v["vlan_id"] == vlan_id for v in vlans)
+        return any(v.vlan_id == vlan_id for v in vlans)
     except Exception as exc:
         logger.warning(
             "vlan_exists check failed for device=%s vlan=%s: %s — treating as unknown",

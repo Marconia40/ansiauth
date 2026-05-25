@@ -1,7 +1,13 @@
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 from app.services import ansible_service
 from app.services.vendors.base import BaseVendorDriver
+
+if TYPE_CHECKING:
+    from app.models.vlan import VLANInfo
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +72,7 @@ class CiscoVlanDriver(BaseVendorDriver):
             inventory=inventory,
         )
 
-    def get_vlans(self, device, password: str) -> list[dict]:
+    def get_vlans(self, device, password: str) -> list[VLANInfo]:
         logger.info("CiscoVlanDriver.get_vlans device=%s", device.name)
         inventory = ansible_service.build_inventory(
             device.name, device.host, device.username, password,

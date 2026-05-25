@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import logging
 import traceback
+from typing import TYPE_CHECKING
 
 from app.services import ansible_service
 from app.services.vendors.base import BaseVendorDriver
+
+if TYPE_CHECKING:
+    from app.models.vlan import VLANInfo
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +210,7 @@ class HuaweiVlanDriver(BaseVendorDriver):
 
     # ── Query operations ──────────────────────────────────────────────────────
 
-    def list_vlans(self, device, password: str) -> list[dict]:
+    def list_vlans(self, device, password: str) -> list[VLANInfo]:
         """Return all VLANs configured on *device*, excluding internal VLANs.
 
         Runs the ``get_vlans`` playbook, strips ANSI escape codes from the
@@ -222,8 +226,8 @@ class HuaweiVlanDriver(BaseVendorDriver):
 
         Returns
         -------
-        list[dict]
-            List of ``{"vlan_id": int, "name": str}`` entries.
+        list[VLANInfo]
+            Normalized VLAN entries.
 
         Raises
         ------
@@ -290,7 +294,7 @@ class HuaweiVlanDriver(BaseVendorDriver):
             )
             raise
 
-    def get_vlans(self, device, password: str) -> list[dict]:
+    def get_vlans(self, device, password: str) -> list[VLANInfo]:
         """Backward-compatible alias for ``list_vlans()``.
 
         All existing callers (vlan_service, tests) continue to work without
