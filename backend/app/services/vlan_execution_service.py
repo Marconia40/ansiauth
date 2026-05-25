@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # Ansible level regardless of the error text.
 _TRANSIENT_RC_CODES = frozenset({4, 6, 255})
 
+# Hard cap so a mis-tuned retry_base_delay never locks a device for too long.
+_MAX_RETRY_DELAY: float = 5.0
+
 
 def _classify_result(result: dict) -> RetryDecision:
     """Classify an Ansible result dict.
@@ -93,8 +96,9 @@ def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay:
         if not decision.should_retry:
             break
         if attempt >= max_retries:
+            logger.warning("Job %s exhausted retries", job_id)
             break
-        delay = retry_base_delay * (2 ** attempt)
+        delay = min(retry_base_delay * (2 ** attempt), _MAX_RETRY_DELAY)
         retry_count += 1
         error = _combined_error(result)
         job_service.update_job(
@@ -104,8 +108,8 @@ def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay:
             current_step="retrying",
         )
         logger.info(
-            "Job %s: transient error, retry %d/%d in %.1fs: %s",
-            job_id, retry_count, max_retries, delay, error.strip(),
+            "Retrying job %s (attempt %d/%d) in %ds",
+            job_id, retry_count, max_retries, int(delay),
         )
         time.sleep(delay)
     return result, retry_count
