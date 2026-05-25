@@ -82,3 +82,10 @@ class CiscoVlanDriver(BaseVendorDriver):
             raise RuntimeError(error)
         from app.services.parsers.vlan_parser import parse_vlan_brief
         return parse_vlan_brief(result["stdout"])
+
+    def save_config(self, device, password: str) -> dict:
+        """Cisco IOS commits changes immediately; no explicit save step is required."""
+        raise NotImplementedError(
+            f"save_config is not supported for Cisco IOS device '{device.name}'. "
+            "Cisco IOS writes changes to the running config automatically."
+        )
