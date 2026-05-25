@@ -35,6 +35,7 @@ def _to_job(row: JobModel) -> Job:
         pre_state=row.pre_state,
         last_error=row.last_error,
         current_step=row.current_step,
+        group_job_id=row.group_job_id,
     )
 
 
@@ -43,6 +44,7 @@ def create_job(
     device: Optional[str] = None,
     parameters: Optional[dict] = None,
     max_retries: int = 3,
+    group_job_id: Optional[str] = None,
 ) -> Job:
     with get_session() as session:
         row = JobModel(
@@ -55,6 +57,7 @@ def create_job(
             created_at=datetime.now(timezone.utc),
             rollback_performed=False,
             retry_count=0,
+            group_job_id=group_job_id,
         )
         session.add(row)
         session.flush()

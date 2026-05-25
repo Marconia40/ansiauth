@@ -95,8 +95,8 @@ def create_vlan(
     for dev_name in vlan.devices:
         if not device_service.get_device(dev_name):
             raise NotFoundError(f"Device '{dev_name}' not found")
-    jobs = vlan_execution_service.enqueue_create_jobs(vlan, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
-    return {"success": True, "jobs": jobs}
+    jobs, group_job_id = vlan_execution_service.enqueue_create_jobs(vlan, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
 @router.delete(
@@ -122,8 +122,8 @@ def delete_vlan(
     for dev_name in data.devices:
         if not device_service.get_device(dev_name):
             raise NotFoundError(f"Device '{dev_name}' not found")
-    jobs = vlan_execution_service.enqueue_delete_jobs(vlan_id, data.devices, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
-    return {"success": True, "jobs": jobs}
+    jobs, group_job_id = vlan_execution_service.enqueue_delete_jobs(vlan_id, data.devices, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
 @router.patch(
@@ -149,5 +149,5 @@ def update_vlan(
     for dev_name in data.devices:
         if not device_service.get_device(dev_name):
             raise NotFoundError(f"Device '{dev_name}' not found")
-    jobs = vlan_execution_service.enqueue_update_jobs(vlan_id, data, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
-    return {"success": True, "jobs": jobs}
+    jobs, group_job_id = vlan_execution_service.enqueue_update_jobs(vlan_id, data, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}

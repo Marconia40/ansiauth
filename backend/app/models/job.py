@@ -23,3 +23,4 @@ class Job:
     pre_state: Optional[dict] = None
     last_error: Optional[str] = None
     current_step: Optional[str] = None
+    group_job_id: Optional[str] = None

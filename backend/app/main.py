@@ -85,6 +85,21 @@ def _migrate_audit_log_columns(engine) -> None:
 _migrate_audit_log_columns(get_engine())
 
 
+def _migrate_group_job_id(engine) -> None:
+    """Add the group_job_id column to jobs if it was not present in an older DB."""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "jobs" in inspector.get_table_names():
+        existing_cols = {c["name"] for c in inspector.get_columns("jobs")}
+        if "group_job_id" not in existing_cols:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN group_job_id VARCHAR DEFAULT NULL"))
+                conn.commit()
+            logger.info("Migration applied: added 'group_job_id' column to jobs")
+
+_migrate_group_job_id(get_engine())
+
+
 def _install_audit_immutability_trigger(engine) -> None:
     """Create a BEFORE UPDATE trigger that prevents any mutation of audit_logs rows."""
     from sqlalchemy import text
@@ -101,7 +116,7 @@ def _install_audit_immutability_trigger(engine) -> None:
 
 _install_audit_immutability_trigger(get_engine())
 
-from app.api import audit, auth, device_groups, devices, health, jobs, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, users, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service, job_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
@@ -344,6 +359,7 @@ app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], r
 app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)
 app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], responses=_err)
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"], responses=_err)
+app.include_router(group_jobs.router, prefix="/api/v1/group-jobs", tags=["group-jobs"], responses=_err)
 
 
 @app.get("/")

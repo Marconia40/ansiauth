@@ -38,6 +38,7 @@ def _format_job(job) -> dict:
         "pre_state": job.pre_state,
         "last_error": job.last_error,
         "current_step": job.current_step,
+        "group_job_id": job.group_job_id,
         "execution_summary": {
             "attempts": job.retry_count + 1 if job.status in ("completed", "failed") else None,
             "rollback_performed": job.rollback_performed,

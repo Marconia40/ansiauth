@@ -79,10 +79,26 @@ class JobModel(Base):
     pre_state = Column(JSON, nullable=True)
     last_error = Column(Text, nullable=True)
     current_step = Column(String, nullable=True)
+    group_job_id = Column(String, nullable=True, index=True)
 
     __table_args__ = (
         Index("ix_jobs_status_created_at", "status", "created_at"),
     )
+
+
+class GroupJobModel(Base):
+    __tablename__ = "group_jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_job_id = Column(String, nullable=False, unique=True, index=True)
+    status = Column(String, nullable=False, default="pending", index=True)
+    operation = Column(String, nullable=True)
+    playbook = Column(String, nullable=True)
+    parameters = Column(JSON, nullable=True)
+    device_results = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class RefreshTokenModel(Base):
