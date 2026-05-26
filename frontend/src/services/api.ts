@@ -1,9 +1,9 @@
 import axios from 'axios';
 import type { AuthUser } from '@/types/auth';
-import type { VlanEntry, VlanCreate, VlanUpdate, VlanDelete, VlanJobResult } from '@/types/vlan';
+import type { VlanEntry, VlanCreate, VlanUpdate, VlanDelete, VlanOperationResult } from '@/types/vlan';
 import type { Device, DeviceCreate, DeviceUpdate } from '@/types/device';
 import type { User, UserCreate, UserUpdate } from '@/types/user';
-import type { Job } from '@/types/job';
+import type { Job, GroupJob } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
@@ -162,21 +162,21 @@ export async function getVlans(device?: string): Promise<VlanEntry[]> {
   );
 }
 
-export async function createVlan(body: VlanCreate): Promise<VlanJobResult[]> {
-  const { data } = await client.post<{ success: boolean; jobs: VlanJobResult[] }>('/vlans/', body);
-  return data.jobs ?? [];
+type VlanRawResponse = { success: boolean; group_job_id: string; jobs: { device: string; job_id: string }[] };
+
+export async function createVlan(body: VlanCreate): Promise<VlanOperationResult> {
+  const { data } = await client.post<VlanRawResponse>('/vlans/', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
-export async function updateVlan(vlanId: number, body: VlanUpdate): Promise<VlanJobResult[]> {
-  const { data } = await client.patch<{ success: boolean; jobs: VlanJobResult[] }>(`/vlans/${vlanId}`, body);
-  return data.jobs ?? [];
+export async function updateVlan(vlanId: number, body: VlanUpdate): Promise<VlanOperationResult> {
+  const { data } = await client.patch<VlanRawResponse>(`/vlans/${vlanId}`, body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
-export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<VlanJobResult[]> {
-  const { data } = await client.delete<{ success: boolean; jobs: VlanJobResult[] }>(`/vlans/${vlanId}`, {
-    data: body,
-  });
-  return data.jobs ?? [];
+export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<VlanOperationResult> {
+  const { data } = await client.delete<VlanRawResponse>(`/vlans/${vlanId}`, { data: body });
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────
@@ -219,6 +219,10 @@ export async function getJob(jobId: string): Promise<Job> {
 
 export async function cancelJob(jobId: string) {
   return unwrap(client.post(`/jobs/${jobId}/cancel`));
+}
+
+export async function getGroupJob(groupJobId: string): Promise<GroupJob> {
+  return unwrap(client.get<ApiResponse<GroupJob>>(`/group-jobs/${groupJobId}`));
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────

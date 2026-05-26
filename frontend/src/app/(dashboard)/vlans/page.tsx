@@ -18,7 +18,7 @@ function extractMessage(error: unknown, fallback: string): string {
 
 export default function VlansPage() {
   const { user } = useAuth();
-  const { trackJob } = useJobNotifications();
+  const { trackJob, trackGroupJob } = useJobNotifications();
   const canMutate = !!user && user.role !== 'observer';
 
   const [selectedDevices, setSelectedDevices] = useState<string[]>([]);
@@ -81,12 +81,16 @@ export default function VlansPage() {
     setErrorMessage(null);
     const capturedVlanId = newVlanId;
     try {
-      const jobs = await createVlan({ vlan_id: Number(newVlanId), name: newVlanName.trim(), devices: effectiveDevices });
+      const result = await createVlan({ vlan_id: Number(newVlanId), name: newVlanName.trim(), devices: effectiveDevices });
       setNewVlanId('');
       setNewVlanName('');
       await refetch();
-      for (const j of jobs) {
-        trackJob(j.job_id, `Create VLAN ${capturedVlanId}`, j.device);
+      if (effectiveDevices.length > 1) {
+        trackGroupJob(result.group_job_id, `Create VLAN ${capturedVlanId}`);
+      } else {
+        for (const j of result.jobs) {
+          trackJob(j.job_id, `Create VLAN ${capturedVlanId}`, j.device);
+        }
       }
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Create failed'));
@@ -112,12 +116,16 @@ export default function VlansPage() {
     setErrorMessage(null);
     const capturedVlanId = editingVlanId!;
     try {
-      const jobs = await updateVlan(editingVlanId!, { description: editingName.trim(), devices: effectiveDevices });
+      const result = await updateVlan(editingVlanId!, { description: editingName.trim(), devices: effectiveDevices });
       setEditingVlanId(null);
       setEditingName('');
       await refetch();
-      for (const j of jobs) {
-        trackJob(j.job_id, `Update VLAN ${capturedVlanId}`, j.device);
+      if (effectiveDevices.length > 1) {
+        trackGroupJob(result.group_job_id, `Update VLAN ${capturedVlanId}`);
+      } else {
+        for (const j of result.jobs) {
+          trackJob(j.job_id, `Update VLAN ${capturedVlanId}`, j.device);
+        }
       }
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Operation failed'));
@@ -133,10 +141,14 @@ export default function VlansPage() {
     setIsSubmitting(true);
     setErrorMessage(null);
     try {
-      const jobs = await deleteVlan(vlan.vlan_id, { devices: effectiveDevices });
+      const result = await deleteVlan(vlan.vlan_id, { devices: effectiveDevices });
       await refetch();
-      for (const j of jobs) {
-        trackJob(j.job_id, `Delete VLAN ${vlan.vlan_id}`, j.device);
+      if (effectiveDevices.length > 1) {
+        trackGroupJob(result.group_job_id, `Delete VLAN ${vlan.vlan_id}`);
+      } else {
+        for (const j of result.jobs) {
+          trackJob(j.job_id, `Delete VLAN ${vlan.vlan_id}`, j.device);
+        }
       }
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Delete failed'));
