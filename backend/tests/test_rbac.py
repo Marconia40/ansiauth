@@ -83,7 +83,7 @@ def test_operator_is_rejected_on_admin_endpoint():
 # ── HTTP endpoints: super-admin reaches all existing tiers ────────────────────
 
 def test_super_admin_client_reaches_observer_endpoint(super_admin_client):
-    response = super_admin_client.get("/api/v1/vlans/")
+    response = super_admin_client.get("/api/v1/vlans/?device=mock_device")
     assert response.status_code == 200
 
 

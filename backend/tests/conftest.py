@@ -118,3 +118,18 @@ def mock_ansible_service(monkeypatch):
     monkeypatch.setattr(vlan_service, "get_vlans", lambda device_id=None: vlan_service._mock_vlans[:])
     # Keep vlan_exists patched as well for tests that still reference it directly.
     monkeypatch.setattr(vlan_service, "vlan_exists", lambda device_id, vlan_id: False)
+
+    # Patch delete_vlan so post-deletion verification in run_delete_job sees the updated
+    # _mock_vlans state. Delegates to the current run_playbook (which may be overridden
+    # per-test) so that retry/rollback tests that patch run_playbook still get rc=1.
+    def _fake_delete_vlan(vlan_id: int, device_id: str) -> dict:
+        result = ansible_service.run_playbook(
+            "delete_vlan.yml",
+            extravars={"vlan_id": vlan_id, "device": device_id},
+            device=device_id,
+        )
+        if result["rc"] == 0:
+            vlan_service._mock_vlans[:] = [v for v in vlan_service._mock_vlans if v.vlan_id != vlan_id]
+        return result
+
+    monkeypatch.setattr(vlan_service, "delete_vlan", _fake_delete_vlan)

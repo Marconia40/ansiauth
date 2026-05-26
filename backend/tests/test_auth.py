@@ -10,20 +10,22 @@ from app.services import user_service
 
 @pytest.fixture(autouse=True)
 def seed_auth_users():
-    """Ensure the three test accounts exist before each auth test."""
-    for username, password, role in [
+    """Reset the three test accounts with known passwords before each auth test."""
+    _accounts = [
         ("admin", "admin123", "admin"),
         ("operator", "operator123", "operator"),
         ("observer", "observer123", "observer"),
-    ]:
-        if user_service.get_by_username(username) is None:
-            user_service.create_user(
-                UserCreate(username=username, password=password, role=role)
-            )
+    ]
+    with get_session() as session:
+        session.query(UserModel).filter(
+            UserModel.username.in_([u for u, _, _ in _accounts])
+        ).delete(synchronize_session=False)
+    for username, password, role in _accounts:
+        user_service.create_user(UserCreate(username=username, password=password, role=role))
     yield
     with get_session() as session:
         session.query(UserModel).filter(
-            UserModel.username.in_(["admin", "operator", "observer"])
+            UserModel.username.in_([u for u, _, _ in _accounts])
         ).delete(synchronize_session=False)
 
 
@@ -67,7 +69,7 @@ def test_login_then_use_token(unauth_client):
     token = login_response.json()["access_token"]
 
     vlan_response = unauth_client.get(
-        "/api/v1/vlans/",
+        "/api/v1/vlans/?device=mock_device",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert vlan_response.status_code == 200
@@ -133,7 +135,7 @@ def test_token_accepted_within_expiry_window(unauth_client):
         os.environ["JWT_SECRET_KEY"],
         algorithm="HS256",
     )
-    response = unauth_client.get("/api/v1/vlans/", headers={"Authorization": f"Bearer {token}"})
+    response = unauth_client.get("/api/v1/vlans/?device=mock_device", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
 
 

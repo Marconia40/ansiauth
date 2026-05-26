@@ -37,7 +37,7 @@ def test_vlan_name_invalid(client):
 
 
 def test_get_vlans(client):
-    response = client.get("/api/v1/vlans/")
+    response = client.get("/api/v1/vlans/?device=mock_device")
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
@@ -80,7 +80,7 @@ def test_update_vlan_reserved_id_range(client):
 
 
 def test_update_vlan_description(client):
-    payload = {"description": "Core network VLAN", "devices": ["mock_device"]}
+    payload = {"description": "Core-network-VLAN", "devices": ["mock_device"]}
     response = client.patch("/api/v1/vlans/10", json=payload)
     assert response.status_code == 200
     data = response.json()
@@ -117,7 +117,7 @@ def test_delete_vlan_failure(client):
 
 
 def test_update_vlan_failure(client):
-    payload = {"description": "Test desc", "devices": ["fail_device"]}
+    payload = {"description": "Test-desc", "devices": ["fail_device"]}
     response = client.patch("/api/v1/vlans/10", json=payload)
     assert response.status_code == 200
     # BackgroundTask runs synchronously in TestClient — job is already failed
@@ -151,7 +151,7 @@ def test_delete_multi_device(client):
 
 def test_update_multi_device(client):
     """Update on multiple devices creates one job per device."""
-    payload = {"description": "Multi update", "devices": ["mock_device", "mock_device"]}
+    payload = {"description": "Multi-update", "devices": ["mock_device", "mock_device"]}
     response = client.patch("/api/v1/vlans/10", json=payload)
     assert response.status_code == 200
     data = response.json()
@@ -181,8 +181,9 @@ def test_get_vlans_no_device_real_mode_returns_400(client, monkeypatch):
     assert "device" in response.json()["message"].lower()
 
 
-def test_get_vlans_no_device_mock_mode_returns_list(client):
+def test_get_vlans_no_device_mock_mode_returns_list(client, monkeypatch):
     """GET /vlans/ without ?device= must still return the mock list in mock mode."""
+    monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "mock")
     response = client.get("/api/v1/vlans/")
     assert response.status_code == 200
     data = response.json()

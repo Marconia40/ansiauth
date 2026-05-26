@@ -802,6 +802,58 @@ def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: floa
             _notify_group_job_complete(group_job_id, job_id, device)
 
 
+# ── Sequential group runners ──────────────────────────────────────────────────
+#
+# Each group runner executes one background task per group job. Devices run
+# strictly one after the other. A device failure is caught inside run_*_job
+# (which never propagates exceptions) so the loop always continues to the
+# next device — providing fault isolation across the fleet.
+#
+# device_tasks tuples carry only the data needed to call the corresponding
+# run_*_job; retry_base_delay and group_job_id are passed as separate args.
+
+def run_group_create_job(
+    group_job_id: str,
+    device_tasks: list[tuple],  # (job_id, vlan_id, name, device, audit_id, pre_state)
+    retry_base_delay: float = 1.0,
+) -> None:
+    logger.info("GroupJob %s: sequential create starting — %d device(s)", group_job_id, len(device_tasks))
+    for job_id, vlan_id, name, device, audit_id, pre_state in device_tasks:
+        logger.info("GroupJob %s: executing device=%s", group_job_id, device)
+        run_create_job(job_id, vlan_id, name, device, audit_id, retry_base_delay,
+                       pre_state=pre_state, group_job_id=group_job_id)
+        logger.info("GroupJob %s: finished device=%s", group_job_id, device)
+    logger.info("GroupJob %s: sequential create done", group_job_id)
+
+
+def run_group_delete_job(
+    group_job_id: str,
+    device_tasks: list[tuple],  # (job_id, vlan_id, device, audit_id, pre_state)
+    retry_base_delay: float = 1.0,
+) -> None:
+    logger.info("GroupJob %s: sequential delete starting — %d device(s)", group_job_id, len(device_tasks))
+    for job_id, vlan_id, device, audit_id, pre_state in device_tasks:
+        logger.info("GroupJob %s: executing device=%s", group_job_id, device)
+        run_delete_job(job_id, vlan_id, device, audit_id, retry_base_delay,
+                       pre_state=pre_state, group_job_id=group_job_id)
+        logger.info("GroupJob %s: finished device=%s", group_job_id, device)
+    logger.info("GroupJob %s: sequential delete done", group_job_id)
+
+
+def run_group_update_job(
+    group_job_id: str,
+    device_tasks: list[tuple],  # (job_id, vlan_id, description, device, audit_id, pre_state)
+    retry_base_delay: float = 1.0,
+) -> None:
+    logger.info("GroupJob %s: sequential update starting — %d device(s)", group_job_id, len(device_tasks))
+    for job_id, vlan_id, description, device, audit_id, pre_state in device_tasks:
+        logger.info("GroupJob %s: executing device=%s", group_job_id, device)
+        run_update_job(job_id, vlan_id, description, device, audit_id, retry_base_delay,
+                       pre_state=pre_state, group_job_id=group_job_id)
+        logger.info("GroupJob %s: finished device=%s", group_job_id, device)
+    logger.info("GroupJob %s: sequential update done", group_job_id)
+
+
 # ── Enqueue helpers (called by route handlers) ────────────────────────────────
 
 def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> tuple[list[dict], str]:
@@ -813,6 +865,7 @@ def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, 
         parameters={"vlan_id": vlan.vlan_id, "name": vlan.name},
         devices=list(vlan.devices),
     )
+    device_tasks = []
     job_entries = []
     for dev_name in vlan.devices:
         job = job_service.create_job(
@@ -832,11 +885,9 @@ def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, 
         except TimeoutError:
             logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan.vlan_id)
             pre_state = {"existed": None, "vlan_data": None}
-        background_tasks.add_task(
-            run_create_job, job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id, retry_base_delay,
-            pre_state=pre_state, group_job_id=group_job.group_job_id,
-        )
+        device_tasks.append((job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
+    background_tasks.add_task(run_group_create_job, group_job.group_job_id, device_tasks, retry_base_delay)
     return job_entries, group_job.group_job_id
 
 
@@ -849,6 +900,7 @@ def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, backgro
         parameters={"vlan_id": vlan_id},
         devices=devices,
     )
+    device_tasks = []
     job_entries = []
     for dev_name in devices:
         job = job_service.create_job(
@@ -868,11 +920,9 @@ def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, backgro
         except TimeoutError:
             logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan_id)
             pre_state = {"existed": None, "vlan_data": None}
-        background_tasks.add_task(
-            run_delete_job, job.job_id, vlan_id, dev_name, audit.id, retry_base_delay,
-            pre_state=pre_state, group_job_id=group_job.group_job_id,
-        )
+        device_tasks.append((job.job_id, vlan_id, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
+    background_tasks.add_task(run_group_delete_job, group_job.group_job_id, device_tasks, retry_base_delay)
     return job_entries, group_job.group_job_id
 
 
@@ -907,6 +957,7 @@ def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: Bac
         parameters={"vlan_id": vlan_id, "description": data.description},
         devices=list(data.devices),
     )
+    device_tasks = []
     job_entries = []
     for dev_name in data.devices:
         job = job_service.create_job(
@@ -926,9 +977,7 @@ def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: Bac
         except TimeoutError:
             logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan_id)
             pre_state = {"existed": None, "vlan_data": None}
-        background_tasks.add_task(
-            run_update_job, job.job_id, vlan_id, data.description, dev_name, audit.id, retry_base_delay,
-            pre_state=pre_state, group_job_id=group_job.group_job_id,
-        )
+        device_tasks.append((job.job_id, vlan_id, data.description, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
+    background_tasks.add_task(run_group_update_job, group_job.group_job_id, device_tasks, retry_base_delay)
     return job_entries, group_job.group_job_id

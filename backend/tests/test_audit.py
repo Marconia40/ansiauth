@@ -126,14 +126,14 @@ def test_delete_vlan_is_audited(admin_client):
 
 
 def test_update_vlan_is_audited(operator_client, admin_client):
-    operator_client.patch("/api/v1/vlans/10", json={"description": "Core VLAN", "devices": ["mock_device"]})
+    operator_client.patch("/api/v1/vlans/10", json={"description": "Core-VLAN", "devices": ["mock_device"]})
 
     # BackgroundTasks run synchronously in TestClient, so status is final immediately
     log = admin_client.get("/api/v1/audit/").json()
     entry = next(e for e in log if e["action"] == "update_vlan")
     assert entry["resource"] == "vlan"
     assert entry["user"] == "operator"
-    assert entry["details"]["description"] == "Core VLAN"
+    assert entry["details"]["description"] == "Core-VLAN"
     assert entry["job_id"] is not None
     assert entry["status"] == "completed"
 

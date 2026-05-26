@@ -90,10 +90,10 @@ def test_authenticated_requests_use_user_limit(client, monkeypatch):
     monkeypatch.setattr(rl, "RATE_LIMIT_PER_USER_RPM", 5)
 
     for _ in range(5):
-        r = client.get("/api/v1/vlans/")
+        r = client.get("/api/v1/vlans/?device=mock_device")
         assert r.status_code == 200
 
-    r = client.get("/api/v1/vlans/")
+    r = client.get("/api/v1/vlans/?device=mock_device")
     assert r.status_code == 429
 
 
@@ -102,10 +102,10 @@ def test_authenticated_limit_is_separate_from_ip_limit(client, unauth_client, mo
     monkeypatch.setattr(rl, "RATE_LIMIT_PER_USER_RPM", 3)
 
     for _ in range(3):
-        client.get("/api/v1/vlans/")
+        client.get("/api/v1/vlans/?device=mock_device")
 
     # Authenticated user is now blocked
-    assert client.get("/api/v1/vlans/").status_code == 429
+    assert client.get("/api/v1/vlans/?device=mock_device").status_code == 429
 
     # Unauthenticated IP bucket is untouched
     assert unauth_client.get("/").status_code == 200
