@@ -7,6 +7,13 @@ export type JobStatus =
   | 'failed'
   | 'cancelled';
 
+export interface JobExecutionSummary {
+  attempts: number | null;
+  rollback_performed: boolean;
+  rollback_success: boolean | null;
+  duration_ms: number | null;
+}
+
 export interface Job {
   job_id: string;
   status: JobStatus;
@@ -20,9 +27,12 @@ export interface Job {
   retry_count: number;
   max_retries: number;
   rollback_performed: boolean;
+  rollback_success: boolean | null;
   pre_state: unknown;
   last_error: string | null;
   current_step: string | null;
+  group_job_id: string | null;
+  execution_summary: JobExecutionSummary | null;
 }
 
 // Statuses that mean the job is still running and should be polled
