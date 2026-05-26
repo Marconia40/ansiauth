@@ -201,3 +201,135 @@ def test_rollback_started_log_emitted_in_observability(monkeypatch, caplog):
     assert any("rollback started" in r.message for r in caplog.records)
     assert any("rollback executed" in r.message for r in caplog.records)
     assert any("rollback verification succeeded" in r.message for r in caplog.records)
+
+
+# ── Step 4.3: GroupJob execution_summary fields ───────────────────────────────
+
+def test_group_job_summary_partial_success_false_when_all_succeed(client):
+    """execution_summary.partial_success must be False when all devices succeed."""
+    from app.services import group_job_service
+    gj = group_job_service.create_group_job(
+        operation="create_vlan", playbook="create_vlan.yml",
+        parameters={"vlan_id": 800}, devices=["sw1", "sw2"],
+    )
+    group_job_service.update_device_result(gj.group_job_id, "sw1", "j1", "completed")
+    group_job_service.update_device_result(gj.group_job_id, "sw2", "j2", "completed")
+    fetched = group_job_service.get_group_job(gj.group_job_id)
+    assert fetched.execution_summary()["partial_success"] is False
+
+
+def test_group_job_summary_partial_success_true_on_mixed(client):
+    """execution_summary.partial_success must be True when some devices succeed and some fail."""
+    from app.services import group_job_service
+    gj = group_job_service.create_group_job(
+        operation="create_vlan", playbook="create_vlan.yml",
+        parameters={"vlan_id": 801}, devices=["sw1", "sw2"],
+    )
+    group_job_service.update_device_result(gj.group_job_id, "sw1", "j1", "completed")
+    group_job_service.update_device_result(gj.group_job_id, "sw2", "j2", "failed")
+    fetched = group_job_service.get_group_job(gj.group_job_id)
+    assert fetched.execution_summary()["partial_success"] is True
+
+
+def test_group_job_summary_duration_ms_set_after_completion(client):
+    """execution_summary.duration_ms must be a non-negative integer after the group job finishes."""
+    from app.services import group_job_service
+    gj = group_job_service.create_group_job(
+        operation="create_vlan", playbook="create_vlan.yml",
+        parameters={"vlan_id": 802}, devices=["sw1"],
+    )
+    group_job_service.update_device_result(gj.group_job_id, "sw1", "j1", "completed")
+    fetched = group_job_service.get_group_job(gj.group_job_id)
+    s = fetched.execution_summary()
+    assert s["duration_ms"] is not None
+    assert isinstance(s["duration_ms"], int)
+    assert s["duration_ms"] >= 0
+
+
+def test_group_job_summary_duration_ms_none_while_pending():
+    """execution_summary.duration_ms must be None when the group job has not yet started."""
+    from app.models.group_job import DeviceExecution, GroupJob
+    gj = GroupJob(
+        device_results=[DeviceExecution(device="sw1", status="pending")],
+    )
+    assert gj.execution_summary()["duration_ms"] is None
+
+
+def test_api_group_job_summary_includes_partial_success_and_duration(client):
+    """GET /group-jobs/{id} must return partial_success and duration_ms in execution_summary."""
+    payload = {"vlan_id": 803, "name": "OBSGRP", "devices": ["mock_device"]}
+    create_resp = client.post("/api/v1/vlans/", json=payload)
+    assert create_resp.status_code == 200
+    group_job_id = create_resp.json()["group_job_id"]
+
+    time.sleep(0.4)
+
+    resp = client.get(f"/api/v1/group-jobs/{group_job_id}")
+    assert resp.status_code == 200
+    s = resp.json()["data"]["execution_summary"]
+    assert "partial_success" in s
+    assert "duration_ms" in s
+    assert isinstance(s["partial_success"], bool)
+
+
+# ── Step 4.3: current_step="executing" while running ─────────────────────────
+
+def test_current_step_is_executing_while_running(client, monkeypatch):
+    """current_step must be 'executing' immediately after a job transitions to running."""
+    from app.services import job_service
+
+    captured_steps = []
+
+    real_update = job_service.update_job
+    def _spy_update(job_id, status=None, **kwargs):
+        real_update(job_id, status=status, **kwargs)
+        if status == "running":
+            job = job_service.get_job(job_id)
+            if job:
+                captured_steps.append(job.current_step)
+
+    monkeypatch.setattr(job_service, "update_job", _spy_update)
+    monkeypatch.setattr(svc, "job_service", job_service)
+
+    resp = client.post(
+        "/api/v1/vlans/",
+        json={"vlan_id": 810, "name": "EXEC_STEP", "devices": ["mock_device"]},
+    )
+    assert resp.status_code == 200
+    assert "executing" in captured_steps
+
+
+# ── Step 4.3: retry log includes device name ──────────────────────────────────
+
+def test_retry_log_includes_device_name(monkeypatch, caplog):
+    """Retry log must include the device name."""
+    monkeypatch.setattr(svc.time, "sleep", lambda d: None)
+    monkeypatch.setattr(svc.job_service, "update_job", lambda *a, **kw: None)
+
+    def _transient():
+        return {"rc": 1, "stdout": "SSH connection refused", "stderr": ""}
+
+    with caplog.at_level(logging.INFO, logger="app.services.vlan_execution_service"):
+        svc._execute_with_retry(_transient, "dev-log-test", max_retries=1, retry_base_delay=0.01, device="switch1")
+
+    retry_lines = [r.message for r in caplog.records if "retry attempt" in r.message]
+    assert len(retry_lines) == 1
+    assert "switch1" in retry_lines[0]
+
+
+# ── Step 4.3: per-device result fields in API ─────────────────────────────────
+
+def test_api_per_device_result_fields_complete(client):
+    """device_results in group job API response must include all required fields."""
+    payload = {"vlan_id": 820, "name": "DEVFLDS", "devices": ["mock_device"]}
+    create_resp = client.post("/api/v1/vlans/", json=payload)
+    assert create_resp.status_code == 200
+    group_job_id = create_resp.json()["group_job_id"]
+
+    time.sleep(0.4)
+
+    resp = client.get(f"/api/v1/group-jobs/{group_job_id}")
+    assert resp.status_code == 200
+    dr = resp.json()["data"]["device_results"][0]
+    for field in ("device", "status", "retry_count", "rollback_performed", "rollback_success", "duration_ms"):
+        assert field in dr, f"Missing field: {field}"

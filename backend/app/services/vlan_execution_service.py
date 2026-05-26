@@ -74,7 +74,7 @@ def _get_pre_state(vlan_id: int, device: str) -> dict:
     return _vlans_api._capture_pre_state_vlan(vlan_id, device)
 
 
-def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay: float = 1.0) -> tuple[dict, int]:
+def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay: float = 1.0, device: str = "") -> tuple[dict, int]:
     """Call fn() up to max_retries+1 times, backing off on transient errors.
 
     Returns (result_dict, retry_count).
@@ -108,8 +108,8 @@ def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay:
             current_step="retrying",
         )
         logger.info(
-            "Job %s retry attempt %d/%d — waiting %ds",
-            job_id, retry_count, max_retries, int(delay),
+            "Job %s device %s retry attempt %d/%d — waiting %ds",
+            job_id, device, retry_count, max_retries, int(delay),
         )
         time.sleep(delay)
     return result, retry_count
@@ -407,6 +407,7 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
                 lambda: vlan_service.create_vlan_on_device(vlan_id, name, device),
                 job_id,
                 retry_base_delay=retry_base_delay,
+                device=device,
             )
 
             duration = time.time() - start_time
@@ -530,6 +531,7 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
                     lambda: vlan_service.delete_vlan(vlan_id, device),
                     job_id,
                     retry_base_delay=retry_base_delay,
+                    device=device,
                 )
                 last_result = result
 
@@ -686,6 +688,7 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
                 lambda: vlan_service.update_vlan_description(vlan_id, description, device),
                 job_id,
                 retry_base_delay=retry_base_delay,
+                device=device,
             )
 
             duration = time.time() - start_time
@@ -764,6 +767,7 @@ def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: floa
                 lambda: vlan_service.save_config_on_device(device),
                 job_id,
                 retry_base_delay=retry_base_delay,
+                device=device,
             )
             duration = time.time() - start_time
 

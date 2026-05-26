@@ -32,7 +32,7 @@ def test_group_job_execution_summary_all_completed():
         ]
     )
     s = gj.execution_summary()
-    assert s == {"total_devices": 2, "completed": 2, "failed": 0, "rollback_count": 0}
+    assert s == {"total_devices": 2, "completed": 2, "failed": 0, "partial_success": False, "rollback_count": 0, "duration_ms": None}
 
 
 def test_group_job_execution_summary_mixed():
@@ -44,7 +44,7 @@ def test_group_job_execution_summary_mixed():
         ]
     )
     s = gj.execution_summary()
-    assert s == {"total_devices": 2, "completed": 1, "failed": 1, "rollback_count": 1}
+    assert s == {"total_devices": 2, "completed": 1, "failed": 1, "partial_success": True, "rollback_count": 1, "duration_ms": None}
 
 
 def test_group_job_execution_summary_all_failed():
@@ -56,7 +56,7 @@ def test_group_job_execution_summary_all_failed():
         ]
     )
     s = gj.execution_summary()
-    assert s == {"total_devices": 2, "completed": 0, "failed": 2, "rollback_count": 1}
+    assert s == {"total_devices": 2, "completed": 0, "failed": 2, "partial_success": False, "rollback_count": 1, "duration_ms": None}
 
 
 # ── Service: create + retrieve ────────────────────────────────────────────────

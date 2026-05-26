@@ -68,9 +68,17 @@ class GroupJob:
         completed = sum(1 for r in self.device_results if r.status == "completed")
         failed = sum(1 for r in self.device_results if r.status == "failed")
         rollback_count = sum(1 for r in self.device_results if r.rollback_performed)
+        partial_success = completed > 0 and failed > 0
+        duration_ms: int | None = None
+        if self.started_at and self.finished_at:
+            s = self.started_at if self.started_at.tzinfo else self.started_at.replace(tzinfo=timezone.utc)
+            f = self.finished_at if self.finished_at.tzinfo else self.finished_at.replace(tzinfo=timezone.utc)
+            duration_ms = round((f - s).total_seconds() * 1000)
         return {
             "total_devices": self.total_devices,
             "completed": completed,
             "failed": failed,
+            "partial_success": partial_success,
             "rollback_count": rollback_count,
+            "duration_ms": duration_ms,
         }

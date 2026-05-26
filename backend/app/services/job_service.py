@@ -144,6 +144,7 @@ def update_job(
         now = datetime.now(timezone.utc)
         if status == "running":
             row.started_at = now
+            row.current_step = "executing"
             logger.info("Job %s started", job_id)
         elif status == "completed":
             row.finished_at = now
