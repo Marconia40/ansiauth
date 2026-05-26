@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { getJob, getGroupJob } from '@/services/api';
+import { StatusBadge } from '@/components/StatusBadge';
+import { ElapsedTimer } from '@/components/ElapsedTimer';
+import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Job, GroupJob, GroupJobDeviceResult } from '@/types/job';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -54,23 +57,6 @@ function Field({
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const classes: Record<string, string> = {
-    completed: 'bg-green-100 text-green-700',
-    failed: 'bg-red-100 text-red-700',
-    cancelled: 'bg-red-100 text-red-700',
-    running: 'bg-amber-100 text-amber-700',
-    retrying: 'bg-amber-100 text-amber-700',
-    pending: 'bg-gray-100 text-gray-600',
-    partial_success: 'bg-orange-100 text-orange-700',
-  };
-  return (
-    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${classes[status] ?? 'bg-gray-100 text-gray-600'}`}>
-      {status.replace('_', ' ')}
-    </span>
-  );
-}
-
 function JsonBlock({ data }: { data: unknown }) {
   if (data == null) return <span className="text-gray-300 text-xs">null</span>;
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
@@ -98,6 +84,7 @@ function RollbackRow({ performed, success }: { performed: boolean; success: bool
 function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: string; onBack?: () => void }) {
   const durationMs = job.execution_summary?.duration_ms ?? deriveDurationMs(job.started_at, job.finished_at);
   const attempts = job.execution_summary?.attempts;
+  const isActive = (ACTIVE_JOB_STATUSES as string[]).includes(job.status);
   const hasPreState = job.pre_state != null;
   const hasResult = job.result != null;
   const hasError = !!(job.error || job.last_error);
@@ -114,7 +101,27 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       )}
 
       <SectionHeader>Overview</SectionHeader>
-      <Field label="Status"><StatusBadge status={job.status} /></Field>
+      <Field label="Status">
+        <div className="flex items-center gap-2 flex-wrap">
+          <StatusBadge status={job.status} />
+          {job.rollback_performed && job.status !== 'rollback_performed' && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-50 text-orange-600">
+              Rollback executed
+            </span>
+          )}
+          {isActive && <ElapsedTimer startedAt={job.started_at} />}
+          {!isActive && durationMs != null && (
+            <span className="text-xs text-gray-400">{formatMs(durationMs)}</span>
+          )}
+        </div>
+      </Field>
+      {hasError && job.status === 'failed' && (
+        <Field label="Error">
+          <span className="text-red-600 text-xs truncate block max-w-full">
+            {job.error ?? job.last_error}
+          </span>
+        </Field>
+      )}
       <Field label="Device">{job.device}</Field>
       <Field label="Playbook">{job.playbook}</Field>
       <Field label="Job ID" mono>{job.job_id}</Field>
@@ -123,11 +130,15 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       )}
 
       <SectionHeader>Execution</SectionHeader>
-      <Field label="Duration">{formatMs(durationMs)}</Field>
+      <Field label="Duration">
+        {isActive
+          ? <ElapsedTimer startedAt={job.started_at} />
+          : formatMs(durationMs)}
+      </Field>
       {attempts != null && (
         <Field label="Attempts">{attempts} / {job.max_retries + 1}</Field>
       )}
-      {attempts == null && (
+      {attempts == null && job.retry_count > 0 && (
         <Field label="Retries">{job.retry_count} / {job.max_retries}</Field>
       )}
       <RollbackRow
@@ -157,9 +168,17 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
         </>
       )}
 
-      {hasError && (
+      {hasError && job.status !== 'failed' && (
         <>
           <SectionHeader>Error</SectionHeader>
+          <div className="text-sm text-red-700 bg-red-50 border border-red-100 rounded p-2 break-all">
+            {job.error ?? job.last_error}
+          </div>
+        </>
+      )}
+      {hasError && job.status === 'failed' && (
+        <>
+          <SectionHeader>Full Error</SectionHeader>
           <div className="text-sm text-red-700 bg-red-50 border border-red-100 rounded p-2 break-all">
             {job.error ?? job.last_error}
           </div>
@@ -174,6 +193,7 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
 function deviceIcon(status: string): { icon: string; className: string } {
   if (status === 'completed') return { icon: '✓', className: 'text-green-600' };
   if (status === 'failed' || status === 'cancelled') return { icon: '✗', className: 'text-red-600' };
+  if (status === 'rollback_performed') return { icon: '↩', className: 'text-orange-600' };
   if (status === 'running' || status === 'retrying') return { icon: '↻', className: 'text-amber-600' };
   return { icon: '·', className: 'text-gray-400' };
 }
@@ -186,6 +206,7 @@ function DeviceRow({
   onDrillDown: (jobId: string) => void;
 }) {
   const { icon, className } = deviceIcon(dr.status);
+  const isDeviceActive = dr.status === 'running' || dr.status === 'retrying';
   return (
     <div className="flex items-center gap-2 py-1.5 text-sm border-b border-gray-50 last:border-0">
       <span className={`font-mono w-4 text-center flex-shrink-0 ${className}`}>{icon}</span>
@@ -193,9 +214,11 @@ function DeviceRow({
       <span className="flex-shrink-0">
         <StatusBadge status={dr.status} />
       </span>
-      {dr.duration_ms != null && (
+      {isDeviceActive ? (
+        <span className="text-xs text-gray-300 flex-shrink-0">running</span>
+      ) : dr.duration_ms != null ? (
         <span className="text-xs text-gray-400 flex-shrink-0">{formatMs(dr.duration_ms)}</span>
-      )}
+      ) : null}
       {dr.retry_count > 0 && (
         <span className="text-xs text-amber-600 flex-shrink-0">↺{dr.retry_count}</span>
       )}
@@ -224,18 +247,23 @@ function GroupJobView({
   onDrillDown: (jobId: string, device: string) => void;
 }) {
   const { execution_summary: s, device_results, parameters } = groupJob;
+  const isGroupActive = groupJob.status === 'pending' || groupJob.status === 'running';
 
   return (
     <div>
       <SectionHeader>Overview</SectionHeader>
       <Field label="Status">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <StatusBadge status={groupJob.status} />
           {s.total_devices > 0 && (
             <span className="text-xs text-gray-500">
               {s.completed}/{s.total_devices} completed
               {s.failed > 0 && `, ${s.failed} failed`}
             </span>
+          )}
+          {isGroupActive && <ElapsedTimer startedAt={groupJob.started_at} />}
+          {!isGroupActive && s.duration_ms != null && (
+            <span className="text-xs text-gray-400">{formatMs(s.duration_ms)}</span>
           )}
         </div>
       </Field>

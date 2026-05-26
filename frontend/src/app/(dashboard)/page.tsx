@@ -5,8 +5,11 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
+import { StatusBadge } from '@/components/StatusBadge';
+import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { useAuth } from '@/context/AuthContext';
 import { getDevices, getJobs, getAuditLogs } from '@/services/api';
+import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Device } from '@/types/device';
 import type { Job } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
@@ -19,15 +22,9 @@ function extractMessage(error: unknown, fallback: string): string {
 function statusColor(status: string): string {
   if (status === 'completed' || status === 'success') return 'text-green-600';
   if (status === 'failed' || status === 'error' || status === 'cancelled') return 'text-red-600';
-  if (status === 'pending' || status === 'running' || status === 'retrying') return 'text-amber-600';
+  if ((ACTIVE_JOB_STATUSES as string[]).includes(status)) return 'text-amber-600';
+  if (status === 'partial_failure' || status === 'partial_success' || status === 'rollback_performed') return 'text-orange-600';
   return 'text-gray-600';
-}
-
-function statusBadge(status: string): string {
-  if (status === 'completed' || status === 'success') return 'bg-green-100 text-green-700';
-  if (status === 'failed' || status === 'error' || status === 'cancelled') return 'bg-red-100 text-red-700';
-  if (status === 'pending' || status === 'running' || status === 'retrying') return 'bg-amber-100 text-amber-700';
-  return 'bg-gray-100 text-gray-700';
 }
 
 function formatDuration(job: Job): string {
@@ -261,20 +258,25 @@ export default function DashboardPage() {
               </tr>
             </thead>
             <tbody>
-              {recentJobs.map((job) => (
-                <tr key={job.job_id} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="px-4 py-2 font-mono text-xs text-gray-700">{job.job_id.slice(0, 8)}…</td>
-                  <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
-                  <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
-                  <td className="px-4 py-2">
-                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${statusBadge(job.status)}`}>
-                      {job.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2 text-gray-600">{formatDuration(job)}</td>
-                  <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
-                </tr>
-              ))}
+              {recentJobs.map((job) => {
+                const isActive = (ACTIVE_JOB_STATUSES as string[]).includes(job.status);
+                return (
+                  <tr key={job.job_id} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-xs text-gray-700">{job.job_id.slice(0, 8)}…</td>
+                    <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
+                    <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
+                    <td className="px-4 py-2">
+                      <StatusBadge status={job.status} />
+                    </td>
+                    <td className="px-4 py-2 text-gray-600">
+                      {isActive
+                        ? <ElapsedTimer startedAt={job.started_at} className="text-xs text-amber-600" />
+                        : formatDuration(job)}
+                    </td>
+                    <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

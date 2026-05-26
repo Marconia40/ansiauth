@@ -5,27 +5,24 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
+import { StatusBadge } from '@/components/StatusBadge';
+import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { getJobs, getJob } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
-import type { Job, JobStatus } from '@/types/job';
+import { ACTIVE_JOB_STATUSES } from '@/types/job';
+import type { Job } from '@/types/job';
 
 function extractMessage(error: unknown, fallback: string): string {
   const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
   return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
 }
 
-function statusClass(status: JobStatus | string): string {
+function statusClass(status: string): string {
   if (status === 'completed') return 'text-green-600';
   if (status === 'failed' || status === 'cancelled') return 'text-red-600';
-  if (status === 'running' || status === 'retrying' || status === 'pending') return 'text-amber-600';
+  if ((ACTIVE_JOB_STATUSES as string[]).includes(status)) return 'text-amber-600';
+  if (status === 'partial_failure' || status === 'partial_success' || status === 'rollback_performed') return 'text-orange-600';
   return 'text-gray-600';
-}
-
-function statusBadge(status: JobStatus | string): string {
-  if (status === 'completed') return 'bg-green-100 text-green-700';
-  if (status === 'failed' || status === 'cancelled') return 'bg-red-100 text-red-700';
-  if (status === 'running' || status === 'retrying' || status === 'pending') return 'bg-amber-100 text-amber-700';
-  return 'bg-gray-100 text-gray-700';
 }
 
 function formatDuration(job: Job): string {
@@ -67,7 +64,7 @@ export default function JobsPage() {
     queryFn: () => getJobs(),
     refetchInterval: (query) => {
       const jobs = normalizeJobs(query.state.data);
-      const hasActive = jobs.some((j) => j.status === 'pending' || j.status === 'running');
+      const hasActive = jobs.some((j) => (ACTIVE_JOB_STATUSES as string[]).includes(j.status));
       return hasActive ? 2500 : false;
     },
   });
@@ -85,7 +82,7 @@ export default function JobsPage() {
     refetchInterval: (query) => {
       const job = query.state.data as Job | undefined;
       if (!job) return false;
-      return (job.status === 'pending' || job.status === 'running') ? 2500 : false;
+      return (ACTIVE_JOB_STATUSES as string[]).includes(job.status) ? 2500 : false;
     },
   });
 
@@ -139,44 +136,60 @@ export default function JobsPage() {
             </tr>
           </thead>
           <tbody>
-            {jobs.map((job) => (
-              <tr
-                key={job.job_id}
-                onClick={() =>
-                  setSelectedJobId(job.job_id === selectedJobId ? null : job.job_id)
-                }
-                className={`border-b border-gray-100 cursor-pointer hover:bg-blue-50 transition-colors ${
-                  job.job_id === selectedJobId ? 'bg-blue-50' : ''
-                }`}
-              >
-                <td className="px-4 py-2 font-mono text-xs text-gray-700">
-                  <span>{job.job_id.slice(0, 8)}…</span>
-                  {trackedIds.has(job.job_id) && (
-                    <span className="ml-1.5 px-1 py-0.5 rounded text-xs bg-blue-100 text-blue-600 font-sans font-medium">
-                      tracked
-                    </span>
-                  )}
-                </td>
-                <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
-                <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
-                <td className="px-4 py-2">
-                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${statusBadge(job.status)}`}>
-                    {job.status}
-                  </span>
-                </td>
-                <td className="px-4 py-2 text-gray-600">
-                  {job.retry_count} / {job.max_retries}
-                </td>
-                <td className="px-4 py-2 text-gray-600">
-                  {job.rollback_performed ? 'Yes' : 'No'}
-                </td>
-                <td className="px-4 py-2 text-gray-600 max-w-[160px] truncate">
-                  {job.error ?? job.last_error ?? '—'}
-                </td>
-                <td className="px-4 py-2 text-gray-600">{formatDuration(job)}</td>
-                <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
-              </tr>
-            ))}
+            {jobs.map((job) => {
+              const isActive = (ACTIVE_JOB_STATUSES as string[]).includes(job.status);
+              return (
+                <tr
+                  key={job.job_id}
+                  onClick={() =>
+                    setSelectedJobId(job.job_id === selectedJobId ? null : job.job_id)
+                  }
+                  className={`border-b border-gray-100 cursor-pointer hover:bg-blue-50 transition-colors ${
+                    job.job_id === selectedJobId ? 'bg-blue-50' : ''
+                  }`}
+                >
+                  <td className="px-4 py-2 font-mono text-xs text-gray-700">
+                    <span>{job.job_id.slice(0, 8)}…</span>
+                    {trackedIds.has(job.job_id) && (
+                      <span className="ml-1.5 px-1 py-0.5 rounded text-xs bg-blue-100 text-blue-600 font-sans font-medium">
+                        tracked
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
+                  <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
+                  <td className="px-4 py-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <StatusBadge status={job.status} />
+                      {job.rollback_performed && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-orange-50 text-orange-600">
+                          ↩
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-2 text-gray-600">
+                    {job.retry_count > 0
+                      ? <span className="text-amber-600">{job.retry_count} / {job.max_retries}</span>
+                      : <span>{job.retry_count} / {job.max_retries}</span>}
+                  </td>
+                  <td className="px-4 py-2 text-gray-600">
+                    {job.rollback_performed
+                      ? <span className="text-orange-600">Yes</span>
+                      : 'No'}
+                  </td>
+                  <td className="px-4 py-2 text-gray-600 max-w-[160px] truncate">
+                    {job.error ?? job.last_error ?? '—'}
+                  </td>
+                  <td className="px-4 py-2 text-gray-600">
+                    {isActive
+                      ? <ElapsedTimer startedAt={job.started_at} className="text-xs text-amber-600" />
+                      : formatDuration(job)}
+                  </td>
+                  <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}
@@ -206,7 +219,19 @@ export default function JobsPage() {
               <dd className="text-gray-900">{detail.playbook ?? 'N/A'}</dd>
 
               <dt className="text-gray-500">Status</dt>
-              <dd className={`font-medium ${statusClass(detail.status)}`}>{detail.status}</dd>
+              <dd>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <StatusBadge status={detail.status} />
+                  {detail.rollback_performed && (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-50 text-orange-600">
+                      Rollback executed
+                    </span>
+                  )}
+                  {(ACTIVE_JOB_STATUSES as string[]).includes(detail.status) && (
+                    <ElapsedTimer startedAt={detail.started_at} className="text-xs text-amber-600" />
+                  )}
+                </div>
+              </dd>
 
               <dt className="text-gray-500">Device</dt>
               <dd className="text-gray-900">{detail.device ?? 'N/A'}</dd>
@@ -215,16 +240,30 @@ export default function JobsPage() {
               <dd className="text-gray-900">{detail.current_step ?? 'N/A'}</dd>
 
               <dt className="text-gray-500">Retry Count</dt>
-              <dd className="text-gray-900">{detail.retry_count} / {detail.max_retries}</dd>
+              <dd className={`font-medium ${statusClass(detail.retry_count > 0 ? 'retrying' : 'completed')}`}>
+                {detail.retry_count} / {detail.max_retries}
+              </dd>
 
-              <dt className="text-gray-500">Rollback Performed</dt>
-              <dd className="text-gray-900">{detail.rollback_performed ? 'Yes' : 'No'}</dd>
+              <dt className="text-gray-500">Rollback</dt>
+              <dd className={detail.rollback_performed ? 'text-orange-600 font-medium' : 'text-gray-900'}>
+                {detail.rollback_performed
+                  ? `Executed — ${detail.rollback_success === true ? 'succeeded' : detail.rollback_success === false ? 'failed' : 'unverified'}`
+                  : 'No'}
+              </dd>
 
-              <dt className="text-gray-500">Error</dt>
-              <dd className="text-red-600">{detail.error ?? '—'}</dd>
+              {(detail.error || detail.last_error) && (
+                <>
+                  <dt className="text-gray-500">Error</dt>
+                  <dd className="text-red-600">{detail.error ?? detail.last_error}</dd>
+                </>
+              )}
 
-              <dt className="text-gray-500">Last Error</dt>
-              <dd className="text-red-600">{detail.last_error ?? '—'}</dd>
+              <dt className="text-gray-500">Duration</dt>
+              <dd className="text-gray-900">
+                {(ACTIVE_JOB_STATUSES as string[]).includes(detail.status)
+                  ? <ElapsedTimer startedAt={detail.started_at} className="text-xs text-amber-600" />
+                  : formatDuration(detail)}
+              </dd>
 
               <dt className="text-gray-500">Started At</dt>
               <dd className="text-gray-900">{formatDate(detail.started_at)}</dd>

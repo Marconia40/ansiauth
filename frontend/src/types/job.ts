@@ -1,11 +1,13 @@
 // Matches the _format_job() output in backend/app/api/jobs.py
 export type JobStatus =
   | 'pending'
+  | 'queued'
   | 'running'
   | 'retrying'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'rollback_performed';
 
 export interface JobExecutionSummary {
   attempts: number | null;
@@ -36,9 +38,9 @@ export interface Job {
 }
 
 // Statuses that mean the job is still running and should be polled
-export const ACTIVE_JOB_STATUSES: JobStatus[] = ['pending', 'running', 'retrying'];
+export const ACTIVE_JOB_STATUSES: JobStatus[] = ['pending', 'queued', 'running', 'retrying'];
 
-export type GroupJobStatus = 'pending' | 'running' | 'completed' | 'partial_success' | 'failed';
+export type GroupJobStatus = 'pending' | 'running' | 'completed' | 'partial_success' | 'partial_failure' | 'failed';
 
 export interface GroupJobDeviceResult {
   device: string;
