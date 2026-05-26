@@ -117,10 +117,20 @@ def update_device_result(
             else:
                 row.status = "failed"
             row.finished_at = datetime.now(timezone.utc)
+            _final_status = row.status
+            _n = len(results)
         else:
             row.status = "running"
+            _final_status = None
+            _n = 0
 
     logger.info(
         "GroupJob %s device=%s → status=%s (retry_count=%d rollback=%s)",
         group_job_id, device, status, retry_count, rollback_performed,
     )
+    if _final_status is not None:
+        completed_count = sum(1 for r in results if r.get("status") == "completed")
+        logger.info(
+            "GroupJob %s reached terminal status=%s (total=%d completed=%d failed=%d)",
+            group_job_id, _final_status, _n, completed_count, _n - completed_count,
+        )

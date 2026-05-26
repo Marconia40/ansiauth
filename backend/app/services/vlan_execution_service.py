@@ -816,6 +816,20 @@ def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: floa
 # device_tasks tuples carry only the data needed to call the corresponding
 # run_*_job; retry_base_delay and group_job_id are passed as separate args.
 
+def _log_group_outcome(group_job_id: str, operation: str) -> None:
+    """Fetch and log the final aggregate status after all devices have run."""
+    try:
+        gj = group_job_service.get_group_job(group_job_id)
+        if gj:
+            s = gj.execution_summary()
+            logger.info(
+                "GroupJob %s: %s complete — status=%s completed=%d/%d",
+                group_job_id, operation, gj.status, s["completed"], s["total_devices"],
+            )
+    except Exception as exc:
+        logger.warning("GroupJob %s: could not fetch final status: %s", group_job_id, exc)
+
+
 def run_group_create_job(
     group_job_id: str,
     device_tasks: list[tuple],  # (job_id, vlan_id, name, device, audit_id, pre_state)
@@ -827,7 +841,7 @@ def run_group_create_job(
         run_create_job(job_id, vlan_id, name, device, audit_id, retry_base_delay,
                        pre_state=pre_state, group_job_id=group_job_id)
         logger.info("GroupJob %s: finished device=%s", group_job_id, device)
-    logger.info("GroupJob %s: sequential create done", group_job_id)
+    _log_group_outcome(group_job_id, "create")
 
 
 def run_group_delete_job(
@@ -841,7 +855,7 @@ def run_group_delete_job(
         run_delete_job(job_id, vlan_id, device, audit_id, retry_base_delay,
                        pre_state=pre_state, group_job_id=group_job_id)
         logger.info("GroupJob %s: finished device=%s", group_job_id, device)
-    logger.info("GroupJob %s: sequential delete done", group_job_id)
+    _log_group_outcome(group_job_id, "delete")
 
 
 def run_group_update_job(
@@ -855,7 +869,7 @@ def run_group_update_job(
         run_update_job(job_id, vlan_id, description, device, audit_id, retry_base_delay,
                        pre_state=pre_state, group_job_id=group_job_id)
         logger.info("GroupJob %s: finished device=%s", group_job_id, device)
-    logger.info("GroupJob %s: sequential update done", group_job_id)
+    _log_group_outcome(group_job_id, "update")
 
 
 # ── Enqueue helpers (called by route handlers) ────────────────────────────────
