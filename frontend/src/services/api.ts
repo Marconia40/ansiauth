@@ -208,9 +208,9 @@ export async function getJobs(params?: {
   device?: string;
   page?: number;
   page_size?: number;
-}) {
-  const { data } = await client.get<{ items: unknown[]; total: number }>('/jobs/', { params });
-  return data.items ?? [];
+}): Promise<{ items: Job[]; total: number }> {
+  const { data } = await client.get<{ items: Job[]; total: number }>('/jobs/', { params });
+  return { items: data.items ?? [], total: data.total ?? 0 };
 }
 
 export async function getJob(jobId: string): Promise<Job> {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
@@ -17,6 +17,8 @@ import type { Job } from '@/types/job';
 
 type SortKey = 'newest' | 'oldest' | 'duration' | 'failures_first';
 type DateRange = 'today' | '7d' | '30d' | 'all';
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -55,16 +57,6 @@ function isToday(ts: string | null | undefined): boolean {
   );
 }
 
-function normalizeJobs(data: unknown): Job[] {
-  if (Array.isArray(data)) return data as Job[];
-  if (data && typeof data === 'object') {
-    const d = data as Record<string, unknown>;
-    if (Array.isArray(d.items)) return d.items as Job[];
-    if (Array.isArray(d.jobs)) return d.jobs as Job[];
-  }
-  return [];
-}
-
 function startOfDay(offsetDays = 0): number {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -73,7 +65,7 @@ function startOfDay(offsetDays = 0): number {
 
 // ── Summary bar ───────────────────────────────────────────────────────────────
 
-function SummaryBar({ jobs }: { jobs: Job[] }) {
+function SummaryBar({ jobs, total }: { jobs: Job[]; total: number }) {
   const todayCount = jobs.filter(j => isToday(j.created_at)).length;
   const terminal = jobs.filter(j => j.status === 'completed' || j.status === 'failed');
   const successRate =
@@ -100,11 +92,16 @@ function SummaryBar({ jobs }: { jobs: Job[] }) {
           <div className="text-xs text-gray-500 mt-0.5">{s.label}</div>
         </div>
       ))}
+      {total > jobs.length && (
+        <p className="col-span-2 sm:col-span-4 text-xs text-gray-400 -mt-1">
+          Stats reflect this page only ({jobs.length} of {total} jobs loaded)
+        </p>
+      )}
     </div>
   );
 }
 
-// ── Select helper ─────────────────────────────────────────────────────────────
+// ── Shared select class ───────────────────────────────────────────────────────
 
 const SELECT_CLS =
   'px-2 py-1.5 text-sm border border-gray-300 rounded-md bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400';
@@ -124,6 +121,8 @@ interface FilterBarProps {
   setFilterDateRange: (v: DateRange) => void;
   sort: SortKey;
   setSort: (v: SortKey) => void;
+  pageSize: number;
+  setPageSize: (v: number) => void;
   hasActiveFilters: boolean;
   onClearFilters: () => void;
 }
@@ -141,6 +140,8 @@ function FilterBar({
   setFilterDateRange,
   sort,
   setSort,
+  pageSize,
+  setPageSize,
   hasActiveFilters,
   onClearFilters,
 }: FilterBarProps) {
@@ -177,22 +178,110 @@ function FilterBar({
       </select>
 
       {hasActiveFilters && (
-        <button
-          onClick={onClearFilters}
-          className="text-xs text-gray-500 hover:text-gray-700 underline px-1"
-        >
+        <button onClick={onClearFilters} className="text-xs text-gray-500 hover:text-gray-700 underline px-1">
           Clear
         </button>
       )}
 
-      <div className="ml-auto flex items-center gap-2">
-        <span className="text-xs text-gray-400 whitespace-nowrap">Sort:</span>
-        <select value={sort} onChange={e => setSort(e.target.value as SortKey)} className={SELECT_CLS}>
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-          <option value="duration">Longest duration</option>
-          <option value="failures_first">Failures first</option>
-        </select>
+      <div className="ml-auto flex items-center gap-3">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-400 whitespace-nowrap">Per page:</span>
+          <select value={pageSize} onChange={e => setPageSize(Number(e.target.value))} className={SELECT_CLS}>
+            {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-400 whitespace-nowrap">Sort:</span>
+          <select value={sort} onChange={e => setSort(e.target.value as SortKey)} className={SELECT_CLS}>
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="duration">Longest duration</option>
+            <option value="failures_first">Failures first</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Pagination controls ───────────────────────────────────────────────────────
+
+function Pagination({
+  page,
+  totalPages,
+  totalItems,
+  pageSize,
+  onPrev,
+  onNext,
+  onGoTo,
+}: {
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  pageSize: number;
+  onPrev: () => void;
+  onNext: () => void;
+  onGoTo: (p: number) => void;
+}) {
+  const [inputVal, setInputVal] = useState(String(page));
+
+  useEffect(() => { setInputVal(String(page)); }, [page]);
+
+  const firstItem = (page - 1) * pageSize + 1;
+  const lastItem = Math.min(page * pageSize, totalItems);
+
+  function handleKey(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== 'Enter') return;
+    const n = parseInt(inputVal, 10);
+    if (!isNaN(n) && n >= 1 && n <= totalPages) onGoTo(n);
+    else setInputVal(String(page));
+  }
+
+  function handleBlur() {
+    const n = parseInt(inputVal, 10);
+    if (!isNaN(n) && n >= 1 && n <= totalPages) onGoTo(n);
+    else setInputVal(String(page));
+  }
+
+  if (totalPages <= 1) return null;
+
+  return (
+    <div className="flex items-center justify-between mt-4 text-sm">
+      <span className="text-xs text-gray-400">
+        {firstItem}–{lastItem} of {totalItems}
+      </span>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onPrev}
+          disabled={page <= 1}
+          className="px-2.5 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          ← Prev
+        </button>
+
+        <div className="flex items-center gap-1 text-xs text-gray-500">
+          <span>Page</span>
+          <input
+            type="text"
+            value={inputVal}
+            onChange={e => setInputVal(e.target.value)}
+            onKeyDown={handleKey}
+            onBlur={handleBlur}
+            className="w-10 px-1.5 py-0.5 text-center border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+            aria-label="Page number"
+          />
+          <span>of {totalPages}</span>
+        </div>
+
+        <button
+          onClick={onNext}
+          disabled={page >= totalPages}
+          className="px-2.5 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Next →
+        </button>
       </div>
     </div>
   );
@@ -206,34 +295,37 @@ export default function JobsPage() {
   const [filterPlaybook, setFilterPlaybook] = useState('');
   const [filterDateRange, setFilterDateRange] = useState<DateRange>('all');
   const [sort, setSort] = useState<SortKey>('newest');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 
   const { jobs: trackedJobs } = useJobNotifications();
   const trackedIds = new Set(trackedJobs.map(n => n.jobId));
 
-  const { data: jobsRaw, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ['jobs'],
-    queryFn: () => getJobs({ page: 1, page_size: 150 }),
+  // reset to page 1 when server-side params change
+  useEffect(() => { setPage(1); }, [filterStatus, filterDevice, pageSize]);
+
+  const { data, isLoading, error, refetch, isFetching } = useQuery({
+    queryKey: ['jobs', page, pageSize, filterStatus, filterDevice],
+    queryFn: () => getJobs({
+      page,
+      page_size: pageSize,
+      status: filterStatus || undefined,
+      device: filterDevice || undefined,
+    }),
     refetchInterval: (query) => {
-      const jobs = normalizeJobs(query.state.data);
-      const hasActive = jobs.some(j => (ACTIVE_JOB_STATUSES as string[]).includes(j.status));
+      const items = (query.state.data as { items: Job[] } | undefined)?.items ?? [];
+      const hasActive = items.some(j => (ACTIVE_JOB_STATUSES as string[]).includes(j.status));
       return hasActive ? 2500 : false;
     },
   });
 
-  const allJobs = normalizeJobs(jobsRaw);
+  const pageItems: Job[] = data?.items ?? [];
+  const serverTotal: number = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(serverTotal / pageSize));
 
-  const uniqueDevices = useMemo(() => {
-    const s = new Set(allJobs.map(j => j.device).filter(Boolean) as string[]);
-    return Array.from(s).sort();
-  }, [allJobs]);
-
-  const uniquePlaybooks = useMemo(() => {
-    const s = new Set(allJobs.map(j => j.playbook).filter(Boolean) as string[]);
-    return Array.from(s).sort();
-  }, [allJobs]);
-
-  const filteredJobs = useMemo(() => {
+  // client-side filters applied on top of the server page
+  const displayItems = useMemo(() => {
     const cutoffs: Record<DateRange, number | null> = {
       today: startOfDay(),
       '7d': startOfDay(7),
@@ -241,14 +333,10 @@ export default function JobsPage() {
       all: null,
     };
 
-    let jobs = allJobs;
-    if (filterDevice) jobs = jobs.filter(j => j.device === filterDevice);
-    if (filterStatus) jobs = jobs.filter(j => j.status === filterStatus);
+    let jobs = pageItems;
     if (filterPlaybook) jobs = jobs.filter(j => j.playbook === filterPlaybook);
     const cut = cutoffs[filterDateRange];
-    if (cut != null) {
-      jobs = jobs.filter(j => j.created_at != null && new Date(j.created_at).getTime() >= cut);
-    }
+    if (cut != null) jobs = jobs.filter(j => j.created_at != null && new Date(j.created_at).getTime() >= cut);
 
     const result = [...jobs];
     if (sort === 'newest') {
@@ -266,9 +354,18 @@ export default function JobsPage() {
       };
       result.sort((a, b) => rank(a) - rank(b));
     }
-
     return result;
-  }, [allJobs, filterDevice, filterStatus, filterPlaybook, filterDateRange, sort]);
+  }, [pageItems, filterPlaybook, filterDateRange, sort]);
+
+  const uniqueDevices = useMemo(() => {
+    const s = new Set(pageItems.map(j => j.device).filter(Boolean) as string[]);
+    return Array.from(s).sort();
+  }, [pageItems]);
+
+  const uniquePlaybooks = useMemo(() => {
+    const s = new Set(pageItems.map(j => j.playbook).filter(Boolean) as string[]);
+    return Array.from(s).sort();
+  }, [pageItems]);
 
   const hasActiveFilters =
     !!filterDevice || !!filterStatus || !!filterPlaybook || filterDateRange !== 'all';
@@ -303,16 +400,13 @@ export default function JobsPage() {
       ) : error ? (
         <div className="py-6">
           <ErrorMessage error={extractMessage(error, 'Could not load jobs')} />
-          <button
-            onClick={() => refetch()}
-            className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
-          >
+          <button onClick={() => refetch()} className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50">
             Retry
           </button>
         </div>
       ) : (
         <>
-          <SummaryBar jobs={allJobs} />
+          <SummaryBar jobs={pageItems} total={serverTotal} />
 
           <FilterBar
             devices={uniqueDevices}
@@ -327,18 +421,17 @@ export default function JobsPage() {
             setFilterDateRange={setFilterDateRange}
             sort={sort}
             setSort={setSort}
+            pageSize={pageSize}
+            setPageSize={setPageSize}
             hasActiveFilters={hasActiveFilters}
             onClearFilters={clearFilters}
           />
 
-          {filteredJobs.length === 0 ? (
+          {displayItems.length === 0 ? (
             <div className="py-12 text-center">
               <p className="text-gray-400 text-sm">No jobs match the current filters.</p>
               {hasActiveFilters && (
-                <button
-                  onClick={clearFilters}
-                  className="mt-2 text-xs text-blue-600 hover:underline"
-                >
+                <button onClick={clearFilters} className="mt-2 text-xs text-blue-600 hover:underline">
                   Clear filters
                 </button>
               )}
@@ -346,8 +439,8 @@ export default function JobsPage() {
           ) : (
             <>
               <p className="text-xs text-gray-400 mb-2">
-                {filteredJobs.length} job{filteredJobs.length !== 1 ? 's' : ''}
-                {hasActiveFilters && ` — filtered from ${allJobs.length} total`}
+                {serverTotal} total
+                {hasActiveFilters && ` — showing ${displayItems.length} on this page`}
               </p>
 
               <table className="w-full border-collapse text-sm">
@@ -363,15 +456,12 @@ export default function JobsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredJobs.map(job => {
+                  {displayItems.map(job => {
                     const isActive = (ACTIVE_JOB_STATUSES as string[]).includes(job.status);
                     const durationMs = getDurationMs(job);
 
                     return (
-                      <tr
-                        key={job.job_id}
-                        className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
-                      >
+                      <tr key={job.job_id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
                         <td className="px-4 py-2.5 font-mono text-xs text-gray-600">
                           {job.job_id.slice(0, 8)}…
                           {trackedIds.has(job.job_id) && (
@@ -381,13 +471,9 @@ export default function JobsPage() {
                           )}
                         </td>
 
-                        <td className="px-4 py-2.5 text-gray-900">
-                          {job.playbook ?? '—'}
-                        </td>
+                        <td className="px-4 py-2.5 text-gray-900">{job.playbook ?? '—'}</td>
 
-                        <td className="px-4 py-2.5 text-gray-900">
-                          {job.device ?? '—'}
-                        </td>
+                        <td className="px-4 py-2.5 text-gray-900">{job.device ?? '—'}</td>
 
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-1.5 flex-wrap">
@@ -433,16 +519,23 @@ export default function JobsPage() {
                   })}
                 </tbody>
               </table>
+
+              <Pagination
+                page={page}
+                totalPages={totalPages}
+                totalItems={serverTotal}
+                pageSize={pageSize}
+                onPrev={() => setPage(p => Math.max(1, p - 1))}
+                onNext={() => setPage(p => Math.min(totalPages, p + 1))}
+                onGoTo={setPage}
+              />
             </>
           )}
         </>
       )}
 
       {selectedJobId && (
-        <JobDetailModal
-          jobId={selectedJobId}
-          onClose={() => setSelectedJobId(null)}
-        />
+        <JobDetailModal jobId={selectedJobId} onClose={() => setSelectedJobId(null)} />
       )}
     </div>
   );
