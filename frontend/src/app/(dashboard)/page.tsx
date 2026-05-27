@@ -109,7 +109,7 @@ export default function DashboardPage() {
   }
 
   const deviceList = devices ?? [];
-  const jobs = (Array.isArray(jobsRaw) ? jobsRaw : []) as Job[];
+  const jobs = (jobsRaw?.items ?? []) as Job[];
   const logs = auditLogs ?? [];
 
   const totalDevices = deviceList.length;
