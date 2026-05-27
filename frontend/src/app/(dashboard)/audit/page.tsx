@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { useAuth } from '@/context/AuthContext';
@@ -319,6 +319,207 @@ function FilterBar(props: FilterBarProps) {
   );
 }
 
+// ── Export helpers (frontend-only generation) ────────────────────────────────
+
+const EXPORT_COLUMNS = [
+  'id',
+  'timestamp',
+  'user',
+  'action',
+  'resource',
+  'resource_id',
+  'status',
+  'device',
+  'job_id',
+  'request_id',
+  'parent_audit_id',
+  'details',
+] as const;
+
+const EXPORT_FETCH_CHUNK = 1000;
+const EXPORT_MAX_ROWS = 100_000;
+
+type ExportFormat = 'csv' | 'json';
+type ExportScope = 'page' | 'all';
+
+function csvEscape(value: unknown): string {
+  if (value == null) return '';
+  const raw = typeof value === 'string' ? value : JSON.stringify(value);
+  if (/[",\r\n]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
+  return raw;
+}
+
+function toCsv(rows: AuditLog[]): string {
+  const header = EXPORT_COLUMNS.join(',');
+  const body = rows.map(r =>
+    EXPORT_COLUMNS.map(c => csvEscape((r as unknown as Record<string, unknown>)[c])).join(','),
+  );
+  // UTF-8 BOM + CRLF — best compatibility with Excel and LibreOffice.
+  return '﻿' + [header, ...body].join('\r\n') + '\r\n';
+}
+
+function toJsonPretty(rows: AuditLog[]): string {
+  return JSON.stringify(rows, null, 2) + '\n';
+}
+
+function triggerDownload(content: string, filename: string, mime: string): void {
+  const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+function sanitizeToken(s: string): string {
+  return s
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24);
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function buildExportFilename(opts: {
+  scope: ExportScope;
+  state: AuditQueryState;
+  ext: ExportFormat;
+  hasFilters: boolean;
+}): string {
+  const { scope, state, ext, hasFilters } = opts;
+  const tokens: string[] = ['audit_logs'];
+  if (hasFilters) tokens.push('filtered');
+
+  const filterTokens = [state.status, state.action, state.resource, state.user, state.device]
+    .filter(Boolean)
+    .map(sanitizeToken)
+    .filter(Boolean)
+    .slice(0, 3);
+  tokens.push(...filterTokens);
+
+  if (scope === 'page') tokens.push(`page${state.page}`);
+  tokens.push(todayIso());
+  return `${tokens.join('_')}.${ext}`;
+}
+
+type AuditQueryFilters = Omit<Parameters<typeof getAuditLogs>[0] & object, 'page' | 'page_size' | 'skip' | 'limit'>;
+
+async function fetchAllFiltered(filters: AuditQueryFilters): Promise<AuditLog[]> {
+  const collected: AuditLog[] = [];
+  let skip = 0;
+  while (true) {
+    const { items, total } = await getAuditLogs({ ...filters, skip, limit: EXPORT_FETCH_CHUNK });
+    collected.push(...items);
+    if (items.length < EXPORT_FETCH_CHUNK) break;
+    if (total > 0 && collected.length >= total) break;
+    if (collected.length >= EXPORT_MAX_ROWS) break;
+    skip += EXPORT_FETCH_CHUNK;
+  }
+  return collected.slice(0, EXPORT_MAX_ROWS);
+}
+
+// ── Export menu ──────────────────────────────────────────────────────────────
+
+interface ExportMenuProps {
+  onExport: (format: ExportFormat, scope: ExportScope) => void;
+  busy: boolean;
+  pageCount: number;
+  totalCount: number;
+}
+
+function ExportMenu({ onExport, busy, pageCount, totalCount }: ExportMenuProps) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const disabled = busy || (pageCount === 0 && totalCount === 0);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  function choose(format: ExportFormat, scope: ExportScope) {
+    setOpen(false);
+    onExport(format, scope);
+  }
+
+  return (
+    <div ref={ref} className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {busy ? 'Exporting…' : 'Export ▾'}
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 mt-1 w-64 rounded-md border border-gray-200 bg-white shadow-lg text-sm z-10"
+        >
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-400 border-b border-gray-100">
+            Current page ({pageCount})
+          </div>
+          <button
+            role="menuitem"
+            onClick={() => choose('csv', 'page')}
+            disabled={pageCount === 0}
+            className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Export current page (CSV)
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => choose('json', 'page')}
+            disabled={pageCount === 0}
+            className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Export current page (JSON)
+          </button>
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-400 border-y border-gray-100">
+            All filtered results ({totalCount.toLocaleString()})
+          </div>
+          <button
+            role="menuitem"
+            onClick={() => choose('csv', 'all')}
+            disabled={totalCount === 0}
+            className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Export all filtered results (CSV)
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => choose('json', 'all')}
+            disabled={totalCount === 0}
+            className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Export all filtered results (JSON)
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main content (uses useSearchParams — must be inside Suspense) ────────────
 
 const KNOWN_RESOURCES = ['vlan', 'job', 'auth', 'device', 'user', 'audit_log', 'request'];
@@ -431,21 +632,69 @@ function AuditPageContent() {
     !!state.device ||
     state.dateRange !== 'all';
 
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const handleExport = useCallback(
+    async (format: ExportFormat, scope: ExportScope) => {
+      setExporting(true);
+      setExportError(null);
+      try {
+        let rows: AuditLog[];
+        if (scope === 'page') {
+          rows = items;
+        } else {
+          rows = await fetchAllFiltered({
+            user: state.user || undefined,
+            action: state.action || undefined,
+            resource: state.resource || undefined,
+            status: state.status || undefined,
+            device_id: state.device || undefined,
+            from_date: dateRangeToFromDate(state.dateRange),
+          });
+        }
+        const content = format === 'csv' ? toCsv(rows) : toJsonPretty(rows);
+        const filename = buildExportFilename({ scope, state, ext: format, hasFilters: hasActiveFilters });
+        const mime = format === 'csv' ? 'text/csv' : 'application/json';
+        triggerDownload(content, filename, mime);
+      } catch (e) {
+        setExportError(extractMessage(e, 'Export failed'));
+      } finally {
+        setExporting(false);
+      }
+    },
+    [items, state, hasActiveFilters],
+  );
+
   return (
     <div>
       <PageHeader
         title="Audit Logs"
         actions={
-          <button
-            onClick={() => refetch()}
-            disabled={isLoading || isFetching}
-            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isFetching ? 'Refreshing…' : 'Refresh'}
-          </button>
+          <div className="flex items-center gap-2">
+            <ExportMenu
+              onExport={handleExport}
+              busy={exporting}
+              pageCount={items.length}
+              totalCount={total}
+            />
+            <button
+              onClick={() => refetch()}
+              disabled={isLoading || isFetching}
+              className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isFetching ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
         }
       />
       <p className="text-sm text-gray-500 mb-6">View system audit history</p>
+
+      {exportError && (
+        <div className="mb-3">
+          <ErrorMessage error={exportError} />
+        </div>
+      )}
 
       <FilterBar
         draftUser={draftUser}
