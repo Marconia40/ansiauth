@@ -43,6 +43,12 @@ class DeviceModel(Base):
     platform = Column(String, nullable=True)  # nullable for backward compat with existing rows
     username = Column(String, nullable=False)
     encrypted_password = Column(String, nullable=False)
+    site_id = Column(
+        Integer,
+        ForeignKey("sites.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -54,6 +60,7 @@ class DeviceModel(Base):
         back_populates="device",
         cascade="all, delete-orphan",
     )
+    site = relationship("SiteModel", back_populates="devices")
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_name"),)
 
@@ -158,6 +165,29 @@ class DeviceGroupModel(Base):
     )
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_group_name"),)
+
+
+class SiteModel(Base):
+    __tablename__ = "sites"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False, unique=True, index=True)
+    description = Column(String, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    devices = relationship("DeviceModel", back_populates="site")
+
+    __table_args__ = (UniqueConstraint("name", name="uq_site_name"),)
 
 
 class DeviceGroupMemberModel(Base):

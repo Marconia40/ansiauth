@@ -5,6 +5,7 @@ import type { Device, DeviceCreate, DeviceUpdate } from '@/types/device';
 import type { User, UserCreate, UserUpdate } from '@/types/user';
 import type { Job, GroupJob } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
+import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -434,4 +435,26 @@ export async function addDeviceToGroup(groupId: number, deviceName: string): Pro
 
 export async function removeDeviceFromGroup(groupId: number, deviceName: string): Promise<void> {
   return unwrap(client.delete(`/device-groups/${groupId}/members/${deviceName}`));
+}
+
+// ── Sites ─────────────────────────────────────────────────────────────────────
+
+export async function getSites(): Promise<Site[]> {
+  return unwrap(client.get<ApiResponse<Site[]>>('/sites/'));
+}
+
+export async function getSite(siteId: number): Promise<Site> {
+  return unwrap(client.get<ApiResponse<Site>>(`/sites/${siteId}`));
+}
+
+export async function createSite(body: SiteCreate): Promise<Site> {
+  return unwrap(client.post<ApiResponse<Site>>('/sites/', body));
+}
+
+export async function updateSite(siteId: number, body: SiteUpdate): Promise<Site> {
+  return unwrap(client.put<ApiResponse<Site>>(`/sites/${siteId}`, body));
+}
+
+export async function deleteSite(siteId: number): Promise<void> {
+  return unwrap(client.delete(`/sites/${siteId}`));
 }

@@ -10,6 +10,7 @@ const NAV_ITEMS: { href: string; label: string; minRole: Role }[] = [
   { href: '/vlans', label: 'VLANs', minRole: 'observer' },
   { href: '/devices', label: 'Devices', minRole: 'observer' },
   { href: '/device-groups', label: 'Device Groups', minRole: 'observer' },
+  { href: '/sites', label: 'Sites', minRole: 'observer' },
   { href: '/jobs', label: 'Jobs', minRole: 'observer' },
   { href: '/users', label: 'Users', minRole: 'admin' },
   { href: '/audit', label: 'Audit Log', minRole: 'super-admin' },

@@ -19,7 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.config import AUDIT_RETENTION_DAYS, DATABASE_URL, SSL_CERTFILE
-from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, DeviceExecutionError, NotFoundError, ValidationError
 from app.schemas.error import ErrorResponse, make_error  # noqa: F401 — re-exported for OpenAPI
 from app.db.base import Base
 from app.db.session import get_engine, init_db
@@ -100,6 +100,21 @@ def _migrate_group_job_id(engine) -> None:
 _migrate_group_job_id(get_engine())
 
 
+def _migrate_device_site_id(engine) -> None:
+    """Add the site_id column to devices if it was not present in an older DB."""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "devices" in inspector.get_table_names():
+        existing_cols = {c["name"] for c in inspector.get_columns("devices")}
+        if "site_id" not in existing_cols:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE devices ADD COLUMN site_id INTEGER REFERENCES sites(id)"))
+                conn.commit()
+            logger.info("Migration applied: added 'site_id' column to devices")
+
+_migrate_device_site_id(get_engine())
+
+
 def _install_audit_immutability_trigger(engine) -> None:
     """Create a BEFORE UPDATE trigger that prevents any mutation of audit_logs rows."""
     from sqlalchemy import text
@@ -116,7 +131,7 @@ def _install_audit_immutability_trigger(engine) -> None:
 
 _install_audit_immutability_trigger(get_engine())
 
-from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service, job_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
@@ -337,6 +352,12 @@ async def not_found_error_handler(request: Request, exc: NotFoundError):
     return JSONResponse(status_code=404, content=make_error(404, str(exc), "NOT_FOUND"))
 
 
+@app.exception_handler(ConflictError)
+async def conflict_error_handler(request: Request, exc: ConflictError):
+    logger.warning("Conflict: %s", str(exc))
+    return JSONResponse(status_code=409, content=make_error(409, str(exc), "CONFLICT"))
+
+
 @app.exception_handler(DeviceExecutionError)
 async def device_execution_error_handler(request: Request, exc: DeviceExecutionError):
     logger.error("Device execution error: %s", str(exc))
@@ -358,6 +379,7 @@ app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"], respons
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"], responses=_err)
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], responses=_err)
 app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)
+app.include_router(sites.router, prefix="/api/v1/sites", tags=["sites"], responses=_err)
 app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], responses=_err)
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"], responses=_err)
 app.include_router(group_jobs.router, prefix="/api/v1/group-jobs", tags=["group-jobs"], responses=_err)
