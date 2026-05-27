@@ -410,18 +410,24 @@ function buildExportFilename(opts: {
 
 type AuditQueryFilters = Omit<Parameters<typeof getAuditLogs>[0] & object, 'page' | 'page_size' | 'skip' | 'limit'>;
 
-async function fetchAllFiltered(filters: AuditQueryFilters): Promise<AuditLog[]> {
+async function fetchAllFiltered(
+  filters: AuditQueryFilters,
+): Promise<{ rows: AuditLog[]; truncated: boolean }> {
   const collected: AuditLog[] = [];
   let skip = 0;
+  let truncated = false;
   while (true) {
     const { items, total } = await getAuditLogs({ ...filters, skip, limit: EXPORT_FETCH_CHUNK });
     collected.push(...items);
     if (items.length < EXPORT_FETCH_CHUNK) break;
     if (total > 0 && collected.length >= total) break;
-    if (collected.length >= EXPORT_MAX_ROWS) break;
+    if (collected.length >= EXPORT_MAX_ROWS) {
+      truncated = total === 0 || total > EXPORT_MAX_ROWS;
+      break;
+    }
     skip += EXPORT_FETCH_CHUNK;
   }
-  return collected.slice(0, EXPORT_MAX_ROWS);
+  return { rows: collected.slice(0, EXPORT_MAX_ROWS), truncated };
 }
 
 // ── Export menu ──────────────────────────────────────────────────────────────
@@ -634,17 +640,27 @@ function AuditPageContent() {
 
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [exportInfo, setExportInfo] = useState<{ level: 'success' | 'warning'; message: string } | null>(null);
+
+  // Auto-dismiss the success / truncation banner after a short delay.
+  useEffect(() => {
+    if (!exportInfo) return;
+    const t = setTimeout(() => setExportInfo(null), 6000);
+    return () => clearTimeout(t);
+  }, [exportInfo]);
 
   const handleExport = useCallback(
     async (format: ExportFormat, scope: ExportScope) => {
       setExporting(true);
       setExportError(null);
+      setExportInfo(null);
       try {
         let rows: AuditLog[];
+        let truncated = false;
         if (scope === 'page') {
           rows = items;
         } else {
-          rows = await fetchAllFiltered({
+          const result = await fetchAllFiltered({
             user: state.user || undefined,
             action: state.action || undefined,
             resource: state.resource || undefined,
@@ -652,11 +668,25 @@ function AuditPageContent() {
             device_id: state.device || undefined,
             from_date: dateRangeToFromDate(state.dateRange),
           });
+          rows = result.rows;
+          truncated = result.truncated;
         }
         const content = format === 'csv' ? toCsv(rows) : toJsonPretty(rows);
         const filename = buildExportFilename({ scope, state, ext: format, hasFilters: hasActiveFilters });
         const mime = format === 'csv' ? 'text/csv' : 'application/json';
         triggerDownload(content, filename, mime);
+
+        setExportInfo(
+          truncated
+            ? {
+                level: 'warning',
+                message: `Export truncated to ${EXPORT_MAX_ROWS.toLocaleString()} rows (safety limit reached)`,
+              }
+            : {
+                level: 'success',
+                message: `Export completed (${rows.length.toLocaleString()} rows)`,
+              },
+        );
       } catch (e) {
         setExportError(extractMessage(e, 'Export failed'));
       } finally {
@@ -693,6 +723,19 @@ function AuditPageContent() {
       {exportError && (
         <div className="mb-3">
           <ErrorMessage error={exportError} />
+        </div>
+      )}
+
+      {exportInfo && (
+        <div
+          role="status"
+          className={`mb-3 px-3 py-2 text-sm rounded-md border ${
+            exportInfo.level === 'warning'
+              ? 'bg-amber-50 border-amber-200 text-amber-800'
+              : 'bg-green-50 border-green-200 text-green-700'
+          }`}
+        >
+          {exportInfo.message}
         </div>
       )}
 
