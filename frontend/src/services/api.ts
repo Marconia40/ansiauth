@@ -21,10 +21,61 @@ let _accessToken: string | null = null;
 
 export function setAccessToken(access: string): void {
   _accessToken = access;
+  scheduleProactiveRefresh();
 }
 
 export function clearAccessToken(): void {
   _accessToken = null;
+  cancelProactiveRefresh();
+}
+
+function parseAccessTokenExpiryMs(token: string): number | null {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Session expiration notification ───────────────────────────────────────────
+
+const SESSION_EXPIRED_FLAG = 'ansiauth.sessionExpired';
+
+let _sessionExpiredHandler: (() => void) | null = null;
+
+export function onSessionExpired(handler: () => void): () => void {
+  _sessionExpiredHandler = handler;
+  return () => {
+    if (_sessionExpiredHandler === handler) _sessionExpiredHandler = null;
+  };
+}
+
+function notifySessionExpired(): void {
+  cancelProactiveRefresh();
+  _accessToken = null;
+  if (typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.setItem(SESSION_EXPIRED_FLAG, '1');
+    } catch {
+      /* ignore quota / disabled storage */
+    }
+  }
+  _sessionExpiredHandler?.();
+}
+
+export function consumeSessionExpiredFlag(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const flag = window.sessionStorage.getItem(SESSION_EXPIRED_FLAG);
+    if (flag === '1') {
+      window.sessionStorage.removeItem(SESSION_EXPIRED_FLAG);
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
 }
 
 // ── Axios instance ────────────────────────────────────────────────────────────
@@ -42,58 +93,92 @@ client.interceptors.request.use((config) => {
   return config;
 });
 
-// ── Refresh token interceptor ─────────────────────────────────────────────────
+// ── Refresh coordination ──────────────────────────────────────────────────────
 
-let _isRefreshing = false;
-let _refreshQueue: Array<(token: string) => void> = [];
+let _refreshInFlight: Promise<string> | null = null;
 
-client.interceptors.response.use(
-  (response) => response,
-  async (error) => {
-    const original = error.config;
+async function refreshAccessToken(): Promise<string> {
+  if (_refreshInFlight) return _refreshInFlight;
 
-    if (error.response?.status !== 401 || original._retry) {
-      return Promise.reject(error);
-    }
-
-    original._retry = true;
-
-    if (_isRefreshing) {
-      return new Promise((resolve) => {
-        _refreshQueue.push((token) => {
-          original.headers.Authorization = `Bearer ${token}`;
-          resolve(client(original));
-        });
-      });
-    }
-
-    _isRefreshing = true;
-
+  _refreshInFlight = (async () => {
     try {
       const { data } = await axios.post<{ access_token: string }>(
         `${BASE_URL}/api/v1/auth/refresh`,
         undefined,
         { withCredentials: true },
       );
-
       _accessToken = data.access_token;
+      scheduleProactiveRefresh();
+      return data.access_token;
+    } finally {
+      _refreshInFlight = null;
+    }
+  })();
 
-      _refreshQueue.forEach((cb) => cb(data.access_token));
-      _refreshQueue = [];
+  return _refreshInFlight;
+}
 
-      original.headers.Authorization = `Bearer ${data.access_token}`;
+// ── Proactive refresh scheduler ───────────────────────────────────────────────
+//
+// Schedules a refresh shortly before the access token's `exp`. This ensures the
+// session terminates predictably even when the user is idle: when the refresh
+// token also expires, the proactive refresh fails and we trigger a clean logout
+// rather than waiting for the next API call.
 
+let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleProactiveRefresh(): void {
+  cancelProactiveRefresh();
+  if (typeof window === 'undefined' || !_accessToken) return;
+
+  const expiryMs = parseAccessTokenExpiryMs(_accessToken);
+  if (!expiryMs) return;
+
+  const leadMs = 30_000;
+  const minDelay = 5_000;
+  const maxDelay = 60 * 60_000;
+  const delay = Math.max(minDelay, Math.min(expiryMs - Date.now() - leadMs, maxDelay));
+
+  _refreshTimer = setTimeout(() => {
+    refreshAccessToken().catch(() => {
+      notifySessionExpired();
+    });
+  }, delay);
+}
+
+function cancelProactiveRefresh(): void {
+  if (_refreshTimer !== null) {
+    clearTimeout(_refreshTimer);
+    _refreshTimer = null;
+  }
+}
+
+// ── 401 interceptor — single refresh + retry ──────────────────────────────────
+
+client.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const original = error.config;
+
+    if (!original || error.response?.status !== 401 || original._retry) {
+      return Promise.reject(error);
+    }
+
+    // Don't try to refresh in response to a failing refresh request itself.
+    if (typeof original.url === 'string' && original.url.includes('/auth/refresh')) {
+      return Promise.reject(error);
+    }
+
+    original._retry = true;
+
+    try {
+      const newToken = await refreshAccessToken();
+      original.headers = original.headers ?? {};
+      original.headers.Authorization = `Bearer ${newToken}`;
       return client(original);
     } catch {
-      clearAccessToken();
-
-      if (typeof window !== 'undefined') {
-        window.location.href = '/login';
-      }
-
+      notifySessionExpired();
       return Promise.reject(error);
-    } finally {
-      _isRefreshing = false;
     }
   },
 );
@@ -134,15 +219,11 @@ export async function login(
 
 export async function restoreSession(): Promise<AuthUser | null> {
   try {
-    const { data } = await axios.post<{ access_token: string }>(
-      `${BASE_URL}/api/v1/auth/refresh`,
-      undefined,
-      { withCredentials: true },
-    );
-    setAccessToken(data.access_token);
-    const payload = JSON.parse(atob(data.access_token.split('.')[1]));
+    const token = await refreshAccessToken();
+    const payload = JSON.parse(atob(token.split('.')[1]));
     return { username: payload.sub, role: payload.role };
   } catch {
+    clearAccessToken();
     return null;
   }
 }
@@ -150,6 +231,13 @@ export async function restoreSession(): Promise<AuthUser | null> {
 export async function logout(): Promise<void> {
   await client.post('/auth/logout').catch(() => {});
   clearAccessToken();
+  if (typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.removeItem(SESSION_EXPIRED_FLAG);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 // ── VLANs ─────────────────────────────────────────────────────────────────────

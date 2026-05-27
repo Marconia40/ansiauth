@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
 import type { AuthUser } from '@/types/auth';
-import { restoreSession } from '@/services/api';
+import { onSessionExpired, restoreSession } from '@/services/api';
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -23,6 +23,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (restored) setUser(restored);
       })
       .finally(() => setIsInitializing(false));
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = onSessionExpired(() => {
+      setUser(null);
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.replace('/login');
+      }
+    });
+    return unsubscribe;
   }, []);
 
   return (

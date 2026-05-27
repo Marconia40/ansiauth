@@ -7,7 +7,7 @@ load_dotenv()
 FERNET_KEY = os.getenv("FERNET_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
-_raw_expiry = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15")
+_raw_expiry = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "20")
 try:
     ACCESS_TOKEN_EXPIRE_MINUTES = int(_raw_expiry)
 except ValueError:
@@ -44,7 +44,7 @@ def _parse_int(name: str, default: int, minimum: int = 1) -> int:
 RATE_LIMIT_PER_IP: int = _parse_int("RATE_LIMIT_PER_IP", 20)
 RATE_LIMIT_PER_USER: int = _parse_int("RATE_LIMIT_PER_USER", 200)
 RATE_LIMIT_LOGIN: int = _parse_int("RATE_LIMIT_LOGIN", 5)
-REFRESH_TOKEN_EXPIRE_DAYS: int = _parse_int("REFRESH_TOKEN_EXPIRE_DAYS", 7)
+REFRESH_TOKEN_EXPIRE_MINUTES: int = _parse_int("REFRESH_TOKEN_EXPIRE_MINUTES", 240)
 
 SSL_CERTFILE: str | None = os.getenv("SSL_CERTFILE") or None
 SSL_KEYFILE: str | None = os.getenv("SSL_KEYFILE") or None

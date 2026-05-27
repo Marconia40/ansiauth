@@ -163,7 +163,7 @@ def test_startup_fails_when_expiry_exceeds_ceiling():
     import app.core.security as sec
 
     original = cfg.ACCESS_TOKEN_EXPIRE_MINUTES
-    cfg.ACCESS_TOKEN_EXPIRE_MINUTES = 20
+    cfg.ACCESS_TOKEN_EXPIRE_MINUTES = 61
     try:
         with pytest.raises(RuntimeError, match="ACCESS_TOKEN_EXPIRE_MINUTES must be between"):
             importlib.reload(sec)

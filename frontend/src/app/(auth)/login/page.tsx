@@ -3,15 +3,23 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { login } from '@/services/api';
+import { consumeSessionExpiredFlag, login } from '@/services/api';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const { user, setUser, isInitializing } = useAuth();
   const router = useRouter();
+
+  useEffect(() => {
+    if (consumeSessionExpiredFlag()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setNotice('Session expired. Please sign in again.');
+    }
+  }, []);
 
   useEffect(() => {
     if (!isInitializing && user) router.push('/');
@@ -40,6 +48,12 @@ export default function LoginPage() {
       <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-sm">
         <h1 className="text-2xl font-bold text-gray-900 mb-1">AnsiAuth</h1>
         <p className="text-sm text-gray-500 mb-6">Network Automation Platform</p>
+
+        {notice && (
+          <div className="mb-4 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            {notice}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>

@@ -2,7 +2,7 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from app.core.config import REFRESH_TOKEN_EXPIRE_DAYS
+from app.core.config import REFRESH_TOKEN_EXPIRE_MINUTES
 from app.db.models import RefreshTokenModel
 from app.db.session import get_session
 
@@ -19,7 +19,7 @@ def create(username: str) -> str:
             RefreshTokenModel(
                 token_hash=_hash(raw),
                 username=username.lower(),
-                expires_at=datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=REFRESH_TOKEN_EXPIRE_MINUTES),
                 revoked=False,
                 created_at=datetime.now(timezone.utc),
             )
@@ -70,7 +70,7 @@ def validate_and_rotate(raw: str) -> tuple[str, str]:
                     RefreshTokenModel(
                         token_hash=_hash(new_raw),
                         username=username_out,
-                        expires_at=now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+                        expires_at=now + timedelta(minutes=REFRESH_TOKEN_EXPIRE_MINUTES),
                         revoked=False,
                         created_at=now,
                     )
