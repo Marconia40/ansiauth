@@ -20,6 +20,20 @@ function extractMessage(error: unknown, fallback: string): string {
   return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
 }
 
+function getStatus(error: unknown): number | null {
+  const e = error as { response?: { status?: number } } | null;
+  return e?.response?.status ?? null;
+}
+
+function getErrorCode(error: unknown): string | null {
+  const e = error as { response?: { data?: { error_code?: string } } } | null;
+  return e?.response?.data?.error_code ?? null;
+}
+
+function isUnsupportedVendorError(error: unknown): boolean {
+  return getStatus(error) === 501 || getErrorCode(error) === 'VENDOR_NOT_SUPPORTED';
+}
+
 function formatVlanList(vlans: number[] | null): string {
   if (vlans == null) return DASH;
   if (vlans.length === 0) return 'None';
@@ -467,15 +481,36 @@ export default function PortsPage() {
           <LoadingSpinner size="lg" />
         </div>
       ) : portsError ? (
-        <div className="py-6">
-          <ErrorMessage error={extractMessage(portsError, 'Could not load ports')} />
-          <button
-            onClick={() => refetch()}
-            className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
-          >
-            Retry
-          </button>
-        </div>
+        isUnsupportedVendorError(portsError) ? (
+          // Vendor unsupported — calmer "not yet available" notice instead of
+          // a red error.  Hide the Retry button because retrying will never
+          // help; this is a feature-coverage gap, not a transient failure.
+          <div className="py-6">
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-4 max-w-xl">
+              <div className="flex items-start gap-3">
+                <div className="text-gray-400 mt-0.5" aria-hidden>ⓘ</div>
+                <div className="text-sm">
+                  <p className="font-medium text-gray-800">Port management is not yet supported for this vendor.</p>
+                  <p className="mt-1 text-gray-500">
+                    {portsResponse?.vendor
+                      ? `Selected device reports vendor "${portsResponse.vendor}".`
+                      : 'Pick another device to view its port inventory.'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="py-6">
+            <ErrorMessage error={extractMessage(portsError, 'Could not load ports')} />
+            <button
+              onClick={() => refetch()}
+              className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+            >
+              Retry
+            </button>
+          </div>
+        )
       ) : (
         <>
           <FilterBar

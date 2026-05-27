@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core import authz
 from app.core.dependencies import require_role
-from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    DeviceExecutionError,
+    NotFoundError,
+    UnsupportedVendorError,
+    ValidationError,
+)
 from app.schemas.port import PortRead  # noqa: F401 — exported via OpenAPI components
 from app.services import port_service
 
@@ -50,6 +55,21 @@ def list_ports(
     target = device if device is not None else "mock_device"
     try:
         response = port_service.list_ports(target)
+    except UnsupportedVendorError as exc:
+        # Detailed (vendor / platform) details stay in the server log via the
+        # dispatcher's WARNING entry; clients receive a controlled message
+        # that does not leak backend internals.
+        logger.info(
+            "Port management requested on unsupported vendor: device=%s vendor=%s platform=%s",
+            target, exc.vendor, exc.platform,
+        )
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error_code": "VENDOR_NOT_SUPPORTED",
+                "message": "Port management is not yet supported for this vendor.",
+            },
+        )
     except TimeoutError:
         # Surfaced when the per-device lock cannot be acquired — somebody else
         # is mid-operation against the same device.  Mirror the VLAN endpoint's

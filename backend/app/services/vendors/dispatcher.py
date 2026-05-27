@@ -106,8 +106,10 @@ def get_port_driver(device: Device) -> BasePortDriver:
 
     Raises
     ------
-    ValueError
+    UnsupportedVendorError
         If no port driver is registered for device.vendor / device.platform.
+        Carries the raw vendor / platform strings so the API layer can keep
+        internal logs diagnostic while presenting a friendly client message.
     """
     logger.info(
         "Resolving port driver for device=%s vendor=%s platform=%s",
@@ -124,8 +126,10 @@ def get_port_vendor_driver(vendor: str, platform: str) -> BasePortDriver:
 
     Raises
     ------
-    ValueError
+    UnsupportedVendorError
         If no port driver is registered for the given vendor / platform pair.
+        Internal logs still record the exact ``vendor='X' platform='Y'``
+        tuple for diagnostics.
     """
     if vendor in _HUAWEI_VENDORS:
         from app.services.vendors.huawei.port_driver import HuaweiPortDriver
@@ -133,6 +137,10 @@ def get_port_vendor_driver(vendor: str, platform: str) -> BasePortDriver:
     if vendor in _CISCO_VENDORS:
         from app.services.vendors.cisco.port_driver import CiscoPortDriver
         return CiscoPortDriver()
-    raise ValueError(
-        f"No port driver registered for vendor='{vendor}' platform='{platform}'"
+    from app.core.exceptions import UnsupportedVendorError
+    logger.warning(
+        "No port driver registered for vendor='%s' platform='%s' — "
+        "returning UnsupportedVendorError to caller",
+        vendor, platform,
     )
+    raise UnsupportedVendorError(vendor=vendor, platform=platform, operation="Port management")

@@ -19,7 +19,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.config import AUDIT_RETENTION_DAYS, DATABASE_URL, SSL_CERTFILE
-from app.core.exceptions import ConflictError, DeviceExecutionError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    DeviceExecutionError,
+    NotFoundError,
+    UnsupportedVendorError,
+    ValidationError,
+)
 from app.schemas.error import ErrorResponse, make_error  # noqa: F401 — re-exported for OpenAPI
 from app.db.base import Base
 from app.db.session import get_engine, init_db
@@ -436,6 +442,23 @@ async def conflict_error_handler(request: Request, exc: ConflictError):
 async def device_execution_error_handler(request: Request, exc: DeviceExecutionError):
     logger.error("Device execution error: %s", str(exc))
     return JSONResponse(status_code=500, content=make_error(500, str(exc), "DEVICE_EXECUTION_ERROR"))
+
+
+@app.exception_handler(UnsupportedVendorError)
+async def unsupported_vendor_error_handler(request: Request, exc: UnsupportedVendorError):
+    # Detailed vendor / platform context goes to the log only.
+    logger.info(
+        "Unsupported vendor for %s: vendor=%s platform=%s",
+        exc.operation, exc.vendor, exc.platform,
+    )
+    return JSONResponse(
+        status_code=501,
+        content=make_error(
+            501,
+            f"{exc.operation} is not yet supported for this vendor.",
+            "VENDOR_NOT_SUPPORTED",
+        ),
+    )
 
 
 @app.exception_handler(Exception)

@@ -8,6 +8,7 @@ dispatcher wiring resolves a Huawei device to ``HuaweiPortDriver``.
 
 import pytest
 
+from app.core.exceptions import UnsupportedVendorError
 from app.models.device import Device
 from app.models.port import PortInfo, PortListResponse
 from app.services import port_service
@@ -94,9 +95,14 @@ def test_dispatcher_resolves_huawei_vrp_alias():
     assert isinstance(driver, HuaweiPortDriver)
 
 
-def test_dispatcher_rejects_unknown_vendor():
-    with pytest.raises(ValueError):
+def test_dispatcher_raises_unsupported_vendor_for_unknown():
+    with pytest.raises(UnsupportedVendorError) as exc:
         get_port_vendor_driver("juniper", "junos")
+    # The exception must carry the raw strings so logs/handlers can render
+    # diagnostic details even though the client-facing message stays generic.
+    assert exc.value.vendor == "juniper"
+    assert exc.value.platform == "junos"
+    assert "junos" in str(exc.value)
 
 
 def test_dispatcher_resolves_cisco_strings():
