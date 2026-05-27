@@ -71,6 +71,7 @@ def _apply_filters(
     to_date: Optional[datetime],
     device_id: Optional[str],
     site_id: Optional[int],
+    allowed_devices: Optional[set[str]] = None,
 ):
     if user:
         q = q.filter(AuditLogModel.user == user)
@@ -100,6 +101,13 @@ def _apply_filters(
         else:
             # Empty site → only keep rows unrelated to a device.
             q = q.filter(AuditLogModel.device.is_(None))
+    if allowed_devices is not None:
+        # Restricted (non-admin) caller: keep rows for their devices + device-less
+        # rows (login, user-management, etc.). Spec: device-unrelated entries stay visible.
+        if not allowed_devices:
+            q = q.filter(AuditLogModel.device.is_(None))
+        else:
+            q = q.filter(or_(AuditLogModel.device.is_(None), AuditLogModel.device.in_(allowed_devices)))
     return q
 
 
@@ -112,6 +120,7 @@ def get_audit_log(
     to_date: Optional[datetime] = None,
     device_id: Optional[str] = None,
     site_id: Optional[int] = None,
+    allowed_devices: Optional[set[str]] = None,
     skip: int = 0,
     limit: int = 100,
 ) -> list[AuditRecord]:
@@ -127,6 +136,7 @@ def get_audit_log(
             to_date=to_date,
             device_id=device_id,
             site_id=site_id,
+            allowed_devices=allowed_devices,
         )
         rows = q.offset(skip).limit(limit).all()
         return [_to_record(r) for r in rows]
@@ -141,6 +151,7 @@ def count_audit_log(
     to_date: Optional[datetime] = None,
     device_id: Optional[str] = None,
     site_id: Optional[int] = None,
+    allowed_devices: Optional[set[str]] = None,
 ) -> int:
     with get_session() as session:
         q = _apply_filters(
@@ -154,6 +165,7 @@ def count_audit_log(
             to_date=to_date,
             device_id=device_id,
             site_id=site_id,
+            allowed_devices=allowed_devices,
         )
         return q.count()
 

@@ -102,6 +102,52 @@ def reset_refresh_tokens():
 
 
 @pytest.fixture(autouse=True)
+def _seed_test_role_users_with_full_visibility():
+    """Step 7.3 — site-scoped RBAC looks up the calling user by username.
+
+    The role-based test clients use synthetic JWTs (sub == role), so we seed real
+    DB users for those usernames and grant non-admin roles access to every
+    existing site. Tests that want to verify restricted access can revoke sites
+    explicitly. Admins/super-admins bypass scoping by policy and don't need
+    allowed_sites rows.
+    """
+    from app.db.models import SiteModel, UserAllowedSiteModel, UserModel
+    from app.db.session import get_session
+    from app.services import user_service
+    from app.schemas.user import UserCreate
+
+    # Match passwords other test modules already expect, so seed_users-style
+    # fixtures (test_audit.py, test_auth.py) that only create-if-missing find a
+    # user with the right credentials.
+    _accounts = [
+        ("admin", "admin123"),
+        ("operator", "operator123"),
+        ("observer", "observer123"),
+        ("super-admin", "superadmin123"),
+    ]
+    for role, password in _accounts:
+        if user_service.get_by_username(role) is None:
+            user_service.create_user(UserCreate(
+                username=role,
+                password=password,
+                role=role,
+            ))
+
+    with get_session() as session:
+        all_site_ids = [r[0] for r in session.query(SiteModel.id).all()]
+        for role in ("observer", "operator"):
+            user_row = session.query(UserModel).filter_by(username=role).first()
+            if user_row is None:
+                continue
+            session.query(UserAllowedSiteModel).filter_by(user_id=user_row.id).delete(
+                synchronize_session=False
+            )
+            for sid in all_site_ids:
+                session.add(UserAllowedSiteModel(user_id=user_row.id, site_id=sid))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def mock_ansible_service(monkeypatch):
     """Prevent real Ansible playbook execution in unit tests."""
     from app.services import ansible_service, vlan_service

@@ -2,6 +2,7 @@ import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 
+from app.core import authz
 from app.core.dependencies import require_role
 from app.core.exceptions import NotFoundError, ValidationError
 from app.schemas.device import DeviceCreate, DevicePublic, DeviceUpdate
@@ -30,7 +31,11 @@ def _to_public(device) -> dict:
     description="Return all registered network devices. Credentials are never included in responses. Requires observer role or higher.",
 )
 def list_devices(current_user: dict = Depends(require_role("observer"))):
-    return {"success": True, "data": [_to_public(d) for d in device_service.get_devices()]}
+    devices = device_service.get_devices()
+    allowed = authz.allowed_device_names_for(current_user)
+    if allowed is not None:
+        devices = [d for d in devices if d.name in allowed]
+    return {"success": True, "data": [_to_public(d) for d in devices]}
 
 
 @router.get(
@@ -42,6 +47,7 @@ def get_device(name: str, current_user: dict = Depends(require_role("observer"))
     device = device_service.get_device(name)
     if not device:
         raise NotFoundError(f"Device '{name}' not found")
+    authz.ensure_device_allowed(current_user, name)
     return {"success": True, "data": _to_public(device)}
 
 
@@ -139,6 +145,7 @@ def save_device_config(
     device = device_service.get_device(name)
     if not device:
         raise NotFoundError(f"Device '{name}' not found")
+    authz.ensure_device_allowed(current_user, name)
     from app.services.vlan_execution_service import enqueue_save_job
     entry = enqueue_save_job(name, current_user["username"], background_tasks)
     return {"success": True, "data": entry}

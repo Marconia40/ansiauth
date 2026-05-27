@@ -115,6 +115,36 @@ def _migrate_device_site_id(engine) -> None:
 _migrate_device_site_id(get_engine())
 
 
+def _backfill_user_allowed_sites(engine) -> None:
+    """Ensure each non-admin user with no allowed_sites rows gets one row per existing site.
+
+    Runs on every startup but is idempotent — never duplicates existing rows.
+    Lets the policy switch be non-breaking for already-deployed databases.
+    """
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    needed = {"users", "sites", "user_allowed_sites"}
+    if not needed.issubset(set(inspector.get_table_names())):
+        return
+    with engine.connect() as conn:
+        # Only seed users who have zero allowed_sites rows and aren't admins —
+        # that way an admin who explicitly empties a user's set never gets it re-filled.
+        result = conn.execute(text("""
+            INSERT INTO user_allowed_sites (user_id, site_id, created_at)
+            SELECT u.id, s.id, CURRENT_TIMESTAMP
+              FROM users u
+             CROSS JOIN sites s
+             WHERE u.role NOT IN ('admin', 'super-admin')
+               AND NOT EXISTS (SELECT 1 FROM user_allowed_sites x WHERE x.user_id = u.id)
+        """))
+        inserted = getattr(result, "rowcount", 0) or 0
+        if inserted > 0:
+            conn.commit()
+            logger.info("Backfilled %d user_allowed_sites rows", inserted)
+
+_backfill_user_allowed_sites(get_engine())
+
+
 def _install_audit_immutability_trigger(engine) -> None:
     """Create a BEFORE UPDATE trigger that prevents any mutation of audit_logs rows."""
     from sqlalchemy import text

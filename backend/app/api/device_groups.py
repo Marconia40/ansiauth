@@ -2,6 +2,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 
+from app.core import authz
 from app.core.dependencies import require_role
 from app.core.exceptions import NotFoundError, ValidationError
 from app.schemas.device_group import DeviceGroupCreate, DeviceGroupMemberCreate
@@ -38,6 +39,14 @@ def create_group(data: DeviceGroupCreate, current_user: dict = Depends(require_r
 )
 def list_groups(current_user: dict = Depends(require_role("observer"))):
     groups = device_group_service.list_groups()
+    allowed = authz.allowed_device_names_for(current_user)
+    if allowed is not None:
+        visible = []
+        for g in groups:
+            members = device_group_service.list_group_devices(g.id) or []
+            if any(d in allowed for d in members):
+                visible.append(g)
+        groups = visible
     return {"success": True, "data": [g.model_dump() for g in groups]}
 
 
@@ -50,6 +59,12 @@ def get_group(group_id: int, current_user: dict = Depends(require_role("observer
     group = device_group_service.get_group(group_id)
     if not group:
         raise NotFoundError(f"Device group {group_id} not found")
+    allowed = authz.allowed_device_names_for(current_user)
+    if allowed is not None:
+        members = device_group_service.list_group_devices(group_id) or []
+        if not any(d in allowed for d in members):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=403, detail=f"Device group {group_id} is outside your allowed sites")
     return {"success": True, "data": group.model_dump()}
 
 
@@ -121,4 +136,7 @@ def list_group_devices(group_id: int, current_user: dict = Depends(require_role(
     devices = device_group_service.list_group_devices(group_id)
     if devices is None:
         raise NotFoundError(f"Device group {group_id} not found")
+    allowed = authz.allowed_device_names_for(current_user)
+    if allowed is not None:
+        devices = [d for d in devices if d in allowed]
     return {"success": True, "data": {"group_id": group_id, "devices": devices}}

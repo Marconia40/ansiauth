@@ -84,6 +84,7 @@ def query_jobs(
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     site_id: Optional[int] = None,
+    allowed_devices: Optional[set[str]] = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[Job], int]:
@@ -109,6 +110,11 @@ def query_jobs(
             else:
                 # No devices in this site → result must be empty.
                 return [], 0
+        if allowed_devices is not None:
+            # Empty set → caller has no visibility; short-circuit to empty result.
+            if not allowed_devices:
+                return [], 0
+            q = q.filter(JobModel.device.in_(allowed_devices))
         total = q.count()
         rows = (
             q.order_by(JobModel.created_at.desc())

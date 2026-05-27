@@ -27,9 +27,33 @@ class UserModel(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
+    allowed_sites = relationship(
+        "SiteModel",
+        secondary="user_allowed_sites",
+        back_populates="allowed_users",
+    )
+
     __table_args__ = (
         UniqueConstraint("username", name="uq_user_username"),
         UniqueConstraint("email", name="uq_user_email"),
+    )
+
+
+class UserAllowedSiteModel(Base):
+    """Many-to-many association table: which sites a (non-admin) user may access."""
+
+    __tablename__ = "user_allowed_sites"
+
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    site_id = Column(
+        Integer, ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -186,6 +210,11 @@ class SiteModel(Base):
     )
 
     devices = relationship("DeviceModel", back_populates="site")
+    allowed_users = relationship(
+        "UserModel",
+        secondary="user_allowed_sites",
+        back_populates="allowed_sites",
+    )
 
     __table_args__ = (UniqueConstraint("name", name="uq_site_name"),)
 

@@ -1,9 +1,24 @@
 """Step 7.2 — Device site assignment and site-aware filters."""
 import pytest
 
-from app.db.models import AuditLogModel, DeviceModel, JobModel, SiteModel
+from app.db.models import AuditLogModel, DeviceModel, JobModel, SiteModel, UserAllowedSiteModel, UserModel
 from app.db.session import get_session
 from datetime import datetime, timezone
+
+
+def _grant_to_observer(site_id: int) -> None:
+    """Grant the test observer access to a site (the autouse fixture seeded
+    observer with whatever sites existed at fixture time — newly-created sites
+    aren't auto-added)."""
+    with get_session() as session:
+        user_row = session.query(UserModel).filter_by(username="observer").first()
+        if user_row is None:
+            return
+        existing = session.query(UserAllowedSiteModel).filter_by(
+            user_id=user_row.id, site_id=site_id
+        ).first()
+        if existing is None:
+            session.add(UserAllowedSiteModel(user_id=user_row.id, site_id=site_id))
 
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -117,6 +132,10 @@ def _make_job(device: str | None, status: str = "completed"):
 def test_jobs_site_filter_returns_only_site_devices(observer_client, admin_client):
     site_a = _seed_site(admin_client, "A")
     site_b = _seed_site(admin_client, "B")
+    # Make site A visible to observer (site B intentionally left out so we also
+    # verify scoping doesn't accidentally include site B's devices).
+    _grant_to_observer(site_a)
+    _grant_to_observer(site_b)
     _attach("mock_device", site_a)
     _attach("fail_device", site_b)
     _make_job("mock_device")
@@ -192,16 +211,18 @@ def test_audit_site_filter_empty_site_returns_only_deviceless(admin_client):
 
 # ── Regression: existing flows still work ─────────────────────────────────────
 
-def test_devices_listing_still_works(observer_client):
-    r = observer_client.get("/api/v1/devices/")
+def test_devices_listing_still_works(admin_client):
+    # Admins bypass scoping by policy → always see all devices regardless of
+    # site assignment. (Observer visibility is covered by the RBAC suite.)
+    r = admin_client.get("/api/v1/devices/")
     assert r.status_code == 200
     devs = r.json()["data"]
     assert isinstance(devs, list) and len(devs) >= 1
 
 
-def test_jobs_listing_without_site_filter_unchanged(observer_client):
+def test_jobs_listing_without_site_filter_unchanged(admin_client):
     _make_job("mock_device")
-    r = observer_client.get("/api/v1/jobs/")
+    r = admin_client.get("/api/v1/jobs/")
     assert r.status_code == 200
     assert r.json()["total"] >= 1
 

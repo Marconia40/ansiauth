@@ -3,6 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
+from app.core import authz
 from app.core.config import AUDIT_RETENTION_DAYS
 from app.core.dependencies import require_role
 from app.services import audit_service
@@ -68,6 +69,8 @@ def get_audit_log(
         skip = (effective_page - 1) * effective_page_size
         limit = effective_page_size
 
+    allowed = authz.allowed_device_names_for(current_user)
+
     total = audit_service.count_audit_log(
         user=user,
         action=action,
@@ -77,6 +80,7 @@ def get_audit_log(
         to_date=to_date,
         device_id=device_id,
         site_id=site_id,
+        allowed_devices=allowed,
     )
     response.headers["X-Total-Count"] = str(total)
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
@@ -90,6 +94,7 @@ def get_audit_log(
         to_date=to_date,
         device_id=device_id,
         site_id=site_id,
+        allowed_devices=allowed,
         skip=skip,
         limit=limit,
     )
