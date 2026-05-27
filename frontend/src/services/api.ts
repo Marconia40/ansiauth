@@ -248,11 +248,21 @@ export async function deleteUser(userId: number) {
 export async function getAuditLogs(params?: {
   user?: string;
   action?: string;
+  resource?: string;
+  status?: string;
+  device_id?: string;
+  from_date?: string;
+  to_date?: string;
+  page?: number;
+  page_size?: number;
   skip?: number;
   limit?: number;
-}): Promise<AuditLog[]> {
-  const { data } = await client.get<AuditLog[]>('/audit/', { params });
-  return Array.isArray(data) ? data : [];
+}): Promise<{ items: AuditLog[]; total: number }> {
+  const response = await client.get<AuditLog[]>('/audit/', { params });
+  const items = Array.isArray(response.data) ? response.data : [];
+  const header = response.headers?.['x-total-count'] ?? response.headers?.['X-Total-Count'];
+  const total = header != null ? Number(header) : items.length;
+  return { items, total: Number.isFinite(total) ? total : items.length };
 }
 
 // ── Device Groups ─────────────────────────────────────────────────────────────

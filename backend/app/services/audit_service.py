@@ -57,10 +57,41 @@ def log_action(
     return record
 
 
+def _apply_filters(
+    q,
+    *,
+    user: Optional[str],
+    action: Optional[str],
+    resource: Optional[str],
+    status: Optional[str],
+    from_date: Optional[datetime],
+    to_date: Optional[datetime],
+    device_id: Optional[str],
+):
+    if user:
+        q = q.filter(AuditLogModel.user == user)
+    if action:
+        q = q.filter(AuditLogModel.action == action)
+    if resource:
+        q = q.filter(AuditLogModel.resource == resource)
+    if status:
+        q = q.filter(AuditLogModel.status == status)
+    if from_date is not None:
+        _from = from_date if from_date.tzinfo else from_date.replace(tzinfo=timezone.utc)
+        q = q.filter(AuditLogModel.timestamp >= _from)
+    if to_date is not None:
+        _to = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
+        q = q.filter(AuditLogModel.timestamp <= _to)
+    if device_id is not None:
+        q = q.filter(AuditLogModel.device == device_id)
+    return q
+
+
 def get_audit_log(
     user: Optional[str] = None,
     action: Optional[str] = None,
     resource: Optional[str] = None,
+    status: Optional[str] = None,
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     device_id: Optional[str] = None,
@@ -68,23 +99,41 @@ def get_audit_log(
     limit: int = 100,
 ) -> list[AuditRecord]:
     with get_session() as session:
-        q = session.query(AuditLogModel).order_by(AuditLogModel.timestamp.desc())
-        if user:
-            q = q.filter(AuditLogModel.user == user)
-        if action:
-            q = q.filter(AuditLogModel.action == action)
-        if resource:
-            q = q.filter(AuditLogModel.resource == resource)
-        if from_date is not None:
-            _from = from_date if from_date.tzinfo else from_date.replace(tzinfo=timezone.utc)
-            q = q.filter(AuditLogModel.timestamp >= _from)
-        if to_date is not None:
-            _to = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
-            q = q.filter(AuditLogModel.timestamp <= _to)
-        if device_id is not None:
-            q = q.filter(AuditLogModel.device == device_id)
+        q = _apply_filters(
+            session.query(AuditLogModel).order_by(AuditLogModel.timestamp.desc()),
+            user=user,
+            action=action,
+            resource=resource,
+            status=status,
+            from_date=from_date,
+            to_date=to_date,
+            device_id=device_id,
+        )
         rows = q.offset(skip).limit(limit).all()
         return [_to_record(r) for r in rows]
+
+
+def count_audit_log(
+    user: Optional[str] = None,
+    action: Optional[str] = None,
+    resource: Optional[str] = None,
+    status: Optional[str] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    device_id: Optional[str] = None,
+) -> int:
+    with get_session() as session:
+        q = _apply_filters(
+            session.query(AuditLogModel),
+            user=user,
+            action=action,
+            resource=resource,
+            status=status,
+            from_date=from_date,
+            to_date=to_date,
+            device_id=device_id,
+        )
+        return q.count()
 
 
 def append_audit_event(

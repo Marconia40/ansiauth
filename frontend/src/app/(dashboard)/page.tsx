@@ -66,12 +66,12 @@ export default function DashboardPage() {
   });
 
   const {
-    data: auditLogs,
+    data: auditData,
     isLoading: auditLoading,
     isFetching: auditFetching,
     error: auditError,
     refetch: refetchAudit,
-  } = useQuery<AuditLog[]>({
+  } = useQuery<{ items: AuditLog[]; total: number }>({
     queryKey: ['dashboard-audit'],
     queryFn: () => getAuditLogs({ limit: 50 }),
   });
@@ -110,7 +110,8 @@ export default function DashboardPage() {
 
   const deviceList = devices ?? [];
   const jobs = (jobsRaw?.items ?? []) as Job[];
-  const logs = auditLogs ?? [];
+  const logs: AuditLog[] = auditData?.items ?? [];
+  const totalAudit = auditData?.total ?? logs.length;
 
   const totalDevices = deviceList.length;
   const ciscoDevices = deviceList.filter((d) => d.vendor.toLowerCase().includes('cisco')).length;
@@ -123,7 +124,7 @@ export default function DashboardPage() {
     (j) => j.status !== 'pending' && j.status !== 'running' && j.status !== 'retrying',
   ).length;
   const successRate = finishedJobs === 0 ? 'N/A' : `${Math.round((completedJobs / finishedJobs) * 100)}%`;
-  const auditCount = auditError ? null : logs.length;
+  const auditCount = auditError ? null : totalAudit;
 
   const recentJobs = jobs.slice(0, 5);
   const recentLogs = logs.slice(0, 5);
