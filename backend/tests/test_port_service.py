@@ -11,6 +11,7 @@ import pytest
 from app.models.device import Device
 from app.models.port import PortInfo, PortListResponse
 from app.services import port_service
+from app.services.vendors.cisco.port_driver import CiscoPortDriver
 from app.services.vendors.dispatcher import get_port_driver, get_port_vendor_driver
 from app.services.vendors.huawei.port_driver import HuaweiPortDriver
 from app.services.vendors.port_driver_base import BasePortDriver
@@ -98,11 +99,15 @@ def test_dispatcher_rejects_unknown_vendor():
         get_port_vendor_driver("juniper", "junos")
 
 
-def test_dispatcher_rejects_cisco_for_now():
-    # Step 1.1 ships Huawei first per the project's multi-vendor directive.
-    # Cisco port driver registration arrives in a later step.
-    with pytest.raises(ValueError):
-        get_port_vendor_driver("cisco_ios", "ios")
+def test_dispatcher_resolves_cisco_strings():
+    driver = get_port_vendor_driver("cisco", "ios")
+    assert isinstance(driver, CiscoPortDriver)
+    assert isinstance(driver, BasePortDriver)
+
+
+def test_dispatcher_resolves_cisco_ios_alias():
+    driver = get_port_vendor_driver("cisco_ios", "ios")
+    assert isinstance(driver, CiscoPortDriver)
 
 
 def test_dispatcher_resolves_from_device_object():

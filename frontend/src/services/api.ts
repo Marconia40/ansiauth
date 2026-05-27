@@ -6,6 +6,7 @@ import type { User, UserCreate, UserUpdate } from '@/types/user';
 import type { Job, GroupJob } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
 import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
+import type { PortListResponse } from '@/types/port';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -303,6 +304,16 @@ export async function updateVlan(vlanId: number, body: VlanUpdate): Promise<Vlan
 export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<VlanOperationResult> {
   const { data } = await client.delete<VlanRawResponse>(`/vlans/${vlanId}`, { data: body });
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+// ── Ports ─────────────────────────────────────────────────────────────────────
+
+export async function getPorts(device: string): Promise<PortListResponse> {
+  return unwrap(
+    client.get<ApiResponse<PortListResponse>>('/ports/', {
+      params: { device },
+    }),
+  );
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────

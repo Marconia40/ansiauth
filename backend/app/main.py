@@ -205,7 +205,7 @@ def _install_audit_immutability_trigger(engine) -> None:
 
 _install_audit_immutability_trigger(get_engine())
 
-from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, sites, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service, job_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
@@ -450,6 +450,7 @@ _err = {s: {"model": ErrorResponse} for s in (400, 401, 403, 404, 409, 422, 429,
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], responses=_err)
 app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"], responses=_err)
+app.include_router(ports.router, prefix="/api/v1/ports", tags=["ports"], responses=_err)
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"], responses=_err)
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], responses=_err)
 app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)

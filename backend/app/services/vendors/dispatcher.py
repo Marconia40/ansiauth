@@ -130,8 +130,9 @@ def get_port_vendor_driver(vendor: str, platform: str) -> BasePortDriver:
     if vendor in _HUAWEI_VENDORS:
         from app.services.vendors.huawei.port_driver import HuaweiPortDriver
         return HuaweiPortDriver()
-    # Cisco port driver intentionally not registered yet (Step 1.1 ships
-    # Huawei first per the project's multi-vendor directive).
+    if vendor in _CISCO_VENDORS:
+        from app.services.vendors.cisco.port_driver import CiscoPortDriver
+        return CiscoPortDriver()
     raise ValueError(
         f"No port driver registered for vendor='{vendor}' platform='{platform}'"
     )
