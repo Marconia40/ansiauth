@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
 import type { AuthUser } from '@/types/auth';
-import { onSessionExpired, restoreSession } from '@/services/api';
+import { onSessionExpired, registerSessionRevalidation, restoreSession } from '@/services/api';
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -34,6 +34,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
     return unsubscribe;
   }, []);
+
+  useEffect(() => registerSessionRevalidation(), []);
 
   return (
     <AuthContext.Provider value={{ user, isAuthenticated: user !== null, isInitializing, setUser }}>

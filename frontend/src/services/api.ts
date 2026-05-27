@@ -153,6 +153,43 @@ function cancelProactiveRefresh(): void {
   }
 }
 
+// ── Focus / visibility revalidation ───────────────────────────────────────────
+//
+// Background tabs throttle setTimeout and OS sleep can suspend it entirely, so
+// the proactive timer can be late by hours after a resume. When the tab becomes
+// visible or window focuses, re-check whether the access token is still valid;
+// if not, kick a refresh (deduped by _refreshInFlight) and let the existing
+// failure path (notifySessionExpired) handle a stale refresh token.
+
+const REVALIDATE_MARGIN_MS = 5_000;
+
+function revalidateOnResume(): void {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  if (!_accessToken) return;
+
+  const expiryMs = parseAccessTokenExpiryMs(_accessToken);
+  if (expiryMs === null) return;
+
+  // Access token still comfortably valid → nothing to do.
+  if (expiryMs - Date.now() > REVALIDATE_MARGIN_MS) return;
+
+  refreshAccessToken().catch(() => {
+    notifySessionExpired();
+  });
+}
+
+export function registerSessionRevalidation(): () => void {
+  if (typeof window === 'undefined') return () => {};
+
+  window.addEventListener('focus', revalidateOnResume);
+  document.addEventListener('visibilitychange', revalidateOnResume);
+
+  return () => {
+    window.removeEventListener('focus', revalidateOnResume);
+    document.removeEventListener('visibilitychange', revalidateOnResume);
+  };
+}
+
 // ── 401 interceptor — single refresh + retry ──────────────────────────────────
 
 client.interceptors.response.use(
