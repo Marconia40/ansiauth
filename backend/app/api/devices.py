@@ -19,6 +19,8 @@ def _to_public(device) -> dict:
         vendor=device.vendor,
         platform=device.platform,
         username=device.username,
+        site_id=device.site_id,
+        site_name=device.site_name,
     ).model_dump()
 
 
@@ -61,6 +63,7 @@ def create_device(data: DeviceCreate, current_user: dict = Depends(require_role(
             platform=data.platform,
             username=data.username,
             password=data.password,
+            site_id=data.site_id,
         )
     except ValueError as e:
         raise ValidationError(str(e))
@@ -68,7 +71,13 @@ def create_device(data: DeviceCreate, current_user: dict = Depends(require_role(
         user=current_user["username"],
         action="create_device",
         resource="device",
-        details={"id": device.id, "name": device.name, "host": device.host, "vendor": device.vendor},
+        details={
+            "id": device.id,
+            "name": device.name,
+            "host": device.host,
+            "vendor": device.vendor,
+            "site_id": device.site_id,
+        },
     )
     return {"success": True, "data": _to_public(device)}
 
@@ -83,10 +92,14 @@ def create_device(data: DeviceCreate, current_user: dict = Depends(require_role(
     ),
 )
 def update_device(name: str, data: DeviceUpdate, current_user: dict = Depends(require_role("admin"))):
-    changed = data.model_dump(exclude_none=True)
-    if not changed:
+    # Differentiate "not provided" from "explicitly set to null" — needed so callers
+    # can clear site_id via {"site_id": null}.
+    provided = data.model_dump(exclude_unset=True)
+    if not provided:
         raise ValidationError("No fields provided for update")
     try:
+        # Pass the service sentinel only when site_id was actually included in the body.
+        site_id_kwarg = {"site_id": data.site_id} if "site_id" in provided else {}
         device = device_service.update_device(
             name=name,
             host=data.host,
@@ -94,10 +107,11 @@ def update_device(name: str, data: DeviceUpdate, current_user: dict = Depends(re
             platform=data.platform,
             username=data.username,
             password=data.password,
+            **site_id_kwarg,
         )
     except ValueError as e:
         raise ValidationError(str(e))
-    audit_fields = {k: v for k, v in changed.items() if k != "password"}
+    audit_fields = {k: v for k, v in provided.items() if k != "password"}
     audit_service.log_action(
         user=current_user["username"],
         action="update_device",

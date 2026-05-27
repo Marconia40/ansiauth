@@ -7,8 +7,9 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getVlans, createVlan, updateVlan, deleteVlan } from '@/services/api';
+import { getDevices, getVlans, createVlan, updateVlan, deleteVlan, getSites } from '@/services/api';
 import type { Device } from '@/types/device';
+import type { Site } from '@/types/site';
 import type { VlanEntry } from '@/types/vlan';
 
 function extractMessage(error: unknown, fallback: string): string {
@@ -22,6 +23,7 @@ export default function VlansPage() {
   const canMutate = !!user && user.role !== 'observer';
 
   const [selectedDevices, setSelectedDevices] = useState<string[]>([]);
+  const [siteFilter, setSiteFilter] = useState<string>(''); // '' = All sites
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingVlanId, setDeletingVlanId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -56,10 +58,25 @@ export default function VlansPage() {
     queryFn: getDevices,
   });
 
+  const { data: sites } = useQuery<Site[]>({
+    queryKey: ['sites'],
+    queryFn: getSites,
+  });
+  const siteList = sites ?? [];
+
+  // Narrow the device list by selected site (UX filter only — backend unchanged).
+  const filteredDevices = (devices ?? []).filter(
+    (d) => !siteFilter || String(d.site_id ?? '') === siteFilter,
+  );
+
+  // When the visible set shrinks, drop checkboxes that are no longer in scope.
+  const visibleNames = filteredDevices.map((d) => d.name);
+  const inScopeSelected = selectedDevices.filter((n) => visibleNames.includes(n));
+
   const effectiveDevices =
-    selectedDevices.length > 0
-      ? selectedDevices
-      : devices?.[0]?.name ? [devices[0].name] : [];
+    inScopeSelected.length > 0
+      ? inScopeSelected
+      : filteredDevices[0]?.name ? [filteredDevices[0].name] : [];
 
   const {
     data: vlans,
@@ -174,14 +191,29 @@ export default function VlansPage() {
       />
       <p className="text-sm text-gray-500 mb-6">View VLANs configured on managed devices</p>
 
-      <div className="mb-6">
+      <div className="mb-6 space-y-3">
+        <div className="flex items-center gap-2">
+          <label htmlFor="site-filter" className="text-sm text-gray-700">Site:</label>
+          <select
+            id="site-filter"
+            value={siteFilter}
+            onChange={(e) => setSiteFilter(e.target.value)}
+            className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">All Sites</option>
+            {siteList.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </div>
+
         {devicesLoading ? (
           <LoadingSpinner size="sm" />
         ) : devicesError ? (
           <ErrorMessage error={extractMessage(devicesError, 'Could not load devices')} />
-        ) : devices && devices.length > 0 ? (
+        ) : filteredDevices.length > 0 ? (
           <div className="flex flex-wrap gap-3">
-            {devices.map((device) => (
+            {filteredDevices.map((device) => (
               <label
                 key={device.name}
                 className="flex items-center gap-1.5 text-sm cursor-pointer select-none"
@@ -198,12 +230,19 @@ export default function VlansPage() {
                   }}
                   className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                 />
-                <span className="text-gray-700">{device.name}</span>
+                <span className="text-gray-700">
+                  {device.name}
+                  {device.site_name && (
+                    <span className="ml-1 text-xs text-gray-400">({device.site_name})</span>
+                  )}
+                </span>
               </label>
             ))}
           </div>
         ) : (
-          <p className="text-sm text-gray-400">No devices available.</p>
+          <p className="text-sm text-gray-400">
+            {siteFilter ? 'No devices in this site.' : 'No devices available.'}
+          </p>
         )}
       </div>
 

@@ -2,7 +2,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from app.db.models import AuditLogModel
+from sqlalchemy import or_
+
+from app.db.models import AuditLogModel, DeviceModel
 from app.db.session import get_session
 from app.models.audit import AuditRecord
 
@@ -60,6 +62,7 @@ def log_action(
 def _apply_filters(
     q,
     *,
+    session,
     user: Optional[str],
     action: Optional[str],
     resource: Optional[str],
@@ -67,6 +70,7 @@ def _apply_filters(
     from_date: Optional[datetime],
     to_date: Optional[datetime],
     device_id: Optional[str],
+    site_id: Optional[int],
 ):
     if user:
         q = q.filter(AuditLogModel.user == user)
@@ -84,6 +88,18 @@ def _apply_filters(
         q = q.filter(AuditLogModel.timestamp <= _to)
     if device_id is not None:
         q = q.filter(AuditLogModel.device == device_id)
+    if site_id is not None:
+        # Show device-related rows whose device is owned by `site_id`, plus rows
+        # that are not tied to a device at all (per spec: "If action is unrelated
+        # to device: keep visible").
+        device_names = [
+            r[0] for r in session.query(DeviceModel.name).filter(DeviceModel.site_id == site_id).all()
+        ]
+        if device_names:
+            q = q.filter(or_(AuditLogModel.device.is_(None), AuditLogModel.device.in_(device_names)))
+        else:
+            # Empty site → only keep rows unrelated to a device.
+            q = q.filter(AuditLogModel.device.is_(None))
     return q
 
 
@@ -95,12 +111,14 @@ def get_audit_log(
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     device_id: Optional[str] = None,
+    site_id: Optional[int] = None,
     skip: int = 0,
     limit: int = 100,
 ) -> list[AuditRecord]:
     with get_session() as session:
         q = _apply_filters(
             session.query(AuditLogModel).order_by(AuditLogModel.timestamp.desc()),
+            session=session,
             user=user,
             action=action,
             resource=resource,
@@ -108,6 +126,7 @@ def get_audit_log(
             from_date=from_date,
             to_date=to_date,
             device_id=device_id,
+            site_id=site_id,
         )
         rows = q.offset(skip).limit(limit).all()
         return [_to_record(r) for r in rows]
@@ -121,10 +140,12 @@ def count_audit_log(
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     device_id: Optional[str] = None,
+    site_id: Optional[int] = None,
 ) -> int:
     with get_session() as session:
         q = _apply_filters(
             session.query(AuditLogModel),
+            session=session,
             user=user,
             action=action,
             resource=resource,
@@ -132,6 +153,7 @@ def count_audit_log(
             from_date=from_date,
             to_date=to_date,
             device_id=device_id,
+            site_id=site_id,
         )
         return q.count()
 

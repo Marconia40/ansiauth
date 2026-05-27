@@ -332,6 +332,7 @@ export async function deleteDevice(name: string) {
 export async function getJobs(params?: {
   status?: string;
   device?: string;
+  site_id?: number;
   page?: number;
   page_size?: number;
 }): Promise<{ items: Job[]; total: number }> {
@@ -377,6 +378,7 @@ export async function getAuditLogs(params?: {
   resource?: string;
   status?: string;
   device_id?: string;
+  site_id?: number;
   from_date?: string;
   to_date?: string;
   page?: number;

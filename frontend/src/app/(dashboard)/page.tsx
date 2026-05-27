@@ -8,11 +8,12 @@ import { ErrorMessage } from '@/components/ErrorMessage';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { useAuth } from '@/context/AuthContext';
-import { getDevices, getJobs, getAuditLogs } from '@/services/api';
+import { getDevices, getJobs, getAuditLogs, getSites } from '@/services/api';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Device } from '@/types/device';
 import type { Job } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
+import type { Site } from '@/types/site';
 
 function extractMessage(error: unknown, fallback: string): string {
   const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
@@ -76,13 +77,23 @@ export default function DashboardPage() {
     queryFn: () => getAuditLogs({ limit: 50 }),
   });
 
-  const isFetching = devicesFetching || jobsFetching || auditFetching;
+  const {
+    data: sites,
+    isFetching: sitesFetching,
+    refetch: refetchSites,
+  } = useQuery<Site[]>({
+    queryKey: ['sites'],
+    queryFn: getSites,
+  });
+
+  const isFetching = devicesFetching || jobsFetching || auditFetching || sitesFetching;
   const isLoading = devicesLoading || jobsLoading || auditLoading;
 
   function handleRefresh() {
     refetchDevices();
     refetchJobs();
     refetchAudit();
+    refetchSites();
   }
 
   if (isLoading) {
@@ -128,6 +139,15 @@ export default function DashboardPage() {
 
   const recentJobs = jobs.slice(0, 5);
   const recentLogs = logs.slice(0, 5);
+
+  // Devices-per-site widget data: prefer authoritative counts from /sites; add an
+  // "Unassigned" entry derived from the devices list.
+  const siteList = sites ?? [];
+  const unassignedCount = deviceList.filter((d) => d.site_id == null).length;
+  const sitesWithCounts: { label: string; count: number; key: string }[] = [
+    ...siteList.map((s) => ({ label: s.name, count: s.device_count, key: `site-${s.id}` })),
+    ...(unassignedCount > 0 ? [{ label: 'Unassigned', count: unassignedCount, key: 'unassigned' }] : []),
+  ];
 
   return (
     <div>
@@ -198,6 +218,23 @@ export default function DashboardPage() {
             <p className="text-xs text-gray-500 uppercase tracking-wide">Audit Events</p>
             <p className="text-3xl font-semibold text-gray-900 mt-1">{auditCount}</p>
             <p className="text-xs text-gray-400 mt-1">Recent audit entries</p>
+          </div>
+        )}
+      </div>
+
+      {/* Devices per site */}
+      <div className="mb-10">
+        <h2 className="text-sm font-semibold text-gray-700 mb-3">Devices per Site</h2>
+        {sitesWithCounts.length === 0 ? (
+          <p className="text-sm text-gray-400 py-4">No sites defined yet.</p>
+        ) : (
+          <div className="flex flex-wrap gap-3">
+            {sitesWithCounts.map((s) => (
+              <div key={s.key} className="border border-gray-200 rounded-md px-4 py-2 min-w-[8rem]">
+                <p className="text-xs text-gray-500 truncate" title={s.label}>{s.label}</p>
+                <p className="text-2xl font-semibold tabular-nums text-gray-900 mt-0.5">{s.count}</p>
+              </div>
+            ))}
           </div>
         )}
       </div>

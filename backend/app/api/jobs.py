@@ -69,6 +69,7 @@ def list_jobs(
     current_user: dict = Depends(get_current_user),
     status: Optional[str] = Query(default=None),
     device_id: Optional[str] = Query(default=None),
+    site_id: Optional[int] = Query(default=None, ge=1),
     from_date: Optional[datetime] = Query(default=None),
     to_date: Optional[datetime] = Query(default=None),
     page: int = Query(default=1, ge=1),
@@ -89,6 +90,7 @@ def list_jobs(
         device=device_id,
         from_date=from_date,
         to_date=to_date,
+        site_id=site_id,
         page=page,
         page_size=page_size,
     )

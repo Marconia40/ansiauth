@@ -52,6 +52,7 @@ def get_audit_log(
     from_date: Optional[datetime] = Query(default=None),
     to_date: Optional[datetime] = Query(default=None),
     device_id: Optional[str] = Query(default=None),
+    site_id: Optional[int] = Query(default=None, ge=1),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=1000),
     page: Optional[int] = Query(default=None, ge=1),
@@ -75,6 +76,7 @@ def get_audit_log(
         from_date=from_date,
         to_date=to_date,
         device_id=device_id,
+        site_id=site_id,
     )
     response.headers["X-Total-Count"] = str(total)
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
@@ -87,6 +89,7 @@ def get_audit_log(
         from_date=from_date,
         to_date=to_date,
         device_id=device_id,
+        site_id=site_id,
         skip=skip,
         limit=limit,
     )

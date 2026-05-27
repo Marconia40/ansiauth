@@ -83,6 +83,7 @@ def query_jobs(
     device: Optional[str] = None,
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
+    site_id: Optional[int] = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[Job], int]:
@@ -98,6 +99,16 @@ def query_jobs(
         if to_date is not None:
             td = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
             q = q.filter(JobModel.created_at <= td)
+        if site_id is not None:
+            from app.db.models import DeviceModel
+            device_names = [
+                r[0] for r in session.query(DeviceModel.name).filter(DeviceModel.site_id == site_id).all()
+            ]
+            if device_names:
+                q = q.filter(JobModel.device.in_(device_names))
+            else:
+                # No devices in this site → result must be empty.
+                return [], 0
         total = q.count()
         rows = (
             q.order_by(JobModel.created_at.desc())

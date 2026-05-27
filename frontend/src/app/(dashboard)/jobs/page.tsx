@@ -8,10 +8,11 @@ import { ErrorMessage } from '@/components/ErrorMessage';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { JobDetailModal } from '@/components/JobDetailModal';
-import { getJobs } from '@/services/api';
+import { getJobs, getSites } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Job } from '@/types/job';
+import type { Site } from '@/types/site';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -111,6 +112,9 @@ const SELECT_CLS =
 interface FilterBarProps {
   devices: string[];
   playbooks: string[];
+  sites: Site[];
+  filterSite: string;
+  setFilterSite: (v: string) => void;
   filterDevice: string;
   setFilterDevice: (v: string) => void;
   filterStatus: string;
@@ -130,6 +134,9 @@ interface FilterBarProps {
 function FilterBar({
   devices,
   playbooks,
+  sites,
+  filterSite,
+  setFilterSite,
   filterDevice,
   setFilterDevice,
   filterStatus,
@@ -147,6 +154,11 @@ function FilterBar({
 }: FilterBarProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 mb-3">
+      <select value={filterSite} onChange={e => setFilterSite(e.target.value)} className={SELECT_CLS}>
+        <option value="">All Sites</option>
+        {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+
       <select value={filterDevice} onChange={e => setFilterDevice(e.target.value)} className={SELECT_CLS}>
         <option value="">All devices</option>
         {devices.map(d => <option key={d} value={d}>{d}</option>)}
@@ -290,6 +302,7 @@ function Pagination({
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function JobsPage() {
+  const [filterSite, setFilterSite] = useState('');
   const [filterDevice, setFilterDevice] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [filterPlaybook, setFilterPlaybook] = useState('');
@@ -302,16 +315,20 @@ export default function JobsPage() {
   const { jobs: trackedJobs } = useJobNotifications();
   const trackedIds = new Set(trackedJobs.map(n => n.jobId));
 
+  const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
+  const siteList = sites ?? [];
+
   // reset to page 1 when server-side params change
-  useEffect(() => { setPage(1); }, [filterStatus, filterDevice, pageSize]);
+  useEffect(() => { setPage(1); }, [filterStatus, filterDevice, filterSite, pageSize]);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ['jobs', page, pageSize, filterStatus, filterDevice],
+    queryKey: ['jobs', page, pageSize, filterStatus, filterDevice, filterSite],
     queryFn: () => getJobs({
       page,
       page_size: pageSize,
       status: filterStatus || undefined,
       device: filterDevice || undefined,
+      site_id: filterSite ? Number(filterSite) : undefined,
     }),
     refetchInterval: (query) => {
       const items = (query.state.data as { items: Job[] } | undefined)?.items ?? [];
@@ -368,9 +385,10 @@ export default function JobsPage() {
   }, [pageItems]);
 
   const hasActiveFilters =
-    !!filterDevice || !!filterStatus || !!filterPlaybook || filterDateRange !== 'all';
+    !!filterSite || !!filterDevice || !!filterStatus || !!filterPlaybook || filterDateRange !== 'all';
 
   function clearFilters() {
+    setFilterSite('');
     setFilterDevice('');
     setFilterStatus('');
     setFilterPlaybook('');
@@ -411,6 +429,9 @@ export default function JobsPage() {
           <FilterBar
             devices={uniqueDevices}
             playbooks={uniquePlaybooks}
+            sites={siteList}
+            filterSite={filterSite}
+            setFilterSite={setFilterSite}
             filterDevice={filterDevice}
             setFilterDevice={setFilterDevice}
             filterStatus={filterStatus}

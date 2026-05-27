@@ -31,6 +31,7 @@ class DeviceCreate(BaseModel):
             "platform": "ios",
             "username": "admin",
             "password": "s3cr3tpass",
+            "site_id": 1,
         }
     })
 
@@ -40,11 +41,12 @@ class DeviceCreate(BaseModel):
     platform: str = "ios"
     username: str
     password: str  # plain text — encrypted before storing
+    site_id: Optional[int] = None
 
 
 class DeviceUpdate(BaseModel):
     model_config = ConfigDict(json_schema_extra={
-        "example": {"host": "192.168.1.20", "username": "netops"}
+        "example": {"host": "192.168.1.20", "username": "netops", "site_id": 2}
     })
 
     host: Optional[str] = None
@@ -52,6 +54,9 @@ class DeviceUpdate(BaseModel):
     platform: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+    # site_id is also Optional[int], but we distinguish "not provided" from "set to null"
+    # via model_dump(exclude_unset=True) in the router — clients pass null to clear.
+    site_id: Optional[int] = None
 
     @field_validator("host")
     @classmethod
@@ -68,4 +73,6 @@ class DevicePublic(BaseModel):
     vendor: str
     platform: str
     username: str
+    site_id: Optional[int] = None
+    site_name: Optional[str] = None
     # encrypted_password intentionally excluded from responses

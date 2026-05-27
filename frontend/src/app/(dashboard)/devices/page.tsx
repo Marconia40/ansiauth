@@ -6,8 +6,9 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, createDevice, updateDevice, deleteDevice } from '@/services/api';
+import { getDevices, createDevice, updateDevice, deleteDevice, getSites } from '@/services/api';
 import type { Device, DeviceUpdate, Vendor } from '@/types/device';
+import type { Site } from '@/types/site';
 
 function extractMessage(error: unknown, fallback: string): string {
   const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
@@ -34,6 +35,7 @@ export default function DevicesPage() {
   const [newPlatform, setNewPlatform] = useState('');
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [newSiteId, setNewSiteId] = useState<string>(''); // '' means Unassigned
 
   const [editingDeviceName, setEditingDeviceName] = useState<string | null>(null);
   const [editingHost, setEditingHost] = useState('');
@@ -41,6 +43,7 @@ export default function DevicesPage() {
   const [editingPlatform, setEditingPlatform] = useState('');
   const [editingUsername, setEditingUsername] = useState('');
   const [editingPassword, setEditingPassword] = useState('');
+  const [editingSiteId, setEditingSiteId] = useState<string>('');
 
   const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -71,6 +74,12 @@ export default function DevicesPage() {
     queryFn: getDevices,
   });
 
+  const { data: sites } = useQuery<Site[]>({
+    queryKey: ['sites'],
+    queryFn: getSites,
+  });
+  const siteList = sites ?? [];
+
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!newName.trim()) { setErrorMessage('Device name is required'); return; }
@@ -90,6 +99,7 @@ export default function DevicesPage() {
         platform: newPlatform.trim(),
         username: newUsername.trim(),
         password: newPassword.trim(),
+        site_id: newSiteId ? Number(newSiteId) : null,
       });
       setNewName('');
       setNewHost('');
@@ -97,6 +107,7 @@ export default function DevicesPage() {
       setNewPlatform('');
       setNewUsername('');
       setNewPassword('');
+      setNewSiteId('');
       await refetch();
       setSuccessMessage(`Device ${deviceName} created successfully`);
     } catch (err) {
@@ -113,6 +124,7 @@ export default function DevicesPage() {
     setEditingPlatform(device.platform);
     setEditingUsername(device.username);
     setEditingPassword('');
+    setEditingSiteId(device.site_id != null ? String(device.site_id) : '');
     setSuccessMessage(null);
     setErrorMessage(null);
   }
@@ -124,6 +136,7 @@ export default function DevicesPage() {
     setEditingPlatform('');
     setEditingUsername('');
     setEditingPassword('');
+    setEditingSiteId('');
   }
 
   async function handleUpdate() {
@@ -140,6 +153,8 @@ export default function DevicesPage() {
         vendor: editingVendor,
         platform: editingPlatform.trim(),
         username: editingUsername.trim(),
+        // null clears the assignment; an empty string from the select maps to null.
+        site_id: editingSiteId ? Number(editingSiteId) : null,
       };
       if (editingPassword.trim()) {
         body.password = editingPassword.trim();
@@ -151,6 +166,7 @@ export default function DevicesPage() {
       setEditingPlatform('');
       setEditingUsername('');
       setEditingPassword('');
+      setEditingSiteId('');
       await refetch();
       setSuccessMessage(`Device ${deviceName} updated successfully`);
     } catch (err) {
@@ -250,6 +266,18 @@ export default function DevicesPage() {
           required
           className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
         />
+        <select
+          value={newSiteId}
+          onChange={(e) => setNewSiteId(e.target.value)}
+          disabled={isSubmitting}
+          aria-label="Site"
+          className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+        >
+          <option value="">No site</option>
+          {siteList.map((s) => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
         <button
           type="submit"
           disabled={
@@ -296,6 +324,7 @@ export default function DevicesPage() {
               <th className="text-left px-4 py-2 font-medium text-gray-700">Vendor</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Platform</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Username</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Site</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Actions</th>
             </tr>
           </thead>
@@ -361,6 +390,24 @@ export default function DevicesPage() {
                         device.username
                       )}
                     </td>
+                    <td className="px-4 py-2 text-gray-900">
+                      {isEditing ? (
+                        <select
+                          value={editingSiteId}
+                          onChange={(e) => setEditingSiteId(e.target.value)}
+                          disabled={isSubmitting}
+                          aria-label="Site"
+                          className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                        >
+                          <option value="">No site</option>
+                          {siteList.map((s) => (
+                            <option key={s.id} value={s.id}>{s.name}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        device.site_name ?? <span className="text-gray-400">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2">
                       {canMutate && (isEditing ? (
                         <div className="flex flex-wrap gap-2 items-center">
@@ -414,7 +461,7 @@ export default function DevicesPage() {
               })
             ) : (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={7} className="px-4 py-8 text-center text-gray-400">
                   No devices registered yet.
                 </td>
               </tr>

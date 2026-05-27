@@ -7,8 +7,9 @@ import { useAuth } from '@/context/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getAuditLogs } from '@/services/api';
+import { getAuditLogs, getSites } from '@/services/api';
 import type { AuditLog } from '@/types/audit';
+import type { Site } from '@/types/site';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -69,6 +70,7 @@ interface AuditQueryState {
   resource: string;
   status: string;
   device: string;
+  site: string;  // empty = All Sites
   dateRange: DateRange;
 }
 
@@ -90,6 +92,7 @@ function readQueryState(params: URLSearchParams): AuditQueryState {
     resource: params.get('resource') ?? '',
     status: params.get('status') ?? '',
     device: params.get('device') ?? '',
+    site: params.get('site') ?? '',
     dateRange,
   };
 }
@@ -105,6 +108,7 @@ function buildQueryString(state: Partial<AuditQueryState>): string {
   if (state.resource) params.set('resource', state.resource);
   if (state.status) params.set('status', state.status);
   if (state.device) params.set('device', state.device);
+  if (state.site) params.set('site', state.site);
   if (state.dateRange && state.dateRange !== 'all') params.set('range', state.dateRange);
   const s = params.toString();
   return s ? `?${s}` : '';
@@ -210,6 +214,9 @@ interface FilterBarProps {
   setResource: (v: string) => void;
   status: string;
   setStatus: (v: string) => void;
+  site: string;
+  setSite: (v: string) => void;
+  sites: Site[];
   dateRange: DateRange;
   setDateRange: (v: DateRange) => void;
   pageSize: number;
@@ -233,6 +240,9 @@ function FilterBar(props: FilterBarProps) {
     setResource,
     status,
     setStatus,
+    site,
+    setSite,
+    sites,
     dateRange,
     setDateRange,
     pageSize,
@@ -293,6 +303,13 @@ function FilterBar(props: FilterBarProps) {
         placeholder="Device"
         className={`${INPUT_CLS} w-32`}
       />
+
+      <select value={site} onChange={e => setSite(e.target.value)} className={SELECT_CLS}>
+        <option value="">All Sites</option>
+        {sites.map(s => (
+          <option key={s.id} value={s.id}>{s.name}</option>
+        ))}
+      </select>
 
       <select value={dateRange} onChange={e => setDateRange(e.target.value as DateRange)} className={SELECT_CLS}>
         <option value="all">All time</option>
@@ -564,6 +581,7 @@ function AuditPageContent() {
       patch.resource !== undefined ||
       patch.status !== undefined ||
       patch.device !== undefined ||
+      patch.site !== undefined ||
       patch.dateRange !== undefined ||
       patch.pageSize !== undefined;
     if (filtersChanged && patch.page === undefined) next.page = 1;
@@ -585,6 +603,7 @@ function AuditPageContent() {
       resource: '',
       status: '',
       device: '',
+      site: '',
       dateRange: 'all',
     });
   }, [updateState]);
@@ -597,8 +616,12 @@ function AuditPageContent() {
     resource: state.resource || undefined,
     status: state.status || undefined,
     device_id: state.device || undefined,
+    site_id: state.site ? Number(state.site) : undefined,
     from_date: dateRangeToFromDate(state.dateRange),
   }), [state]);
+
+  const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
+  const siteList = sites ?? [];
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['audit-logs', queryParams],
@@ -636,6 +659,7 @@ function AuditPageContent() {
     !!state.resource ||
     !!state.status ||
     !!state.device ||
+    !!state.site ||
     state.dateRange !== 'all';
 
   const [exporting, setExporting] = useState(false);
@@ -666,6 +690,7 @@ function AuditPageContent() {
             resource: state.resource || undefined,
             status: state.status || undefined,
             device_id: state.device || undefined,
+            site_id: state.site ? Number(state.site) : undefined,
             from_date: dateRangeToFromDate(state.dateRange),
           });
           rows = result.rows;
@@ -750,6 +775,9 @@ function AuditPageContent() {
         setResource={r => updateState({ resource: r })}
         status={state.status}
         setStatus={s => updateState({ status: s })}
+        site={state.site}
+        setSite={s => updateState({ site: s })}
+        sites={siteList}
         dateRange={state.dateRange}
         setDateRange={r => updateState({ dateRange: r })}
         pageSize={state.pageSize}
