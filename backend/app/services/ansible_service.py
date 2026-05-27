@@ -158,12 +158,17 @@ def run_playbook(
         stdout = ios_cmd_output
     else:
         stdout = raw_stdout
+    # Per-task stdouts for callers that need every command's output (e.g. the
+    # port driver runs three read commands in one playbook).  Always populated
+    # so consumers don't need to check for None.
+    stdouts = _extract_all_command_outputs(r) if rc == 0 else []
     combined_output = (stdout + stderr).lower()
     if "no hosts matched" in combined_output and rc == 0:
         logger.error("Playbook %s: no hosts matched on device=%s — treating as failure", playbook, device_label)
         rc = 1
         stderr = stderr or "No hosts matched in inventory"
-    result = {"rc": rc, "stdout": stdout, "stderr": stderr}
+        stdouts = []
+    result = {"rc": rc, "stdout": stdout, "stderr": stderr, "stdouts": stdouts}
     logger.debug("Ansible raw result: %s", result)
     if rc != 0:
         error_output = (stderr + " " + stdout).strip()
@@ -228,6 +233,46 @@ def _extract_ios_command_output(r) -> str:
     except Exception as exc:
         logger.debug("Could not extract command output from events: %s", exc)
     return ""
+
+
+def _extract_all_command_outputs(r) -> list[str]:
+    """Return every command stdout, in execution order, from ansible-runner events.
+
+    Companion to ``_extract_ios_command_output`` for playbooks that issue
+    multiple read commands in sequence and need to consume all of them.
+    Handles the same two result shapes:
+
+    * ``ios_command`` / ``ce_command``: ``res.stdout`` is a list per task.
+      Each element is appended to the returned list separately so callers
+      see one entry per device-side command.
+    * ``cli_command`` (netcommon): ``res.stdout`` is a plain string per task.
+
+    Tasks that produce no stdout (config modules, ``set_fact``, etc.) are
+    silently skipped — they contribute nothing to the result list.
+
+    Returns
+    -------
+    list[str]
+        Command stdouts in the order their tasks completed.  Empty list if
+        no relevant events were found.
+    """
+    outputs: list[str] = []
+    try:
+        for event in r.events:
+            if event.get("event") != "runner_on_ok":
+                continue
+            res = event.get("event_data", {}).get("res", {})
+            stdout_val = res.get("stdout")
+            if isinstance(stdout_val, list):
+                for entry in stdout_val:
+                    if isinstance(entry, str) and entry:
+                        outputs.append(entry)
+            elif isinstance(stdout_val, str) and stdout_val:
+                outputs.append(stdout_val)
+    except Exception as exc:
+        logger.debug("Could not extract command outputs from events: %s", exc)
+    logger.debug("Extracted %d command output(s) from events", len(outputs))
+    return outputs
 
 
 def _extract_failure_reason(r) -> str:
