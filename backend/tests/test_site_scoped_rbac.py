@@ -262,9 +262,11 @@ def test_admin_audit_unrestricted(admin_client):
 
 # ── Device groups visibility ──────────────────────────────────────────────────
 
-def _make_group(name: str, devices: list[str]) -> int:
+def _make_group(name: str, devices: list[str], site_id: int | None = None) -> int:
+    """Create a device group. Step 7.4: groups must belong to a site; passing
+    site_id=None creates a legacy / mixed-site group (admin-only by policy)."""
     with get_session() as session:
-        g = DeviceGroupModel(name=name, description=None)
+        g = DeviceGroupModel(name=name, description=None, site_id=site_id)
         session.add(g)
         session.flush()
         for d in devices:
@@ -281,8 +283,8 @@ def test_operator_sees_only_groups_with_allowed_devices(juan, admin_client):
     _attach("fail_device", lab)
     _grant("juan", [lib])
 
-    g_visible = _make_group("LibraryGroup", ["mock_device"])
-    g_hidden = _make_group("LabGroup", ["fail_device"])
+    g_visible = _make_group("LibraryGroup", ["mock_device"], site_id=lib)
+    g_hidden = _make_group("LabGroup", ["fail_device"], site_id=lab)
 
     r = juan_client.get("/api/v1/device-groups/")
     assert r.status_code == 200
@@ -299,22 +301,23 @@ def test_operator_403_on_forbidden_group(juan, admin_client):
     _attach("fail_device", lab)
     _grant("juan", [lib])
 
-    g_hidden = _make_group("LabGroup", ["fail_device"])
+    g_hidden = _make_group("LabGroup", ["fail_device"], site_id=lab)
     assert juan_client.get(f"/api/v1/device-groups/{g_hidden}").status_code == 403
 
 
-def test_group_devices_listing_filtered_for_operator(juan, admin_client):
+def test_group_devices_listing_includes_all_same_site_devices(juan, admin_client):
+    """A site-aware group's members all share that site by construction, so an
+    operator allowed for that site sees the full membership."""
     juan_client, _ = juan
     lib = _seed_site(admin_client, "Library")
-    lab = _seed_site(admin_client, "Laboratory")
     _attach("mock_device", lib)
-    _attach("fail_device", lab)
+    _attach("fail_device", lib)
     _grant("juan", [lib])
-    g_mixed = _make_group("Mixed", ["mock_device", "fail_device"])
+    gid = _make_group("LibraryGroup", ["mock_device", "fail_device"], site_id=lib)
 
-    r = juan_client.get(f"/api/v1/device-groups/{g_mixed}/devices")
+    r = juan_client.get(f"/api/v1/device-groups/{gid}/devices")
     assert r.status_code == 200
-    assert r.json()["data"]["devices"] == ["mock_device"]
+    assert sorted(r.json()["data"]["devices"]) == ["fail_device", "mock_device"]
 
 
 # ── User management: allowed_sites assignment ────────────────────────────────

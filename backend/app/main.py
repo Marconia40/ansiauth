@@ -145,6 +145,50 @@ def _backfill_user_allowed_sites(engine) -> None:
 _backfill_user_allowed_sites(get_engine())
 
 
+def _migrate_device_group_site_id(engine) -> None:
+    """Add the site_id column to device_groups (idempotent) and backfill rows
+    whose members all live in the same site. Mixed-site groups are left with
+    site_id=NULL — admins must clean them up before non-admin RBAC will surface them.
+    """
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "device_groups" not in inspector.get_table_names():
+        return
+    existing_cols = {c["name"] for c in inspector.get_columns("device_groups")}
+    if "site_id" not in existing_cols:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE device_groups ADD COLUMN site_id INTEGER REFERENCES sites(id)"))
+            conn.commit()
+        logger.info("Migration applied: added 'site_id' column to device_groups")
+    # Backfill only NULL-site groups whose members all share a single site.
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            UPDATE device_groups
+               SET site_id = (
+                   SELECT MIN(d.site_id)
+                     FROM device_group_members m
+                     JOIN devices d ON d.name = m.device_name
+                    WHERE m.group_id = device_groups.id
+                      AND d.site_id IS NOT NULL
+               )
+             WHERE site_id IS NULL
+               AND id IN (
+                   SELECT m.group_id
+                     FROM device_group_members m
+                     JOIN devices d ON d.name = m.device_name
+                    GROUP BY m.group_id
+                   HAVING MIN(d.site_id) = MAX(d.site_id)
+                      AND MIN(d.site_id) IS NOT NULL
+               )
+        """))
+        affected = getattr(result, "rowcount", 0) or 0
+        if affected > 0:
+            conn.commit()
+            logger.info("Backfilled site_id on %d device_groups", affected)
+
+_migrate_device_group_site_id(get_engine())
+
+
 def _install_audit_immutability_trigger(engine) -> None:
     """Create a BEFORE UPDATE trigger that prevents any mutation of audit_logs rows."""
     from sqlalchemy import text

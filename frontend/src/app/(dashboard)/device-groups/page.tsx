@@ -14,9 +14,11 @@ import {
   getDeviceGroupDevices,
   addDeviceToGroup,
   removeDeviceFromGroup,
+  getSites,
 } from '@/services/api';
 import type { DeviceGroup } from '@/services/api';
 import type { Device } from '@/types/device';
+import type { Site } from '@/types/site';
 
 function extractMessage(error: unknown, fallback: string): string {
   const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
@@ -28,6 +30,7 @@ export default function DeviceGroupsPage() {
 
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
+  const [newGroupSiteId, setNewGroupSiteId] = useState<string>('');
   const [isCreating, setIsCreating] = useState(false);
 
   const [addingToGroup, setAddingToGroup] = useState<number | null>(null);
@@ -80,6 +83,9 @@ export default function DeviceGroupsPage() {
     queryFn: getDevices,
   });
 
+  const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
+  const siteList = sites ?? [];
+
   const isFetching = groupsFetching || devicesFetching;
   const isLoading = groupsLoading || devicesLoading;
   const isAnyOperationRunning = isCreating || !!addingToGroup || !!removingMember || !!deletingGroupId;
@@ -121,6 +127,7 @@ export default function DeviceGroupsPage() {
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!newGroupName.trim()) { setErrorMessage('Group name is required'); return; }
+    if (!newGroupSiteId) { setErrorMessage('Site is required'); return; }
     setIsCreating(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -129,9 +136,11 @@ export default function DeviceGroupsPage() {
       await createDeviceGroup({
         name: groupName,
         description: newGroupDescription.trim() || undefined,
+        site_id: Number(newGroupSiteId),
       });
       setNewGroupName('');
       setNewGroupDescription('');
+      setNewGroupSiteId('');
       await refetchGroups();
       setSuccessMessage(`Device group ${groupName} created successfully`);
     } catch (err) {
@@ -260,16 +269,34 @@ export default function DeviceGroupsPage() {
               value={newGroupDescription}
               onChange={(e) => setNewGroupDescription(e.target.value)}
               disabled={isCreating}
-              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             />
+            <select
+              value={newGroupSiteId}
+              onChange={(e) => setNewGroupSiteId(e.target.value)}
+              disabled={isCreating || siteList.length === 0}
+              required
+              aria-label="Site"
+              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            >
+              <option value="">{siteList.length === 0 ? 'No sites available' : 'Select site...'}</option>
+              {siteList.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
             <button
               type="submit"
-              disabled={isCreating || isAnyOperationRunning || !newGroupName.trim()}
+              disabled={isCreating || isAnyOperationRunning || !newGroupName.trim() || !newGroupSiteId}
               className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isCreating ? 'Creating...' : 'Create Group'}
             </button>
           </form>
+          {siteList.length === 0 && (
+            <p className="mt-2 text-xs text-gray-500">
+              You need to create at least one site before you can create a device group.
+            </p>
+          )}
         </div>
       )}
 
@@ -289,6 +316,7 @@ export default function DeviceGroupsPage() {
           <thead>
             <tr className="border-b border-gray-200 bg-gray-50">
               <th className="text-left px-4 py-2 font-medium text-gray-700">Name</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Site</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Description</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Members</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700 whitespace-nowrap">Created</th>
@@ -303,9 +331,13 @@ export default function DeviceGroupsPage() {
               const isDeletingThis = deletingGroupId === group.id;
               const groupSelectedDevice = selectedDevice[group.id] ?? '';
 
+              const groupDevicePool = deviceList.filter((d) => d.site_id === group.site_id);
               return (
                 <tr key={group.id} className="border-b border-gray-100 hover:bg-gray-50 align-top">
                   <td className="px-4 py-3 text-gray-900 font-medium">{group.name}</td>
+                  <td className="px-4 py-3 text-gray-700">
+                    {group.site_name ?? <span className="text-amber-600 text-xs">unset (legacy)</span>}
+                  </td>
                   <td className="px-4 py-3 text-gray-600">{group.description ?? '—'}</td>
                   <td className="px-4 py-3 text-gray-600">{group.member_count}</td>
                   <td className="px-4 py-3 text-gray-600 whitespace-nowrap text-xs">
@@ -337,22 +369,28 @@ export default function DeviceGroupsPage() {
                       </div>
                     )}
 
-                    {canMutate && (
+                    {canMutate && group.site_id !== null && (
                       <div className="flex gap-1 items-center mt-1">
                         <select
                           value={groupSelectedDevice}
                           onChange={(e) =>
                             setSelectedDevice((prev) => ({ ...prev, [group.id]: e.target.value }))
                           }
-                          disabled={isAdding || isDeletingThis}
+                          disabled={isAdding || isDeletingThis || groupDevicePool.length === 0}
                           className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
                         >
-                          <option value="">Select device...</option>
-                          {deviceList.map((d) => (
-                            <option key={d.name} value={d.name}>
-                              {d.name}
-                            </option>
-                          ))}
+                          <option value="">
+                            {groupDevicePool.length === 0
+                              ? `No devices in ${group.site_name ?? 'this site'}`
+                              : 'Select device...'}
+                          </option>
+                          {groupDevicePool
+                            .filter((d) => !members.includes(d.name))
+                            .map((d) => (
+                              <option key={d.name} value={d.name}>
+                                {d.name}
+                              </option>
+                            ))}
                         </select>
                         <button
                           onClick={() => handleAddDevice(group)}
@@ -362,6 +400,11 @@ export default function DeviceGroupsPage() {
                           {isAdding ? 'Adding...' : 'Add'}
                         </button>
                       </div>
+                    )}
+                    {canMutate && group.site_id === null && (
+                      <p className="text-xs text-amber-600 mt-1">
+                        Set this group&apos;s site before adding members
+                      </p>
                     )}
                   </td>
                   <td className="px-4 py-3">

@@ -401,6 +401,8 @@ export interface DeviceGroup {
   description: string | null;
   member_count: number;
   created_at: string;
+  site_id: number | null;
+  site_name: string | null;
 }
 
 export async function getDeviceGroups(): Promise<DeviceGroup[]> {
@@ -410,6 +412,7 @@ export async function getDeviceGroups(): Promise<DeviceGroup[]> {
 export async function createDeviceGroup(body: {
   name: string;
   description?: string;
+  site_id: number;
 }): Promise<DeviceGroup> {
   return unwrap(client.post<ApiResponse<DeviceGroup>>('/device-groups/', body));
 }

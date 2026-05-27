@@ -113,6 +113,23 @@ def update_device(
         if site_id is not _UNSET:
             if site_id is not None:
                 _validate_site_or_raise(session, site_id)
+            # Step 7.4 invariant: a device may only belong to groups whose site
+            # matches its own. Reject a site change that would break that.
+            if site_id != row.site_id:
+                from app.db.models import DeviceGroupMemberModel, DeviceGroupModel
+                conflicting = (
+                    session.query(DeviceGroupModel.name)
+                    .join(DeviceGroupMemberModel, DeviceGroupMemberModel.group_id == DeviceGroupModel.id)
+                    .filter(DeviceGroupMemberModel.device_name == name)
+                    .filter(DeviceGroupModel.site_id != site_id)
+                    .all()
+                )
+                if conflicting:
+                    names = sorted({r[0] for r in conflicting})
+                    raise ValueError(
+                        "Cannot change site: device is a member of group(s) tied to a different site — "
+                        f"remove it from these groups first: {names}"
+                    )
             row.site_id = site_id
         session.flush()
         domain = _to_domain(row)

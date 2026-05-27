@@ -176,6 +176,12 @@ class DeviceGroupModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True, index=True)
     description = Column(String, nullable=True)
+    site_id = Column(
+        Integer,
+        ForeignKey("sites.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -187,6 +193,7 @@ class DeviceGroupModel(Base):
         back_populates="group",
         cascade="all, delete-orphan",
     )
+    site = relationship("SiteModel", back_populates="device_groups")
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_group_name"),)
 
@@ -210,6 +217,7 @@ class SiteModel(Base):
     )
 
     devices = relationship("DeviceModel", back_populates="site")
+    device_groups = relationship("DeviceGroupModel", back_populates="site")
     allowed_users = relationship(
         "UserModel",
         secondary="user_allowed_sites",
