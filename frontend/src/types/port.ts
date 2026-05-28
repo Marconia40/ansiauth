@@ -24,3 +24,23 @@ export interface PortListResponse {
   count: number;
   ports: Port[];
 }
+
+// Body for PATCH /api/v1/ports/description.  Empty description clears it.
+export interface PortDescriptionUpdateRequest {
+  device: string;
+  interface: string;
+  description: string;
+}
+
+// Response shape — matches the orchestration envelope used by VLAN endpoints,
+// so the existing JobNotificationContext can track these jobs unchanged.
+export interface PortJobResult {
+  device: string;
+  job_id: string;
+  status?: string;
+}
+
+export interface PortOperationResult {
+  group_job_id: string;
+  jobs: PortJobResult[];
+}

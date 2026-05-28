@@ -61,6 +61,30 @@ class PortRead(BaseModel):
     )
 
 
+class PortDescriptionUpdateRequest(BaseModel):
+    """Request body for ``PATCH /api/v1/ports/description`` (Step 2.1).
+
+    Single device only — the spec deliberately keeps Step 2.1 narrow.
+    Empty ``description`` is allowed and means "clear the description".
+    """
+
+    device: str = Field(..., min_length=1, description="Target device name (single device only).")
+    interface: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
+    )
+    description: str = Field(
+        default="",
+        max_length=200,
+        description=(
+            "New description text. An empty string clears the description "
+            "(`undo description` on Huawei, `no description` on Cisco)."
+        ),
+    )
+
+
 class PortListResponseBody(BaseModel):
     """Envelope returned by ``GET /api/v1/ports/?device=...``.
 

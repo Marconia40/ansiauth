@@ -18,6 +18,7 @@ _NETWORK_OS = "ios"
 _CONNECTION = "network_cli"
 
 _PLAYBOOK_GET_PORTS = "vendors/cisco/get_ports.yml"
+_PLAYBOOK_UPDATE_DESCRIPTION = "vendors/cisco/update_port_description.yml"
 
 # The Cisco get_ports playbook issues a single ios_command task with three
 # commands in this order.  ios_command returns stdout as a list, which is
@@ -144,3 +145,60 @@ class CiscoPortDriver(BasePortDriver):
             len(ports), device.name,
         )
         return ports
+
+    # ── Mutation operations ──────────────────────────────────────────────────
+
+    def update_port_description(
+        self,
+        interface: str,
+        description: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the port description on a Cisco IOS device.
+
+        Runs ``cisco.ios.ios_config`` inside the interface parent context.
+        Empty / whitespace-only ``description`` triggers ``no description``
+        rather than echoing an empty literal — keeping the device's
+        running config clean.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        is_empty = not bool(description and description.strip())
+        logger.info(
+            "Cisco: update description on interface=%s device=%s (clear=%s)",
+            interface, device.name, is_empty,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_UPDATE_DESCRIPTION,
+                extravars={
+                    "interface": interface,
+                    "description": description or "",
+                    "description_is_empty": is_empty,
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Cisco: update description OK on interface=%s device=%s",
+                    interface, device.name,
+                )
+            else:
+                logger.error(
+                    "Cisco: update description FAILED on interface=%s device=%s — %s",
+                    interface, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [update_port_description interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise

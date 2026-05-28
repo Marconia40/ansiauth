@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from app.core.config import EXECUTION_MODE
 from app.models.port import PortInfo, PortListResponse
-from app.services import device_locks, secret_service
+from app.services import secret_service
 
 if TYPE_CHECKING:
     from app.services.vendors.port_driver_base import BasePortDriver
@@ -122,14 +122,73 @@ def list_ports(device_id: str) -> PortListResponse:
     password = secret_service.decrypt_password(device.encrypted_password)
     driver = _get_driver(device)
 
-    with device_locks.acquire(device.name):
-        ports = driver.list_ports(device, password)
+    # Locking is the API layer's responsibility (mirrors the VLAN read path
+    # where `api/vlans.py` acquires the lock with a short timeout).  Keeping
+    # it out of the service means orchestration code that is already holding
+    # the lock (pre-state capture, rollback verification, ...) can call this
+    # without deadlocking.
+    ports = driver.list_ports(device, password)
 
     logger.info(
         "Listed %d ports on device=%s vendor=%s",
         len(ports), device.name, device.vendor,
     )
     return PortListResponse(device=device.name, vendor=device.vendor, ports=ports)
+
+
+def update_port_description_on_device(
+    interface: str,
+    description: str,
+    device_id: str,
+) -> dict:
+    """Set the description of *interface* on *device_id*.
+
+    Dispatches to the vendor driver's ``update_port_description``.  Caller
+    (typically ``port_execution_service``) is responsible for retry,
+    rollback verification, and device locking — this helper is the thin
+    "drive one Ansible playbook" layer that mirrors
+    ``vlan_service.update_vlan_description``.
+
+    Empty ``description`` is normalized to mean "clear the description"
+    (``undo description`` on Huawei, ``no description`` on Cisco) — the
+    vendor driver / playbook is the one that interprets this.
+
+    Parameters
+    ----------
+    interface:
+        Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+    description:
+        New description string.  May be empty to clear.
+    device_id:
+        Device name to act on.
+
+    Returns
+    -------
+    dict
+        Normalized Ansible result: ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+
+    Notes
+    -----
+    Mock mode is supported for tests / local dev: returns success unless
+    ``device_id == "fail_device"``.
+    """
+    if EXECUTION_MODE == "mock":
+        if device_id == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: update description on interface=%s device=%s description=%r",
+            interface, device_id, description,
+        )
+        return {"rc": 0, "stdout": "Simulated description updated", "stderr": "", "success": True}
+
+    dev = _resolve_device(device_id)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    driver = _get_driver(dev)
+    logger.info(
+        "Real mode: update description on interface=%s device=%s",
+        interface, dev.name,
+    )
+    return driver.update_port_description(interface, description, dev, pw)
 
 
 def get_port(device_id: str, name: str) -> PortInfo | None:

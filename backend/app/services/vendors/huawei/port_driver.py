@@ -18,6 +18,7 @@ _NETWORK_OS = "community.network.ce"
 _CONNECTION = "network_cli"
 
 _PLAYBOOK_GET_PORTS = "vendors/huawei/get_ports.yml"
+_PLAYBOOK_UPDATE_DESCRIPTION = "vendors/huawei/update_port_description.yml"
 
 # The Huawei get_ports playbook issues three cli_command tasks in this order:
 #   0. display interface brief
@@ -144,3 +145,64 @@ class HuaweiPortDriver(BasePortDriver):
             len(ports), device.name,
         )
         return ports
+
+    # ── Mutation operations ──────────────────────────────────────────────────
+
+    def update_port_description(
+        self,
+        interface: str,
+        description: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the port description on a Huawei VRP device.
+
+        Runs the ``update_port_description`` playbook with the description
+        text (or its emptiness flag) as Ansible vars.  Returns the
+        normalized Ansible result with the additive ``success`` key.
+
+        Empty / whitespace-only ``description`` clears the description via
+        ``undo description`` — chosen so an operator who wipes the field
+        in the UI gets a clean state on the device, not a literal empty
+        string.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        is_empty = not bool(description and description.strip())
+        logger.info(
+            "Huawei: update description on interface=%s device=%s (clear=%s)",
+            interface, device.name, is_empty,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_UPDATE_DESCRIPTION,
+                extravars={
+                    "interface": interface,
+                    "description": description or "",
+                    "description_is_empty": is_empty,
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Huawei: update description OK on interface=%s device=%s",
+                    interface, device.name,
+                )
+            else:
+                logger.error(
+                    "Huawei: update description FAILED on interface=%s device=%s — %s",
+                    interface, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL HUAWEI TRACEBACK [update_port_description interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise

@@ -1,0 +1,28 @@
+---
+# Step 2.1 — Update port description on Cisco IOS.
+#
+# Behaviour:
+#   * description non-empty → `description <text>` inside the interface block
+#   * description empty     → `no description` (clears any prior value)
+#
+# Uses cisco.ios.ios_config with `parents: interface <name>` so the change
+# is applied inside the right interface context.  IOS commits to running
+# config immediately; `save_when: always` persists to startup.
+#
+# Vars expected:
+#   interface  (str)
+#   description (str) — may be empty/whitespace; caller passes that as-is
+#   description_is_empty (bool) — caller-computed
+#   device     (str) — diagnostic only
+
+- name: Update port description on Cisco IOS device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Set or clear port description
+      cisco.ios.ios_config:
+        parents: "interface {{ interface }}"
+        lines:
+          - "{{ 'no description' if description_is_empty else 'description ' + description }}"
+        save_when: always

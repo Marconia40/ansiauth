@@ -6,7 +6,11 @@ import type { User, UserCreate, UserUpdate } from '@/types/user';
 import type { Job, GroupJob } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
 import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
-import type { PortListResponse } from '@/types/port';
+import type {
+  PortDescriptionUpdateRequest,
+  PortListResponse,
+  PortOperationResult,
+} from '@/types/port';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -314,6 +318,19 @@ export async function getPorts(device: string): Promise<PortListResponse> {
       params: { device },
     }),
   );
+}
+
+type PortJobRawResponse = {
+  success: boolean;
+  group_job_id: string;
+  jobs: { device: string; job_id: string; status?: string }[];
+};
+
+export async function updatePortDescription(
+  body: PortDescriptionUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/description', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────

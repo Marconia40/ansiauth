@@ -2,10 +2,12 @@
 
 import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useAuth } from '@/context/AuthContext';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getPorts, getSites } from '@/services/api';
+import { getDevices, getPorts, getSites, updatePortDescription } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
 import type { Port, PortListResponse, PortMode } from '@/types/port';
@@ -304,6 +306,10 @@ function Pagination({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function PortsPage() {
+  const { user } = useAuth();
+  const { trackJob } = useJobNotifications();
+  const canEdit = !!user && user.role !== 'observer';
+
   const [selectedDevice, setSelectedDevice] = useState<string>('');
   const [siteFilter, setSiteFilter] = useState<string>('');
 
@@ -313,6 +319,12 @@ export default function PortsPage() {
   const [filterOper, setFilterOper] = useState<OperFilter>('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+
+  // ── Inline description-edit state ──
+  const [editingPort, setEditingPort] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState<string>('');
+  const [savingPort, setSavingPort] = useState<string | null>(null);
+  const [editErrorPort, setEditErrorPort] = useState<{ port: string; message: string } | null>(null);
 
   // ── Device + site lookup ──
   const {
@@ -393,6 +405,53 @@ export default function PortsPage() {
     setFilterMode('');
     setFilterAdmin('');
     setFilterOper('');
+  }
+
+  // ── Inline-edit handlers ──
+
+  function handleEditStart(port: Port) {
+    setEditingPort(port.name);
+    setEditingValue(port.description ?? '');
+    setEditErrorPort(null);
+  }
+
+  function handleEditCancel() {
+    setEditingPort(null);
+    setEditingValue('');
+    setEditErrorPort(null);
+  }
+
+  async function handleEditSave(port: Port) {
+    if (!selectedDevice) return;
+    const value = editingValue;
+    // No-op short-circuit: if the user didn't change anything, just close.
+    if ((value ?? '').trim() === (port.description ?? '').trim()) {
+      handleEditCancel();
+      return;
+    }
+    setSavingPort(port.name);
+    setEditErrorPort(null);
+    try {
+      const result = await updatePortDescription({
+        device: selectedDevice,
+        interface: port.name,
+        description: value,
+      });
+      const job = result.jobs[0];
+      if (job) {
+        trackJob(job.job_id, `Update description on ${port.name}`, job.device);
+      }
+      // Optimistic close + refetch so the new value lands in the table.
+      handleEditCancel();
+      // Brief delay before the refetch — the backend job runs asynchronously
+      // and the new state may not be visible immediately.  This is best-effort
+      // UX; the JobNotificationContext drives the authoritative completion signal.
+      setTimeout(() => { refetch(); }, 500);
+    } catch (err) {
+      setEditErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
+    } finally {
+      setSavingPort(null);
+    }
   }
 
   // ── Render ──
@@ -570,7 +629,65 @@ export default function PortsPage() {
                         <td className="px-3 py-2 font-mono text-xs text-gray-900 whitespace-nowrap">
                           {port.name}
                         </td>
-                        <td className="px-3 py-2 text-gray-900">{port.description ?? DASH}</td>
+                        <td className="px-3 py-2 text-gray-900 max-w-xs">
+                          {editingPort === port.name ? (
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="text"
+                                  value={editingValue}
+                                  onChange={(e) => setEditingValue(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') { e.preventDefault(); handleEditSave(port); }
+                                    if (e.key === 'Escape') { e.preventDefault(); handleEditCancel(); }
+                                  }}
+                                  disabled={savingPort === port.name}
+                                  maxLength={200}
+                                  autoFocus
+                                  placeholder="(empty clears description)"
+                                  aria-label={`Description for ${port.name}`}
+                                  className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                                />
+                                <button
+                                  onClick={() => handleEditSave(port)}
+                                  disabled={savingPort === port.name}
+                                  className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  aria-label="Save description"
+                                >
+                                  {savingPort === port.name ? 'Saving...' : 'Save'}
+                                </button>
+                                <button
+                                  onClick={handleEditCancel}
+                                  disabled={savingPort === port.name}
+                                  className="px-2 py-1 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  aria-label="Cancel"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                              {editErrorPort?.port === port.name && (
+                                <p className="text-xs text-red-600">{editErrorPort.message}</p>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-gray-900 truncate" title={port.description ?? ''}>
+                                {port.description ?? DASH}
+                              </span>
+                              {canEdit && (
+                                <button
+                                  onClick={() => handleEditStart(port)}
+                                  disabled={editingPort !== null || savingPort !== null}
+                                  className="opacity-60 hover:opacity-100 text-gray-500 hover:text-blue-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                                  aria-label={`Edit description for ${port.name}`}
+                                  title="Edit description"
+                                >
+                                  ✎
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </td>
                         <td className="px-3 py-2"><AdminBadge value={port.admin_up} /></td>
                         <td className="px-3 py-2"><OperBadge value={port.operational_up} /></td>
                         <td className="px-3 py-2"><ModeBadge mode={port.mode} /></td>

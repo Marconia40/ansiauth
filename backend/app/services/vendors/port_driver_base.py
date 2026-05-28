@@ -56,6 +56,44 @@ class BasePortDriver(ABC):
             be parsed.
         """
 
+    def update_port_description(
+        self,
+        interface: str,
+        description: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the description of *interface* on *device*.
+
+        Step 2.1 introduces the first port mutation operation.  Concrete
+        drivers should override this; the default implementation raises
+        ``NotImplementedError`` so vendors that haven't been wired yet are
+        explicit about the gap.  The orchestration layer converts this
+        into a clean ``UnsupportedVendorError`` for the API client.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        description:
+            New description text.  An empty string requests the driver to
+            clear the description (``undo description`` on Huawei VRP,
+            ``no description`` on Cisco IOS).
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            Normalized Ansible result:
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement update_port_description yet"
+        )
+
     def get_port(self, name: str, device: Device, password: str) -> PortInfo | None:
         """Return the ``PortInfo`` for *name* on *device*, or ``None`` if absent.
 
