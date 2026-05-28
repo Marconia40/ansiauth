@@ -19,6 +19,7 @@ _CONNECTION = "network_cli"
 
 _PLAYBOOK_GET_PORTS = "vendors/cisco/get_ports.yml"
 _PLAYBOOK_UPDATE_DESCRIPTION = "vendors/cisco/update_port_description.yml"
+_PLAYBOOK_SET_ADMIN_STATE = "vendors/cisco/set_port_admin_state.yml"
 
 # The Cisco get_ports playbook issues a single ios_command task with three
 # commands in this order.  ios_command returns stdout as a list, which is
@@ -199,6 +200,54 @@ class CiscoPortDriver(BasePortDriver):
         except Exception as exc:
             logger.exception(
                 "FULL CISCO TRACEBACK [update_port_description interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def set_port_admin_state(
+        self,
+        interface: str,
+        enabled: bool,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Administratively enable / disable *interface* on a Cisco IOS device.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        logger.info(
+            "Cisco: set admin state on interface=%s device=%s enabled=%s",
+            interface, device.name, enabled,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_ADMIN_STATE,
+                extravars={
+                    "interface": interface,
+                    "enabled": bool(enabled),
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Cisco: set admin state OK on interface=%s device=%s enabled=%s",
+                    interface, device.name, enabled,
+                )
+            else:
+                logger.error(
+                    "Cisco: set admin state FAILED on interface=%s device=%s enabled=%s — %s",
+                    interface, device.name, enabled,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [set_port_admin_state interface=%s device=%s]: %s\n%s",
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise

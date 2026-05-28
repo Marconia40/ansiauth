@@ -94,6 +94,50 @@ class BasePortDriver(ABC):
             f"{self.__class__.__name__} does not implement update_port_description yet"
         )
 
+    def set_port_admin_state(
+        self,
+        interface: str,
+        enabled: bool,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Administratively enable or disable *interface* on *device*.
+
+        Step 2.2 introduces the second port mutation operation.  Concrete
+        drivers should override this; the default implementation raises
+        ``NotImplementedError`` so vendors that haven't been wired yet are
+        explicit about the gap, and the API layer can present a clean
+        ``VENDOR_NOT_SUPPORTED`` 501 instead of leaking the stub.
+
+        Vendor mapping:
+            * Huawei VRP — ``undo shutdown`` (enable) / ``shutdown`` (disable)
+              inside the interface view, followed by ``commit``.
+            * Cisco IOS  — ``no shutdown`` / ``shutdown`` inside
+              ``interface <name>`` parent context.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        enabled:
+            ``True``  → bring the interface up (``undo shutdown`` /
+            ``no shutdown``).
+            ``False`` → bring the interface down (``shutdown``).
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            Normalized Ansible result:
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_port_admin_state yet"
+        )
+
     def get_port(self, name: str, device: Device, password: str) -> PortInfo | None:
         """Return the ``PortInfo`` for *name* on *device*, or ``None`` if absent.
 

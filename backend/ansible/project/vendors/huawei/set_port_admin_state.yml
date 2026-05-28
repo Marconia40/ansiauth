@@ -1,0 +1,36 @@
+---
+# Step 2.2 — Set port admin state on Huawei VRP.
+#
+# Behaviour:
+#   * enabled=true  → `undo shutdown` (bring port up)
+#   * enabled=false → `shutdown`     (bring port down)
+#
+# VRP commits are idempotent so re-running with the same target state is
+# a safe no-op.  The driver pre-state check short-circuits when the desired
+# state already matches.
+#
+# Vars expected:
+#   interface (str) — vendor-native interface name
+#   enabled   (bool) — desired admin state
+#   device    (str) — diagnostic only
+
+- name: Set port admin state on Huawei VRP device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Apply admin state
+      ansible.netcommon.cli_command:
+        command: "{{ command_block }}"
+      vars:
+        command_block: |
+          system-view
+          interface {{ interface }}
+          {% if enabled %}
+          undo shutdown
+          {% else %}
+          shutdown
+          {% endif %}
+          commit
+          quit
+          quit

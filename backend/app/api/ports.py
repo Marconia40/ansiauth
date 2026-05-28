@@ -12,7 +12,11 @@ from app.core.exceptions import (
     UnsupportedVendorError,
     ValidationError,
 )
-from app.schemas.port import PortDescriptionUpdateRequest, PortRead  # noqa: F401 — exported via OpenAPI components
+from app.schemas.port import (
+    PortAdminStateUpdateRequest,
+    PortDescriptionUpdateRequest,
+    PortRead,  # noqa: F401 — exported via OpenAPI components
+)
 from app.services import device_service, port_execution_service, port_service
 from app.validators import port_validator
 
@@ -30,6 +34,56 @@ def _capture_pre_state_port_description(interface: str, device: str) -> dict:
     monkeypatch a single attachment point.  Mirrors the VLAN module's
     ``_capture_pre_state_vlan`` indirection."""
     return port_execution_service._capture_pre_state_description(interface, device)
+
+
+def _capture_pre_state_port_admin(interface: str, device: str) -> dict:
+    """Re-export the admin-state pre-state capture (Step 2.2) so tests can
+    monkeypatch a single attachment point."""
+    return port_execution_service._capture_pre_state_admin(interface, device)
+
+
+def _require_port_driver_with(method_name: str, device_name: str, current_user: dict):
+    """Resolve the port driver for *device_name* and assert that the driver
+    actually overrides *method_name*.  Returns the driver if everything is
+    in order; raises ``HTTPException(501)`` with the friendly
+    VENDOR_NOT_SUPPORTED envelope when the vendor is unknown or has only
+    inherited the base default stub.
+
+    Shared by the description and admin-state endpoints so both surface the
+    same controlled error for unsupported vendors.
+    """
+    from app.services.vendors.dispatcher import get_port_driver
+    from app.services.vendors.port_driver_base import BasePortDriver
+
+    device_obj = device_service.get_device(device_name)
+    # caller already verified existence + RBAC; we re-read for the dispatcher
+    try:
+        driver = get_port_driver(device_obj)
+    except UnsupportedVendorError as exc:
+        logger.info(
+            "Port %s requested on unsupported vendor: device=%s vendor=%s platform=%s",
+            method_name, device_name, exc.vendor, exc.platform,
+        )
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error_code": "VENDOR_NOT_SUPPORTED",
+                "message": "Port management is not yet supported for this vendor.",
+            },
+        )
+    if getattr(type(driver), method_name) is getattr(BasePortDriver, method_name):
+        logger.info(
+            "Port %s unimplemented on driver=%s for device=%s",
+            method_name, type(driver).__name__, device_name,
+        )
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error_code": "VENDOR_NOT_SUPPORTED",
+                "message": "This port operation is not yet supported for this vendor.",
+            },
+        )
+    return driver
 
 
 @router.get(
@@ -149,47 +203,58 @@ def update_port_description(
         raise NotFoundError(f"Device '{data.device}' not found")
     authz.ensure_device_allowed(current_user, data.device)
 
-    # Verify the device's vendor has an update_port_description driver
-    # implementation before we enqueue a job that would only fail at runtime.
-    # The dispatcher raises ``UnsupportedVendorError`` for vendors with no
-    # port driver; we then probe the driver class for an override of the
-    # base method so the API can return the friendly 501 immediately.
-    try:
-        device_obj = device_service.get_device(data.device)
-        from app.services.vendors.dispatcher import get_port_driver
-        from app.services.vendors.port_driver_base import BasePortDriver
-        driver = get_port_driver(device_obj)
-    except UnsupportedVendorError as exc:
-        logger.info(
-            "Port description update requested on unsupported vendor: device=%s vendor=%s platform=%s",
-            data.device, exc.vendor, exc.platform,
-        )
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "error_code": "VENDOR_NOT_SUPPORTED",
-                "message": "Port management is not yet supported for this vendor.",
-            },
-        )
-    if type(driver).update_port_description is BasePortDriver.update_port_description:
-        # Driver inherits the base default (NotImplementedError stub).  Treat
-        # the same way as an unsupported vendor — never surface the raw
-        # NotImplementedError to the client.
-        logger.info(
-            "Port description update unimplemented on driver=%s for device=%s",
-            type(driver).__name__, data.device,
-        )
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "error_code": "VENDOR_NOT_SUPPORTED",
-                "message": "Port description update is not yet supported for this vendor.",
-            },
-        )
+    # Resolve the driver and verify the operation is supported for this
+    # vendor.  Returns 501 with a controlled message when not — see
+    # ``_require_port_driver_with`` for the exact gating.
+    _require_port_driver_with("update_port_description", data.device, current_user)
 
     jobs, group_job_id = port_execution_service.enqueue_update_description_job(
         interface=data.interface,
         description=data.description,
+        device=data.device,
+        username=current_user["username"],
+        background_tasks=background_tasks,
+        retry_base_delay=_RETRY_BASE_DELAY,
+    )
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+
+
+@router.patch(
+    "/admin-state",
+    summary="Set port admin state",
+    description=(
+        "Administratively enable or disable a single interface.  "
+        "``enabled=true`` runs ``undo shutdown`` (Huawei) / ``no shutdown`` "
+        "(Cisco); ``enabled=false`` runs ``shutdown``.  Executed "
+        "asynchronously: the response carries a ``group_job_id`` and per-"
+        "device job entry the frontend can poll via "
+        "``GET /api/v1/jobs/{job_id}`` and ``GET /api/v1/group-jobs/{id}``.  "
+        "Pre-state is captured for rollback — if the device-side change "
+        "fails, the original admin state is restored automatically.  "
+        "Requires operator role or higher; site-scoped users may only "
+        "target devices in their allowed sites."
+    ),
+)
+def set_port_admin_state(
+    data: PortAdminStateUpdateRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("operator")),
+):
+    """Schedule an admin-state change on a single port."""
+    try:
+        port_validator.validate_interface_name(data.interface)
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    if not device_service.get_device(data.device):
+        raise NotFoundError(f"Device '{data.device}' not found")
+    authz.ensure_device_allowed(current_user, data.device)
+
+    _require_port_driver_with("set_port_admin_state", data.device, current_user)
+
+    jobs, group_job_id = port_execution_service.enqueue_set_admin_state_job(
+        interface=data.interface,
+        enabled=data.enabled,
         device=data.device,
         username=current_user["username"],
         background_tasks=background_tasks,

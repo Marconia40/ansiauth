@@ -32,6 +32,14 @@ export interface PortDescriptionUpdateRequest {
   description: string;
 }
 
+// Body for PATCH /api/v1/ports/admin-state.
+// enabled=true → `undo shutdown` / `no shutdown`; enabled=false → `shutdown`.
+export interface PortAdminStateUpdateRequest {
+  device: string;
+  interface: string;
+  enabled: boolean;
+}
+
 // Response shape — matches the orchestration envelope used by VLAN endpoints,
 // so the existing JobNotificationContext can track these jobs unchanged.
 export interface PortJobResult {

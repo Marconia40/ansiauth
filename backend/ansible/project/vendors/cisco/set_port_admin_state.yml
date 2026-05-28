@@ -1,0 +1,26 @@
+---
+# Step 2.2 — Set port admin state on Cisco IOS.
+#
+# Behaviour:
+#   * enabled=true  → `no shutdown` (bring port up)
+#   * enabled=false → `shutdown`    (bring port down)
+#
+# IOS commits to running config immediately; `save_when: always` persists
+# to startup so a reload doesn't revert the change.
+#
+# Vars expected:
+#   interface (str)
+#   enabled   (bool)
+#   device    (str) — diagnostic only
+
+- name: Set port admin state on Cisco IOS device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Apply admin state
+      cisco.ios.ios_config:
+        parents: "interface {{ interface }}"
+        lines:
+          - "{{ 'no shutdown' if enabled else 'shutdown' }}"
+        save_when: always

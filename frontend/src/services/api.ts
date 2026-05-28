@@ -7,6 +7,7 @@ import type { Job, GroupJob } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
 import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
 import type {
+  PortAdminStateUpdateRequest,
   PortDescriptionUpdateRequest,
   PortListResponse,
   PortOperationResult,
@@ -330,6 +331,13 @@ export async function updatePortDescription(
   body: PortDescriptionUpdateRequest,
 ): Promise<PortOperationResult> {
   const { data } = await client.patch<PortJobRawResponse>('/ports/description', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setPortAdminState(
+  body: PortAdminStateUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/admin-state', body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 

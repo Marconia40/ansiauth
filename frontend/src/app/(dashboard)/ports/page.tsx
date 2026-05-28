@@ -7,7 +7,7 @@ import { useJobNotifications } from '@/context/JobNotificationContext';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getPorts, getSites, updatePortDescription } from '@/services/api';
+import { getDevices, getPorts, getSites, setPortAdminState, updatePortDescription } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
 import type { Port, PortListResponse, PortMode } from '@/types/port';
@@ -326,6 +326,12 @@ export default function PortsPage() {
   const [savingPort, setSavingPort] = useState<string | null>(null);
   const [editErrorPort, setEditErrorPort] = useState<{ port: string; message: string } | null>(null);
 
+  // ── Admin-state toggle state ──
+  // Set of interface names currently mid-toggle so the buttons can be
+  // disabled per-row without locking the whole page.
+  const [togglingPort, setTogglingPort] = useState<string | null>(null);
+  const [adminErrorPort, setAdminErrorPort] = useState<{ port: string; message: string } | null>(null);
+
   // ── Device + site lookup ──
   const {
     data: devices,
@@ -419,6 +425,44 @@ export default function PortsPage() {
     setEditingPort(null);
     setEditingValue('');
     setEditErrorPort(null);
+  }
+
+  async function handleToggleAdminState(port: Port) {
+    if (!selectedDevice) return;
+    // Default to "enable" when the current state is unknown — safer than
+    // disabling something the operator can't see the state of.
+    const currentlyEnabled = port.admin_up === true;
+    const nextEnabled = !currentlyEnabled;
+    const verb = nextEnabled ? 'enable' : 'disable';
+    if (!window.confirm(
+      `Are you sure you want to ${verb} interface ${port.name} on ${selectedDevice}?`,
+    )) {
+      return;
+    }
+    setTogglingPort(port.name);
+    setAdminErrorPort(null);
+    try {
+      const result = await setPortAdminState({
+        device: selectedDevice,
+        interface: port.name,
+        enabled: nextEnabled,
+      });
+      const job = result.jobs[0];
+      if (job) {
+        trackJob(
+          job.job_id,
+          `${nextEnabled ? 'Enable' : 'Disable'} ${port.name}`,
+          job.device,
+        );
+      }
+      // Refetch shortly so the table reflects the new admin state once the
+      // async job completes (the authoritative signal is JobNotifications).
+      setTimeout(() => { refetch(); }, 500);
+    } catch (err) {
+      setAdminErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
+    } finally {
+      setTogglingPort(null);
+    }
   }
 
   async function handleEditSave(port: Port) {
@@ -688,7 +732,33 @@ export default function PortsPage() {
                             </div>
                           )}
                         </td>
-                        <td className="px-3 py-2"><AdminBadge value={port.admin_up} /></td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                              <AdminBadge value={port.admin_up} />
+                              {canEdit && port.admin_up !== null && (
+                                <button
+                                  onClick={() => handleToggleAdminState(port)}
+                                  disabled={togglingPort !== null}
+                                  className={`px-2 py-0.5 text-xs rounded border whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed ${
+                                    port.admin_up
+                                      ? 'text-red-600 border-red-300 hover:bg-red-50'
+                                      : 'text-green-700 border-green-300 hover:bg-green-50'
+                                  }`}
+                                  aria-label={`${port.admin_up ? 'Disable' : 'Enable'} ${port.name}`}
+                                  title={port.admin_up ? 'Disable interface' : 'Enable interface'}
+                                >
+                                  {togglingPort === port.name
+                                    ? '…'
+                                    : (port.admin_up ? 'Disable' : 'Enable')}
+                                </button>
+                              )}
+                            </div>
+                            {adminErrorPort?.port === port.name && (
+                              <p className="text-xs text-red-600">{adminErrorPort.message}</p>
+                            )}
+                          </div>
+                        </td>
                         <td className="px-3 py-2"><OperBadge value={port.operational_up} /></td>
                         <td className="px-3 py-2"><ModeBadge mode={port.mode} /></td>
                         <td className="px-3 py-2 text-gray-900">{port.access_vlan ?? DASH}</td>

@@ -19,6 +19,7 @@ _CONNECTION = "network_cli"
 
 _PLAYBOOK_GET_PORTS = "vendors/huawei/get_ports.yml"
 _PLAYBOOK_UPDATE_DESCRIPTION = "vendors/huawei/update_port_description.yml"
+_PLAYBOOK_SET_ADMIN_STATE = "vendors/huawei/set_port_admin_state.yml"
 
 # The Huawei get_ports playbook issues three cli_command tasks in this order:
 #   0. display interface brief
@@ -203,6 +204,58 @@ class HuaweiPortDriver(BasePortDriver):
         except Exception as exc:
             logger.exception(
                 "FULL HUAWEI TRACEBACK [update_port_description interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def set_port_admin_state(
+        self,
+        interface: str,
+        enabled: bool,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Administratively enable / disable *interface* on a Huawei VRP device.
+
+        Runs the ``set_port_admin_state`` playbook with the desired state as
+        an Ansible var; the playbook applies ``undo shutdown`` or ``shutdown``
+        inside the interface view and commits.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        logger.info(
+            "Huawei: set admin state on interface=%s device=%s enabled=%s",
+            interface, device.name, enabled,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_ADMIN_STATE,
+                extravars={
+                    "interface": interface,
+                    "enabled": bool(enabled),
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Huawei: set admin state OK on interface=%s device=%s enabled=%s",
+                    interface, device.name, enabled,
+                )
+            else:
+                logger.error(
+                    "Huawei: set admin state FAILED on interface=%s device=%s enabled=%s — %s",
+                    interface, device.name, enabled,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL HUAWEI TRACEBACK [set_port_admin_state interface=%s device=%s]: %s\n%s",
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise

@@ -85,6 +85,27 @@ class PortDescriptionUpdateRequest(BaseModel):
     )
 
 
+class PortAdminStateUpdateRequest(BaseModel):
+    """Request body for ``PATCH /api/v1/ports/admin-state`` (Step 2.2).
+
+    Single device only.  ``enabled=True`` brings the interface up
+    (``undo shutdown`` / ``no shutdown``); ``enabled=False`` brings it
+    down (``shutdown``).
+    """
+
+    device: str = Field(..., min_length=1, description="Target device name.")
+    interface: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
+    )
+    enabled: bool = Field(
+        ...,
+        description="Desired admin state — True to enable, False to disable.",
+    )
+
+
 class PortListResponseBody(BaseModel):
     """Envelope returned by ``GET /api/v1/ports/?device=...``.
 
