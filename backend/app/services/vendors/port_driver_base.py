@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortInfo
+    from app.models.port import PortConfigRequest, PortConfigResult, PortInfo
 
 
 class BasePortDriver(ABC):
@@ -228,6 +228,126 @@ class BasePortDriver(ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement set_trunk_allowed_vlans yet"
+        )
+
+    def configure_port(
+        self,
+        config: PortConfigRequest,
+        device: Device,
+        password: str,
+    ) -> PortConfigResult:
+        """Apply a composite set of port mutations in a single driver call.
+
+        Step 3.1 registers this method as part of the vendor contract.
+        Concrete drivers should override it to apply all fields in *config*
+        that are non-``None`` in a single device interaction.  The default
+        raises ``NotImplementedError`` so vendors that haven't wired this
+        yet surface a controlled ``VENDOR_NOT_SUPPORTED`` 501 rather than
+        a bare exception.
+
+        The driver is responsible for:
+        * Respecting the field ordering (e.g. set mode before VLAN).
+        * Returning a ``PortConfigResult`` that reflects what actually changed.
+        * Raising ``RuntimeError`` (not ``NotImplementedError``) if a playbook
+          fails mid-operation so the orchestration layer can trigger rollback.
+
+        Parameters
+        ----------
+        config:
+            Validated ``PortConfigRequest`` — callers must pass an already-
+            validated instance; the driver may trust its invariants.
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        PortConfigResult
+            Normalized result describing success, change status, and
+            optional rollback / warning metadata.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement configure_port yet"
+        )
+
+    def shutdown_port(
+        self,
+        interface: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Administratively disable *interface* on *device* (shutdown).
+
+        Semantic wrapper: equivalent to ``set_port_admin_state(enabled=False)``
+        but expressed as an explicit, intent-named operation so higher-level
+        orchestration and audit logs can describe the action unambiguously.
+
+        Step 3.1 registers this method as part of the vendor contract.
+        Concrete drivers should override it; the default raises
+        ``NotImplementedError`` so vendors without an implementation surface
+        a controlled 501 at the API boundary.
+
+        Vendor mapping (informational — implementations fill in the details):
+            * Huawei VRP — ``shutdown`` inside interface view + ``commit``.
+            * Cisco IOS  — ``shutdown`` inside ``interface <name>`` context.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        device:
+            Domain device object.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            Normalized Ansible result:
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement shutdown_port yet"
+        )
+
+    def enable_port(
+        self,
+        interface: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Administratively enable *interface* on *device* (no shutdown).
+
+        Semantic wrapper: equivalent to ``set_port_admin_state(enabled=True)``
+        but expressed as an explicit, intent-named operation.
+
+        Step 3.1 registers this method as part of the vendor contract.
+        Concrete drivers should override it; the default raises
+        ``NotImplementedError`` so vendors without an implementation surface
+        a controlled 501 at the API boundary.
+
+        Vendor mapping (informational — implementations fill in the details):
+            * Huawei VRP — ``undo shutdown`` inside interface view + ``commit``.
+            * Cisco IOS  — ``no shutdown`` inside ``interface <name>`` context.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name.
+        device:
+            Domain device object.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            Normalized Ansible result:
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement enable_port yet"
         )
 
     def get_port(self, name: str, device: Device, password: str) -> PortInfo | None:

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 PortMode = Literal["access", "trunk", "unknown"]
+PortConfigMode = Literal["access", "trunk"]
 
 
 @dataclass
@@ -163,4 +164,153 @@ class PortListResponse:
             "vendor": self.vendor,
             "ports": [p.to_dict() for p in self.ports],
             "count": len(self.ports),
+        }
+
+
+@dataclass
+class PortConfigRequest:
+    """Domain model for a composite port write operation.
+
+    Step 3.1 introduces this model as the architectural foundation for
+    multi-field port configuration.  Each field is optional — only the
+    supplied fields will be applied.  Validation in ``__post_init__``
+    catches cross-field constraint violations before any network I/O.
+
+    Attributes
+    ----------
+    device:
+        Target device name (must be registered in the device inventory).
+    interface:
+        Vendor-native interface identifier (required; cannot be empty).
+    description:
+        New description text.  ``""`` clears the description; ``None`` means
+        "do not change the description".
+    admin_enabled:
+        ``True`` → bring the port up; ``False`` → shut it down;
+        ``None`` → do not change admin state.
+    mode:
+        Switchport mode to configure.  ``None`` means "do not change mode".
+        Required when ``access_vlan`` or ``allowed_vlans`` is also set,
+        because those fields only make sense in a specific mode.
+    access_vlan:
+        Access VLAN to assign.  Only valid when ``mode='access'``.
+    allowed_vlans:
+        Trunk allowed-VLAN list.  Only valid when ``mode='trunk'``.
+
+    Validation rules
+    ----------------
+    * ``interface`` must be a non-empty string.
+    * At least one mutation field (description, admin_enabled, mode,
+      access_vlan, allowed_vlans) must be non-``None``.
+    * ``access_vlan`` is only valid when ``mode='access'``.
+    * ``allowed_vlans`` is only valid when ``mode='trunk'``.
+    """
+
+    device: str
+    interface: str
+    description: str | None = None
+    admin_enabled: bool | None = None
+    mode: PortConfigMode | None = None
+    access_vlan: int | None = None
+    allowed_vlans: list[int] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.interface:
+            raise ValueError("'interface' is required and must be a non-empty string")
+
+        _mutation_fields = (
+            self.description,
+            self.admin_enabled,
+            self.mode,
+            self.access_vlan,
+            self.allowed_vlans,
+        )
+        if all(v is None for v in _mutation_fields):
+            raise ValueError(
+                "at least one mutation field must be provided "
+                "(description, admin_enabled, mode, access_vlan, or allowed_vlans)"
+            )
+
+        if self.access_vlan is not None and self.mode != "access":
+            raise ValueError(
+                f"'access_vlan' may only be set when mode='access' "
+                f"(got mode={self.mode!r})"
+            )
+
+        if self.allowed_vlans is not None and self.mode != "trunk":
+            raise ValueError(
+                f"'allowed_vlans' may only be set when mode='trunk' "
+                f"(got mode={self.mode!r})"
+            )
+
+    @property
+    def has_vlan_change(self) -> bool:
+        """True if this request includes any VLAN-related field."""
+        return self.access_vlan is not None or self.allowed_vlans is not None
+
+    @property
+    def mutation_fields(self) -> list[str]:
+        """Names of the mutation fields that are non-None in this request."""
+        fields = []
+        if self.description is not None:
+            fields.append("description")
+        if self.admin_enabled is not None:
+            fields.append("admin_enabled")
+        if self.mode is not None:
+            fields.append("mode")
+        if self.access_vlan is not None:
+            fields.append("access_vlan")
+        if self.allowed_vlans is not None:
+            fields.append("allowed_vlans")
+        return fields
+
+
+@dataclass
+class PortConfigResult:
+    """Domain model for the result of a composite port write operation.
+
+    Returned by ``BasePortDriver.configure_port`` implementations.  Fields
+    marked optional (default ``None``) are populated by the orchestration
+    layer or the driver when the information is available.
+
+    Attributes
+    ----------
+    success:
+        ``True`` iff all requested mutations were applied without error.
+    changed:
+        ``True`` iff at least one field on the device was actually changed
+        (i.e. the operation was not a complete no-op).
+    interface:
+        Vendor-native interface identifier the operation targeted.
+    vendor:
+        Vendor driver string (e.g. ``"huawei_vrp"``).  ``None`` when the
+        driver does not report it.
+    execution_time_ms:
+        Wall-clock time the driver call consumed, in milliseconds.
+    rollback_performed:
+        ``True`` if a rollback was triggered after a failure.  ``None``
+        when not applicable (success path, or rollback not supported).
+    warnings:
+        Non-fatal conditions the driver observed (e.g. idempotent no-op
+        for a subset of fields).  Empty list is normalized to ``None``.
+    """
+
+    success: bool
+    changed: bool
+    interface: str
+    vendor: str | None = None
+    execution_time_ms: float | None = None
+    rollback_performed: bool | None = None
+    warnings: list[str] | None = None
+
+    def to_dict(self) -> dict:
+        """Serialize to a JSON-safe dict for HTTP responses."""
+        return {
+            "success": self.success,
+            "changed": self.changed,
+            "interface": self.interface,
+            "vendor": self.vendor,
+            "execution_time_ms": self.execution_time_ms,
+            "rollback_performed": self.rollback_performed,
+            "warnings": list(self.warnings) if self.warnings is not None else None,
         }

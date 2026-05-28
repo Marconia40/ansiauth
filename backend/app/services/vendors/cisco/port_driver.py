@@ -10,7 +10,7 @@ from app.services.vendors.port_driver_base import BasePortDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortInfo
+    from app.models.port import PortConfigRequest, PortConfigResult, PortInfo
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +301,44 @@ class CiscoPortDriver(BasePortDriver):
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise
+
+    # ── Step 3.1 composite / semantic stubs ─────────────────────────────────────
+
+    def configure_port(
+        self,
+        config: PortConfigRequest,
+        device: Device,
+        password: str,
+    ) -> PortConfigResult:
+        """Composite port configuration — Step 3.1 stub (not yet implemented)."""
+        raise NotImplementedError(
+            "CiscoPortDriver.configure_port is not yet implemented — "
+            "use the individual set_port_* methods for now"
+        )
+
+    def shutdown_port(
+        self,
+        interface: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Shut down *interface* — Step 3.1 stub (not yet implemented)."""
+        raise NotImplementedError(
+            "CiscoPortDriver.shutdown_port is not yet implemented — "
+            "use set_port_admin_state(enabled=False) for now"
+        )
+
+    def enable_port(
+        self,
+        interface: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Enable *interface* — Step 3.1 stub (not yet implemented)."""
+        raise NotImplementedError(
+            "CiscoPortDriver.enable_port is not yet implemented — "
+            "use set_port_admin_state(enabled=True) for now"
+        )
 
     def set_trunk_allowed_vlans(
         self,

@@ -10,7 +10,7 @@ from app.services.vendors.port_driver_base import BasePortDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortInfo
+    from app.models.port import PortConfigRequest, PortConfigResult, PortInfo
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +313,48 @@ class HuaweiPortDriver(BasePortDriver):
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise
+
+    # ── Step 3.1 composite / semantic stubs ─────────────────────────────────────
+    # These methods are registered in BasePortDriver as part of the Step 3.1
+    # vendor contract.  Concrete implementations will be added in a later step;
+    # for now they raise NotImplementedError so the API layer surfaces a clean
+    # 501 VENDOR_NOT_SUPPORTED response rather than an uncontrolled exception.
+
+    def configure_port(
+        self,
+        config: PortConfigRequest,
+        device: Device,
+        password: str,
+    ) -> PortConfigResult:
+        """Composite port configuration — Step 3.1 stub (not yet implemented)."""
+        raise NotImplementedError(
+            "HuaweiPortDriver.configure_port is not yet implemented — "
+            "use the individual set_port_* methods for now"
+        )
+
+    def shutdown_port(
+        self,
+        interface: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Shut down *interface* — Step 3.1 stub (not yet implemented)."""
+        raise NotImplementedError(
+            "HuaweiPortDriver.shutdown_port is not yet implemented — "
+            "use set_port_admin_state(enabled=False) for now"
+        )
+
+    def enable_port(
+        self,
+        interface: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Enable *interface* — Step 3.1 stub (not yet implemented)."""
+        raise NotImplementedError(
+            "HuaweiPortDriver.enable_port is not yet implemented — "
+            "use set_port_admin_state(enabled=True) for now"
+        )
 
     def set_trunk_allowed_vlans(
         self,
