@@ -138,6 +138,51 @@ class BasePortDriver(ABC):
             f"{self.__class__.__name__} does not implement set_port_admin_state yet"
         )
 
+    def set_port_access_vlan(
+        self,
+        interface: str,
+        vlan_id: int,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Assign *vlan_id* as the access VLAN on *interface*.
+
+        Step 2.3 introduces the third port mutation operation.  Concrete
+        drivers should override this; the default raises
+        ``NotImplementedError`` so the API layer returns a controlled 501.
+
+        **Pre-conditions are the caller's responsibility:** the
+        orchestration layer must verify the port is in access mode and
+        the VLAN id is valid *before* invoking this method.  Drivers
+        execute the change directly without checking mode — they trust
+        the caller's pre-state validation.
+
+        Vendor mapping:
+            * Huawei VRP — ``port default vlan <id>`` inside the
+              interface view, followed by ``commit``.
+            * Cisco IOS  — ``switchport access vlan <id>`` inside
+              ``interface <name>`` parent context.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        vlan_id:
+            New access VLAN identifier (1–4094, excluding 1002–1005).
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_port_access_vlan yet"
+        )
+
     def get_port(self, name: str, device: Device, password: str) -> PortInfo | None:
         """Return the ``PortInfo`` for *name* on *device*, or ``None`` if absent.
 

@@ -106,6 +106,29 @@ class PortAdminStateUpdateRequest(BaseModel):
     )
 
 
+class PortAccessVlanUpdateRequest(BaseModel):
+    """Request body for ``PATCH /api/v1/ports/access-vlan`` (Step 2.3).
+
+    Single device only.  Sets the access VLAN on an interface that is
+    already in access mode.  The orchestration layer validates the current
+    mode via pre-state before invoking the driver.
+    """
+
+    device: str = Field(..., min_length=1, description="Target device name.")
+    interface: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
+    )
+    vlan_id: int = Field(
+        ...,
+        ge=1,
+        le=4094,
+        description="Access VLAN ID (1-4094, excluding reserved 1002-1005).",
+    )
+
+
 class PortListResponseBody(BaseModel):
     """Envelope returned by ``GET /api/v1/ports/?device=...``.
 

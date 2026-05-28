@@ -39,6 +39,31 @@ def validate_interface_name(interface: str) -> None:
         )
 
 
+def validate_access_vlan_id(vlan_id: int) -> None:
+    """Validate the VLAN ID for an access-port assignment (Step 2.3).
+
+    Rules:
+        * must be a plain int (not a bool — Python treats bool as int)
+        * must be in the standard switchport range 1–4094
+        * must not be one of the IOS legacy FDDI/Token-Ring VLANs (1002–1005)
+          which Cisco refuses to use as an access VLAN
+
+    VLAN 1 is **allowed** because it is the platform default for an access
+    port — operators who reset a port to default need to be able to express
+    that.  This differs from ``vlan_validator.validate_vlan_not_reserved``
+    which is correct for *create/delete* operations on the VLAN itself.
+    """
+    if isinstance(vlan_id, bool) or not isinstance(vlan_id, int):
+        raise ValueError("VLAN ID must be an integer")
+    if vlan_id < 1 or vlan_id > 4094:
+        raise ValueError(f"VLAN ID {vlan_id} is out of range (1-4094)")
+    if vlan_id in (1002, 1003, 1004, 1005):
+        raise ValueError(
+            f"VLAN {vlan_id} is reserved (Cisco IOS legacy FDDI/Token-Ring) "
+            "and cannot be assigned as an access VLAN"
+        )
+
+
 def validate_description(description: str) -> None:
     """Raise ``ValueError`` if *description* is unsafe to push to a device.
 

@@ -20,6 +20,7 @@ _CONNECTION = "network_cli"
 _PLAYBOOK_GET_PORTS = "vendors/huawei/get_ports.yml"
 _PLAYBOOK_UPDATE_DESCRIPTION = "vendors/huawei/update_port_description.yml"
 _PLAYBOOK_SET_ADMIN_STATE = "vendors/huawei/set_port_admin_state.yml"
+_PLAYBOOK_SET_ACCESS_VLAN = "vendors/huawei/set_access_vlan.yml"
 
 # The Huawei get_ports playbook issues three cli_command tasks in this order:
 #   0. display interface brief
@@ -256,6 +257,58 @@ class HuaweiPortDriver(BasePortDriver):
         except Exception as exc:
             logger.exception(
                 "FULL HUAWEI TRACEBACK [set_port_admin_state interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def set_port_access_vlan(
+        self,
+        interface: str,
+        vlan_id: int,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the access VLAN of *interface* on a Huawei VRP device.
+
+        Runs ``port default vlan {{ vlan_id }}`` inside the interface view.
+        The orchestration layer must guarantee the port is already in
+        access mode before this is called.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        logger.info(
+            "Huawei: set access VLAN on interface=%s device=%s vlan_id=%d",
+            interface, device.name, vlan_id,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_ACCESS_VLAN,
+                extravars={
+                    "interface": interface,
+                    "vlan_id": int(vlan_id),
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Huawei: set access VLAN OK on interface=%s device=%s vlan_id=%d",
+                    interface, device.name, vlan_id,
+                )
+            else:
+                logger.error(
+                    "Huawei: set access VLAN FAILED on interface=%s device=%s vlan_id=%d — %s",
+                    interface, device.name, vlan_id,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL HUAWEI TRACEBACK [set_port_access_vlan interface=%s device=%s]: %s\n%s",
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise

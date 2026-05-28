@@ -20,6 +20,7 @@ _CONNECTION = "network_cli"
 _PLAYBOOK_GET_PORTS = "vendors/cisco/get_ports.yml"
 _PLAYBOOK_UPDATE_DESCRIPTION = "vendors/cisco/update_port_description.yml"
 _PLAYBOOK_SET_ADMIN_STATE = "vendors/cisco/set_port_admin_state.yml"
+_PLAYBOOK_SET_ACCESS_VLAN = "vendors/cisco/set_access_vlan.yml"
 
 # The Cisco get_ports playbook issues a single ios_command task with three
 # commands in this order.  ios_command returns stdout as a list, which is
@@ -248,6 +249,54 @@ class CiscoPortDriver(BasePortDriver):
         except Exception as exc:
             logger.exception(
                 "FULL CISCO TRACEBACK [set_port_admin_state interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def set_port_access_vlan(
+        self,
+        interface: str,
+        vlan_id: int,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the access VLAN of *interface* on a Cisco IOS device.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        logger.info(
+            "Cisco: set access VLAN on interface=%s device=%s vlan_id=%d",
+            interface, device.name, vlan_id,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_ACCESS_VLAN,
+                extravars={
+                    "interface": interface,
+                    "vlan_id": int(vlan_id),
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Cisco: set access VLAN OK on interface=%s device=%s vlan_id=%d",
+                    interface, device.name, vlan_id,
+                )
+            else:
+                logger.error(
+                    "Cisco: set access VLAN FAILED on interface=%s device=%s vlan_id=%d — %s",
+                    interface, device.name, vlan_id,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [set_port_access_vlan interface=%s device=%s]: %s\n%s",
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise
