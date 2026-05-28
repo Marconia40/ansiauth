@@ -325,6 +325,87 @@ def set_trunk_allowed_vlans_on_device(
     return driver.set_trunk_allowed_vlans(interface, vlan_list, dev, pw)
 
 
+def shutdown_port_on_device(interface: str, device_id: str) -> dict:
+    """Administratively disable *interface* on *device_id* (shutdown).
+
+    Dispatches to the vendor driver's ``shutdown_port``.  Caller (typically
+    ``port_config_service``) handles retry, rollback, and device locking.
+
+    Returns
+    -------
+    dict
+        ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
+    """
+    if EXECUTION_MODE == "mock":
+        if device_id == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info("Mock: shutdown_port on interface=%s device=%s", interface, device_id)
+        return {"rc": 0, "stdout": "Simulated port shutdown", "stderr": "", "success": True}
+    dev = _resolve_device(device_id)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    driver = _get_driver(dev)
+    logger.info("Real mode: shutdown_port on interface=%s device=%s", interface, dev.name)
+    return driver.shutdown_port(interface, dev, pw)
+
+
+def enable_port_on_device(interface: str, device_id: str) -> dict:
+    """Administratively enable *interface* on *device_id* (no shutdown).
+
+    Dispatches to the vendor driver's ``enable_port``.  Caller handles retry,
+    rollback, and device locking.
+
+    Returns
+    -------
+    dict
+        ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
+    """
+    if EXECUTION_MODE == "mock":
+        if device_id == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info("Mock: enable_port on interface=%s device=%s", interface, device_id)
+        return {"rc": 0, "stdout": "Simulated port enabled", "stderr": "", "success": True}
+    dev = _resolve_device(device_id)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    driver = _get_driver(dev)
+    logger.info("Real mode: enable_port on interface=%s device=%s", interface, dev.name)
+    return driver.enable_port(interface, dev, pw)
+
+
+def configure_port_on_device(config: "PortConfigRequest", device_id: str) -> "PortConfigResult":
+    """Apply a composite set of port mutations on *device_id*.
+
+    Dispatches to the vendor driver's ``configure_port``.  Caller handles
+    retry, rollback, and device locking.  Pre-condition validation is the
+    orchestration layer's responsibility.
+
+    Returns
+    -------
+    PortConfigResult
+        Normalized result from the vendor driver.
+    """
+    if EXECUTION_MODE == "mock":
+        from app.models.port import PortConfigResult as _PCR
+        if device_id == "fail_device":
+            logger.info(
+                "Mock: configure_port FAILED on interface=%s device=%s",
+                config.interface, device_id,
+            )
+            return _PCR(success=False, changed=False, interface=config.interface, vendor="mock")
+        logger.info(
+            "Mock: configure_port on interface=%s device=%s fields=%s",
+            config.interface, device_id, config.mutation_fields,
+        )
+        return _PCR(
+            success=True, changed=True, interface=config.interface,
+            vendor="mock", execution_time_ms=1.0,
+        )
+    dev = _resolve_device(device_id)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    driver = _get_driver(dev)
+    logger.info("Real mode: configure_port on interface=%s device=%s", config.interface, dev.name)
+    return driver.configure_port(config, dev, pw)
+
+
 def get_port(device_id: str, name: str) -> PortInfo | None:
     """Return a single ``PortInfo`` for *name* on *device_id*, or ``None`` if absent.
 

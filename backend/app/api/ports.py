@@ -15,11 +15,14 @@ from app.core.exceptions import (
 from app.schemas.port import (
     PortAccessVlanUpdateRequest,
     PortAdminStateUpdateRequest,
+    PortConfigureRequest,
     PortDescriptionUpdateRequest,
+    PortEnableRequest,
+    PortShutdownRequest,
     PortTrunkVlansUpdateRequest,
     PortRead,  # noqa: F401 — exported via OpenAPI components
 )
-from app.services import device_service, port_execution_service, port_service
+from app.services import device_service, port_config_service, port_execution_service, port_service
 from app.validators import port_validator
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,24 @@ def _capture_pre_state_port_trunk_vlans(interface: str, device: str) -> dict:
     """Re-export the trunk-VLAN pre-state capture (Step 2.4) so tests can
     monkeypatch a single attachment point."""
     return port_execution_service._capture_pre_state_trunk_vlans(interface, device)
+
+
+def _capture_pre_state_port_configure(interface: str, device: str) -> dict:
+    """Re-export the configure pre-state capture (Step 3.3) so tests can
+    monkeypatch a single attachment point."""
+    return port_config_service._capture_pre_state_configure(interface, device)
+
+
+def _capture_pre_state_port_shutdown(interface: str, device: str) -> dict:
+    """Re-export the shutdown pre-state capture (Step 3.3) so tests can
+    monkeypatch a single attachment point."""
+    return port_config_service._capture_pre_state_shutdown(interface, device)
+
+
+def _capture_pre_state_port_enable(interface: str, device: str) -> dict:
+    """Re-export the enable pre-state capture (Step 3.3) so tests can
+    monkeypatch a single attachment point."""
+    return port_config_service._capture_pre_state_enable(interface, device)
 
 
 def _require_port_driver_with(method_name: str, device_name: str, current_user: dict):
@@ -360,6 +381,153 @@ def set_trunk_allowed_vlans(
         interface=data.interface,
         vlans=list(data.vlans),
         mode=data.mode,
+        device=data.device,
+        username=current_user["username"],
+        background_tasks=background_tasks,
+        retry_base_delay=_RETRY_BASE_DELAY,
+    )
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+
+
+@router.patch(
+    "/configure",
+    summary="Configure port (composite)",
+    description=(
+        "Apply one or more port configuration fields in a single driver call.  "
+        "All non-``None`` fields are applied atomically on the device.  "
+        "Field application order on Huawei VRP: mode → VLAN → description → admin state.  "
+        "Pre-state is captured for rollback — on failure the orchestration layer "
+        "reconstructs a rollback request covering the changed fields and attempts "
+        "to restore their pre-state values.  "
+        "Executed asynchronously: the response carries a ``group_job_id`` and "
+        "per-device job entry the frontend can poll via ``GET /api/v1/jobs/{job_id}`` "
+        "and ``GET /api/v1/group-jobs/{id}``.  "
+        "Requires operator role or higher; site-scoped users may only target "
+        "devices in their allowed sites."
+    ),
+)
+def configure_port(
+    data: PortConfigureRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("operator")),
+):
+    """Schedule a composite port configuration on a single port."""
+    from app.models.port import PortConfigRequest
+
+    try:
+        port_validator.validate_interface_name(data.interface)
+        if data.access_vlan is not None:
+            port_validator.validate_access_vlan_id(data.access_vlan)
+        if data.allowed_vlans is not None:
+            port_validator.validate_trunk_vlan_list(list(data.allowed_vlans))
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    if not device_service.get_device(data.device):
+        raise NotFoundError(f"Device '{data.device}' not found")
+    authz.ensure_device_allowed(current_user, data.device)
+
+    _require_port_driver_with("configure_port", data.device, current_user)
+
+    try:
+        config = PortConfigRequest(
+            device=data.device,
+            interface=data.interface,
+            description=data.description,
+            admin_enabled=data.admin_enabled,
+            mode=data.mode,
+            access_vlan=data.access_vlan,
+            allowed_vlans=list(data.allowed_vlans) if data.allowed_vlans else None,
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    jobs, group_job_id = port_config_service.configure_port(
+        config=config,
+        username=current_user["username"],
+        background_tasks=background_tasks,
+        retry_base_delay=_RETRY_BASE_DELAY,
+    )
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+
+
+@router.post(
+    "/shutdown",
+    summary="Shutdown port",
+    description=(
+        "Administratively disable a single interface (``shutdown`` command).  "
+        "No-op when the port is already administratively down.  "
+        "Pre-state is captured for rollback — if the device-side command fails "
+        "and the port was previously up, the orchestration layer calls "
+        "``enable_port`` to restore its state.  "
+        "Executed asynchronously: the response carries a ``group_job_id`` and "
+        "per-device job entry.  "
+        "Requires operator role or higher; site-scoped users may only target "
+        "devices in their allowed sites."
+    ),
+)
+def shutdown_port(
+    data: PortShutdownRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("operator")),
+):
+    """Schedule an administrative shutdown on a single port."""
+    try:
+        port_validator.validate_interface_name(data.interface)
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    if not device_service.get_device(data.device):
+        raise NotFoundError(f"Device '{data.device}' not found")
+    authz.ensure_device_allowed(current_user, data.device)
+
+    _require_port_driver_with("shutdown_port", data.device, current_user)
+
+    jobs, group_job_id = port_config_service.shutdown_port(
+        interface=data.interface,
+        device=data.device,
+        username=current_user["username"],
+        background_tasks=background_tasks,
+        retry_base_delay=_RETRY_BASE_DELAY,
+    )
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+
+
+@router.post(
+    "/enable",
+    summary="Enable port",
+    description=(
+        "Administratively enable a single interface (``no shutdown`` / "
+        "``undo shutdown`` command).  "
+        "No-op when the port is already administratively up.  "
+        "Pre-state is captured for rollback — if the device-side command fails "
+        "and the port was previously down, the orchestration layer calls "
+        "``shutdown_port`` to restore its state.  "
+        "Executed asynchronously: the response carries a ``group_job_id`` and "
+        "per-device job entry.  "
+        "Requires operator role or higher; site-scoped users may only target "
+        "devices in their allowed sites."
+    ),
+)
+def enable_port(
+    data: PortEnableRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("operator")),
+):
+    """Schedule an administrative enable on a single port."""
+    try:
+        port_validator.validate_interface_name(data.interface)
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    if not device_service.get_device(data.device):
+        raise NotFoundError(f"Device '{data.device}' not found")
+    authz.ensure_device_allowed(current_user, data.device)
+
+    _require_port_driver_with("enable_port", data.device, current_user)
+
+    jobs, group_job_id = port_config_service.enable_port(
+        interface=data.interface,
         device=data.device,
         username=current_user["username"],
         background_tasks=background_tasks,

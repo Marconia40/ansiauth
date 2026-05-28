@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 PortMode = Literal["access", "trunk", "unknown"]
 
@@ -169,6 +169,106 @@ class PortTrunkVlansUpdateRequest(BaseModel):
             "VLAN IDs to apply (1-4094, excluding reserved 1002-1005). "
             "Must be a non-empty list. Duplicates are ignored."
         ),
+    )
+
+
+class PortConfigureRequest(BaseModel):
+    """Request body for ``PATCH /api/v1/ports/configure`` (Step 3.3).
+
+    Applies one or more port configuration fields in a single driver call.
+    At least one mutation field must be non-``None``.
+
+    Cross-field constraints (mirroring ``PortConfigRequest`` domain model):
+    * ``access_vlan`` is only valid when ``mode='access'``.
+    * ``allowed_vlans`` is only valid when ``mode='trunk'``.
+    """
+
+    device: str = Field(..., min_length=1, description="Target device name.")
+    interface: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
+    )
+    description: Optional[str] = Field(
+        None,
+        max_length=200,
+        description=(
+            "New description. Empty string clears it. "
+            "``None`` leaves the description unchanged."
+        ),
+    )
+    admin_enabled: Optional[bool] = Field(
+        None,
+        description="True to enable, False to disable. None = do not change.",
+    )
+    mode: Optional[Literal["access", "trunk"]] = Field(
+        None,
+        description="Switchport mode. None = do not change.",
+    )
+    access_vlan: Optional[int] = Field(
+        None,
+        ge=1,
+        le=4094,
+        description="Access VLAN ID (1-4094). Only valid when mode='access'.",
+    )
+    allowed_vlans: Optional[list[int]] = Field(
+        None,
+        min_length=1,
+        description="Trunk allowed VLANs. Only valid when mode='trunk'.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> "PortConfigureRequest":
+        mutation_fields = [
+            self.description, self.admin_enabled, self.mode,
+            self.access_vlan, self.allowed_vlans,
+        ]
+        if all(v is None for v in mutation_fields):
+            raise ValueError(
+                "at least one mutation field must be provided "
+                "(description, admin_enabled, mode, access_vlan, or allowed_vlans)"
+            )
+        if self.access_vlan is not None and self.mode != "access":
+            raise ValueError(
+                f"'access_vlan' may only be set when mode='access' "
+                f"(got mode={self.mode!r})"
+            )
+        if self.allowed_vlans is not None and self.mode != "trunk":
+            raise ValueError(
+                f"'allowed_vlans' may only be set when mode='trunk' "
+                f"(got mode={self.mode!r})"
+            )
+        return self
+
+
+class PortShutdownRequest(BaseModel):
+    """Request body for ``POST /api/v1/ports/shutdown`` (Step 3.3).
+
+    Administratively disables a single interface (``shutdown`` on the device).
+    """
+
+    device: str = Field(..., min_length=1, description="Target device name.")
+    interface: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
+    )
+
+
+class PortEnableRequest(BaseModel):
+    """Request body for ``POST /api/v1/ports/enable`` (Step 3.3).
+
+    Administratively enables a single interface (``no shutdown`` / ``undo shutdown``).
+    """
+
+    device: str = Field(..., min_length=1, description="Target device name.")
+    interface: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
     )
 
 
