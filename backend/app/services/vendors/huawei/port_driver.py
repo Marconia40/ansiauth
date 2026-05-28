@@ -22,6 +22,9 @@ _PLAYBOOK_UPDATE_DESCRIPTION = "vendors/huawei/update_port_description.yml"
 _PLAYBOOK_SET_ADMIN_STATE = "vendors/huawei/set_port_admin_state.yml"
 _PLAYBOOK_SET_ACCESS_VLAN = "vendors/huawei/set_access_vlan.yml"
 _PLAYBOOK_SET_TRUNK_VLANS = "vendors/huawei/set_trunk_allowed_vlans.yml"
+_PLAYBOOK_CONFIGURE_PORT = "vendors/huawei/configure_port.yml"
+_PLAYBOOK_SHUTDOWN_PORT = "vendors/huawei/shutdown_port.yml"
+_PLAYBOOK_ENABLE_PORT = "vendors/huawei/enable_port.yml"
 
 # The Huawei get_ports playbook issues three cli_command tasks in this order:
 #   0. display interface brief
@@ -314,11 +317,7 @@ class HuaweiPortDriver(BasePortDriver):
             )
             raise
 
-    # ── Step 3.1 composite / semantic stubs ─────────────────────────────────────
-    # These methods are registered in BasePortDriver as part of the Step 3.1
-    # vendor contract.  Concrete implementations will be added in a later step;
-    # for now they raise NotImplementedError so the API layer surfaces a clean
-    # 501 VENDOR_NOT_SUPPORTED response rather than an uncontrolled exception.
+    # ── Step 3.2 composite / semantic implementations ────────────────────────────
 
     def configure_port(
         self,
@@ -326,11 +325,107 @@ class HuaweiPortDriver(BasePortDriver):
         device: Device,
         password: str,
     ) -> PortConfigResult:
-        """Composite port configuration — Step 3.1 stub (not yet implemented)."""
-        raise NotImplementedError(
-            "HuaweiPortDriver.configure_port is not yet implemented — "
-            "use the individual set_port_* methods for now"
+        """Apply a composite set of port mutations on a Huawei VRP device.
+
+        All requested fields are applied in a single candidate-config session
+        and committed atomically via ``commit``.  Only the sections whose
+        corresponding boolean flag is ``True`` are emitted — no mutation
+        touches fields that were not set in *config*.
+
+        Field application order (VRP constraint):
+            1. ``port link-type`` (mode) — must precede VLAN commands.
+            2. VLAN assignment (access or trunk, never both).
+            3. ``description`` / ``undo description``.
+            4. ``shutdown`` / ``undo shutdown`` (admin state).
+            5. ``commit`` + ``quit``.
+
+        Returns
+        -------
+        PortConfigResult
+            ``success=True`` and ``changed=True`` when ``rc == 0``.
+            ``success=False`` and ``changed=False`` on playbook failure.
+            ``rollback_performed`` is always ``None`` — the orchestration layer
+            sets this field after deciding whether to trigger rollback.
+        """
+        import time
+        from app.models.port import PortConfigResult as _PCR
+        from app.validators.port_validator import compress_vlans_huawei
+
+        start = time.time()
+
+        configure_description = config.description is not None
+        description = config.description if config.description is not None else ""
+        description_is_empty = not bool(description and description.strip())
+
+        configure_admin = config.admin_enabled is not None
+        admin_enabled = bool(config.admin_enabled) if config.admin_enabled is not None else False
+
+        configure_mode = config.mode is not None
+        mode = config.mode or ""
+
+        configure_access_vlan = config.access_vlan is not None
+        access_vlan = config.access_vlan if config.access_vlan is not None else 0
+
+        configure_trunk_vlans = config.allowed_vlans is not None
+        vlan_list = (
+            compress_vlans_huawei(sorted(set(config.allowed_vlans)))
+            if config.allowed_vlans
+            else ""
         )
+
+        logger.info(
+            "Huawei: configure_port on interface=%s device=%s fields=%s",
+            config.interface, device.name, config.mutation_fields,
+        )
+
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_CONFIGURE_PORT,
+                extravars={
+                    "interface": config.interface,
+                    "device": device.name,
+                    "configure_mode": configure_mode,
+                    "mode": mode,
+                    "configure_access_vlan": configure_access_vlan,
+                    "access_vlan": access_vlan,
+                    "configure_trunk_vlans": configure_trunk_vlans,
+                    "vlan_list": vlan_list,
+                    "configure_description": configure_description,
+                    "description": description,
+                    "description_is_empty": description_is_empty,
+                    "configure_admin": configure_admin,
+                    "admin_enabled": admin_enabled,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            elapsed_ms = (time.time() - start) * 1000
+            success = result.get("rc", 1) == 0
+            if success:
+                logger.info(
+                    "Huawei: configure_port OK on interface=%s device=%s in %.0fms fields=%s",
+                    config.interface, device.name, elapsed_ms, config.mutation_fields,
+                )
+            else:
+                logger.error(
+                    "Huawei: configure_port FAILED on interface=%s device=%s — %s",
+                    config.interface, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return _PCR(
+                success=success,
+                changed=success,
+                interface=config.interface,
+                vendor="huawei_vrp",
+                execution_time_ms=round(elapsed_ms, 1),
+                rollback_performed=None,
+                warnings=None,
+            )
+        except Exception as exc:
+            logger.exception(
+                "FULL HUAWEI TRACEBACK [configure_port interface=%s device=%s]: %s\n%s",
+                config.interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
 
     def shutdown_port(
         self,
@@ -338,11 +433,45 @@ class HuaweiPortDriver(BasePortDriver):
         device: Device,
         password: str,
     ) -> dict:
-        """Shut down *interface* — Step 3.1 stub (not yet implemented)."""
-        raise NotImplementedError(
-            "HuaweiPortDriver.shutdown_port is not yet implemented — "
-            "use set_port_admin_state(enabled=False) for now"
+        """Administratively disable *interface* on a Huawei VRP device.
+
+        Runs ``shutdown`` inside the interface view and commits atomically.
+        Intent-named counterpart to ``enable_port`` — produces self-describing
+        Ansible run logs without requiring callers to decode a boolean flag.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        logger.info(
+            "Huawei: shutdown_port on interface=%s device=%s", interface, device.name
         )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SHUTDOWN_PORT,
+                extravars={"interface": interface, "device": device.name},
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Huawei: shutdown_port OK on interface=%s device=%s",
+                    interface, device.name,
+                )
+            else:
+                logger.error(
+                    "Huawei: shutdown_port FAILED on interface=%s device=%s — %s",
+                    interface, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL HUAWEI TRACEBACK [shutdown_port interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
 
     def enable_port(
         self,
@@ -350,11 +479,44 @@ class HuaweiPortDriver(BasePortDriver):
         device: Device,
         password: str,
     ) -> dict:
-        """Enable *interface* — Step 3.1 stub (not yet implemented)."""
-        raise NotImplementedError(
-            "HuaweiPortDriver.enable_port is not yet implemented — "
-            "use set_port_admin_state(enabled=True) for now"
+        """Administratively enable *interface* on a Huawei VRP device.
+
+        Runs ``undo shutdown`` inside the interface view and commits atomically.
+        Intent-named counterpart to ``shutdown_port``.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        logger.info(
+            "Huawei: enable_port on interface=%s device=%s", interface, device.name
         )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_ENABLE_PORT,
+                extravars={"interface": interface, "device": device.name},
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Huawei: enable_port OK on interface=%s device=%s",
+                    interface, device.name,
+                )
+            else:
+                logger.error(
+                    "Huawei: enable_port FAILED on interface=%s device=%s — %s",
+                    interface, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL HUAWEI TRACEBACK [enable_port interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
 
     def set_trunk_allowed_vlans(
         self,

@@ -268,28 +268,52 @@ def test_base_driver_enable_port_raises():
         driver.enable_port("Gi0/1", _device(), "pw")
 
 
-# ── HuaweiPortDriver stubs ────────────────────────────────────────────────────
+# ── HuaweiPortDriver — Step 3.2 implemented (not stubs) ──────────────────────
+# configure_port / shutdown_port / enable_port are real implementations in
+# Step 3.2 and call ansible_service.  Verify they are callable and invoke the
+# Ansible layer (not raise NotImplementedError).
 
-def test_huawei_configure_port_raises_not_implemented():
+def test_huawei_configure_port_is_implemented(monkeypatch):
+    """configure_port must not raise NotImplementedError — it is wired in Step 3.2."""
+    calls: list = []
+    monkeypatch.setattr(
+        "app.services.ansible_service.run_playbook",
+        lambda playbook, extravars, inventory: calls.append(playbook) or {"rc": 0, "stdout": "", "stderr": ""},
+    )
     driver = HuaweiPortDriver()
     req = PortConfigRequest(device="sw1", interface="Gi0/0/1", description="x")
-    with pytest.raises(NotImplementedError, match="configure_port"):
-        driver.configure_port(req, _device(), "pw")
+    result = driver.configure_port(req, _device(), "pw")
+    assert calls, "configure_port must call ansible_service.run_playbook"
+    assert hasattr(result, "success"), "configure_port must return PortConfigResult"
 
 
-def test_huawei_shutdown_port_raises_not_implemented():
+def test_huawei_shutdown_port_is_implemented(monkeypatch):
+    """shutdown_port must not raise NotImplementedError — it is wired in Step 3.2."""
+    calls: list = []
+    monkeypatch.setattr(
+        "app.services.ansible_service.run_playbook",
+        lambda playbook, extravars, inventory: calls.append(playbook) or {"rc": 0, "stdout": "", "stderr": ""},
+    )
     driver = HuaweiPortDriver()
-    with pytest.raises(NotImplementedError, match="shutdown_port"):
-        driver.shutdown_port("GigabitEthernet0/0/1", _device(), "pw")
+    result = driver.shutdown_port("GigabitEthernet0/0/1", _device(), "pw")
+    assert calls, "shutdown_port must call ansible_service.run_playbook"
+    assert "success" in result
 
 
-def test_huawei_enable_port_raises_not_implemented():
+def test_huawei_enable_port_is_implemented(monkeypatch):
+    """enable_port must not raise NotImplementedError — it is wired in Step 3.2."""
+    calls: list = []
+    monkeypatch.setattr(
+        "app.services.ansible_service.run_playbook",
+        lambda playbook, extravars, inventory: calls.append(playbook) or {"rc": 0, "stdout": "", "stderr": ""},
+    )
     driver = HuaweiPortDriver()
-    with pytest.raises(NotImplementedError, match="enable_port"):
-        driver.enable_port("GigabitEthernet0/0/1", _device(), "pw")
+    result = driver.enable_port("GigabitEthernet0/0/1", _device(), "pw")
+    assert calls, "enable_port must call ansible_service.run_playbook"
+    assert "success" in result
 
 
-# ── CiscoPortDriver stubs ─────────────────────────────────────────────────────
+# ── CiscoPortDriver stubs — still NotImplementedError in Step 3.2 ─────────────
 
 def test_cisco_configure_port_raises_not_implemented():
     driver = CiscoPortDriver()
@@ -310,22 +334,7 @@ def test_cisco_enable_port_raises_not_implemented():
         driver.enable_port("GigabitEthernet1/0/1", _device("cisco_ios", "ios"), "pw")
 
 
-# ── Stub message quality ──────────────────────────────────────────────────────
-# Verify the NotImplementedError messages are meaningful, not just empty.
-
-@pytest.mark.parametrize("method,args", [
-    ("shutdown_port", ("Gi0/1",)),
-    ("enable_port", ("Gi0/1",)),
-])
-def test_huawei_stub_messages_are_informative(method, args):
-    driver = HuaweiPortDriver()
-    dev = _device()
-    with pytest.raises(NotImplementedError) as exc_info:
-        getattr(driver, method)(*args, dev, "pw")
-    msg = str(exc_info.value)
-    assert "HuaweiPortDriver" in msg
-    assert method in msg
-
+# ── Cisco stub message quality ────────────────────────────────────────────────
 
 @pytest.mark.parametrize("method,args", [
     ("shutdown_port", ("Gi0/1",)),
