@@ -129,6 +129,49 @@ class PortAccessVlanUpdateRequest(BaseModel):
     )
 
 
+class PortTrunkVlansUpdateRequest(BaseModel):
+    """Request body for ``PATCH /api/v1/ports/trunk-vlans`` (Step 2.4).
+
+    Single device only.  The port must already be in trunk mode.
+
+    ``mode`` controls how the ``vlans`` list is applied relative to the
+    current trunk configuration:
+
+    * ``"replace"`` — the trunk is set to exactly *vlans* (clears and resets).
+    * ``"add"``     — *vlans* are added to the existing allowed list.
+    * ``"remove"``  — *vlans* are removed from the existing allowed list.
+
+    The orchestration layer computes the final desired list and calls the
+    vendor driver with the result.  The driver always performs a full replace
+    on the device (undo-all + set) so the device state exactly matches
+    the computed list.
+    """
+
+    device: str = Field(..., min_length=1, description="Target device name.")
+    interface: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
+    )
+    mode: Literal["replace", "add", "remove"] = Field(
+        ...,
+        description=(
+            "How vlans is applied to the current trunk config. "
+            "'replace' sets the list exactly; 'add' unions with current; "
+            "'remove' subtracts from current."
+        ),
+    )
+    vlans: list[int] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "VLAN IDs to apply (1-4094, excluding reserved 1002-1005). "
+            "Must be a non-empty list. Duplicates are ignored."
+        ),
+    )
+
+
 class PortListResponseBody(BaseModel):
     """Envelope returned by ``GET /api/v1/ports/?device=...``.
 

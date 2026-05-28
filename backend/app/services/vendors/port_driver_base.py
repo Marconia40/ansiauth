@@ -183,6 +183,53 @@ class BasePortDriver(ABC):
             f"{self.__class__.__name__} does not implement set_port_access_vlan yet"
         )
 
+    def set_trunk_allowed_vlans(
+        self,
+        interface: str,
+        vlan_list: list[int],
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the trunk allowed-VLAN list of *interface* to exactly *vlan_list*.
+
+        Step 2.4 introduces the fourth port mutation operation.  The driver
+        always performs a full replace (clear existing + set desired), not a
+        delta.  The orchestration layer is responsible for computing the
+        desired list from the requested mode (replace / add / remove) and the
+        pre-state — the driver receives only the final list.
+
+        **Pre-conditions are the caller's responsibility:** the orchestration
+        layer must verify the port is in trunk mode and *vlan_list* is valid
+        before invoking this method.
+
+        Vendor mapping:
+            * Huawei VRP — ``undo port trunk allow-pass vlan all`` followed by
+              ``port trunk allow-pass vlan <list>`` inside the interface view,
+              then ``commit``.
+            * Cisco IOS  — ``switchport trunk allowed vlan <list>`` inside
+              ``interface <name>`` parent context with ``save_when: always``.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name.
+        vlan_list:
+            Sorted, deduplicated list of VLAN IDs to allow on the trunk.
+            Must be non-empty and validated by the caller.
+        device:
+            Domain device object.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_trunk_allowed_vlans yet"
+        )
+
     def get_port(self, name: str, device: Device, password: str) -> PortInfo | None:
         """Return the ``PortInfo`` for *name* on *device*, or ``None`` if absent.
 

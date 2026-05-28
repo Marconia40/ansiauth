@@ -290,6 +290,41 @@ def set_port_access_vlan_on_device(
     return driver.set_port_access_vlan(interface, vlan_id, dev, pw)
 
 
+def set_trunk_allowed_vlans_on_device(
+    interface: str,
+    vlan_list: list[int],
+    device_id: str,
+) -> dict:
+    """Set the trunk allowed-VLAN list of *interface* on *device_id*.
+
+    Dispatches to the vendor driver's ``set_trunk_allowed_vlans``.  The caller
+    (``port_execution_service``) is responsible for computing the final desired
+    list (from mode + pre-state + requested VLANs) before calling this function.
+    The driver always performs a full replace on the device.
+
+    Notes
+    -----
+    Mock mode: returns success unless ``device_id == "fail_device"``.
+    """
+    if EXECUTION_MODE == "mock":
+        if device_id == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: set trunk VLANs on interface=%s device=%s vlans=%s",
+            interface, device_id, vlan_list,
+        )
+        return {"rc": 0, "stdout": "Simulated trunk VLANs applied", "stderr": "", "success": True}
+
+    dev = _resolve_device(device_id)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    driver = _get_driver(dev)
+    logger.info(
+        "Real mode: set trunk VLANs on interface=%s device=%s vlans=%s",
+        interface, dev.name, vlan_list,
+    )
+    return driver.set_trunk_allowed_vlans(interface, vlan_list, dev, pw)
+
+
 def get_port(device_id: str, name: str) -> PortInfo | None:
     """Return a single ``PortInfo`` for *name* on *device_id*, or ``None`` if absent.
 

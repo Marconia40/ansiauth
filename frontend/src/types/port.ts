@@ -40,6 +40,23 @@ export interface PortAdminStateUpdateRequest {
   enabled: boolean;
 }
 
+// Body for PATCH /api/v1/ports/access-vlan.
+export interface PortAccessVlanUpdateRequest {
+  device: string;
+  interface: string;
+  vlan_id: number;
+}
+
+// Body for PATCH /api/v1/ports/trunk-vlans.
+export type TrunkVlanMode = 'replace' | 'add' | 'remove';
+
+export interface PortTrunkVlansUpdateRequest {
+  device: string;
+  interface: string;
+  mode: TrunkVlanMode;
+  vlans: number[];
+}
+
 // Response shape — matches the orchestration envelope used by VLAN endpoints,
 // so the existing JobNotificationContext can track these jobs unchanged.
 export interface PortJobResult {

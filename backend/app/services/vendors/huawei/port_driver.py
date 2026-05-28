@@ -21,6 +21,7 @@ _PLAYBOOK_GET_PORTS = "vendors/huawei/get_ports.yml"
 _PLAYBOOK_UPDATE_DESCRIPTION = "vendors/huawei/update_port_description.yml"
 _PLAYBOOK_SET_ADMIN_STATE = "vendors/huawei/set_port_admin_state.yml"
 _PLAYBOOK_SET_ACCESS_VLAN = "vendors/huawei/set_access_vlan.yml"
+_PLAYBOOK_SET_TRUNK_VLANS = "vendors/huawei/set_trunk_allowed_vlans.yml"
 
 # The Huawei get_ports playbook issues three cli_command tasks in this order:
 #   0. display interface brief
@@ -309,6 +310,61 @@ class HuaweiPortDriver(BasePortDriver):
         except Exception as exc:
             logger.exception(
                 "FULL HUAWEI TRACEBACK [set_port_access_vlan interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def set_trunk_allowed_vlans(
+        self,
+        interface: str,
+        vlan_list: list[int],
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the trunk allowed-VLAN list of *interface* on a Huawei VRP device.
+
+        Runs ``undo port trunk allow-pass vlan all`` then
+        ``port trunk allow-pass vlan <list>`` inside the interface view,
+        followed by ``commit``.  Both commands are in the candidate config and
+        committed atomically so no transient blackout occurs.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        from app.validators.port_validator import compress_vlans_huawei
+        vlan_str = compress_vlans_huawei(sorted(set(vlan_list)))
+        logger.info(
+            "Huawei: set trunk VLANs on interface=%s device=%s vlans=%s",
+            interface, device.name, vlan_str,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_TRUNK_VLANS,
+                extravars={
+                    "interface": interface,
+                    "vlan_list": vlan_str,
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Huawei: set trunk VLANs OK on interface=%s device=%s vlans=%s",
+                    interface, device.name, vlan_str,
+                )
+            else:
+                logger.error(
+                    "Huawei: set trunk VLANs FAILED on interface=%s device=%s vlans=%s — %s",
+                    interface, device.name, vlan_str,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL HUAWEI TRACEBACK [set_trunk_allowed_vlans interface=%s device=%s]: %s\n%s",
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise

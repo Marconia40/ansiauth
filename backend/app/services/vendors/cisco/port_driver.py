@@ -21,6 +21,7 @@ _PLAYBOOK_GET_PORTS = "vendors/cisco/get_ports.yml"
 _PLAYBOOK_UPDATE_DESCRIPTION = "vendors/cisco/update_port_description.yml"
 _PLAYBOOK_SET_ADMIN_STATE = "vendors/cisco/set_port_admin_state.yml"
 _PLAYBOOK_SET_ACCESS_VLAN = "vendors/cisco/set_access_vlan.yml"
+_PLAYBOOK_SET_TRUNK_VLANS = "vendors/cisco/set_trunk_allowed_vlans.yml"
 
 # The Cisco get_ports playbook issues a single ios_command task with three
 # commands in this order.  ios_command returns stdout as a list, which is
@@ -297,6 +298,60 @@ class CiscoPortDriver(BasePortDriver):
         except Exception as exc:
             logger.exception(
                 "FULL CISCO TRACEBACK [set_port_access_vlan interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def set_trunk_allowed_vlans(
+        self,
+        interface: str,
+        vlan_list: list[int],
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the trunk allowed-VLAN list of *interface* on a Cisco IOS device.
+
+        Runs ``switchport trunk allowed vlan <list>`` inside the interface
+        context.  IOS replaces the current list with the new one in a single
+        atomic command.  ``save_when: always`` persists to startup-config.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        from app.validators.port_validator import compress_vlans_cisco
+        vlan_str = compress_vlans_cisco(sorted(set(vlan_list)))
+        logger.info(
+            "Cisco: set trunk VLANs on interface=%s device=%s vlans=%s",
+            interface, device.name, vlan_str,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_TRUNK_VLANS,
+                extravars={
+                    "interface": interface,
+                    "vlan_list": vlan_str,
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Cisco: set trunk VLANs OK on interface=%s device=%s vlans=%s",
+                    interface, device.name, vlan_str,
+                )
+            else:
+                logger.error(
+                    "Cisco: set trunk VLANs FAILED on interface=%s device=%s vlans=%s — %s",
+                    interface, device.name, vlan_str,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [set_trunk_allowed_vlans interface=%s device=%s]: %s\n%s",
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise

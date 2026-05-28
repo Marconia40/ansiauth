@@ -11,6 +11,7 @@ import type {
   PortDescriptionUpdateRequest,
   PortListResponse,
   PortOperationResult,
+  PortTrunkVlansUpdateRequest,
 } from '@/types/port';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
@@ -338,6 +339,13 @@ export async function setPortAdminState(
   body: PortAdminStateUpdateRequest,
 ): Promise<PortOperationResult> {
   const { data } = await client.patch<PortJobRawResponse>('/ports/admin-state', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setTrunkAllowedVlans(
+  body: PortTrunkVlansUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/trunk-vlans', body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 

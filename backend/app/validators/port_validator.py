@@ -64,6 +64,91 @@ def validate_access_vlan_id(vlan_id: int) -> None:
         )
 
 
+def validate_trunk_vlan_id(vlan_id: int) -> None:
+    """Validate a single VLAN ID in a trunk allowed-VLAN list.
+
+    Same range rules as access VLANs, but explicitly documented separately
+    because trunk lists have different semantics (VLAN 1 appears commonly as
+    a native VLAN that operators legitimately add or remove).
+    """
+    if isinstance(vlan_id, bool) or not isinstance(vlan_id, int):
+        raise ValueError("VLAN ID must be an integer")
+    if vlan_id < 1 or vlan_id > 4094:
+        raise ValueError(f"VLAN ID {vlan_id} is out of range (1-4094)")
+    if vlan_id in (1002, 1003, 1004, 1005):
+        raise ValueError(
+            f"VLAN {vlan_id} is reserved (Cisco IOS legacy FDDI/Token-Ring) "
+            "and cannot appear in a trunk allowed-VLAN list"
+        )
+
+
+def validate_trunk_vlan_list(vlans: list) -> None:
+    """Validate a list of VLAN IDs for trunk allowed-VLAN assignment.
+
+    Rules:
+        * must be a non-empty list (the caller is responsible for ensuring
+          that a remove operation does not reduce the list to empty)
+        * each item must pass ``validate_trunk_vlan_id``
+        * no duplicates
+    """
+    if not isinstance(vlans, list):
+        raise ValueError("vlans must be a list of integers")
+    if len(vlans) == 0:
+        raise ValueError("vlans must not be empty")
+    seen: set[int] = set()
+    for v in vlans:
+        validate_trunk_vlan_id(v)
+        if v in seen:
+            raise ValueError(f"Duplicate VLAN ID {v} in list")
+        seen.add(v)
+
+
+# ── VLAN list compression utilities ──────────────────────────────────────────
+# Used by vendor drivers to format the desired VLAN list into the CLI string
+# the device expects.  Both functions accept a sorted-or-unsorted list of ints
+# and return a compact range string.
+
+def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:
+    """Collapse *vlans* into (start, end) range tuples."""
+    if not vlans:
+        return []
+    sv = sorted(set(vlans))
+    ranges: list[tuple[int, int]] = []
+    start = sv[0]
+    prev = sv[0]
+    for v in sv[1:]:
+        if v == prev + 1:
+            prev = v
+        else:
+            ranges.append((start, prev))
+            start = v
+            prev = v
+    ranges.append((start, prev))
+    return ranges
+
+
+def compress_vlans_cisco(vlans: list[int]) -> str:
+    """Format a VLAN list into the Cisco IOS trunk-allowed syntax.
+
+    Example: [10, 11, 12, 20] → ``"10-12,20"``
+    """
+    parts = []
+    for s, e in _compress_to_ranges(vlans):
+        parts.append(f"{s}-{e}" if s != e else str(s))
+    return ",".join(parts)
+
+
+def compress_vlans_huawei(vlans: list[int]) -> str:
+    """Format a VLAN list into the Huawei VRP trunk-allowed syntax.
+
+    Example: [10, 11, 12, 20] → ``"10 to 12 20"``
+    """
+    parts = []
+    for s, e in _compress_to_ranges(vlans):
+        parts.append(f"{s} to {e}" if s != e else str(s))
+    return " ".join(parts)
+
+
 def validate_description(description: str) -> None:
     """Raise ``ValueError`` if *description* is unsafe to push to a device.
 

@@ -16,6 +16,7 @@ from app.schemas.port import (
     PortAccessVlanUpdateRequest,
     PortAdminStateUpdateRequest,
     PortDescriptionUpdateRequest,
+    PortTrunkVlansUpdateRequest,
     PortRead,  # noqa: F401 — exported via OpenAPI components
 )
 from app.services import device_service, port_execution_service, port_service
@@ -47,6 +48,12 @@ def _capture_pre_state_port_access_vlan(interface: str, device: str) -> dict:
     """Re-export the access-VLAN pre-state capture (Step 2.3) so tests can
     monkeypatch a single attachment point."""
     return port_execution_service._capture_pre_state_access_vlan(interface, device)
+
+
+def _capture_pre_state_port_trunk_vlans(interface: str, device: str) -> dict:
+    """Re-export the trunk-VLAN pre-state capture (Step 2.4) so tests can
+    monkeypatch a single attachment point."""
+    return port_execution_service._capture_pre_state_trunk_vlans(interface, device)
 
 
 def _require_port_driver_with(method_name: str, device_name: str, current_user: dict):
@@ -306,6 +313,53 @@ def set_port_access_vlan(
     jobs, group_job_id = port_execution_service.enqueue_set_access_vlan_job(
         interface=data.interface,
         vlan_id=data.vlan_id,
+        device=data.device,
+        username=current_user["username"],
+        background_tasks=background_tasks,
+        retry_base_delay=_RETRY_BASE_DELAY,
+    )
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+
+
+@router.patch(
+    "/trunk-vlans",
+    summary="Set trunk allowed VLANs",
+    description=(
+        "Modify the trunk allowed-VLAN list on a single interface.  "
+        "``mode='replace'`` sets the list to exactly ``vlans``; "
+        "``mode='add'`` unions ``vlans`` with the current list; "
+        "``mode='remove'`` subtracts ``vlans`` from the current list.  "
+        "The port must already be in trunk mode.  Executed asynchronously: "
+        "the response carries a ``group_job_id`` and per-device job entry "
+        "the frontend can poll via ``GET /api/v1/jobs/{job_id}`` and "
+        "``GET /api/v1/group-jobs/{id}``.  Pre-state is captured for rollback "
+        "— if the device-side change fails, the original VLAN list is restored "
+        "automatically.  Requires operator role or higher; site-scoped users "
+        "may only target devices in their allowed sites."
+    ),
+)
+def set_trunk_allowed_vlans(
+    data: PortTrunkVlansUpdateRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("operator")),
+):
+    """Schedule a trunk allowed-VLAN update on a single port."""
+    try:
+        port_validator.validate_interface_name(data.interface)
+        port_validator.validate_trunk_vlan_list(list(data.vlans))
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    if not device_service.get_device(data.device):
+        raise NotFoundError(f"Device '{data.device}' not found")
+    authz.ensure_device_allowed(current_user, data.device)
+
+    _require_port_driver_with("set_trunk_allowed_vlans", data.device, current_user)
+
+    jobs, group_job_id = port_execution_service.enqueue_set_trunk_allowed_vlans_job(
+        interface=data.interface,
+        vlans=list(data.vlans),
+        mode=data.mode,
         device=data.device,
         username=current_user["username"],
         background_tasks=background_tasks,

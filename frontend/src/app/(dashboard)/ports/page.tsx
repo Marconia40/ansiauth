@@ -7,10 +7,10 @@ import { useJobNotifications } from '@/context/JobNotificationContext';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getPorts, getSites, setPortAdminState, updatePortDescription } from '@/services/api';
+import { getDevices, getPorts, getSites, setPortAdminState, setTrunkAllowedVlans, updatePortDescription } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
-import type { Port, PortListResponse, PortMode } from '@/types/port';
+import type { Port, PortListResponse, PortMode, TrunkVlanMode } from '@/types/port';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -64,6 +64,53 @@ function formatVlanList(vlans: number[] | null): string {
     return `${ranges[0]} (${vlans.length})`;
   }
   return text;
+}
+
+// ── VLAN input parsing + validation ──────────────────────────────────────────
+// Parses user input like "10,20,30-35" or "10 20 30 to 35" into a sorted
+// unique number[] and returns either the list or an error string.
+
+const RESERVED_VLANS = new Set([1002, 1003, 1004, 1005]);
+
+function parseVlanInput(raw: string): { vlans: number[]; error: string | null } {
+  const tokens = raw.split(/[\s,]+/).filter(Boolean);
+  if (tokens.length === 0) return { vlans: [], error: 'Enter at least one VLAN ID' };
+
+  const set = new Set<number>();
+  for (const tok of tokens) {
+    // Range: "10-20" or "10 to 20"
+    const range = tok.match(/^(\d+)(?:-|to)(\d+)$/i);
+    if (range) {
+      const lo = parseInt(range[1], 10);
+      const hi = parseInt(range[2], 10);
+      if (lo > hi) return { vlans: [], error: `Invalid range: ${tok} (start must be ≤ end)` };
+      for (let v = lo; v <= hi; v++) set.add(v);
+      continue;
+    }
+    // Single ID
+    const n = parseInt(tok, 10);
+    if (isNaN(n) || String(n) !== tok.trim()) {
+      return { vlans: [], error: `'${tok}' is not a valid VLAN ID` };
+    }
+    set.add(n);
+  }
+
+  const vlans = [...set].sort((a, b) => a - b);
+
+  for (const v of vlans) {
+    if (v < 1 || v > 4094) return { vlans: [], error: `VLAN ${v} is out of range (1–4094)` };
+    if (RESERVED_VLANS.has(v)) return { vlans: [], error: `VLAN ${v} is reserved (Cisco legacy)` };
+  }
+
+  return { vlans, error: null };
+}
+
+function vlanInputError(raw: string, mode: TrunkVlanMode): string | null {
+  const { vlans, error } = parseVlanInput(raw);
+  if (error) return error;
+  if (vlans.length === 0) return 'Enter at least one VLAN ID';
+  if (mode === 'remove' && vlans.length > 0) return null; // validated server-side for empty result
+  return null;
 }
 
 // ── Status pills ──────────────────────────────────────────────────────────────
@@ -332,6 +379,13 @@ export default function PortsPage() {
   const [togglingPort, setTogglingPort] = useState<string | null>(null);
   const [adminErrorPort, setAdminErrorPort] = useState<{ port: string; message: string } | null>(null);
 
+  // ── Trunk VLAN inline-edit state ──
+  const [editingTrunkPort, setEditingTrunkPort] = useState<string | null>(null);
+  const [trunkEditValue, setTrunkEditValue] = useState<string>('');
+  const [trunkEditMode, setTrunkEditMode] = useState<TrunkVlanMode>('replace');
+  const [savingTrunkPort, setSavingTrunkPort] = useState<string | null>(null);
+  const [trunkErrorPort, setTrunkErrorPort] = useState<{ port: string; message: string } | null>(null);
+
   // ── Device + site lookup ──
   const {
     data: devices,
@@ -495,6 +549,58 @@ export default function PortsPage() {
       setEditErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
     } finally {
       setSavingPort(null);
+    }
+  }
+
+  // ── Trunk VLAN inline-edit handlers ──
+
+  function handleTrunkEditStart(port: Port) {
+    setEditingTrunkPort(port.name);
+    setTrunkEditValue(formatVlanList(port.allowed_vlans) === DASH ? '' : formatVlanList(port.allowed_vlans));
+    setTrunkEditMode('replace');
+    setTrunkErrorPort(null);
+  }
+
+  function handleTrunkEditCancel() {
+    setEditingTrunkPort(null);
+    setTrunkEditValue('');
+    setTrunkErrorPort(null);
+  }
+
+  async function handleTrunkEditSave(port: Port) {
+    if (!selectedDevice) return;
+    const { vlans, error } = parseVlanInput(trunkEditValue);
+    if (error) {
+      setTrunkErrorPort({ port: port.name, message: error });
+      return;
+    }
+    if (vlans.length === 0) {
+      setTrunkErrorPort({ port: port.name, message: 'Enter at least one VLAN ID' });
+      return;
+    }
+    setSavingTrunkPort(port.name);
+    setTrunkErrorPort(null);
+    try {
+      const result = await setTrunkAllowedVlans({
+        device: selectedDevice,
+        interface: port.name,
+        mode: trunkEditMode,
+        vlans,
+      });
+      const job = result.jobs[0];
+      if (job) {
+        trackJob(
+          job.job_id,
+          `${trunkEditMode === 'replace' ? 'Set' : trunkEditMode === 'add' ? 'Add to' : 'Remove from'} trunk VLANs on ${port.name}`,
+          job.device,
+        );
+      }
+      handleTrunkEditCancel();
+      setTimeout(() => { refetch(); }, 500);
+    } catch (err) {
+      setTrunkErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
+    } finally {
+      setSavingTrunkPort(null);
     }
   }
 
@@ -762,8 +868,83 @@ export default function PortsPage() {
                         <td className="px-3 py-2"><OperBadge value={port.operational_up} /></td>
                         <td className="px-3 py-2"><ModeBadge mode={port.mode} /></td>
                         <td className="px-3 py-2 text-gray-900">{port.access_vlan ?? DASH}</td>
-                        <td className="px-3 py-2 text-gray-900 max-w-xs truncate" title={formatVlanList(port.allowed_vlans)}>
-                          {formatVlanList(port.allowed_vlans)}
+                        <td className="px-3 py-2 text-gray-900 max-w-xs">
+                          {editingTrunkPort === port.name ? (
+                            <div className="flex flex-col gap-1.5 min-w-[260px]">
+                              <div className="flex items-center gap-1">
+                                <select
+                                  value={trunkEditMode}
+                                  onChange={(e) => setTrunkEditMode(e.target.value as TrunkVlanMode)}
+                                  disabled={savingTrunkPort === port.name}
+                                  className="px-1.5 py-1 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:opacity-50"
+                                  aria-label="Operation mode"
+                                >
+                                  <option value="replace">Replace</option>
+                                  <option value="add">Add</option>
+                                  <option value="remove">Remove</option>
+                                </select>
+                                <input
+                                  type="text"
+                                  value={trunkEditValue}
+                                  onChange={(e) => {
+                                    setTrunkEditValue(e.target.value);
+                                    // Live validation feedback
+                                    const { error } = parseVlanInput(e.target.value);
+                                    if (error && e.target.value.trim()) {
+                                      setTrunkErrorPort({ port: port.name, message: error });
+                                    } else {
+                                      setTrunkErrorPort(null);
+                                    }
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') { e.preventDefault(); handleTrunkEditSave(port); }
+                                    if (e.key === 'Escape') { e.preventDefault(); handleTrunkEditCancel(); }
+                                  }}
+                                  disabled={savingTrunkPort === port.name}
+                                  autoFocus
+                                  placeholder="e.g. 10,20,30-35"
+                                  aria-label={`Trunk VLANs for ${port.name}`}
+                                  className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-1 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                                />
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => handleTrunkEditSave(port)}
+                                  disabled={savingTrunkPort === port.name || (trunkErrorPort?.port === port.name && !!trunkErrorPort?.message && trunkEditValue.trim() !== '')}
+                                  className="px-2 py-0.5 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {savingTrunkPort === port.name ? 'Saving...' : 'Save'}
+                                </button>
+                                <button
+                                  onClick={handleTrunkEditCancel}
+                                  disabled={savingTrunkPort === port.name}
+                                  className="px-2 py-0.5 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                              {trunkErrorPort?.port === port.name && (
+                                <p className="text-xs text-red-600">{trunkErrorPort.message}</p>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate font-mono text-xs" title={formatVlanList(port.allowed_vlans)}>
+                                {formatVlanList(port.allowed_vlans)}
+                              </span>
+                              {canEdit && port.mode === 'trunk' && (
+                                <button
+                                  onClick={() => handleTrunkEditStart(port)}
+                                  disabled={editingTrunkPort !== null || savingTrunkPort !== null || editingPort !== null}
+                                  className="opacity-60 hover:opacity-100 text-gray-500 hover:text-purple-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                                  aria-label={`Edit trunk VLANs for ${port.name}`}
+                                  title="Edit trunk allowed VLANs"
+                                >
+                                  ✎
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-gray-600">
                           {port.poe_enabled === null
