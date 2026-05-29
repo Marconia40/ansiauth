@@ -219,22 +219,22 @@ job_service.mark_orphaned_jobs_failed()
 
 
 def _bootstrap_admin() -> None:
-    """Create the initial admin user from env vars if no admin exists in the DB."""
+    """Create the initial super-admin user from env vars if no super-admin exists in the DB."""
     from app.core.config import BOOTSTRAP_ADMIN_USER, BOOTSTRAP_ADMIN_PASSWORD
     from app.db.models import UserModel
     from app.db.session import get_session
 
     with get_session() as session:
-        has_admin = session.query(UserModel).filter_by(role="admin", is_active=True).first() is not None
+        has_superadmin = session.query(UserModel).filter_by(role="super-admin", is_active=True).first() is not None
 
-    if has_admin:
-        logger.info("Bootstrap skipped: active admin already exists")
+    if has_superadmin:
+        logger.info("Bootstrap skipped: active super-admin already exists")
         return
 
     if not BOOTSTRAP_ADMIN_PASSWORD:
         logger.warning(
-            "No active admin exists and BOOTSTRAP_ADMIN_PASSWORD is not set — "
-            "set this env var to seed an initial admin on first boot."
+            "No active super-admin exists and BOOTSTRAP_ADMIN_PASSWORD is not set — "
+            "set this env var to seed an initial super-admin on first boot."
         )
         return
 
@@ -247,7 +247,7 @@ def _bootstrap_admin() -> None:
         UserCreate(
             username=BOOTSTRAP_ADMIN_USER,
             password=BOOTSTRAP_ADMIN_PASSWORD,
-            role="admin",
+            role="super-admin",
         )
     )
     audit_service.log_action(
@@ -258,7 +258,7 @@ def _bootstrap_admin() -> None:
         details={"username": user.username},
         status="success",
     )
-    logger.info("Bootstrap: created admin user '%s' (id=%d)", user.username, user.id)
+    logger.info("Bootstrap: created super-admin user '%s' (id=%d)", user.username, user.id)
 
 
 _bootstrap_admin()
