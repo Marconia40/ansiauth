@@ -7,7 +7,7 @@ import { useJobNotifications } from '@/context/JobNotificationContext';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getPorts, getSites, setPortAdminState, setTrunkAllowedVlans, updatePortDescription } from '@/services/api';
+import { configurePort, getDevices, getPorts, getSites, setTrunkAllowedVlans, updatePortDescription } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
 import type { Port, PortListResponse, PortMode, TrunkVlanMode } from '@/types/port';
@@ -482,11 +482,8 @@ export default function PortsPage() {
   }
 
   async function handleToggleAdminState(port: Port) {
-    if (!selectedDevice) return;
-    // Default to "enable" when the current state is unknown — safer than
-    // disabling something the operator can't see the state of.
-    const currentlyEnabled = port.admin_up === true;
-    const nextEnabled = !currentlyEnabled;
+    if (!selectedDevice || port.admin_up === null) return;
+    const nextEnabled = !port.admin_up;
     const verb = nextEnabled ? 'enable' : 'disable';
     if (!window.confirm(
       `Are you sure you want to ${verb} interface ${port.name} on ${selectedDevice}?`,
@@ -496,9 +493,9 @@ export default function PortsPage() {
     setTogglingPort(port.name);
     setAdminErrorPort(null);
     try {
-      const result = await setPortAdminState({
+      const result = await configurePort({
         device: selectedDevice,
-        interface: port.name,
+        port_name: port.name,
         enabled: nextEnabled,
       });
       const job = result.jobs[0];
@@ -509,8 +506,6 @@ export default function PortsPage() {
           job.device,
         );
       }
-      // Refetch shortly so the table reflects the new admin state once the
-      // async job completes (the authoritative signal is JobNotifications).
       setTimeout(() => { refetch(); }, 500);
     } catch (err) {
       setAdminErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
@@ -620,7 +615,7 @@ export default function PortsPage() {
         }
       />
       <p className="text-sm text-gray-500 mb-6">
-        View port inventory and state on managed devices. Read-only.
+        View and configure port state on managed devices.
       </p>
 
       {/* Device selection */}
@@ -842,21 +837,37 @@ export default function PortsPage() {
                           <div className="flex flex-col gap-1">
                             <div className="flex items-center gap-2">
                               <AdminBadge value={port.admin_up} />
-                              {canEdit && port.admin_up !== null && (
+                              {canEdit && (
                                 <button
                                   onClick={() => handleToggleAdminState(port)}
-                                  disabled={togglingPort !== null}
+                                  disabled={togglingPort !== null || port.admin_up === null}
                                   className={`px-2 py-0.5 text-xs rounded border whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed ${
-                                    port.admin_up
+                                    port.admin_up === null
+                                      ? 'text-gray-400 border-gray-200'
+                                      : port.admin_up
                                       ? 'text-red-600 border-red-300 hover:bg-red-50'
                                       : 'text-green-700 border-green-300 hover:bg-green-50'
                                   }`}
-                                  aria-label={`${port.admin_up ? 'Disable' : 'Enable'} ${port.name}`}
-                                  title={port.admin_up ? 'Disable interface' : 'Enable interface'}
+                                  aria-label={
+                                    port.admin_up === null
+                                      ? `Admin state unknown for ${port.name}`
+                                      : `${port.admin_up ? 'Disable' : 'Enable'} ${port.name}`
+                                  }
+                                  title={
+                                    port.admin_up === null
+                                      ? 'Admin state unknown'
+                                      : port.admin_up
+                                      ? 'Disable interface'
+                                      : 'Enable interface'
+                                  }
                                 >
                                   {togglingPort === port.name
                                     ? '…'
-                                    : (port.admin_up ? 'Disable' : 'Enable')}
+                                    : port.admin_up === null
+                                    ? '—'
+                                    : port.admin_up
+                                    ? 'Disable'
+                                    : 'Enable'}
                                 </button>
                               )}
                             </div>

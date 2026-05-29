@@ -349,6 +349,23 @@ export async function setTrunkAllowedVlans(
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
+export async function configurePort(body: {
+  device: string;
+  port_name: string;
+  enabled?: boolean | null;
+  description?: string | null;
+}): Promise<PortOperationResult> {
+  const payload: Record<string, unknown> = {
+    device: body.device,
+    interface: body.port_name,
+  };
+  // null / undefined → omit field (no change); boolean → send; "" → send (clears description)
+  if (body.enabled != null) payload.admin_enabled = body.enabled;
+  if (body.description != null) payload.description = body.description;
+  const { data } = await client.post<PortJobRawResponse>('/ports/configure', payload);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
 // ── Devices ───────────────────────────────────────────────────────────────────
 
 export async function getDevices(): Promise<Device[]> {
