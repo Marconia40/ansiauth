@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/context/AuthContext';
 import { useJobNotifications } from '@/context/JobNotificationContext';
@@ -105,15 +105,14 @@ function parseVlanInput(raw: string): { vlans: number[]; error: string | null } 
   return { vlans, error: null };
 }
 
-function vlanInputError(raw: string, mode: TrunkVlanMode): string | null {
-  const { vlans, error } = parseVlanInput(raw);
-  if (error) return error;
-  if (vlans.length === 0) return 'Enter at least one VLAN ID';
-  if (mode === 'remove' && vlans.length > 0) return null; // validated server-side for empty result
-  return null;
-}
 
 // ── Status pills ──────────────────────────────────────────────────────────────
+
+function RowSpinner() {
+  return (
+    <div className="inline-block w-3 h-3 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500" />
+  );
+}
 
 function AdminBadge({ value }: { value: boolean | null }) {
   if (value === null) {
@@ -185,6 +184,7 @@ const SELECT_CLS =
 
 type AdminFilter = '' | 'enabled' | 'disabled';
 type OperFilter = '' | 'up' | 'down';
+type SortDir = 'asc' | 'desc';
 
 interface FilterBarProps {
   search: string;
@@ -287,9 +287,6 @@ function Pagination({
   onGoTo: (p: number) => void;
 }) {
   const [inputVal, setInputVal] = useState(String(page));
-  useEffect(() => {
-    setInputVal(String(page));
-  }, [page]);
 
   const firstItem = totalItems === 0 ? 0 : (page - 1) * pageSize + 1;
   const lastItem = Math.min(page * pageSize, totalItems);
@@ -398,6 +395,14 @@ export default function PortsPage() {
   const [bulkErrors, setBulkErrors] = useState<string[]>([]);
   const [bulkVlanInput, setBulkVlanInput] = useState('');
   const [bulkVlanExpanded, setBulkVlanExpanded] = useState(false);
+  const [bulkConfirmingDisable, setBulkConfirmingDisable] = useState(false);
+  const [bulkConfirmingClearDesc, setBulkConfirmingClearDesc] = useState(false);
+
+  // ── Table sort state ──
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+
+  // ── Per-row inline confirm state ──
+  const [confirmingDisablePort, setConfirmingDisablePort] = useState<string | null>(null);
 
   // ── Device + site lookup ──
   const {
@@ -416,16 +421,13 @@ export default function PortsPage() {
     (d) => !siteFilter || String(d.site_id ?? '') === siteFilter,
   );
 
-  // Auto-select the first device once the list arrives so the table is never empty by default.
-  useEffect(() => {
-    if (!selectedDevice && filteredDevices.length > 0) {
-      setSelectedDevice(filteredDevices[0].name);
+  const effectiveSelectedDevice = useMemo(() => {
+    if (filteredDevices.length === 0) return '';
+    if (selectedDevice && filteredDevices.some(d => d.name === selectedDevice)) {
+      return selectedDevice;
     }
-    // If the selected device is filtered out by a new site choice, fall back to first visible.
-    if (selectedDevice && !filteredDevices.some((d) => d.name === selectedDevice)) {
-      setSelectedDevice(filteredDevices[0]?.name ?? '');
-    }
-  }, [filteredDevices, selectedDevice]);
+    return filteredDevices[0].name;
+  }, [selectedDevice, filteredDevices]);
 
   // ── Port fetch ──
   const {
@@ -435,30 +437,18 @@ export default function PortsPage() {
     error: portsError,
     refetch,
   } = useQuery<PortListResponse>({
-    queryKey: ['ports', selectedDevice],
-    queryFn: () => getPorts(selectedDevice),
-    enabled: !!selectedDevice,
+    queryKey: ['ports', effectiveSelectedDevice],
+    queryFn: () => getPorts(effectiveSelectedDevice),
+    enabled: !!effectiveSelectedDevice,
   });
 
-  // Reset to page 1 whenever the data set or filters change.
-  useEffect(() => {
-    setPage(1);
-  }, [selectedDevice, search, filterMode, filterAdmin, filterOper, pageSize]);
-
-  // Clear bulk selection when device changes.
-  useEffect(() => {
-    setSelectedPorts(new Set());
-    setBulkErrors([]);
-    setBulkVlanExpanded(false);
-    setBulkVlanInput('');
-  }, [selectedDevice]);
 
   // ── Apply filters + search client-side ──
   const filteredPorts = useMemo(() => {
     const all = portsResponse?.ports ?? [];
     const q = search.trim().toLowerCase();
 
-    return all.filter((p) => {
+    const filtered = all.filter((p) => {
       if (q) {
         const hay = `${p.name} ${p.description ?? ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -470,7 +460,12 @@ export default function PortsPage() {
       if (filterOper === 'down' && p.operational_up !== false) return false;
       return true;
     });
-  }, [portsResponse, search, filterMode, filterAdmin, filterOper]);
+
+    return [...filtered].sort((a, b) => {
+      const cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+  }, [portsResponse, search, filterMode, filterAdmin, filterOper, sortDir]);
 
   const totalItems = filteredPorts.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
@@ -498,7 +493,26 @@ export default function PortsPage() {
     setFilterMode('');
     setFilterAdmin('');
     setFilterOper('');
+    setPage(1);
   }
+
+  function handleSetSelectedDevice(name: string) {
+    setSelectedDevice(name);
+    setPage(1);
+    setSelectedPorts(new Set());
+    setBulkErrors([]);
+    setBulkVlanExpanded(false);
+    setBulkVlanInput('');
+    setBulkConfirmingDisable(false);
+    setBulkConfirmingClearDesc(false);
+    setConfirmingDisablePort(null);
+  }
+
+  function handleSetSearch(v: string) { setSearch(v); setPage(1); }
+  function handleSetFilterMode(v: PortMode | '') { setFilterMode(v); setPage(1); }
+  function handleSetFilterAdmin(v: AdminFilter) { setFilterAdmin(v); setPage(1); }
+  function handleSetFilterOper(v: OperFilter) { setFilterOper(v); setPage(1); }
+  function handleSetPageSize(n: number) { setPageSize(n); setPage(1); }
 
   // ── Inline-edit handlers ──
 
@@ -515,19 +529,13 @@ export default function PortsPage() {
   }
 
   async function handleToggleAdminState(port: Port) {
-    if (!selectedDevice || port.admin_up === null) return;
+    if (!effectiveSelectedDevice || port.admin_up === null) return;
     const nextEnabled = !port.admin_up;
-    const verb = nextEnabled ? 'enable' : 'disable';
-    if (!window.confirm(
-      `Are you sure you want to ${verb} interface ${port.name} on ${selectedDevice}?`,
-    )) {
-      return;
-    }
     setTogglingPort(port.name);
     setAdminErrorPort(null);
     try {
       const result = await configurePort({
-        device: selectedDevice,
+        device: effectiveSelectedDevice,
         port_name: port.name,
         enabled: nextEnabled,
       });
@@ -548,7 +556,7 @@ export default function PortsPage() {
   }
 
   async function handleEditSave(port: Port) {
-    if (!selectedDevice) return;
+    if (!effectiveSelectedDevice) return;
     const value = editingValue;
     // No-op short-circuit: if the user didn't change anything, just close.
     if ((value ?? '').trim() === (port.description ?? '').trim()) {
@@ -559,7 +567,7 @@ export default function PortsPage() {
     setEditErrorPort(null);
     try {
       const result = await updatePortDescription({
-        device: selectedDevice,
+        device: effectiveSelectedDevice,
         interface: port.name,
         description: value,
       });
@@ -596,7 +604,7 @@ export default function PortsPage() {
   }
 
   async function handleTrunkEditSave(port: Port) {
-    if (!selectedDevice) return;
+    if (!effectiveSelectedDevice) return;
     const { vlans, error } = parseVlanInput(trunkEditValue);
     if (error) {
       setTrunkErrorPort({ port: port.name, message: error });
@@ -610,7 +618,7 @@ export default function PortsPage() {
     setTrunkErrorPort(null);
     try {
       const result = await setTrunkAllowedVlans({
-        device: selectedDevice,
+        device: effectiveSelectedDevice,
         interface: port.name,
         mode: trunkEditMode,
         vlans,
@@ -647,7 +655,7 @@ export default function PortsPage() {
   }
 
   async function handleAccessVlanEditSave(port: Port) {
-    if (!selectedDevice) return;
+    if (!effectiveSelectedDevice) return;
     const raw = accessVlanEditValue.trim();
     const n = parseInt(raw, 10);
 
@@ -672,7 +680,7 @@ export default function PortsPage() {
     setAccessVlanErrorPort(null);
     try {
       const result = await setPortAccessVlan({
-        device: selectedDevice,
+        device: effectiveSelectedDevice,
         interface: port.name,
         vlan_id: n,
       });
@@ -692,11 +700,7 @@ export default function PortsPage() {
   // ── Bulk operation handlers ──
 
   async function handleBulkAction(action: 'enable' | 'disable' | 'clear-description') {
-    if (!selectedDevice || bulkExecuting || selectedPorts.size === 0) return;
-    if (action === 'disable' && !window.confirm(
-      `Disable ${selectedPorts.size} selected port${selectedPorts.size !== 1 ? 's' : ''} on ${selectedDevice}?`,
-    )) return;
-
+    if (!effectiveSelectedDevice || bulkExecuting || selectedPorts.size === 0) return;
     setBulkExecuting(true);
     setBulkErrors([]);
     const errors: string[] = [];
@@ -705,10 +709,10 @@ export default function PortsPage() {
       try {
         const result = await configurePort(
           action === 'enable'
-            ? { device: selectedDevice, port_name: portName, enabled: true }
+            ? { device: effectiveSelectedDevice, port_name: portName, enabled: true }
             : action === 'disable'
-            ? { device: selectedDevice, port_name: portName, enabled: false }
-            : { device: selectedDevice, port_name: portName, description: '' },
+            ? { device: effectiveSelectedDevice, port_name: portName, enabled: false }
+            : { device: effectiveSelectedDevice, port_name: portName, description: '' },
         );
         const job = result.jobs[0];
         if (job) {
@@ -727,7 +731,7 @@ export default function PortsPage() {
   }
 
   async function handleBulkSetAccessVlan() {
-    if (!selectedDevice || bulkExecuting || selectedPorts.size === 0) return;
+    if (!effectiveSelectedDevice || bulkExecuting || selectedPorts.size === 0) return;
 
     const raw = bulkVlanInput.trim();
     const n = parseInt(raw, 10);
@@ -751,7 +755,7 @@ export default function PortsPage() {
     for (const portName of Array.from(selectedPorts)) {
       try {
         const result = await configurePort({
-          device: selectedDevice,
+          device: effectiveSelectedDevice,
           port_name: portName,
           mode: 'access',
           access_vlan: n,
@@ -783,7 +787,7 @@ export default function PortsPage() {
         actions={
           <button
             onClick={() => refetch()}
-            disabled={portsLoading || portsFetching || !selectedDevice}
+            disabled={portsLoading || portsFetching || !effectiveSelectedDevice}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {portsFetching ? 'Refreshing...' : 'Refresh'}
@@ -819,8 +823,8 @@ export default function PortsPage() {
           </label>
           <select
             id="device-select"
-            value={selectedDevice}
-            onChange={(e) => setSelectedDevice(e.target.value)}
+            value={effectiveSelectedDevice}
+            onChange={(e) => handleSetSelectedDevice(e.target.value)}
             disabled={devicesLoading || filteredDevices.length === 0}
             className={SELECT_CLS}
           >
@@ -852,7 +856,7 @@ export default function PortsPage() {
       </div>
 
       {/* Table area */}
-      {!selectedDevice ? (
+      {!effectiveSelectedDevice ? (
         <div className="py-12 text-center">
           <p className="text-sm text-gray-400">Select a device to view its ports.</p>
         </div>
@@ -895,18 +899,24 @@ export default function PortsPage() {
         <>
           <FilterBar
             search={search}
-            setSearch={setSearch}
+            setSearch={handleSetSearch}
             filterMode={filterMode}
-            setFilterMode={setFilterMode}
+            setFilterMode={handleSetFilterMode}
             filterAdmin={filterAdmin}
-            setFilterAdmin={setFilterAdmin}
+            setFilterAdmin={handleSetFilterAdmin}
             filterOper={filterOper}
-            setFilterOper={setFilterOper}
+            setFilterOper={handleSetFilterOper}
             pageSize={pageSize}
-            setPageSize={setPageSize}
+            setPageSize={handleSetPageSize}
             hasActiveFilters={hasActiveFilters}
             onClear={clearFilters}
           />
+
+          {portsFetching && !portsLoading && (
+            <div className="h-0.5 bg-blue-100 rounded-full overflow-hidden mb-2">
+              <div className="h-full bg-blue-400 rounded-full animate-pulse" />
+            </div>
+          )}
 
           <p className="text-xs text-gray-400 mb-2">
             {portsResponse?.count ?? 0} total
@@ -930,12 +940,20 @@ export default function PortsPage() {
                     >
                       Enable
                     </button>
-                    <button
-                      onClick={() => handleBulkAction('disable')}
-                      className="px-2.5 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50"
-                    >
-                      Disable
-                    </button>
+                    {bulkConfirmingDisable ? (
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-red-600 whitespace-nowrap">Disable {selectedPorts.size} port{selectedPorts.size !== 1 ? 's' : ''}?</span>
+                        <button onClick={() => { setBulkConfirmingDisable(false); handleBulkAction('disable'); }} className="px-1.5 py-0.5 text-xs bg-red-600 text-white rounded hover:bg-red-700">Yes</button>
+                        <button onClick={() => setBulkConfirmingDisable(false)} className="px-1.5 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50">No</button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setBulkConfirmingDisable(true)}
+                        className="px-2.5 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50"
+                      >
+                        Disable
+                      </button>
+                    )}
 
                     <div className="flex flex-col gap-0.5">
                       {bulkVlanExpanded ? (
@@ -983,14 +1001,22 @@ export default function PortsPage() {
                       )}
                     </div>
 
+                    {bulkConfirmingClearDesc ? (
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-gray-600 whitespace-nowrap">Clear desc on {selectedPorts.size} port{selectedPorts.size !== 1 ? 's' : ''}?</span>
+                        <button onClick={() => { setBulkConfirmingClearDesc(false); handleBulkAction('clear-description'); }} className="px-1.5 py-0.5 text-xs bg-gray-700 text-white rounded hover:bg-gray-800">Yes</button>
+                        <button onClick={() => setBulkConfirmingClearDesc(false)} className="px-1.5 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50">No</button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setBulkConfirmingClearDesc(true)}
+                        className="px-2.5 py-1 text-xs text-gray-700 border border-gray-300 rounded hover:bg-gray-50"
+                      >
+                        Clear Description
+                      </button>
+                    )}
                     <button
-                      onClick={() => handleBulkAction('clear-description')}
-                      className="px-2.5 py-1 text-xs text-gray-700 border border-gray-300 rounded hover:bg-gray-50"
-                    >
-                      Clear Description
-                    </button>
-                    <button
-                      onClick={() => { setSelectedPorts(new Set()); setBulkVlanExpanded(false); setBulkVlanInput(''); setBulkErrors([]); }}
+                      onClick={() => { setSelectedPorts(new Set()); setBulkVlanExpanded(false); setBulkVlanInput(''); setBulkErrors([]); setBulkConfirmingDisable(false); setBulkConfirmingClearDesc(false); }}
                       className="px-2.5 py-1 text-xs text-gray-500 border border-gray-200 rounded hover:bg-gray-100"
                     >
                       Clear Selection
@@ -1026,10 +1052,10 @@ export default function PortsPage() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
+              <div className="overflow-auto max-h-[calc(100vh-380px)] border border-gray-200 rounded-md">
                 <table className="w-full border-collapse text-sm">
-                  <thead>
-                    <tr className="border-b border-gray-200 bg-gray-50">
+                  <thead className="sticky top-0 z-10 bg-gray-50">
+                    <tr className="border-b border-gray-200">
                       <th className="px-3 py-2 w-8">
                         {canEdit && (
                           <input
@@ -1053,7 +1079,13 @@ export default function PortsPage() {
                           />
                         )}
                       </th>
-                      <th className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">Interface</th>
+                      <th
+                        className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap cursor-pointer select-none hover:bg-gray-100"
+                        onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}
+                        aria-sort={sortDir === 'asc' ? 'ascending' : 'descending'}
+                      >
+                        Interface <span className="text-gray-400 text-xs">{sortDir === 'asc' ? '↑' : '↓'}</span>
+                      </th>
                       <th className="text-left px-3 py-2 font-medium text-gray-700">Description</th>
                       <th className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">Admin</th>
                       <th className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">Link</th>
@@ -1070,7 +1102,11 @@ export default function PortsPage() {
                       <tr
                         key={port.name}
                         className={`border-b border-gray-100 transition-colors ${
-                          selectedPorts.has(port.name) ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-gray-50'
+                          selectedPorts.has(port.name)
+                            ? 'bg-blue-50 hover:bg-blue-100'
+                            : port.admin_up === false
+                            ? 'bg-gray-50 hover:bg-gray-100'
+                            : 'hover:bg-gray-50'
                         }`}
                       >
                         <td className="px-3 py-2 w-8">
@@ -1092,7 +1128,7 @@ export default function PortsPage() {
                             />
                           )}
                         </td>
-                        <td className="px-3 py-2 font-mono text-xs text-gray-900 whitespace-nowrap">
+                        <td className={`px-3 py-2 font-mono text-xs whitespace-nowrap ${port.admin_up === false ? 'text-gray-400' : 'text-gray-900'}`}>
                           {port.name}
                         </td>
                         <td className="px-3 py-2 text-gray-900 max-w-xs">
@@ -1120,7 +1156,7 @@ export default function PortsPage() {
                                   className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                                   aria-label="Save description"
                                 >
-                                  {savingPort === port.name ? 'Saving...' : 'Save'}
+                                  {savingPort === port.name ? <span className="inline-flex items-center gap-1"><RowSpinner />Saving</span> : 'Save'}
                                 </button>
                                 <button
                                   onClick={handleEditCancel}
@@ -1163,37 +1199,55 @@ export default function PortsPage() {
                             <div className="flex items-center gap-2">
                               <AdminBadge value={port.admin_up} />
                               {canEdit && (
-                                <button
-                                  onClick={() => handleToggleAdminState(port)}
-                                  disabled={bulkExecuting || togglingPort !== null || port.admin_up === null}
-                                  className={`px-2 py-0.5 text-xs rounded border whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed ${
-                                    port.admin_up === null
-                                      ? 'text-gray-400 border-gray-200'
-                                      : port.admin_up
-                                      ? 'text-red-600 border-red-300 hover:bg-red-50'
-                                      : 'text-green-700 border-green-300 hover:bg-green-50'
-                                  }`}
-                                  aria-label={
-                                    port.admin_up === null
-                                      ? `Admin state unknown for ${port.name}`
-                                      : `${port.admin_up ? 'Disable' : 'Enable'} ${port.name}`
-                                  }
-                                  title={
-                                    port.admin_up === null
-                                      ? 'Admin state unknown'
-                                      : port.admin_up
-                                      ? 'Disable interface'
-                                      : 'Enable interface'
-                                  }
-                                >
-                                  {togglingPort === port.name
-                                    ? '…'
-                                    : port.admin_up === null
-                                    ? '—'
-                                    : port.admin_up
-                                    ? 'Disable'
-                                    : 'Enable'}
-                                </button>
+                                togglingPort === port.name ? (
+                                  <RowSpinner />
+                                ) : confirmingDisablePort === port.name ? (
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-xs text-red-600 whitespace-nowrap">Disable?</span>
+                                    <button
+                                      onClick={() => { setConfirmingDisablePort(null); handleToggleAdminState(port); }}
+                                      className="px-1.5 py-0.5 text-xs bg-red-600 text-white rounded hover:bg-red-700"
+                                    >
+                                      Yes
+                                    </button>
+                                    <button
+                                      onClick={() => setConfirmingDisablePort(null)}
+                                      className="px-1.5 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50"
+                                    >
+                                      No
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() =>
+                                      port.admin_up === true
+                                        ? setConfirmingDisablePort(port.name)
+                                        : handleToggleAdminState(port)
+                                    }
+                                    disabled={bulkExecuting || togglingPort !== null || port.admin_up === null}
+                                    className={`px-2 py-0.5 text-xs rounded border whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed ${
+                                      port.admin_up === null
+                                        ? 'text-gray-400 border-gray-200'
+                                        : port.admin_up
+                                        ? 'text-red-600 border-red-300 hover:bg-red-50'
+                                        : 'text-green-700 border-green-300 hover:bg-green-50'
+                                    }`}
+                                    aria-label={
+                                      port.admin_up === null
+                                        ? `Admin state unknown for ${port.name}`
+                                        : `${port.admin_up ? 'Disable' : 'Enable'} ${port.name}`
+                                    }
+                                    title={
+                                      port.admin_up === null
+                                        ? 'Admin state unknown'
+                                        : port.admin_up
+                                        ? 'Disable interface'
+                                        : 'Enable interface'
+                                    }
+                                  >
+                                    {port.admin_up === null ? '—' : port.admin_up ? 'Disable' : 'Enable'}
+                                  </button>
+                                )
                               )}
                             </div>
                             {adminErrorPort?.port === port.name && (
@@ -1231,7 +1285,7 @@ export default function PortsPage() {
                                   disabled={savingAccessVlanPort === port.name}
                                   className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
-                                  {savingAccessVlanPort === port.name ? 'Saving...' : 'Save'}
+                                  {savingAccessVlanPort === port.name ? <span className="inline-flex items-center gap-1"><RowSpinner />Saving</span> : 'Save'}
                                 </button>
                                 <button
                                   onClick={handleAccessVlanEditCancel}
@@ -1311,7 +1365,7 @@ export default function PortsPage() {
                                   disabled={savingTrunkPort === port.name || (trunkErrorPort?.port === port.name && !!trunkErrorPort?.message && trunkEditValue.trim() !== '')}
                                   className="px-2 py-0.5 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
-                                  {savingTrunkPort === port.name ? 'Saving...' : 'Save'}
+                                  {savingTrunkPort === port.name ? <span className="inline-flex items-center gap-1"><RowSpinner />Saving</span> : 'Save'}
                                 </button>
                                 <button
                                   onClick={handleTrunkEditCancel}
@@ -1364,6 +1418,7 @@ export default function PortsPage() {
               </div>
 
               <Pagination
+                key={page}
                 page={page}
                 totalPages={totalPages}
                 totalItems={totalItems}
