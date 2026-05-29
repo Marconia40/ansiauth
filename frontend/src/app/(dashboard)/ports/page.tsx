@@ -7,7 +7,7 @@ import { useJobNotifications } from '@/context/JobNotificationContext';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { configurePort, getDevices, getPorts, getSites, setTrunkAllowedVlans, updatePortDescription } from '@/services/api';
+import { configurePort, getDevices, getPorts, getSites, setPortAccessVlan, setTrunkAllowedVlans, updatePortDescription } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
 import type { Port, PortListResponse, PortMode, TrunkVlanMode } from '@/types/port';
@@ -386,6 +386,12 @@ export default function PortsPage() {
   const [savingTrunkPort, setSavingTrunkPort] = useState<string | null>(null);
   const [trunkErrorPort, setTrunkErrorPort] = useState<{ port: string; message: string } | null>(null);
 
+  // ── Access VLAN inline-edit state ──
+  const [editingAccessVlanPort, setEditingAccessVlanPort] = useState<string | null>(null);
+  const [accessVlanEditValue, setAccessVlanEditValue] = useState<string>('');
+  const [savingAccessVlanPort, setSavingAccessVlanPort] = useState<string | null>(null);
+  const [accessVlanErrorPort, setAccessVlanErrorPort] = useState<{ port: string; message: string } | null>(null);
+
   // ── Device + site lookup ──
   const {
     data: devices,
@@ -596,6 +602,63 @@ export default function PortsPage() {
       setTrunkErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
     } finally {
       setSavingTrunkPort(null);
+    }
+  }
+
+  // ── Access VLAN inline-edit handlers ──
+
+  function handleAccessVlanEditStart(port: Port) {
+    setEditingAccessVlanPort(port.name);
+    setAccessVlanEditValue(port.access_vlan != null ? String(port.access_vlan) : '');
+    setAccessVlanErrorPort(null);
+  }
+
+  function handleAccessVlanEditCancel() {
+    setEditingAccessVlanPort(null);
+    setAccessVlanEditValue('');
+    setAccessVlanErrorPort(null);
+  }
+
+  async function handleAccessVlanEditSave(port: Port) {
+    if (!selectedDevice) return;
+    const raw = accessVlanEditValue.trim();
+    const n = parseInt(raw, 10);
+
+    if (!raw || isNaN(n) || String(n) !== raw) {
+      setAccessVlanErrorPort({ port: port.name, message: 'Enter a valid VLAN ID (integer)' });
+      return;
+    }
+    if (n < 1 || n > 4094) {
+      setAccessVlanErrorPort({ port: port.name, message: 'VLAN ID must be between 1 and 4094' });
+      return;
+    }
+    if (RESERVED_VLANS.has(n)) {
+      setAccessVlanErrorPort({ port: port.name, message: `VLAN ${n} is reserved (Cisco legacy)` });
+      return;
+    }
+    if (port.access_vlan === n) {
+      handleAccessVlanEditCancel();
+      return;
+    }
+
+    setSavingAccessVlanPort(port.name);
+    setAccessVlanErrorPort(null);
+    try {
+      const result = await setPortAccessVlan({
+        device: selectedDevice,
+        interface: port.name,
+        vlan_id: n,
+      });
+      const job = result.jobs[0];
+      if (job) {
+        trackJob(job.job_id, `Set access VLAN ${n} on ${port.name}`, job.device);
+      }
+      handleAccessVlanEditCancel();
+      setTimeout(() => { refetch(); }, 500);
+    } catch (err) {
+      setAccessVlanErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
+    } finally {
+      setSavingAccessVlanPort(null);
     }
   }
 
@@ -822,7 +885,10 @@ export default function PortsPage() {
                               {canEdit && (
                                 <button
                                   onClick={() => handleEditStart(port)}
-                                  disabled={editingPort !== null || savingPort !== null}
+                                  disabled={
+                                    editingPort !== null || savingPort !== null ||
+                                    editingTrunkPort !== null || editingAccessVlanPort !== null
+                                  }
                                   className="opacity-60 hover:opacity-100 text-gray-500 hover:text-blue-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed"
                                   aria-label={`Edit description for ${port.name}`}
                                   title="Edit description"
@@ -878,7 +944,68 @@ export default function PortsPage() {
                         </td>
                         <td className="px-3 py-2"><OperBadge value={port.operational_up} /></td>
                         <td className="px-3 py-2"><ModeBadge mode={port.mode} /></td>
-                        <td className="px-3 py-2 text-gray-900">{port.access_vlan ?? DASH}</td>
+                        <td className="px-3 py-2 text-gray-900">
+                          {editingAccessVlanPort === port.name ? (
+                            <div className="flex flex-col gap-1 min-w-[140px]">
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={4094}
+                                  value={accessVlanEditValue}
+                                  onChange={(e) => {
+                                    setAccessVlanEditValue(e.target.value);
+                                    setAccessVlanErrorPort(null);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') { e.preventDefault(); handleAccessVlanEditSave(port); }
+                                    if (e.key === 'Escape') { e.preventDefault(); handleAccessVlanEditCancel(); }
+                                  }}
+                                  disabled={savingAccessVlanPort === port.name}
+                                  autoFocus
+                                  placeholder="1–4094"
+                                  aria-label={`Access VLAN for ${port.name}`}
+                                  className="w-20 border border-gray-300 rounded px-2 py-1 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                                />
+                                <button
+                                  onClick={() => handleAccessVlanEditSave(port)}
+                                  disabled={savingAccessVlanPort === port.name}
+                                  className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {savingAccessVlanPort === port.name ? 'Saving...' : 'Save'}
+                                </button>
+                                <button
+                                  onClick={handleAccessVlanEditCancel}
+                                  disabled={savingAccessVlanPort === port.name}
+                                  className="px-2 py-1 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                              {accessVlanErrorPort?.port === port.name && (
+                                <p className="text-xs text-red-600">{accessVlanErrorPort.message}</p>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-xs">{port.access_vlan ?? DASH}</span>
+                              {canEdit && port.mode === 'access' && (
+                                <button
+                                  onClick={() => handleAccessVlanEditStart(port)}
+                                  disabled={
+                                    editingAccessVlanPort !== null || savingAccessVlanPort !== null ||
+                                    editingPort !== null || editingTrunkPort !== null
+                                  }
+                                  className="opacity-60 hover:opacity-100 text-gray-500 hover:text-blue-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                                  aria-label={`Edit access VLAN for ${port.name}`}
+                                  title="Edit access VLAN"
+                                >
+                                  ✎
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-gray-900 max-w-xs">
                           {editingTrunkPort === port.name ? (
                             <div className="flex flex-col gap-1.5 min-w-[260px]">
@@ -946,7 +1073,10 @@ export default function PortsPage() {
                               {canEdit && port.mode === 'trunk' && (
                                 <button
                                   onClick={() => handleTrunkEditStart(port)}
-                                  disabled={editingTrunkPort !== null || savingTrunkPort !== null || editingPort !== null}
+                                  disabled={
+                                    editingTrunkPort !== null || savingTrunkPort !== null ||
+                                    editingPort !== null || editingAccessVlanPort !== null
+                                  }
                                   className="opacity-60 hover:opacity-100 text-gray-500 hover:text-purple-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
                                   aria-label={`Edit trunk VLANs for ${port.name}`}
                                   title="Edit trunk allowed VLANs"
