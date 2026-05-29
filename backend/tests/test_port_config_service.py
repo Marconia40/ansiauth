@@ -95,7 +95,7 @@ def _stub_pre_state_admin(monkeypatch, admin_up: bool = True):
 def test_configure_port_mock_mode_success(mock_mode, mock_device, monkeypatch):
     """configure_port in mock mode creates a job that reaches completed."""
     _stub_pre_state_configure(monkeypatch)
-    res = _client("operator").patch(
+    res = _client("operator").post(
         "/api/v1/ports/configure",
         json={"device": _DEVICE, "interface": _INTERFACE, "description": "new desc"},
     )
@@ -835,7 +835,7 @@ def test_configure_port_rejects_observer(mock_mode, mock_device):
 
 def test_configure_port_rejects_empty_mutation(mock_mode, mock_device):
     """A configure request with no mutation fields returns 422."""
-    res = _client("operator").patch(
+    res = _client("operator").post(
         "/api/v1/ports/configure",
         json={"device": _DEVICE, "interface": _INTERFACE},
     )
@@ -845,7 +845,7 @@ def test_configure_port_rejects_empty_mutation(mock_mode, mock_device):
 def test_configure_port_rejects_unknown_device(mock_mode, monkeypatch):
     """Unknown device returns 404."""
     monkeypatch.setattr("app.services.device_service.get_device", lambda name: None)
-    res = _client("operator").patch(
+    res = _client("operator").post(
         "/api/v1/ports/configure",
         json={"device": "nonexistent", "interface": _INTERFACE, "description": "x"},
     )

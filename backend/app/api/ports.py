@@ -77,6 +77,31 @@ def _capture_pre_state_port_enable(interface: str, device: str) -> dict:
     return port_config_service._capture_pre_state_enable(interface, device)
 
 
+def _check_device_not_locked(device_name: str) -> None:
+    """Raise 409 immediately when the device is already held by another operation.
+
+    Uses a non-blocking lock probe so the check itself has no side-effects.
+    The caller proceeds to enqueue only when the device is currently free.
+    A small TOCTOU window exists — if the device becomes busy between this
+    check and the lock acquisition inside the service, the enqueue still
+    succeeds (the service has its own 30-second acquisition window and will
+    degrade gracefully on an extremely rare second collision).
+    """
+    from app.services import device_locks
+
+    if device_locks.is_device_busy(device_name):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "DEVICE_LOCKED",
+                "message": (
+                    f"Device '{device_name}' is busy with another operation — "
+                    "retry shortly"
+                ),
+            },
+        )
+
+
 def _require_port_driver_with(method_name: str, device_name: str, current_user: dict):
     """Resolve the port driver for *device_name* and assert that the driver
     actually overrides *method_name*.  Returns the driver if everything is
@@ -389,7 +414,7 @@ def set_trunk_allowed_vlans(
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
-@router.patch(
+@router.post(
     "/configure",
     summary="Configure port (composite)",
     description=(
@@ -426,6 +451,7 @@ def configure_port(
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
     authz.ensure_device_allowed(current_user, data.device)
+    _check_device_not_locked(data.device)
 
     _require_port_driver_with("configure_port", data.device, current_user)
 
@@ -480,6 +506,7 @@ def shutdown_port(
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
     authz.ensure_device_allowed(current_user, data.device)
+    _check_device_not_locked(data.device)
 
     _require_port_driver_with("shutdown_port", data.device, current_user)
 
@@ -523,6 +550,7 @@ def enable_port(
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
     authz.ensure_device_allowed(current_user, data.device)
+    _check_device_not_locked(data.device)
 
     _require_port_driver_with("enable_port", data.device, current_user)
 
