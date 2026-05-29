@@ -183,6 +183,34 @@ class BasePortDriver(ABC):
             f"{self.__class__.__name__} does not implement set_port_access_vlan yet"
         )
 
+    def set_trunk_pvid_vlan(
+        self,
+        interface: str,
+        vlan_id: int,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the trunk native VLAN (PVID) of *interface* on *device*.
+
+        Used when the port is in trunk mode to set the untagged/native VLAN.
+        The orchestration layer guarantees the port is in trunk mode before
+        invoking this method.
+
+        Vendor mapping:
+            * Huawei VRP — ``port trunk pvid vlan <id>`` inside the interface
+              view, followed by ``commit``.
+            * Cisco IOS  — ``switchport trunk native vlan <id>`` inside
+              ``interface <name>`` parent context.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_trunk_pvid_vlan yet"
+        )
+
     def set_trunk_allowed_vlans(
         self,
         interface: str,

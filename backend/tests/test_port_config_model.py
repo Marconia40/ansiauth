@@ -125,11 +125,10 @@ def test_config_request_access_vlan_without_mode_raises():
         PortConfigRequest(device="sw1", interface="Gi0/1", access_vlan=10)
 
 
-def test_config_request_access_vlan_with_trunk_mode_raises():
-    with pytest.raises(ValueError, match="access_vlan.*mode="):
-        PortConfigRequest(
-            device="sw1", interface="Gi0/1", mode="trunk", access_vlan=10
-        )
+def test_config_request_access_vlan_with_trunk_mode_allowed():
+    # access_vlan is the trunk PVID when mode='trunk' — must succeed
+    req = PortConfigRequest(device="sw1", interface="Gi0/1", mode="trunk", access_vlan=10)
+    assert req.access_vlan == 10
 
 
 def test_config_request_allowed_vlans_without_mode_raises():

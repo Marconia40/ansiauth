@@ -23,6 +23,7 @@ _PLAYBOOK_SET_ADMIN_STATE = "vendors/huawei/set_port_admin_state.yml"
 _PLAYBOOK_SET_ACCESS_VLAN = "vendors/huawei/set_access_vlan.yml"
 _PLAYBOOK_SET_TRUNK_VLANS = "vendors/huawei/set_trunk_allowed_vlans.yml"
 _PLAYBOOK_CONFIGURE_PORT = "vendors/huawei/configure_port.yml"
+_PLAYBOOK_SET_TRUNK_PVID = "vendors/huawei/set_trunk_pvid.yml"
 _PLAYBOOK_SHUTDOWN_PORT = "vendors/huawei/shutdown_port.yml"
 _PLAYBOOK_ENABLE_PORT = "vendors/huawei/enable_port.yml"
 
@@ -317,6 +318,58 @@ class HuaweiPortDriver(BasePortDriver):
             )
             raise
 
+    def set_trunk_pvid_vlan(
+        self,
+        interface: str,
+        vlan_id: int,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the trunk native VLAN (PVID) of *interface* on a Huawei VRP device.
+
+        Runs ``port trunk pvid vlan {{ vlan_id }}`` inside the interface view.
+        The orchestration layer must guarantee the port is already in
+        trunk mode before this is called.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        logger.info(
+            "Huawei: set trunk PVID on interface=%s device=%s vlan_id=%d",
+            interface, device.name, vlan_id,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_TRUNK_PVID,
+                extravars={
+                    "interface": interface,
+                    "vlan_id": int(vlan_id),
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Huawei: set trunk PVID OK on interface=%s device=%s vlan_id=%d",
+                    interface, device.name, vlan_id,
+                )
+            else:
+                logger.error(
+                    "Huawei: set trunk PVID FAILED on interface=%s device=%s vlan_id=%d — %s",
+                    interface, device.name, vlan_id,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL HUAWEI TRACEBACK [set_trunk_pvid_vlan interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
     # ── Step 3.2 composite / semantic implementations ────────────────────────────
 
     def configure_port(
@@ -365,6 +418,7 @@ class HuaweiPortDriver(BasePortDriver):
 
         configure_access_vlan = config.access_vlan is not None
         access_vlan = config.access_vlan if config.access_vlan is not None else 0
+        is_trunk_pvid = (config.mode == "trunk")
 
         configure_trunk_vlans = config.allowed_vlans is not None
         vlan_list = (
@@ -388,6 +442,7 @@ class HuaweiPortDriver(BasePortDriver):
                     "mode": mode,
                     "configure_access_vlan": configure_access_vlan,
                     "access_vlan": access_vlan,
+                    "is_trunk_pvid": is_trunk_pvid,
                     "configure_trunk_vlans": configure_trunk_vlans,
                     "vlan_list": vlan_list,
                     "configure_description": configure_description,

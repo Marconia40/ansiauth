@@ -16,7 +16,8 @@
 #
 # Safety contract (enforced by PortConfigRequest before this playbook is called):
 #   * configure_access_vlan and configure_trunk_vlans are mutually exclusive.
-#   * access_vlan is only meaningful when mode is 'access'.
+#   * access_vlan represents the access VLAN (mode='access') OR the trunk PVID (mode='trunk').
+#   * is_trunk_pvid distinguishes the two: True when applying access_vlan as trunk PVID.
 #   * vlan_list is only meaningful when mode is 'trunk'.
 #
 # Vars expected:
@@ -24,8 +25,9 @@
 #   device                (str)  — diagnostic only
 #   configure_mode        (bool) — apply link-type change
 #   mode                  (str)  — 'access' or 'trunk'  (only when configure_mode)
-#   configure_access_vlan (bool) — apply port default vlan
+#   configure_access_vlan (bool) — apply PVID or access VLAN
 #   access_vlan           (int)  — VLAN ID               (only when configure_access_vlan)
+#   is_trunk_pvid         (bool) — True → port trunk pvid vlan; False → port default vlan
 #   configure_trunk_vlans (bool) — apply trunk allow-pass vlan list
 #   vlan_list             (str)  — Huawei-format range string (only when configure_trunk_vlans)
 #   configure_description (bool) — apply description change
@@ -50,7 +52,11 @@
           port link-type {{ mode }}
           {% endif %}
           {% if configure_access_vlan %}
+          {% if is_trunk_pvid %}
+          port trunk pvid vlan {{ access_vlan }}
+          {% else %}
           port default vlan {{ access_vlan }}
+          {% endif %}
           {% endif %}
           {% if configure_trunk_vlans %}
           undo port trunk allow-pass vlan all

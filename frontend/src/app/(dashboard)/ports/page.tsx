@@ -10,7 +10,7 @@ import { ErrorMessage } from '@/components/ErrorMessage';
 import { configurePort, getDevices, getPorts, getSites, setPortAccessVlan, setTrunkAllowedVlans, updatePortDescription } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
-import type { Port, PortListResponse, PortMode, TrunkVlanMode } from '@/types/port';
+import type { Port, PortListResponse, PortMode } from '@/types/port';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -379,9 +379,16 @@ export default function PortsPage() {
   // ── Trunk VLAN inline-edit state ──
   const [editingTrunkPort, setEditingTrunkPort] = useState<string | null>(null);
   const [trunkEditValue, setTrunkEditValue] = useState<string>('');
-  const [trunkEditMode, setTrunkEditMode] = useState<TrunkVlanMode>('replace');
   const [savingTrunkPort, setSavingTrunkPort] = useState<string | null>(null);
   const [trunkErrorPort, setTrunkErrorPort] = useState<{ port: string; message: string } | null>(null);
+
+  // ── Mode + VLAN composite inline-edit state ──
+  const [editingModePort, setEditingModePort] = useState<string | null>(null);
+  const [modeEditMode, setModeEditMode] = useState<'access' | 'trunk'>('access');
+  const [modeEditAccessVlan, setModeEditAccessVlan] = useState<string>('');
+  const [modeEditTrunkVlans, setModeEditTrunkVlans] = useState<string>('');
+  const [savingModePort, setSavingModePort] = useState<string | null>(null);
+  const [modeErrorPort, setModeErrorPort] = useState<{ port: string; message: string } | null>(null);
 
   // ── Access VLAN inline-edit state ──
   const [editingAccessVlanPort, setEditingAccessVlanPort] = useState<string | null>(null);
@@ -506,6 +513,8 @@ export default function PortsPage() {
     setBulkConfirmingDisable(false);
     setBulkConfirmingClearDesc(false);
     setConfirmingDisablePort(null);
+    setEditingModePort(null);
+    setModeErrorPort(null);
   }
 
   function handleSetSearch(v: string) { setSearch(v); setPage(1); }
@@ -593,7 +602,6 @@ export default function PortsPage() {
   function handleTrunkEditStart(port: Port) {
     setEditingTrunkPort(port.name);
     setTrunkEditValue(formatVlanList(port.allowed_vlans) === DASH ? '' : formatVlanList(port.allowed_vlans));
-    setTrunkEditMode('replace');
     setTrunkErrorPort(null);
   }
 
@@ -620,14 +628,14 @@ export default function PortsPage() {
       const result = await setTrunkAllowedVlans({
         device: effectiveSelectedDevice,
         interface: port.name,
-        mode: trunkEditMode,
+        mode: 'replace',
         vlans,
       });
       const job = result.jobs[0];
       if (job) {
         trackJob(
           job.job_id,
-          `${trunkEditMode === 'replace' ? 'Set' : trunkEditMode === 'add' ? 'Add to' : 'Remove from'} trunk VLANs on ${port.name}`,
+          `Set trunk VLANs on ${port.name}`,
           job.device,
         );
       }
@@ -694,6 +702,81 @@ export default function PortsPage() {
       setAccessVlanErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
     } finally {
       setSavingAccessVlanPort(null);
+    }
+  }
+
+  // ── Mode + VLAN composite inline-edit handlers ──
+
+  function handleModeEditStart(port: Port) {
+    setEditingModePort(port.name);
+    setModeEditMode(port.mode === 'trunk' ? 'trunk' : 'access');
+    setModeEditAccessVlan(port.access_vlan != null ? String(port.access_vlan) : '');
+    setModeEditTrunkVlans(formatVlanList(port.allowed_vlans) === DASH ? '' : formatVlanList(port.allowed_vlans));
+    setModeErrorPort(null);
+  }
+
+  function handleModeEditCancel() {
+    setEditingModePort(null);
+    setModeEditMode('access');
+    setModeEditAccessVlan('');
+    setModeEditTrunkVlans('');
+    setModeErrorPort(null);
+  }
+
+  async function handleModeEditSave(port: Port) {
+    if (!effectiveSelectedDevice) return;
+
+    const rawVlan = modeEditAccessVlan.trim();
+    const vlanNum = parseInt(rawVlan, 10);
+    const vlanLabel = modeEditMode === 'trunk' ? 'Native VLAN / PVID' : 'Access VLAN';
+
+    if (!rawVlan || isNaN(vlanNum) || String(vlanNum) !== rawVlan) {
+      setModeErrorPort({ port: port.name, message: `${vlanLabel} is required and must be an integer` });
+      return;
+    }
+    if (vlanNum < 1 || vlanNum > 4094) {
+      setModeErrorPort({ port: port.name, message: `${vlanLabel} must be between 1 and 4094` });
+      return;
+    }
+    if (RESERVED_VLANS.has(vlanNum)) {
+      setModeErrorPort({ port: port.name, message: `VLAN ${vlanNum} is reserved (Cisco legacy)` });
+      return;
+    }
+
+    let allowedVlans: number[] | undefined;
+    if (modeEditMode === 'trunk' && modeEditTrunkVlans.trim()) {
+      const { vlans, error } = parseVlanInput(modeEditTrunkVlans);
+      if (error) {
+        setModeErrorPort({ port: port.name, message: error });
+        return;
+      }
+      allowedVlans = vlans;
+    }
+
+    setSavingModePort(port.name);
+    setModeErrorPort(null);
+    try {
+      const result = await configurePort({
+        device: effectiveSelectedDevice,
+        port_name: port.name,
+        mode: modeEditMode,
+        access_vlan: vlanNum,
+        allowed_vlans: allowedVlans,
+      });
+      const job = result.jobs[0];
+      if (job) {
+        trackJob(
+          job.job_id,
+          `Set mode ${modeEditMode} on ${port.name}`,
+          job.device,
+        );
+      }
+      handleModeEditCancel();
+      setTimeout(() => { refetch(); }, 500);
+    } catch (err) {
+      setModeErrorPort({ port: port.name, message: extractMessage(err, 'Update failed') });
+    } finally {
+      setSavingModePort(null);
     }
   }
 
@@ -1182,7 +1265,8 @@ export default function PortsPage() {
                                   disabled={
                                     bulkExecuting ||
                                     editingPort !== null || savingPort !== null ||
-                                    editingTrunkPort !== null || editingAccessVlanPort !== null
+                                    editingTrunkPort !== null || editingAccessVlanPort !== null ||
+                                    editingModePort !== null
                                   }
                                   className="opacity-60 hover:opacity-100 text-gray-500 hover:text-blue-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed"
                                   aria-label={`Edit description for ${port.name}`}
@@ -1256,7 +1340,114 @@ export default function PortsPage() {
                           </div>
                         </td>
                         <td className="px-3 py-2"><OperBadge value={port.operational_up} /></td>
-                        <td className="px-3 py-2"><ModeBadge mode={port.mode} /></td>
+                        <td className="px-3 py-2">
+                          {editingModePort === port.name ? (
+                            <div className="flex flex-col gap-1.5 min-w-[280px]">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <select
+                                  value={modeEditMode}
+                                  onChange={(e) => {
+                                    setModeEditMode(e.target.value as 'access' | 'trunk');
+                                    setModeErrorPort(null);
+                                  }}
+                                  disabled={savingModePort === port.name}
+                                  className="px-1.5 py-1 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:opacity-50"
+                                  aria-label="Port mode"
+                                >
+                                  <option value="access">Access</option>
+                                  <option value="trunk">Trunk</option>
+                                </select>
+                                <span className="text-xs text-gray-500 whitespace-nowrap">
+                                  {modeEditMode === 'trunk' ? 'Native VLAN / PVID:' : 'Access VLAN:'}
+                                </span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={4094}
+                                  value={modeEditAccessVlan}
+                                  onChange={(e) => {
+                                    setModeEditAccessVlan(e.target.value);
+                                    setModeErrorPort(null);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') { e.preventDefault(); handleModeEditSave(port); }
+                                    if (e.key === 'Escape') { e.preventDefault(); handleModeEditCancel(); }
+                                  }}
+                                  disabled={savingModePort === port.name}
+                                  autoFocus
+                                  placeholder="1-4094"
+                                  aria-label={modeEditMode === 'trunk' ? `Native VLAN for ${port.name}` : `Access VLAN for ${port.name}`}
+                                  className="w-20 border border-gray-300 rounded px-2 py-1 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                                />
+                              </div>
+                              {modeEditMode === 'trunk' && (
+                                <div className="flex items-center gap-1">
+                                  <span className="text-xs text-gray-500 whitespace-nowrap">Allowed VLANs:</span>
+                                  <input
+                                    type="text"
+                                    value={modeEditTrunkVlans}
+                                    onChange={(e) => {
+                                      setModeEditTrunkVlans(e.target.value);
+                                      const { error } = parseVlanInput(e.target.value);
+                                      if (error && e.target.value.trim()) {
+                                        setModeErrorPort({ port: port.name, message: error });
+                                      } else {
+                                        setModeErrorPort(null);
+                                      }
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') { e.preventDefault(); handleModeEditSave(port); }
+                                      if (e.key === 'Escape') { e.preventDefault(); handleModeEditCancel(); }
+                                    }}
+                                    disabled={savingModePort === port.name}
+                                    placeholder="e.g. 10,20,30-35 (optional)"
+                                    aria-label={`Allowed VLANs for ${port.name}`}
+                                    className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-1 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                                  />
+                                </div>
+                              )}
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => handleModeEditSave(port)}
+                                  disabled={savingModePort === port.name || (modeErrorPort?.port === port.name && !!modeErrorPort?.message)}
+                                  className="px-2 py-0.5 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {savingModePort === port.name ? <span className="inline-flex items-center gap-1"><RowSpinner />Saving</span> : 'Save'}
+                                </button>
+                                <button
+                                  onClick={handleModeEditCancel}
+                                  disabled={savingModePort === port.name}
+                                  className="px-2 py-0.5 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                              {modeErrorPort?.port === port.name && (
+                                <p className="text-xs text-red-600">{modeErrorPort.message}</p>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5">
+                              <ModeBadge mode={port.mode} />
+                              {canEdit && port.mode !== 'unknown' && (
+                                <button
+                                  onClick={() => handleModeEditStart(port)}
+                                  disabled={
+                                    bulkExecuting ||
+                                    editingModePort !== null || savingModePort !== null ||
+                                    editingPort !== null || editingTrunkPort !== null ||
+                                    editingAccessVlanPort !== null
+                                  }
+                                  className="opacity-60 hover:opacity-100 text-gray-500 hover:text-blue-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                                  aria-label={`Edit mode for ${port.name}`}
+                                  title="Configure port mode and VLANs"
+                                >
+                                  ✎
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-gray-900">
                           {editingAccessVlanPort === port.name ? (
                             <div className="flex flex-col gap-1 min-w-[140px]">
@@ -1302,17 +1493,18 @@ export default function PortsPage() {
                           ) : (
                             <div className="flex items-center gap-1.5">
                               <span className="font-mono text-xs">{port.access_vlan ?? DASH}</span>
-                              {canEdit && port.mode === 'access' && (
+                              {canEdit && (port.mode === 'access' || port.mode === 'trunk') && (
                                 <button
                                   onClick={() => handleAccessVlanEditStart(port)}
                                   disabled={
                                     bulkExecuting ||
                                     editingAccessVlanPort !== null || savingAccessVlanPort !== null ||
-                                    editingPort !== null || editingTrunkPort !== null
+                                    editingPort !== null || editingTrunkPort !== null ||
+                                    editingModePort !== null
                                   }
                                   className="opacity-60 hover:opacity-100 text-gray-500 hover:text-blue-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
-                                  aria-label={`Edit access VLAN for ${port.name}`}
-                                  title="Edit access VLAN"
+                                  aria-label={`Edit ${port.mode === 'trunk' ? 'native VLAN' : 'access VLAN'} for ${port.name}`}
+                                  title={port.mode === 'trunk' ? 'Edit native VLAN (PVID)' : 'Edit access VLAN'}
                                 >
                                   ✎
                                 </button>
@@ -1324,17 +1516,6 @@ export default function PortsPage() {
                           {editingTrunkPort === port.name ? (
                             <div className="flex flex-col gap-1.5 min-w-[260px]">
                               <div className="flex items-center gap-1">
-                                <select
-                                  value={trunkEditMode}
-                                  onChange={(e) => setTrunkEditMode(e.target.value as TrunkVlanMode)}
-                                  disabled={savingTrunkPort === port.name}
-                                  className="px-1.5 py-1 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:opacity-50"
-                                  aria-label="Operation mode"
-                                >
-                                  <option value="replace">Replace</option>
-                                  <option value="add">Add</option>
-                                  <option value="remove">Remove</option>
-                                </select>
                                 <input
                                   type="text"
                                   value={trunkEditValue}
@@ -1390,7 +1571,8 @@ export default function PortsPage() {
                                   disabled={
                                     bulkExecuting ||
                                     editingTrunkPort !== null || savingTrunkPort !== null ||
-                                    editingPort !== null || editingAccessVlanPort !== null
+                                    editingPort !== null || editingAccessVlanPort !== null ||
+                                    editingModePort !== null
                                   }
                                   className="opacity-60 hover:opacity-100 text-gray-500 hover:text-purple-600 text-xs px-1 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
                                   aria-label={`Edit trunk VLANs for ${port.name}`}

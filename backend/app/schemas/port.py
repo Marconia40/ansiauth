@@ -229,9 +229,9 @@ class PortConfigureRequest(BaseModel):
                 "at least one mutation field must be provided "
                 "(description, admin_enabled, mode, access_vlan, or allowed_vlans)"
             )
-        if self.access_vlan is not None and self.mode != "access":
+        if self.access_vlan is not None and self.mode not in ("access", "trunk"):
             raise ValueError(
-                f"'access_vlan' may only be set when mode='access' "
+                f"'access_vlan' (PVID) may only be set when mode='access' or mode='trunk' "
                 f"(got mode={self.mode!r})"
             )
         if self.allowed_vlans is not None and self.mode != "trunk":

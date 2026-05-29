@@ -888,8 +888,14 @@ def _rollback_access_vlan(
     job_service.update_job(job_id, current_step="rollback_started")
     _rb_t0 = time.time()
 
+    prev_mode = pre_state.get("mode")
+    is_trunk = prev_mode == "trunk"
+
     try:
-        rb = port_service.set_port_access_vlan_on_device(interface, int(prev_vlan), device)
+        if is_trunk:
+            rb = port_service.set_trunk_pvid_vlan_on_device(interface, int(prev_vlan), device)
+        else:
+            rb = port_service.set_port_access_vlan_on_device(interface, int(prev_vlan), device)
     except Exception as exc:
         _rb_ms = round((time.time() - _rb_t0) * 1000)
         logger.error(
@@ -1015,35 +1021,38 @@ def run_set_access_vlan_job(
                 return
 
             current_mode = pre_state.get("mode")
-            if current_mode is not None and current_mode != "access":
+            if current_mode is not None and current_mode not in ("access", "trunk"):
                 error_msg = (
                     f"Interface '{interface}' on device '{device}' is in "
-                    f"'{current_mode}' mode — access VLAN can only be set on access ports"
+                    f"'{current_mode}' mode — PVID can only be set on access or trunk ports"
                 )
                 logger.warning("Job %s: pre-condition failed — %s", job_id, error_msg)
                 job_service.update_job(job_id, "failed", error=error_msg)
                 audit_service.append_audit_event(audit_id, "failed", {
                     "validation": "failed",
-                    "reason": "port_not_in_access_mode",
+                    "reason": "port_not_in_access_or_trunk_mode",
                     "error": {"type": "validation_error", "message": error_msg},
                     "pre_state": pre_state,
                 })
                 return
 
-            # Idempotency: no-op when the access VLAN already matches.
+            is_trunk = current_mode == "trunk"
+
+            # Idempotency: no-op when the access VLAN / PVID already matches.
             prev_vlan = pre_state.get("access_vlan")
             if prev_vlan is not None and int(prev_vlan) == int(vlan_id):
                 duration = time.time() - start_time
                 logger.info(
-                    "Job %s: no-op — access VLAN on %s already %d on device=%s",
-                    job_id, interface, vlan_id, device,
+                    "Job %s: no-op — %s on %s already %d on device=%s",
+                    job_id, "trunk PVID" if is_trunk else "access VLAN",
+                    interface, vlan_id, device,
                 )
                 job_service.update_job(
                     job_id, "completed",
                     result={
-                        "output": "Access VLAN already matches requested value, no changes needed",
+                        "output": "PVID already matches requested value, no changes needed",
                         "operation_result": "noop",
-                        "message": "Access VLAN unchanged (no changes needed)",
+                        "message": "PVID unchanged (no changes needed)",
                     },
                     current_step="completed",
                 )
@@ -1054,12 +1063,20 @@ def run_set_access_vlan_job(
                 })
                 return
 
-            result, retry_count = _execute_with_retry(
-                lambda: port_service.set_port_access_vlan_on_device(interface, vlan_id, device),
-                job_id,
-                retry_base_delay=retry_base_delay,
-                device=device,
-            )
+            if is_trunk:
+                result, retry_count = _execute_with_retry(
+                    lambda: port_service.set_trunk_pvid_vlan_on_device(interface, vlan_id, device),
+                    job_id,
+                    retry_base_delay=retry_base_delay,
+                    device=device,
+                )
+            else:
+                result, retry_count = _execute_with_retry(
+                    lambda: port_service.set_port_access_vlan_on_device(interface, vlan_id, device),
+                    job_id,
+                    retry_base_delay=retry_base_delay,
+                    device=device,
+                )
 
             duration = time.time() - start_time
 

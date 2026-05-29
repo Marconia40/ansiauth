@@ -216,12 +216,12 @@ def test_empty_vlans_list_rejected(mock_mode, mock_device):
     assert res.status_code in (400, 422)
 
 
-def test_duplicate_vlans_rejected(mock_mode, mock_device):
+def test_duplicate_vlans_accepted_and_deduplicated(mock_mode, mock_device):
     res = _client("operator").patch(
         "/api/v1/ports/trunk-vlans",
         json={"device": "mock_device", "interface": "Gi0/0/1", "mode": "replace", "vlans": [10, 10]},
     )
-    assert res.status_code == 400
+    assert res.status_code == 200
 
 
 # ── End-to-end runner scenarios ───────────────────────────────────────────────

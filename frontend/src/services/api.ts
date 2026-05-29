@@ -364,6 +364,7 @@ export async function configurePort(body: {
   description?: string | null;
   mode?: 'access' | 'trunk' | null;
   access_vlan?: number | null;
+  allowed_vlans?: number[] | null;
 }): Promise<PortOperationResult> {
   const payload: Record<string, unknown> = {
     device: body.device,
@@ -374,6 +375,7 @@ export async function configurePort(body: {
   if (body.description != null) payload.description = body.description;
   if (body.mode != null) payload.mode = body.mode;
   if (body.access_vlan != null) payload.access_vlan = body.access_vlan;
+  if (body.allowed_vlans != null && body.allowed_vlans.length > 0) payload.allowed_vlans = body.allowed_vlans;
   const { data } = await client.post<PortJobRawResponse>('/ports/configure', payload);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }

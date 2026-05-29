@@ -86,21 +86,16 @@ def validate_trunk_vlan_list(vlans: list) -> None:
     """Validate a list of VLAN IDs for trunk allowed-VLAN assignment.
 
     Rules:
-        * must be a non-empty list (the caller is responsible for ensuring
-          that a remove operation does not reduce the list to empty)
+        * must be a non-empty list
         * each item must pass ``validate_trunk_vlan_id``
-        * no duplicates
+        * duplicates are silently accepted (the execution layer deduplicates)
     """
     if not isinstance(vlans, list):
         raise ValueError("vlans must be a list of integers")
     if len(vlans) == 0:
         raise ValueError("vlans must not be empty")
-    seen: set[int] = set()
     for v in vlans:
         validate_trunk_vlan_id(v)
-        if v in seen:
-            raise ValueError(f"Duplicate VLAN ID {v} in list")
-        seen.add(v)
 
 
 # ── VLAN list compression utilities ──────────────────────────────────────────

@@ -207,20 +207,27 @@ def test_end_to_end_noop_when_vlan_already_matches(monkeypatch, mock_mode, mock_
     assert (job.result or {}).get("operation_result") == "noop"
 
 
-def test_end_to_end_trunk_port_fails_cleanly(monkeypatch, mock_mode, mock_device):
-    """A port in trunk mode must be rejected without calling the driver."""
+def test_end_to_end_trunk_port_sets_pvid(monkeypatch, mock_mode, mock_device):
+    """A port in trunk mode should set the trunk PVID via set_trunk_pvid_vlan_on_device."""
     monkeypatch.setattr(
         "app.api.ports._capture_pre_state_port_access_vlan",
-        lambda interface, device: {"existed": True, "mode": "trunk", "access_vlan": None},
+        lambda interface, device: {"existed": True, "mode": "trunk", "access_vlan": 1},
     )
 
-    call_count = {"n": 0}
-    original = port_service.set_port_access_vlan_on_device
+    pvid_calls = {"n": 0}
+    access_calls = {"n": 0}
+    original_pvid = port_service.set_trunk_pvid_vlan_on_device
 
-    def _spy(*args, **kwargs):
-        call_count["n"] += 1
-        return original(*args, **kwargs)
-    monkeypatch.setattr(port_service, "set_port_access_vlan_on_device", _spy)
+    def _spy_pvid(*args, **kwargs):
+        pvid_calls["n"] += 1
+        return original_pvid(*args, **kwargs)
+
+    def _spy_access(*args, **kwargs):
+        access_calls["n"] += 1
+        return port_service.set_port_access_vlan_on_device(*args, **kwargs)
+
+    monkeypatch.setattr(port_service, "set_trunk_pvid_vlan_on_device", _spy_pvid)
+    monkeypatch.setattr(port_service, "set_port_access_vlan_on_device", _spy_access)
 
     res = _client("operator").patch(
         "/api/v1/ports/access-vlan",
@@ -229,9 +236,9 @@ def test_end_to_end_trunk_port_fails_cleanly(monkeypatch, mock_mode, mock_device
     assert res.status_code == 200
     job_id = res.json()["jobs"][0]["job_id"]
     job = job_service.get_job(job_id)
-    assert job.status == "failed"
-    assert "access" in (job.error or "").lower()
-    assert call_count["n"] == 0
+    assert job.status == "completed"
+    assert pvid_calls["n"] == 1
+    assert access_calls["n"] == 0
 
 
 def test_end_to_end_failure_triggers_rollback(monkeypatch, mock_mode, mock_device):

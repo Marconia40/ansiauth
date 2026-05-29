@@ -290,6 +290,50 @@ def set_port_access_vlan_on_device(
     return driver.set_port_access_vlan(interface, vlan_id, dev, pw)
 
 
+def set_trunk_pvid_vlan_on_device(
+    interface: str,
+    vlan_id: int,
+    device_id: str,
+) -> dict:
+    """Set the trunk native VLAN (PVID) of *interface* on *device_id*.
+
+    Dispatches to the vendor driver's ``set_trunk_pvid_vlan``.  Caller
+    (typically ``port_execution_service``) handles retry, rollback, device
+    locking, and the trunk-mode pre-condition check.
+
+    Parameters
+    ----------
+    interface:
+        Vendor-native interface name.
+    vlan_id:
+        PVID / native VLAN ID (validated at the API boundary).
+    device_id:
+        Device name to act on.
+
+    Returns
+    -------
+    dict
+        Normalized Ansible result: ``{"rc", "stdout", "stderr", "success"}``.
+    """
+    if EXECUTION_MODE == "mock":
+        if device_id == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: set trunk PVID on interface=%s device=%s vlan_id=%d",
+            interface, device_id, vlan_id,
+        )
+        return {"rc": 0, "stdout": "Simulated trunk PVID applied", "stderr": "", "success": True}
+
+    dev = _resolve_device(device_id)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    driver = _get_driver(dev)
+    logger.info(
+        "Real mode: set trunk PVID on interface=%s device=%s vlan_id=%d",
+        interface, dev.name, vlan_id,
+    )
+    return driver.set_trunk_pvid_vlan(interface, vlan_id, dev, pw)
+
+
 def set_trunk_allowed_vlans_on_device(
     interface: str,
     vlan_list: list[int],
