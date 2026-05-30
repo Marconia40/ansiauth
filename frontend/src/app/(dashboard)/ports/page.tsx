@@ -10,7 +10,7 @@ import { ErrorMessage } from '@/components/ErrorMessage';
 import { configurePort, getDevices, getPorts, getSites, setPortAccessVlan, setTrunkAllowedVlans, updatePortDescription } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
-import type { Port, PortListResponse, PortMode } from '@/types/port';
+import type { Port, PortListResponse, PortMode, TrunkVlanMode } from '@/types/port';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ function isUnsupportedVendorError(error: unknown): boolean {
 }
 
 function formatVlanList(vlans: number[] | null): string {
-  if (vlans == null) return DASH;
+  if (vlans == null || !Array.isArray(vlans)) return DASH;
   if (vlans.length === 0) return 'None';
   if (vlans.length === 1) return String(vlans[0]);
 
@@ -379,6 +379,7 @@ export default function PortsPage() {
   // ── Trunk VLAN inline-edit state ──
   const [editingTrunkPort, setEditingTrunkPort] = useState<string | null>(null);
   const [trunkEditValue, setTrunkEditValue] = useState<string>('');
+  const [trunkEditMode, setTrunkEditMode] = useState<TrunkVlanMode>('add');
   const [savingTrunkPort, setSavingTrunkPort] = useState<string | null>(null);
   const [trunkErrorPort, setTrunkErrorPort] = useState<{ port: string; message: string } | null>(null);
 
@@ -387,6 +388,7 @@ export default function PortsPage() {
   const [modeEditMode, setModeEditMode] = useState<'access' | 'trunk'>('access');
   const [modeEditAccessVlan, setModeEditAccessVlan] = useState<string>('');
   const [modeEditTrunkVlans, setModeEditTrunkVlans] = useState<string>('');
+  const [modeEditVlanOp, setModeEditVlanOp] = useState<TrunkVlanMode>('add');
   const [savingModePort, setSavingModePort] = useState<string | null>(null);
   const [modeErrorPort, setModeErrorPort] = useState<{ port: string; message: string } | null>(null);
 
@@ -602,6 +604,7 @@ export default function PortsPage() {
   function handleTrunkEditStart(port: Port) {
     setEditingTrunkPort(port.name);
     setTrunkEditValue(formatVlanList(port.allowed_vlans) === DASH ? '' : formatVlanList(port.allowed_vlans));
+    setTrunkEditMode('add');
     setTrunkErrorPort(null);
   }
 
@@ -628,14 +631,15 @@ export default function PortsPage() {
       const result = await setTrunkAllowedVlans({
         device: effectiveSelectedDevice,
         interface: port.name,
-        mode: 'replace',
+        mode: trunkEditMode,
         vlans,
       });
       const job = result.jobs[0];
       if (job) {
+        const opLabel = trunkEditMode === 'replace' ? 'Set' : trunkEditMode === 'add' ? 'Add to' : 'Remove from';
         trackJob(
           job.job_id,
-          `Set trunk VLANs on ${port.name}`,
+          `${opLabel} trunk VLANs on ${port.name}`,
           job.device,
         );
       }
@@ -712,6 +716,7 @@ export default function PortsPage() {
     setModeEditMode(port.mode === 'trunk' ? 'trunk' : 'access');
     setModeEditAccessVlan(port.access_vlan != null ? String(port.access_vlan) : '');
     setModeEditTrunkVlans(formatVlanList(port.allowed_vlans) === DASH ? '' : formatVlanList(port.allowed_vlans));
+    setModeEditVlanOp('add');
     setModeErrorPort(null);
   }
 
@@ -720,6 +725,7 @@ export default function PortsPage() {
     setModeEditMode('access');
     setModeEditAccessVlan('');
     setModeEditTrunkVlans('');
+    setModeEditVlanOp('add');
     setModeErrorPort(null);
   }
 
@@ -762,6 +768,7 @@ export default function PortsPage() {
         mode: modeEditMode,
         access_vlan: vlanNum,
         allowed_vlans: allowedVlans,
+        allowed_vlan_operation: modeEditMode === 'trunk' ? modeEditVlanOp : undefined,
       });
       const job = result.jobs[0];
       if (job) {
@@ -1382,7 +1389,17 @@ export default function PortsPage() {
                               </div>
                               {modeEditMode === 'trunk' && (
                                 <div className="flex items-center gap-1">
-                                  <span className="text-xs text-gray-500 whitespace-nowrap">Allowed VLANs:</span>
+                                  <select
+                                    value={modeEditVlanOp}
+                                    onChange={(e) => setModeEditVlanOp(e.target.value as TrunkVlanMode)}
+                                    disabled={savingModePort === port.name}
+                                    className="px-1.5 py-1 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:opacity-50"
+                                    aria-label="Allowed VLANs operation"
+                                  >
+                                    <option value="replace">Replace</option>
+                                    <option value="add">Add</option>
+                                    <option value="remove">Remove</option>
+                                  </select>
                                   <input
                                     type="text"
                                     value={modeEditTrunkVlans}
@@ -1516,12 +1533,22 @@ export default function PortsPage() {
                           {editingTrunkPort === port.name ? (
                             <div className="flex flex-col gap-1.5 min-w-[260px]">
                               <div className="flex items-center gap-1">
+                                <select
+                                  value={trunkEditMode}
+                                  onChange={(e) => setTrunkEditMode(e.target.value as TrunkVlanMode)}
+                                  disabled={savingTrunkPort === port.name}
+                                  className="px-1.5 py-1 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:opacity-50"
+                                  aria-label="Operation mode"
+                                >
+                                  <option value="replace">Replace</option>
+                                  <option value="add">Add</option>
+                                  <option value="remove">Remove</option>
+                                </select>
                                 <input
                                   type="text"
                                   value={trunkEditValue}
                                   onChange={(e) => {
                                     setTrunkEditValue(e.target.value);
-                                    // Live validation feedback
                                     const { error } = parseVlanInput(e.target.value);
                                     if (error && e.target.value.trim()) {
                                       setTrunkErrorPort({ port: port.name, message: error });

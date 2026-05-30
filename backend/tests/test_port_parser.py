@@ -115,6 +115,8 @@ GigabitEthernet0/0/2    trunk        1     2 to 4094
 GigabitEthernet0/0/3    hybrid       1     1 untagged, 100 tagged
 GigabitEthernet0/0/4    trunk        99    10, 20, 30 to 32
 GigabitEthernet0/0/5    access       1     -
+GigabitEthernet0/0/6    trunk        50    50 400
+GigabitEthernet0/0/7    trunk        1     10 20 30 to 32
 """
 
 
@@ -154,6 +156,22 @@ def test_port_vlan_trunk_mixed_list_and_range():
     row = rows["GigabitEthernet0/0/4"]
     assert row.mode == "trunk"
     assert row.access_vlan == 99
+    assert row.allowed_vlans == [10, 20, 30, 31, 32]
+
+
+def test_port_vlan_trunk_space_separated():
+    rows = parse_vrp_port_vlan(PORT_VLAN_SAMPLE)
+    row = rows["GigabitEthernet0/0/6"]
+    assert row.mode == "trunk"
+    assert row.access_vlan == 50
+    assert row.allowed_vlans == [50, 400]
+
+
+def test_port_vlan_trunk_mixed_space_and_range():
+    rows = parse_vrp_port_vlan(PORT_VLAN_SAMPLE)
+    row = rows["GigabitEthernet0/0/7"]
+    assert row.mode == "trunk"
+    assert row.access_vlan == 1
     assert row.allowed_vlans == [10, 20, 30, 31, 32]
 
 

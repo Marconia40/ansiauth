@@ -217,6 +217,16 @@ class PortConfigureRequest(BaseModel):
         min_length=1,
         description="Trunk allowed VLANs. Only valid when mode='trunk'.",
     )
+    allowed_vlan_operation: Literal["replace", "add", "remove"] = Field(
+        "add",
+        description=(
+            "How allowed_vlans is applied to the current trunk config when mode='trunk'. "
+            "'replace' sets the list exactly (clears existing first); "
+            "'add' appends without removing existing; "
+            "'remove' removes only the specified VLANs. "
+            "Default: 'add'. Ignored when allowed_vlans is None."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_fields(self) -> "PortConfigureRequest":

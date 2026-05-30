@@ -359,8 +359,8 @@ def test_configure_422_allowed_vlans_without_mode(mock_mode, mock_device):
     assert res.status_code == 422
 
 
-def test_configure_422_access_vlan_wrong_mode(mock_mode, mock_device):
-    """access_vlan=10 with mode='trunk' is invalid."""
+def test_configure_access_vlan_with_trunk_mode_sets_pvid(mock_mode, mock_device):
+    """access_vlan with mode='trunk' is valid — it sets the trunk PVID."""
     res = _client("operator").post(
         "/api/v1/ports/configure",
         json={
@@ -368,7 +368,7 @@ def test_configure_422_access_vlan_wrong_mode(mock_mode, mock_device):
             "mode": "trunk", "access_vlan": 10,
         },
     )
-    assert res.status_code == 422
+    assert res.status_code == 200
 
 
 def test_configure_400_invalid_interface_name(mock_mode, mock_device):

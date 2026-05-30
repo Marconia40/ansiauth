@@ -28,8 +28,9 @@
 #   configure_access_vlan (bool) — apply PVID or access VLAN
 #   access_vlan           (int)  — VLAN ID               (only when configure_access_vlan)
 #   is_trunk_pvid         (bool) — True → port trunk pvid vlan; False → port default vlan
-#   configure_trunk_vlans (bool) — apply trunk allow-pass vlan list
-#   vlan_list             (str)  — Huawei-format range string (only when configure_trunk_vlans)
+#   configure_trunk_vlans    (bool) — apply trunk allow-pass vlan list
+#   vlan_list                (str)  — Huawei-format range string (only when configure_trunk_vlans)
+#   allowed_vlan_operation   (str)  — 'replace' (undo-all + set), 'add' (append), 'remove' (undo per-vlan)
 #   configure_description (bool) — apply description change
 #   description           (str)  — description text       (only when configure_description)
 #   description_is_empty  (bool) — True → undo description (only when configure_description)
@@ -59,8 +60,14 @@
           {% endif %}
           {% endif %}
           {% if configure_trunk_vlans %}
+          {% if allowed_vlan_operation == 'remove' %}
+          undo port trunk allow-pass vlan {{ vlan_list }}
+          {% elif allowed_vlan_operation == 'add' %}
+          port trunk allow-pass vlan {{ vlan_list }}
+          {% else %}
           undo port trunk allow-pass vlan all
           port trunk allow-pass vlan {{ vlan_list }}
+          {% endif %}
           {% endif %}
           {% if configure_description %}
           {% if description_is_empty %}

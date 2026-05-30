@@ -426,6 +426,7 @@ class HuaweiPortDriver(BasePortDriver):
             if config.allowed_vlans
             else ""
         )
+        allowed_vlan_operation = getattr(config, "allowed_vlan_operation", "add") or "add"
 
         logger.info(
             "Huawei: configure_port on interface=%s device=%s fields=%s",
@@ -445,6 +446,7 @@ class HuaweiPortDriver(BasePortDriver):
                     "is_trunk_pvid": is_trunk_pvid,
                     "configure_trunk_vlans": configure_trunk_vlans,
                     "vlan_list": vlan_list,
+                    "allowed_vlan_operation": allowed_vlan_operation,
                     "configure_description": configure_description,
                     "description": description,
                     "description_is_empty": description_is_empty,

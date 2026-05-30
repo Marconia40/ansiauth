@@ -802,7 +802,7 @@ def test_enable_port_noop_when_already_up(monkeypatch, mock_mode, mock_device):
 # ── API validation ────────────────────────────────────────────────────────────
 
 def test_configure_port_rejects_unauthenticated():
-    res = TestClient(app).patch(
+    res = TestClient(app).post(
         "/api/v1/ports/configure",
         json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
     )
@@ -826,7 +826,7 @@ def test_enable_port_rejects_unauthenticated():
 
 
 def test_configure_port_rejects_observer(mock_mode, mock_device):
-    res = _client("observer").patch(
+    res = _client("observer").post(
         "/api/v1/ports/configure",
         json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
     )

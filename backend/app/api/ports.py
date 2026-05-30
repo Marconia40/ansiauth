@@ -464,6 +464,7 @@ def configure_port(
             mode=data.mode,
             access_vlan=data.access_vlan,
             allowed_vlans=list(data.allowed_vlans) if data.allowed_vlans else None,
+            allowed_vlan_operation=data.allowed_vlan_operation,
         )
     except ValueError as exc:
         raise ValidationError(str(exc))

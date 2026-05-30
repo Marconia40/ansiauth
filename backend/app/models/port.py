@@ -213,6 +213,7 @@ class PortConfigRequest:
     mode: PortConfigMode | None = None
     access_vlan: int | None = None
     allowed_vlans: list[int] | None = None
+    allowed_vlan_operation: str = "add"
 
     def __post_init__(self) -> None:
         if not self.interface:

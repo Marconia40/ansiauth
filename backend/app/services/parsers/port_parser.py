@@ -197,42 +197,25 @@ def _column_positions(header_line: str, columns: tuple[str, ...]) -> list[tuple[
 
 # ── Trunk VLAN list parsing ──────────────────────────────────────────────────
 
-_VLAN_RANGE_RE = re.compile(r"^\s*(\d+)\s*(?:to|-)\s*(\d+)\s*$", re.IGNORECASE)
-
-
-def _parse_vlan_token(token: str) -> list[int]:
-    """Expand a single token from a Huawei trunk VLAN list to a list of ints.
-
-    Supported token shapes:
-        ``"10"``          → [10]
-        ``"10 to 12"``    → [10, 11, 12]
-        ``"10-12"``       → [10, 11, 12]
-
-    Returns an empty list when the token is empty, ``"-"``, or contains a
-    qualifier suffix VRP sometimes appends (e.g. ``"100 untagged"`` —
-    parsed digits prefix only).
-    """
-    cleaned = token.strip()
-    if not cleaned or cleaned == "-":
-        return []
-
-    range_match = _VLAN_RANGE_RE.match(cleaned)
-    if range_match:
-        lo, hi = int(range_match.group(1)), int(range_match.group(2))
-        if lo <= hi and lo >= 1 and hi <= 4094:
-            return list(range(lo, hi + 1))
-        return []
-
-    # Hybrid-mode entries look like "100 tagged" / "1 untagged".
-    # Take the leading integer and discard the qualifier.
-    leading = re.match(r"^\s*(\d+)\b", cleaned)
-    if leading:
-        return [int(leading.group(1))]
-    return []
+# Matches all three token forms Huawei VRP emits in the Trunk VLAN List column:
+#   "X to Y"  — range with keyword (primary VRP format)
+#   "X-Y"     — range with hyphen
+#   "X"       — single VLAN (also captures the numeric prefix of hybrid-mode
+#                entries like "100 tagged" / "1 untagged")
+# Using finditer over the whole field handles both space-separated ("50 400")
+# and comma-separated ("10, 20, 30 to 32") formats without a prior split.
+_TRUNK_VLAN_TOKEN_RE = re.compile(
+    r"(\d+)\s+to\s+(\d+)|(\d+)-(\d+)|(\d+)",
+    re.IGNORECASE,
+)
 
 
 def _parse_trunk_vlan_list(field_value: str) -> list[int] | None:
     """Parse the ``Trunk VLAN List`` column from ``display port vlan``.
+
+    Handles Huawei VRP's space-separated format (``50 400``), range notation
+    (``2 to 4094`` or ``2-4094``), comma-separated lists, and hybrid-mode
+    qualifiers (``1 untagged, 100 tagged``).
 
     Returns ``None`` for ``-`` (no trunk VLAN list, e.g. access ports), or
     a sorted, deduplicated list of VLAN IDs otherwise.
@@ -242,9 +225,19 @@ def _parse_trunk_vlan_list(field_value: str) -> list[int] | None:
         return None
 
     vlans: set[int] = set()
-    for token in cleaned.split(","):
-        for vid in _parse_vlan_token(token):
-            vlans.add(vid)
+    for m in _TRUNK_VLAN_TOKEN_RE.finditer(cleaned):
+        if m.group(1) is not None:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if 1 <= lo <= hi <= 4094:
+                vlans.update(range(lo, hi + 1))
+        elif m.group(3) is not None:
+            lo, hi = int(m.group(3)), int(m.group(4))
+            if 1 <= lo <= hi <= 4094:
+                vlans.update(range(lo, hi + 1))
+        elif m.group(5) is not None:
+            vid = int(m.group(5))
+            if 1 <= vid <= 4094:
+                vlans.add(vid)
     return sorted(vlans) if vlans else None
 
 
