@@ -72,6 +72,17 @@ class Settings(BaseSettings):
     # ── Audit ─────────────────────────────────────────────────────────────────
     AUDIT_RETENTION_DAYS: int = Field(default=90, ge=1)
 
+    # ── Background cleanup jobs ───────────────────────────────────────────────
+    # How often the cleanup scheduler runs all three sweep/purge tasks
+    # (artifacts, expired refresh tokens, old login attempts). The first run
+    # also fires once at startup.
+    CLEANUP_INTERVAL_HOURS: int = Field(default=6, ge=1)
+    # Days of ansible-runner artifact directories to keep on disk.
+    ARTIFACT_RETENTION_DAYS: int = Field(default=30, ge=1)
+    # Days of login_attempts rows to keep (only affects historical rows; the
+    # lockout window is governed by login_attempt_service constants).
+    LOGIN_ATTEMPT_RETENTION_DAYS: int = Field(default=7, ge=1)
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Accepts a JSON list (e.g. '["https://app.example.com"]') or a comma-
     # separated string (e.g. 'https://a.example.com,https://b.example.com').
@@ -149,6 +160,9 @@ RATE_LIMIT_LOGIN = settings.RATE_LIMIT_LOGIN
 SSL_CERTFILE = settings.SSL_CERTFILE
 SSL_KEYFILE = settings.SSL_KEYFILE
 AUDIT_RETENTION_DAYS = settings.AUDIT_RETENTION_DAYS
+CLEANUP_INTERVAL_HOURS = settings.CLEANUP_INTERVAL_HOURS
+ARTIFACT_RETENTION_DAYS = settings.ARTIFACT_RETENTION_DAYS
+LOGIN_ATTEMPT_RETENTION_DAYS = settings.LOGIN_ATTEMPT_RETENTION_DAYS
 CORS_ORIGINS = settings.CORS_ORIGINS
 COOKIE_SECURE = settings.COOKIE_SECURE
 COOKIE_SAMESITE = settings.COOKIE_SAMESITE

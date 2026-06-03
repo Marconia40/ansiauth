@@ -18,7 +18,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.core.config import AUDIT_RETENTION_DAYS, CORS_ORIGINS, DATABASE_URL, SSL_CERTFILE
+from app.core.config import (
+    ARTIFACT_RETENTION_DAYS,
+    AUDIT_RETENTION_DAYS,
+    CLEANUP_INTERVAL_HOURS,
+    CORS_ORIGINS,
+    DATABASE_URL,
+    LOGIN_ATTEMPT_RETENTION_DAYS,
+    SSL_CERTFILE,
+)
 from app.core.exceptions import (
     ConflictError,
     DeviceExecutionError,
@@ -93,6 +101,7 @@ _bootstrap_admin()
 def _make_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
     from app.services import audit_service as _audit
+    from app.services import cleanup_service as _cleanup
 
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(
@@ -102,17 +111,42 @@ def _make_scheduler():
         minute=0,
         id="audit_purge_daily",
     )
+    scheduler.add_job(
+        lambda: _cleanup.run_all(
+            artifact_retention_days=ARTIFACT_RETENTION_DAYS,
+            login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
+        ),
+        trigger="interval",
+        hours=CLEANUP_INTERVAL_HOURS,
+        id="cleanup_sweep_interval",
+    )
     return scheduler
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    from app.services import cleanup_service as _cleanup
+
+    # Single startup pass so a long-running deployment doesn't have to wait a
+    # full interval before unbounded tables are pruned for the first time.
+    _cleanup.run_all(
+        artifact_retention_days=ARTIFACT_RETENTION_DAYS,
+        login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
+    )
+
     scheduler = _make_scheduler()
     scheduler.start()
-    logger.info("Audit retention scheduler started (retention=%d days, runs daily at 02:00 UTC)", AUDIT_RETENTION_DAYS)
+    logger.info(
+        "Schedulers started: audit_purge_daily (retention=%d days, 02:00 UTC); "
+        "cleanup_sweep_interval (every %d h, artifacts=%d days, login_attempts=%d days)",
+        AUDIT_RETENTION_DAYS,
+        CLEANUP_INTERVAL_HOURS,
+        ARTIFACT_RETENTION_DAYS,
+        LOGIN_ATTEMPT_RETENTION_DAYS,
+    )
     yield
     scheduler.shutdown(wait=False)
-    logger.info("Audit retention scheduler stopped")
+    logger.info("Schedulers stopped")
 
 
 app = FastAPI(
