@@ -301,160 +301,64 @@ def run_update_description_job(
     """Execute one port-description update.  Never raises — failures are
     funnelled into the job record / audit event so the BackgroundTasks
     queue is never poisoned."""
-    from app.services import device_locks, rate_limiter
+    from app.services.orchestration_runner import NoopOutcome, ValidationFailure, run_operation
 
-    start_time = time.time()
-    logger.info(
-        "Job %s: queued — update description on interface=%s device=%s",
-        job_id, interface, device,
-    )
-
-    try:
-        _job = job_service.get_job(job_id)
-        if _job and _job.status == "cancelled":
-            audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
-            return
-
-        rate_limiter.wait_for_slot(device)
-
-        with device_locks.acquire(device):
-            _job = job_service.get_job(job_id)
-            if _job and _job.status == "cancelled":
-                audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
-                return
-
-            job_service.update_job(job_id, "running")
-            logger.info(
-                "Job %s: started — update description on interface=%s device=%s",
-                job_id, interface, device,
-            )
-
-            if pre_state is None:
-                pre_state = _get_pre_state(interface, device)
-            job_service.update_job(job_id, pre_state=pre_state)
-
-            if pre_state.get("existed") is None:
-                error_msg = (
-                    f"Cannot determine port state on device '{device}' — aborting operation"
-                )
-                logger.error(
-                    "Job %s: pre-state check failed on device=%s", job_id, device,
-                )
-                job_service.update_job(
-                    job_id, "failed", error=error_msg,
-                    retry_count=0, rollback_performed=False,
-                )
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "error": {"type": "precheck_failed", "message": error_msg},
+    def _validate(ps: dict) -> ValidationFailure | None:
+        if ps.get("existed") is None:
+            msg = f"Cannot determine port state on device '{device}' — aborting operation"
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
+                    "error": {"type": "precheck_failed", "message": msg},
                     "error_type": "permanent",
-                    "pre_state": pre_state,
-                })
-                return
-
-            if pre_state.get("existed") is False:
-                error_msg = f"Interface '{interface}' does not exist on device '{device}'"
-                logger.warning("Job %s: validation failed — %s", job_id, error_msg)
-                job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.append_audit_event(audit_id, "failed", {
+                },
+                is_precheck=True,
+            )
+        if ps.get("existed") is False:
+            msg = f"Interface '{interface}' does not exist on device '{device}'"
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
                     "validation": "failed",
                     "reason": "interface_not_found",
-                    "error": {"type": "validation_error", "message": error_msg},
-                    "pre_state": pre_state,
-                })
-                return
-
-            # Idempotency: if the description already matches, complete as a no-op.
-            prev = (pre_state.get("description") or "").strip()
-            desired = (description or "").strip()
-            if prev == desired:
-                duration = time.time() - start_time
-                logger.info(
-                    "Job %s: no-op — description on %s already matches on device=%s",
-                    job_id, interface, device,
-                )
-                job_service.update_job(
-                    job_id, "completed",
-                    result={
-                        "output": "Description already matches requested value, no changes needed",
-                        "operation_result": "noop",
-                        "message": "Description unchanged (no changes needed)",
-                    },
-                    current_step="completed",
-                )
-                audit_service.append_audit_event(audit_id, "completed", {
-                    "reason": "description_unchanged_no_op",
-                    "duration_seconds": round(duration, 2),
-                    "pre_state": pre_state,
-                })
-                return
-
-            result, retry_count = _execute_with_retry(
-                lambda: port_service.update_port_description_on_device(interface, description, device),
-                job_id,
-                retry_base_delay=retry_base_delay,
-                device=device,
+                    "error": {"type": "validation_error", "message": msg},
+                },
             )
+        return None
 
-            duration = time.time() - start_time
+    def _noop(ps: dict) -> NoopOutcome | None:
+        prev = (ps.get("description") or "").strip()
+        desired = (description or "").strip()
+        if prev == desired:
+            return NoopOutcome(
+                output="Description already matches requested value, no changes needed",
+                message="Description unchanged (no changes needed)",
+                audit_reason="description_unchanged_no_op",
+            )
+        return None
 
-            if result["rc"] != 0:
-                rollback_performed, rollback_success = _rollback_description(
-                    interface, device, job_id, pre_state,
-                )
+    def _success_log(duration: float, retry_count: int) -> None:
+        logger.info(
+            "Job %s: completed — description updated on %s/%s in %.2fs (retries=%d)",
+            job_id, device, interface, duration, retry_count,
+        )
 
-                error_msg = result.get("stderr") or result.get("stdout") or "Execution failed"
-                error_output = _combined_error(result)
-                logger.error(
-                    "Job %s: failed — update description on interface=%s device=%s: rc=%d error=%s",
-                    job_id, interface, device, result.get("rc", -1), error_output.strip()[:300],
-                )
-                job_service.update_job(
-                    job_id, "failed", error=error_msg,
-                    retry_count=retry_count, rollback_performed=rollback_performed,
-                    rollback_success=rollback_success,
-                    current_step="rollback_completed" if rollback_performed else None,
-                )
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "retries": retry_count,
-                    "rollback_performed": rollback_performed,
-                    "rollback_success": rollback_success,
-                    "duration_seconds": round(duration, 2),
-                    "error": _structured_error(result),
-                    "error_type": _classify_error(result),
-                    "pre_state": pre_state,
-                })
-            else:
-                job_service.update_job(
-                    job_id, "completed", result={"output": result["stdout"]},
-                    retry_count=retry_count,
-                )
-                audit_service.append_audit_event(audit_id, "completed", {
-                    "retries": retry_count,
-                    "rollback_performed": False,
-                    "duration_seconds": round(duration, 2),
-                    "pre_state": pre_state,
-                })
-                logger.info(
-                    "Job %s: completed — description updated on %s/%s in %.2fs (retries=%d)",
-                    job_id, device, interface, duration, retry_count,
-                )
-
-    except Exception as exc:
-        duration = time.time() - start_time
-        error_msg = str(exc)
-        logger.error("Job %s: unexpected failure on device=%s: %s", job_id, device, error_msg)
-        job_service.update_job(job_id, "failed", error=error_msg)
-        audit_service.append_audit_event(audit_id, "failed", {
-            "error": {"type": "unexpected_error", "message": error_msg},
-            "duration_seconds": round(duration, 2),
-            "error_type": "permanent",
-            "pre_state": pre_state,
-        })
-
-    finally:
-        job_service.ensure_final_state(job_id)
-        if group_job_id:
-            _notify_group_job_complete(group_job_id, job_id, device)
+    run_operation(
+        job_id=job_id,
+        device=device,
+        audit_id=audit_id,
+        operation_label=f"update description on interface={interface}",
+        execute=lambda: port_service.update_port_description_on_device(interface, description, device),
+        retry_base_delay=retry_base_delay,
+        pre_state=pre_state,
+        group_job_id=group_job_id,
+        capture_pre_state=lambda: _get_pre_state(interface, device),
+        validate_pre_state=_validate,
+        check_noop=_noop,
+        rollback=lambda ps: _rollback_description(interface, device, job_id, ps),
+        logger=logger,
+        success_log=_success_log,
+    )
 
 
 # ── Enqueue ──────────────────────────────────────────────────────────────────
@@ -631,161 +535,65 @@ def run_set_admin_state_job(
 ):
     """Execute one admin-state change.  Never raises — failures funnel into
     the job record / audit event."""
-    from app.services import device_locks, rate_limiter
+    from app.services.orchestration_runner import NoopOutcome, ValidationFailure, run_operation
 
-    start_time = time.time()
-    logger.info(
-        "Job %s: queued — set admin state on interface=%s device=%s enabled=%s",
-        job_id, interface, device, enabled,
-    )
-
-    try:
-        _job = job_service.get_job(job_id)
-        if _job and _job.status == "cancelled":
-            audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
-            return
-
-        rate_limiter.wait_for_slot(device)
-
-        with device_locks.acquire(device):
-            _job = job_service.get_job(job_id)
-            if _job and _job.status == "cancelled":
-                audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
-                return
-
-            job_service.update_job(job_id, "running")
-            logger.info(
-                "Job %s: started — set admin state on interface=%s device=%s enabled=%s",
-                job_id, interface, device, enabled,
-            )
-
-            if pre_state is None:
-                pre_state = _get_admin_pre_state(interface, device)
-            job_service.update_job(job_id, pre_state=pre_state)
-
-            if pre_state.get("existed") is None:
-                error_msg = (
-                    f"Cannot determine port state on device '{device}' — aborting operation"
-                )
-                logger.error(
-                    "Job %s: pre-state check failed on device=%s", job_id, device,
-                )
-                job_service.update_job(
-                    job_id, "failed", error=error_msg,
-                    retry_count=0, rollback_performed=False,
-                )
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "error": {"type": "precheck_failed", "message": error_msg},
+    def _validate(ps: dict) -> ValidationFailure | None:
+        if ps.get("existed") is None:
+            msg = f"Cannot determine port state on device '{device}' — aborting operation"
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
+                    "error": {"type": "precheck_failed", "message": msg},
                     "error_type": "permanent",
-                    "pre_state": pre_state,
-                })
-                return
-
-            if pre_state.get("existed") is False:
-                error_msg = f"Interface '{interface}' does not exist on device '{device}'"
-                logger.warning("Job %s: validation failed — %s", job_id, error_msg)
-                job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.append_audit_event(audit_id, "failed", {
+                },
+                is_precheck=True,
+            )
+        if ps.get("existed") is False:
+            msg = f"Interface '{interface}' does not exist on device '{device}'"
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
                     "validation": "failed",
                     "reason": "interface_not_found",
-                    "error": {"type": "validation_error", "message": error_msg},
-                    "pre_state": pre_state,
-                })
-                return
-
-            # Idempotency: if admin state already matches, complete as a no-op.
-            prev_admin = pre_state.get("admin_up")
-            if prev_admin is not None and bool(prev_admin) == bool(enabled):
-                duration = time.time() - start_time
-                logger.info(
-                    "Job %s: no-op — admin state on %s already %s on device=%s",
-                    job_id, interface, "enabled" if enabled else "disabled", device,
-                )
-                job_service.update_job(
-                    job_id, "completed",
-                    result={
-                        "output": "Admin state already matches requested value, no changes needed",
-                        "operation_result": "noop",
-                        "message": "Admin state unchanged (no changes needed)",
-                    },
-                    current_step="completed",
-                )
-                audit_service.append_audit_event(audit_id, "completed", {
-                    "reason": "admin_state_unchanged_no_op",
-                    "duration_seconds": round(duration, 2),
-                    "pre_state": pre_state,
-                })
-                return
-
-            result, retry_count = _execute_with_retry(
-                lambda: port_service.set_port_admin_state_on_device(interface, enabled, device),
-                job_id,
-                retry_base_delay=retry_base_delay,
-                device=device,
+                    "error": {"type": "validation_error", "message": msg},
+                },
             )
+        return None
 
-            duration = time.time() - start_time
+    def _noop(ps: dict) -> NoopOutcome | None:
+        prev_admin = ps.get("admin_up")
+        if prev_admin is not None and bool(prev_admin) == bool(enabled):
+            return NoopOutcome(
+                output="Admin state already matches requested value, no changes needed",
+                message="Admin state unchanged (no changes needed)",
+                audit_reason="admin_state_unchanged_no_op",
+            )
+        return None
 
-            if result["rc"] != 0:
-                rollback_performed, rollback_success = _rollback_admin_state(
-                    interface, device, job_id, pre_state,
-                )
+    def _success_log(duration: float, retry_count: int) -> None:
+        logger.info(
+            "Job %s: completed — admin state on %s/%s set to %s in %.2fs (retries=%d)",
+            job_id, device, interface,
+            "enabled" if enabled else "disabled",
+            duration, retry_count,
+        )
 
-                error_msg = result.get("stderr") or result.get("stdout") or "Execution failed"
-                error_output = _combined_error(result)
-                logger.error(
-                    "Job %s: failed — set admin state on interface=%s device=%s: rc=%d error=%s",
-                    job_id, interface, device, result.get("rc", -1), error_output.strip()[:300],
-                )
-                job_service.update_job(
-                    job_id, "failed", error=error_msg,
-                    retry_count=retry_count, rollback_performed=rollback_performed,
-                    rollback_success=rollback_success,
-                    current_step="rollback_completed" if rollback_performed else None,
-                )
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "retries": retry_count,
-                    "rollback_performed": rollback_performed,
-                    "rollback_success": rollback_success,
-                    "duration_seconds": round(duration, 2),
-                    "error": _structured_error(result),
-                    "error_type": _classify_error(result),
-                    "pre_state": pre_state,
-                })
-            else:
-                job_service.update_job(
-                    job_id, "completed", result={"output": result["stdout"]},
-                    retry_count=retry_count,
-                )
-                audit_service.append_audit_event(audit_id, "completed", {
-                    "retries": retry_count,
-                    "rollback_performed": False,
-                    "duration_seconds": round(duration, 2),
-                    "pre_state": pre_state,
-                })
-                logger.info(
-                    "Job %s: completed — admin state on %s/%s set to %s in %.2fs (retries=%d)",
-                    job_id, device, interface,
-                    "enabled" if enabled else "disabled",
-                    duration, retry_count,
-                )
-
-    except Exception as exc:
-        duration = time.time() - start_time
-        error_msg = str(exc)
-        logger.error("Job %s: unexpected failure on device=%s: %s", job_id, device, error_msg)
-        job_service.update_job(job_id, "failed", error=error_msg)
-        audit_service.append_audit_event(audit_id, "failed", {
-            "error": {"type": "unexpected_error", "message": error_msg},
-            "duration_seconds": round(duration, 2),
-            "error_type": "permanent",
-            "pre_state": pre_state,
-        })
-
-    finally:
-        job_service.ensure_final_state(job_id)
-        if group_job_id:
-            _notify_group_job_complete(group_job_id, job_id, device)
+    run_operation(
+        job_id=job_id,
+        device=device,
+        audit_id=audit_id,
+        operation_label=f"set admin state on interface={interface} enabled={enabled}",
+        execute=lambda: port_service.set_port_admin_state_on_device(interface, enabled, device),
+        retry_base_delay=retry_base_delay,
+        pre_state=pre_state,
+        group_job_id=group_job_id,
+        capture_pre_state=lambda: _get_admin_pre_state(interface, device),
+        validate_pre_state=_validate,
+        check_noop=_noop,
+        rollback=lambda ps: _rollback_admin_state(interface, device, job_id, ps),
+        logger=logger,
+        success_log=_success_log,
+    )
 
 
 def enqueue_set_admin_state_job(
@@ -958,186 +766,85 @@ def run_set_access_vlan_job(
 ):
     """Execute one access-VLAN assignment.  Never raises — failures funnel
     into the job record / audit event."""
-    from app.services import device_locks, rate_limiter
+    from app.services.orchestration_runner import NoopOutcome, ValidationFailure, run_operation
 
-    start_time = time.time()
-    logger.info(
-        "Job %s: queued — set access VLAN on interface=%s device=%s vlan_id=%d",
-        job_id, interface, device, vlan_id,
-    )
-
-    try:
-        _job = job_service.get_job(job_id)
-        if _job and _job.status == "cancelled":
-            audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
-            return
-
-        rate_limiter.wait_for_slot(device)
-
-        with device_locks.acquire(device):
-            _job = job_service.get_job(job_id)
-            if _job and _job.status == "cancelled":
-                audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
-                return
-
-            job_service.update_job(job_id, "running")
-            logger.info(
-                "Job %s: started — set access VLAN on interface=%s device=%s vlan_id=%d",
-                job_id, interface, device, vlan_id,
-            )
-
-            if pre_state is None:
-                pre_state = _get_access_vlan_pre_state(interface, device)
-            job_service.update_job(job_id, pre_state=pre_state)
-
-            if pre_state.get("existed") is None:
-                error_msg = (
-                    f"Cannot determine port state on device '{device}' — aborting operation"
-                )
-                logger.error(
-                    "Job %s: pre-state check failed on device=%s", job_id, device,
-                )
-                job_service.update_job(
-                    job_id, "failed", error=error_msg,
-                    retry_count=0, rollback_performed=False,
-                )
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "error": {"type": "precheck_failed", "message": error_msg},
+    def _validate(ps: dict) -> ValidationFailure | None:
+        if ps.get("existed") is None:
+            msg = f"Cannot determine port state on device '{device}' — aborting operation"
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
+                    "error": {"type": "precheck_failed", "message": msg},
                     "error_type": "permanent",
-                    "pre_state": pre_state,
-                })
-                return
-
-            if pre_state.get("existed") is False:
-                error_msg = f"Interface '{interface}' does not exist on device '{device}'"
-                logger.warning("Job %s: validation failed — %s", job_id, error_msg)
-                job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.append_audit_event(audit_id, "failed", {
+                },
+                is_precheck=True,
+            )
+        if ps.get("existed") is False:
+            msg = f"Interface '{interface}' does not exist on device '{device}'"
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
                     "validation": "failed",
                     "reason": "interface_not_found",
-                    "error": {"type": "validation_error", "message": error_msg},
-                    "pre_state": pre_state,
-                })
-                return
-
-            current_mode = pre_state.get("mode")
-            if current_mode is not None and current_mode not in ("access", "trunk"):
-                error_msg = (
-                    f"Interface '{interface}' on device '{device}' is in "
-                    f"'{current_mode}' mode — PVID can only be set on access or trunk ports"
-                )
-                logger.warning("Job %s: pre-condition failed — %s", job_id, error_msg)
-                job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.append_audit_event(audit_id, "failed", {
+                    "error": {"type": "validation_error", "message": msg},
+                },
+            )
+        current_mode = ps.get("mode")
+        if current_mode is not None and current_mode not in ("access", "trunk"):
+            msg = (
+                f"Interface '{interface}' on device '{device}' is in "
+                f"'{current_mode}' mode — PVID can only be set on access or trunk ports"
+            )
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
                     "validation": "failed",
                     "reason": "port_not_in_access_or_trunk_mode",
-                    "error": {"type": "validation_error", "message": error_msg},
-                    "pre_state": pre_state,
-                })
-                return
+                    "error": {"type": "validation_error", "message": msg},
+                },
+            )
+        return None
 
-            is_trunk = current_mode == "trunk"
+    def _noop(ps: dict) -> NoopOutcome | None:
+        prev_vlan = ps.get("access_vlan")
+        if prev_vlan is not None and int(prev_vlan) == int(vlan_id):
+            return NoopOutcome(
+                output="PVID already matches requested value, no changes needed",
+                message="PVID unchanged (no changes needed)",
+                audit_reason="access_vlan_unchanged_no_op",
+            )
+        return None
 
-            # Idempotency: no-op when the access VLAN / PVID already matches.
-            prev_vlan = pre_state.get("access_vlan")
-            if prev_vlan is not None and int(prev_vlan) == int(vlan_id):
-                duration = time.time() - start_time
-                logger.info(
-                    "Job %s: no-op — %s on %s already %d on device=%s",
-                    job_id, "trunk PVID" if is_trunk else "access VLAN",
-                    interface, vlan_id, device,
-                )
-                job_service.update_job(
-                    job_id, "completed",
-                    result={
-                        "output": "PVID already matches requested value, no changes needed",
-                        "operation_result": "noop",
-                        "message": "PVID unchanged (no changes needed)",
-                    },
-                    current_step="completed",
-                )
-                audit_service.append_audit_event(audit_id, "completed", {
-                    "reason": "access_vlan_unchanged_no_op",
-                    "duration_seconds": round(duration, 2),
-                    "pre_state": pre_state,
-                })
-                return
+    def _execute(ps: dict) -> dict:
+        # Captured-mode picks the playbook: trunk uses PVID; access uses
+        # the regular access-VLAN flow.
+        is_trunk = ps.get("mode") == "trunk"
+        if is_trunk:
+            return port_service.set_trunk_pvid_vlan_on_device(interface, vlan_id, device)
+        return port_service.set_port_access_vlan_on_device(interface, vlan_id, device)
 
-            if is_trunk:
-                result, retry_count = _execute_with_retry(
-                    lambda: port_service.set_trunk_pvid_vlan_on_device(interface, vlan_id, device),
-                    job_id,
-                    retry_base_delay=retry_base_delay,
-                    device=device,
-                )
-            else:
-                result, retry_count = _execute_with_retry(
-                    lambda: port_service.set_port_access_vlan_on_device(interface, vlan_id, device),
-                    job_id,
-                    retry_base_delay=retry_base_delay,
-                    device=device,
-                )
+    def _success_log(duration: float, retry_count: int) -> None:
+        logger.info(
+            "Job %s: completed — access VLAN on %s/%s set to %d in %.2fs (retries=%d)",
+            job_id, device, interface, vlan_id, duration, retry_count,
+        )
 
-            duration = time.time() - start_time
-
-            if result["rc"] != 0:
-                rollback_performed, rollback_success = _rollback_access_vlan(
-                    interface, device, job_id, pre_state,
-                )
-
-                error_msg = result.get("stderr") or result.get("stdout") or "Execution failed"
-                error_output = _combined_error(result)
-                logger.error(
-                    "Job %s: failed — set access VLAN on interface=%s device=%s: rc=%d error=%s",
-                    job_id, interface, device, result.get("rc", -1), error_output.strip()[:300],
-                )
-                job_service.update_job(
-                    job_id, "failed", error=error_msg,
-                    retry_count=retry_count, rollback_performed=rollback_performed,
-                    rollback_success=rollback_success,
-                    current_step="rollback_completed" if rollback_performed else None,
-                )
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "retries": retry_count,
-                    "rollback_performed": rollback_performed,
-                    "rollback_success": rollback_success,
-                    "duration_seconds": round(duration, 2),
-                    "error": _structured_error(result),
-                    "error_type": _classify_error(result),
-                    "pre_state": pre_state,
-                })
-            else:
-                job_service.update_job(
-                    job_id, "completed", result={"output": result["stdout"]},
-                    retry_count=retry_count,
-                )
-                audit_service.append_audit_event(audit_id, "completed", {
-                    "retries": retry_count,
-                    "rollback_performed": False,
-                    "duration_seconds": round(duration, 2),
-                    "pre_state": pre_state,
-                })
-                logger.info(
-                    "Job %s: completed — access VLAN on %s/%s set to %d in %.2fs (retries=%d)",
-                    job_id, device, interface, vlan_id, duration, retry_count,
-                )
-
-    except Exception as exc:
-        duration = time.time() - start_time
-        error_msg = str(exc)
-        logger.error("Job %s: unexpected failure on device=%s: %s", job_id, device, error_msg)
-        job_service.update_job(job_id, "failed", error=error_msg)
-        audit_service.append_audit_event(audit_id, "failed", {
-            "error": {"type": "unexpected_error", "message": error_msg},
-            "duration_seconds": round(duration, 2),
-            "error_type": "permanent",
-            "pre_state": pre_state,
-        })
-
-    finally:
-        job_service.ensure_final_state(job_id)
-        if group_job_id:
-            _notify_group_job_complete(group_job_id, job_id, device)
+    run_operation(
+        job_id=job_id,
+        device=device,
+        audit_id=audit_id,
+        operation_label=f"set access VLAN on interface={interface} vlan_id={vlan_id}",
+        execute_with_pre_state=_execute,
+        retry_base_delay=retry_base_delay,
+        pre_state=pre_state,
+        group_job_id=group_job_id,
+        capture_pre_state=lambda: _get_access_vlan_pre_state(interface, device),
+        validate_pre_state=_validate,
+        check_noop=_noop,
+        rollback=lambda ps: _rollback_access_vlan(interface, device, job_id, ps),
+        logger=logger,
+        success_log=_success_log,
+    )
 
 
 def enqueue_set_access_vlan_job(
@@ -1303,209 +1010,130 @@ def run_set_trunk_allowed_vlans_job(
     group_job_id: str | None = None,
 ):
     """Execute one trunk allowed-VLAN assignment.  Never raises — failures
-    funnel into the job record / audit event."""
-    from app.services import device_locks, rate_limiter
+    funnel into the job record / audit event.
 
-    start_time = time.time()
-    logger.info(
-        "Job %s: queued — set trunk VLANs on interface=%s device=%s mode=%s vlans=%s",
-        job_id, interface, device, mode, vlans,
-    )
+    The audit payload includes a ``desired_vlans`` key (the post-merge list
+    that was actually sent to the driver); the runner's ``extra_audit`` hook
+    threads it onto both success and failure events. ``desired`` is computed
+    inside ``validate_pre_state`` against the captured ``allowed_vlans`` and
+    cached in a shared scratch dict so the execute / extra_audit closures
+    don't have to recompute it.
+    """
+    from app.services.orchestration_runner import NoopOutcome, ValidationFailure, run_operation
 
-    try:
-        _job = job_service.get_job(job_id)
-        if _job and _job.status == "cancelled":
-            audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
-            return
+    _scratch: dict = {"desired": None}
 
-        rate_limiter.wait_for_slot(device)
-
-        with device_locks.acquire(device):
-            _job = job_service.get_job(job_id)
-            if _job and _job.status == "cancelled":
-                audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
-                return
-
-            job_service.update_job(job_id, "running")
-            logger.info(
-                "Job %s: started — set trunk VLANs on interface=%s device=%s mode=%s",
-                job_id, interface, device, mode,
-            )
-
-            if pre_state is None:
-                pre_state = _get_trunk_vlans_pre_state(interface, device)
-            job_service.update_job(job_id, pre_state=pre_state)
-
-            if pre_state.get("existed") is None:
-                error_msg = (
-                    f"Cannot determine port state on device '{device}' — aborting operation"
-                )
-                logger.error("Job %s: pre-state check failed on device=%s", job_id, device)
-                job_service.update_job(
-                    job_id, "failed", error=error_msg,
-                    retry_count=0, rollback_performed=False,
-                )
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "error": {"type": "precheck_failed", "message": error_msg},
+    def _validate(ps: dict) -> ValidationFailure | None:
+        if ps.get("existed") is None:
+            msg = f"Cannot determine port state on device '{device}' — aborting operation"
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
+                    "error": {"type": "precheck_failed", "message": msg},
                     "error_type": "permanent",
-                    "pre_state": pre_state,
-                })
-                return
-
-            if pre_state.get("existed") is False:
-                error_msg = f"Interface '{interface}' does not exist on device '{device}'"
-                logger.warning("Job %s: validation failed — %s", job_id, error_msg)
-                job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.append_audit_event(audit_id, "failed", {
+                },
+                is_precheck=True,
+            )
+        if ps.get("existed") is False:
+            msg = f"Interface '{interface}' does not exist on device '{device}'"
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
                     "validation": "failed",
                     "reason": "interface_not_found",
-                    "error": {"type": "validation_error", "message": error_msg},
-                    "pre_state": pre_state,
-                })
-                return
-
-            current_mode = pre_state.get("mode")
-            if current_mode is not None and current_mode != "trunk":
-                error_msg = (
-                    f"Interface '{interface}' on device '{device}' is in "
-                    f"'{current_mode}' mode — trunk VLAN management requires a trunk port"
-                )
-                logger.warning("Job %s: pre-condition failed — %s", job_id, error_msg)
-                job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.append_audit_event(audit_id, "failed", {
+                    "error": {"type": "validation_error", "message": msg},
+                },
+            )
+        current_mode = ps.get("mode")
+        if current_mode is not None and current_mode != "trunk":
+            msg = (
+                f"Interface '{interface}' on device '{device}' is in "
+                f"'{current_mode}' mode — trunk VLAN management requires a trunk port"
+            )
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
                     "validation": "failed",
                     "reason": "port_not_in_trunk_mode",
-                    "error": {"type": "validation_error", "message": error_msg},
-                    "pre_state": pre_state,
-                })
-                return
-
-            current_vlans = pre_state.get("allowed_vlans")
-            desired = _compute_desired_vlans(mode, current_vlans, vlans)
-
-            if desired is None:
-                error_msg = (
-                    f"Cannot compute desired VLAN list: mode='{mode}' requires the "
-                    f"current allowed-VLAN list but it is unknown for port '{interface}' "
-                    f"on device '{device}'"
-                )
-                logger.warning("Job %s: %s", job_id, error_msg)
-                job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "validation": "failed",
-                    "reason": "current_vlans_unknown",
-                    "error": {"type": "validation_error", "message": error_msg},
-                    "pre_state": pre_state,
-                })
-                return
-
-            if len(desired) == 0:
-                error_msg = (
-                    f"The requested remove operation would leave port '{interface}' "
-                    f"on device '{device}' with no allowed VLANs — rejected to prevent "
-                    "a complete trunk blackout"
-                )
-                logger.warning("Job %s: %s", job_id, error_msg)
-                job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "validation": "failed",
-                    "reason": "remove_would_empty_trunk",
-                    "error": {"type": "validation_error", "message": error_msg},
-                    "pre_state": pre_state,
-                })
-                return
-
-            # Idempotency: no-op when desired list matches current.
-            if current_vlans is not None and sorted(desired) == sorted(current_vlans):
-                duration = time.time() - start_time
-                logger.info(
-                    "Job %s: no-op — trunk VLANs on %s already match desired on device=%s",
-                    job_id, interface, device,
-                )
-                job_service.update_job(
-                    job_id, "completed",
-                    result={
-                        "output": "Trunk allowed-VLAN list already matches requested value, no changes needed",
-                        "operation_result": "noop",
-                        "message": "Trunk VLANs unchanged (no changes needed)",
-                    },
-                    current_step="completed",
-                )
-                audit_service.append_audit_event(audit_id, "completed", {
-                    "reason": "trunk_vlans_unchanged_no_op",
-                    "duration_seconds": round(duration, 2),
-                    "pre_state": pre_state,
-                })
-                return
-
-            result, retry_count = _execute_with_retry(
-                lambda: port_service.set_trunk_allowed_vlans_on_device(interface, desired, device),
-                job_id,
-                retry_base_delay=retry_base_delay,
-                device=device,
+                    "error": {"type": "validation_error", "message": msg},
+                },
             )
 
-            duration = time.time() - start_time
+        current_vlans = ps.get("allowed_vlans")
+        desired = _compute_desired_vlans(mode, current_vlans, vlans)
+        if desired is None:
+            msg = (
+                f"Cannot compute desired VLAN list: mode='{mode}' requires the "
+                f"current allowed-VLAN list but it is unknown for port '{interface}' "
+                f"on device '{device}'"
+            )
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
+                    "validation": "failed",
+                    "reason": "current_vlans_unknown",
+                    "error": {"type": "validation_error", "message": msg},
+                },
+            )
+        if len(desired) == 0:
+            msg = (
+                f"The requested remove operation would leave port '{interface}' "
+                f"on device '{device}' with no allowed VLANs — rejected to prevent "
+                "a complete trunk blackout"
+            )
+            return ValidationFailure(
+                error_msg=msg,
+                audit_extra={
+                    "validation": "failed",
+                    "reason": "remove_would_empty_trunk",
+                    "error": {"type": "validation_error", "message": msg},
+                },
+            )
+        _scratch["desired"] = desired
+        return None
 
-            if result["rc"] != 0:
-                rollback_performed, rollback_success = _rollback_trunk_vlans(
-                    interface, device, job_id, pre_state,
-                )
-                error_msg = result.get("stderr") or result.get("stdout") or "Execution failed"
-                error_output = _combined_error(result)
-                logger.error(
-                    "Job %s: failed — set trunk VLANs on interface=%s device=%s: rc=%d error=%s",
-                    job_id, interface, device, result.get("rc", -1), error_output.strip()[:300],
-                )
-                job_service.update_job(
-                    job_id, "failed", error=error_msg,
-                    retry_count=retry_count, rollback_performed=rollback_performed,
-                    rollback_success=rollback_success,
-                    current_step="rollback_completed" if rollback_performed else None,
-                )
-                audit_service.append_audit_event(audit_id, "failed", {
-                    "retries": retry_count,
-                    "rollback_performed": rollback_performed,
-                    "rollback_success": rollback_success,
-                    "duration_seconds": round(duration, 2),
-                    "error": _structured_error(result),
-                    "error_type": _classify_error(result),
-                    "pre_state": pre_state,
-                    "desired_vlans": desired,
-                })
-            else:
-                job_service.update_job(
-                    job_id, "completed", result={"output": result["stdout"]},
-                    retry_count=retry_count,
-                )
-                audit_service.append_audit_event(audit_id, "completed", {
-                    "retries": retry_count,
-                    "rollback_performed": False,
-                    "duration_seconds": round(duration, 2),
-                    "pre_state": pre_state,
-                    "desired_vlans": desired,
-                })
-                logger.info(
-                    "Job %s: completed — trunk VLANs on %s/%s set (%d VLANs) in %.2fs (retries=%d)",
-                    job_id, device, interface, len(desired), duration, retry_count,
-                )
+    def _noop(ps: dict) -> NoopOutcome | None:
+        current_vlans = ps.get("allowed_vlans")
+        desired = _scratch.get("desired")
+        if current_vlans is not None and desired is not None and sorted(desired) == sorted(current_vlans):
+            return NoopOutcome(
+                output="Trunk allowed-VLAN list already matches requested value, no changes needed",
+                message="Trunk VLANs unchanged (no changes needed)",
+                audit_reason="trunk_vlans_unchanged_no_op",
+            )
+        return None
 
-    except Exception as exc:
-        duration = time.time() - start_time
-        error_msg = str(exc)
-        logger.error("Job %s: unexpected failure on device=%s: %s", job_id, device, error_msg)
-        job_service.update_job(job_id, "failed", error=error_msg)
-        audit_service.append_audit_event(audit_id, "failed", {
-            "error": {"type": "unexpected_error", "message": error_msg},
-            "duration_seconds": round(duration, 2),
-            "error_type": "permanent",
-            "pre_state": pre_state,
-        })
+    def _execute(_ps: dict) -> dict:
+        return port_service.set_trunk_allowed_vlans_on_device(interface, _scratch["desired"], device)
 
-    finally:
-        job_service.ensure_final_state(job_id)
-        if group_job_id:
-            _notify_group_job_complete(group_job_id, job_id, device)
+    def _success_log(duration: float, retry_count: int) -> None:
+        logger.info(
+            "Job %s: completed — trunk VLANs on %s/%s set (%d VLANs) in %.2fs (retries=%d)",
+            job_id, device, interface, len(_scratch["desired"] or []), duration, retry_count,
+        )
+
+    # ``extra_audit`` is a callable so the runner re-reads ``_scratch``
+    # after validate_pre_state has populated it.
+    def _extras() -> dict:
+        return {"desired_vlans": _scratch["desired"]} if _scratch.get("desired") is not None else {}
+
+    run_operation(
+        job_id=job_id,
+        device=device,
+        audit_id=audit_id,
+        operation_label=f"set trunk VLANs on interface={interface} mode={mode}",
+        execute_with_pre_state=_execute,
+        retry_base_delay=retry_base_delay,
+        pre_state=pre_state,
+        group_job_id=group_job_id,
+        capture_pre_state=lambda: _get_trunk_vlans_pre_state(interface, device),
+        validate_pre_state=_validate,
+        check_noop=_noop,
+        rollback=lambda ps: _rollback_trunk_vlans(interface, device, job_id, ps),
+        extra_audit=_extras,
+        logger=logger,
+        success_log=_success_log,
+    )
 
 
 def enqueue_set_trunk_allowed_vlans_job(
