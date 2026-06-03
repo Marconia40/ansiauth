@@ -4,11 +4,23 @@ import os
 os.environ["DATABASE_URL"] = "sqlite:///./test.db"
 os.environ["JWT_SECRET_KEY"] = "test_jwt_secret_key_not_for_production"
 
+# Schema is owned by Alembic now that the startup DDL block in main.py was
+# removed. Wipe any stale test DB from a previous interrupted run, then run
+# migrations against a fresh file before app.main imports the session.
+if os.path.exists("./test.db"):
+    os.remove("./test.db")
+
+from alembic import command as _alembic_command
+from alembic.config import Config as _AlembicConfig
+
+_alembic_cfg = _AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
+_alembic_command.upgrade(_alembic_cfg, "head")
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.core.security import create_access_token
-from app.main import app  # DB is initialized inside main on import
+from app.main import app  # DB session is initialized inside main on import
 from app.services import device_service
 
 

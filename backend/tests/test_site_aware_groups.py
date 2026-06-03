@@ -199,8 +199,39 @@ def test_admin_sees_all_groups_including_legacy(admin_client):
 
 # ── Backfill migration on legacy single-site groups ──────────────────────────
 
+# SQL copied verbatim from migration a3c7e9d1f482 (device_group_site_id). Kept
+# inline so the tests below verify the backfill semantics against the same
+# statement the migration would execute, without having to re-run Alembic.
+_BACKFILL_SQL = """
+    UPDATE device_groups
+       SET site_id = (
+           SELECT MIN(d.site_id)
+             FROM device_group_members m
+             JOIN devices d ON d.name = m.device_name
+            WHERE m.group_id = device_groups.id
+              AND d.site_id IS NOT NULL
+       )
+     WHERE site_id IS NULL
+       AND id IN (
+           SELECT m.group_id
+             FROM device_group_members m
+             JOIN devices d ON d.name = m.device_name
+            GROUP BY m.group_id
+           HAVING MIN(d.site_id) = MAX(d.site_id)
+              AND MIN(d.site_id) IS NOT NULL
+       )
+"""
+
+
+def _run_device_group_site_backfill() -> None:
+    from sqlalchemy import text
+    with get_session() as session:
+        session.execute(text(_BACKFILL_SQL))
+
+
 def test_backfill_legacy_group_gets_site_id():
-    """Repeats what the inline startup migration does. Verifies the SQL is correct."""
+    """Verifies the backfill SQL from migration a3c7e9d1f482 picks up
+    single-site legacy groups."""
     with get_session() as session:
         site = SiteModel(name="MigrateSite")
         session.add(site)
@@ -214,10 +245,7 @@ def test_backfill_legacy_group_gets_site_id():
         session.add(DeviceGroupMemberModel(group_id=g.id, device_name="mock_device"))
         gid = g.id
 
-    # Run the backfill — re-import main triggers _migrate_device_group_site_id.
-    import importlib
-    import app.main as app_main
-    importlib.reload(app_main)
+    _run_device_group_site_backfill()
 
     with get_session() as session:
         g = session.query(DeviceGroupModel).filter_by(id=gid).first()
@@ -238,9 +266,7 @@ def test_backfill_legacy_mixed_group_stays_null():
         session.add(DeviceGroupMemberModel(group_id=g.id, device_name="fail_device"))
         gid = g.id
 
-    import importlib
-    import app.main as app_main
-    importlib.reload(app_main)
+    _run_device_group_site_backfill()
 
     with get_session() as session:
         g = session.query(DeviceGroupModel).filter_by(id=gid).first()
