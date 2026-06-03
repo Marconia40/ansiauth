@@ -1,7 +1,10 @@
 import os
 
-# Must be set before app imports so config.py picks up these values.
-os.environ["DATABASE_URL"] = "sqlite:///./test.db"
+# DATABASE_URL is left to the caller if it's already set (Step 6 lets the
+# whole suite run against a real Postgres container — see
+# docs/refactor-steps/step-6-postgres-portable.md). The default keeps the
+# historical behaviour: a throwaway SQLite file in the cwd.
+os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
 os.environ["JWT_SECRET_KEY"] = "test_jwt_secret_key_not_for_production"
 # Tests run over http://testserver, so the Secure cookie attribute would cause
 # Starlette's TestClient (and any real browser) to refuse the refresh-token
@@ -9,10 +12,22 @@ os.environ["JWT_SECRET_KEY"] = "test_jwt_secret_key_not_for_production"
 os.environ.setdefault("COOKIE_SECURE", "false")
 
 # Schema is owned by Alembic now that the startup DDL block in main.py was
-# removed. Wipe any stale test DB from a previous interrupted run, then run
-# migrations against a fresh file before app.main imports the session.
-if os.path.exists("./test.db"):
-    os.remove("./test.db")
+# removed. Wipe any stale state from a previous interrupted run, then run
+# migrations from scratch before app.main imports the session.
+_db_url = os.environ["DATABASE_URL"]
+if _db_url.startswith("sqlite") and "://./" in _db_url.replace("sqlite:///", "sqlite:///./"):
+    if os.path.exists("./test.db"):
+        os.remove("./test.db")
+elif _db_url.startswith("postgresql"):
+    # Postgres: drop every table in the public schema so each test run starts
+    # from a known-empty state. Cheaper than dropping the database itself —
+    # avoids needing a separate admin connection.
+    import sqlalchemy as _sa
+    _engine = _sa.create_engine(_db_url)
+    with _engine.begin() as _conn:
+        _conn.execute(_sa.text("DROP SCHEMA public CASCADE"))
+        _conn.execute(_sa.text("CREATE SCHEMA public"))
+    _engine.dispose()
 
 from alembic import command as _alembic_command
 from alembic.config import Config as _AlembicConfig
