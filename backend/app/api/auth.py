@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 
-from app.core.config import REFRESH_TOKEN_EXPIRE_MINUTES, SSL_CERTFILE
+from app.core.config import COOKIE_SAMESITE, COOKIE_SECURE, REFRESH_TOKEN_EXPIRE_MINUTES
 from app.core.dependencies import require_role
 from app.core.security import create_access_token
 from app.schemas.auth import TokenResponse
@@ -11,7 +11,6 @@ from app.services.auth_service import authenticate_user
 router = APIRouter()
 
 _COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_MINUTES * 60
-_COOKIE_SECURE = SSL_CERTFILE is not None
 
 
 def _set_refresh_cookie(response: Response, token: str) -> None:
@@ -19,8 +18,8 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         key="refresh_token",
         value=token,
         httponly=True,
-        secure=_COOKIE_SECURE,
-        samesite="strict",
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
         max_age=_COOKIE_MAX_AGE,
         path="/",
     )

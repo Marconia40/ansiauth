@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.core.config import AUDIT_RETENTION_DAYS, DATABASE_URL, SSL_CERTFILE
+from app.core.config import AUDIT_RETENTION_DAYS, CORS_ORIGINS, DATABASE_URL, SSL_CERTFILE
 from app.core.exceptions import (
     ConflictError,
     DeviceExecutionError,
@@ -186,10 +186,7 @@ if SSL_CERTFILE:
 # rate limiting or auth middleware can reject them.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

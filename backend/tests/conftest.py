@@ -3,6 +3,10 @@ import os
 # Must be set before app imports so config.py picks up these values.
 os.environ["DATABASE_URL"] = "sqlite:///./test.db"
 os.environ["JWT_SECRET_KEY"] = "test_jwt_secret_key_not_for_production"
+# Tests run over http://testserver, so the Secure cookie attribute would cause
+# Starlette's TestClient (and any real browser) to refuse the refresh-token
+# cookie. Mirror the local-dev override that .env.example documents.
+os.environ.setdefault("COOKIE_SECURE", "false")
 
 # Schema is owned by Alembic now that the startup DDL block in main.py was
 # removed. Wipe any stale test DB from a previous interrupted run, then run
