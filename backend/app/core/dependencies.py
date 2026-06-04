@@ -1,6 +1,6 @@
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError
+from jwt import PyJWTError
 
 from app.core.security import verify_token
 
@@ -12,7 +12,7 @@ ROLE_HIERARCHY = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 4}
 def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     try:
         payload = verify_token(token)
-    except JWTError:
+    except PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     username = payload.get("sub")
     role = payload.get("role")
