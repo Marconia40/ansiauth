@@ -1,16 +1,32 @@
 import logging
+import os
+from dotenv import load_dotenv
 
-# uvicorn's dictConfig only configures its own loggers and leaves the root
-# logger at WARNING with no handlers, so all app INFO/DEBUG output is silently
-# dropped when running via `uvicorn app.main:app`. Calling basicConfig here
-# (after uvicorn has already run its dictConfig) adds a stderr handler at INFO
-# to the root logger. uvicorn's own loggers are unaffected because they set
-# propagate=False and have their own handlers.
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
-    force=True,
-)
+# Read LOG_FORMAT early — before any other imports — so the root logger is
+# configured before uvicorn's dictConfig runs its own handler setup. force=True
+# ensures our handler wins regardless of order. uvicorn's own loggers are
+# unaffected because they set propagate=False.
+load_dotenv()
+
+_log_format = os.getenv("LOG_FORMAT", "text").lower()
+if _log_format == "json":
+    try:
+        from pythonjsonlogger.jsonlogger import JsonFormatter as _JsonFormatter
+    except ImportError:  # python-json-logger < 3
+        from pythonjsonlogger import jsonlogger as _jl  # type: ignore[no-redef]
+        _JsonFormatter = _jl.JsonFormatter  # type: ignore[assignment]
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(_JsonFormatter(
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+        rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    ))
+    logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+        force=True,
+    )
 
 from contextlib import asynccontextmanager
 
@@ -25,6 +41,7 @@ from app.core.config import (
     CORS_ORIGINS,
     DATABASE_URL,
     LOGIN_ATTEMPT_RETENTION_DAYS,
+    METRICS_ENABLED,
     SSL_CERTFILE,
 )
 from app.core.exceptions import (
@@ -226,6 +243,10 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Total-Count"],
 )
+
+if METRICS_ENABLED:
+    from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
+    Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
 @app.exception_handler(HTTPException)

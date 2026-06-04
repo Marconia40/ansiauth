@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     # lockout window is governed by login_attempt_service constants).
     LOGIN_ATTEMPT_RETENTION_DAYS: int = Field(default=7, ge=1)
 
+    # ── Observability ─────────────────────────────────────────────────────────
+    # Emit structured JSON log lines instead of plain text. Set LOG_FORMAT=json
+    # to switch; any other value (or unset) keeps the human-readable format.
+    LOG_FORMAT: str = "text"
+    # Expose a Prometheus-compatible /metrics endpoint. Off by default so
+    # production deployments opt in explicitly.
+    METRICS_ENABLED: bool = False
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Accepts a JSON list (e.g. '["https://app.example.com"]') or a comma-
     # separated string (e.g. 'https://a.example.com,https://b.example.com').
@@ -166,6 +174,8 @@ LOGIN_ATTEMPT_RETENTION_DAYS = settings.LOGIN_ATTEMPT_RETENTION_DAYS
 CORS_ORIGINS = settings.CORS_ORIGINS
 COOKIE_SECURE = settings.COOKIE_SECURE
 COOKIE_SAMESITE = settings.COOKIE_SAMESITE
+LOG_FORMAT = settings.LOG_FORMAT
+METRICS_ENABLED = settings.METRICS_ENABLED
 
 ANSIBLE_BASE_PATH = _ANSIBLE_DIR
 INVENTORY_PATH = os.path.join(_ANSIBLE_DIR, "inventory", "inventory.ini")
