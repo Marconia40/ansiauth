@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, Depends
 
 from app.core import authz
 from app.core.dependencies import require_role
@@ -139,7 +139,6 @@ def update_device(name: str, data: DeviceUpdate, current_user: dict = Depends(re
 )
 def save_device_config(
     name: str,
-    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     device = device_service.get_device(name)
@@ -147,7 +146,7 @@ def save_device_config(
         raise NotFoundError(f"Device '{name}' not found")
     authz.ensure_device_allowed(current_user, name)
     from app.services.vlan_execution_service import enqueue_save_job
-    entry = enqueue_save_job(name, current_user["username"], background_tasks)
+    entry = enqueue_save_job(name, current_user["username"])
     return {"success": True, "data": entry}
 
 

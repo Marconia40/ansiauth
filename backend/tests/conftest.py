@@ -1,5 +1,7 @@
 import os
 
+os.environ.setdefault("CELERY_TASK_ALWAYS_EAGER", "True")
+
 # DATABASE_URL is left to the caller if it's already set (Step 6 lets the
 # whole suite run against a real Postgres container — see
 # docs/refactor-steps/step-6-postgres-portable.md). The default keeps the

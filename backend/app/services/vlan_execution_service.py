@@ -2,11 +2,10 @@ import logging
 import time
 import uuid
 
-from fastapi import BackgroundTasks
-
 from app.core.exceptions import DeviceExecutionError
 from app.services import audit_service, group_job_service, job_service, vlan_service
 from app.services.retry_policy import RetryDecision, classify_error as _classify_error_string
+from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -631,9 +630,31 @@ def run_group_update_job(
     _log_group_outcome(group_job_id, "update")
 
 
+# ── Celery task wrappers (dispatch gate) ──────────────────────────────────────
+
+@celery_app.task(name="ansiauth.vlan.group_create")
+def _group_create_task(group_job_id: str, device_tasks: list, retry_base_delay: float) -> None:
+    run_group_create_job(group_job_id, device_tasks, retry_base_delay)
+
+
+@celery_app.task(name="ansiauth.vlan.group_delete")
+def _group_delete_task(group_job_id: str, device_tasks: list, retry_base_delay: float) -> None:
+    run_group_delete_job(group_job_id, device_tasks, retry_base_delay)
+
+
+@celery_app.task(name="ansiauth.vlan.group_update")
+def _group_update_task(group_job_id: str, device_tasks: list, retry_base_delay: float) -> None:
+    run_group_update_job(group_job_id, device_tasks, retry_base_delay)
+
+
+@celery_app.task(name="ansiauth.vlan.save")
+def _save_task(job_id: str, device: str, audit_id: str, retry_base_delay: float, group_job_id: str | None) -> None:
+    run_save_job(job_id, device, audit_id, retry_base_delay, group_job_id)
+
+
 # ── Enqueue helpers (called by route handlers) ────────────────────────────────
 
-def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> tuple[list[dict], str]:
+def enqueue_create_jobs(vlan, username: str, retry_base_delay: float) -> tuple[list[dict], str]:
     from app.services import device_locks
     request_id = str(uuid.uuid4())
     group_job = group_job_service.create_group_job(
@@ -664,11 +685,11 @@ def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, 
             pre_state = {"existed": None, "vlan_data": None}
         device_tasks.append((job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
-    background_tasks.add_task(run_group_create_job, group_job.group_job_id, device_tasks, retry_base_delay)
+    _group_create_task.delay(group_job.group_job_id, device_tasks, retry_base_delay)
     return job_entries, group_job.group_job_id
 
 
-def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> tuple[list[dict], str]:
+def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, retry_base_delay: float) -> tuple[list[dict], str]:
     from app.services import device_locks
     request_id = str(uuid.uuid4())
     group_job = group_job_service.create_group_job(
@@ -699,11 +720,11 @@ def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, backgro
             pre_state = {"existed": None, "vlan_data": None}
         device_tasks.append((job.job_id, vlan_id, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
-    background_tasks.add_task(run_group_delete_job, group_job.group_job_id, device_tasks, retry_base_delay)
+    _group_delete_task.delay(group_job.group_job_id, device_tasks, retry_base_delay)
     return job_entries, group_job.group_job_id
 
 
-def enqueue_save_job(device_name: str, username: str, background_tasks: BackgroundTasks, retry_base_delay: float = 1.0) -> dict:
+def enqueue_save_job(device_name: str, username: str, retry_base_delay: float = 1.0) -> dict:
     group_job = group_job_service.create_group_job(
         operation="save_config",
         playbook="save_config.yml",
@@ -721,11 +742,11 @@ def enqueue_save_job(device_name: str, username: str, background_tasks: Backgrou
         details={"device": device_name},
         status="pending", job_id=job.job_id, device=device_name,
     )
-    background_tasks.add_task(run_save_job, job.job_id, device_name, audit.id, retry_base_delay, group_job.group_job_id)
+    _save_task.delay(job.job_id, device_name, audit.id, retry_base_delay, group_job.group_job_id)
     return {"device": device_name, "job_id": job.job_id, "status": job.status, "group_job_id": group_job.group_job_id}
 
 
-def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> tuple[list[dict], str]:
+def enqueue_update_jobs(vlan_id: int, data, username: str, retry_base_delay: float) -> tuple[list[dict], str]:
     from app.services import device_locks
     request_id = str(uuid.uuid4())
     group_job = group_job_service.create_group_job(
@@ -756,5 +777,5 @@ def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: Bac
             pre_state = {"existed": None, "vlan_data": None}
         device_tasks.append((job.job_id, vlan_id, data.description, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
-    background_tasks.add_task(run_group_update_job, group_job.group_job_id, device_tasks, retry_base_delay)
+    _group_update_task.delay(group_job.group_job_id, device_tasks, retry_base_delay)
     return job_entries, group_job.group_job_id

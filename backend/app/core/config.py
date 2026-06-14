@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # production deployments opt in explicitly.
     METRICS_ENABLED: bool = False
 
+    # ── Celery + Redis ─────────────────────────────────────────────────────────
+    REDIS_URL: str = "redis://localhost:6379/0"
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Accepts a JSON list (e.g. '["https://app.example.com"]') or a comma-
     # separated string (e.g. 'https://a.example.com,https://b.example.com').
@@ -176,6 +179,7 @@ COOKIE_SECURE = settings.COOKIE_SECURE
 COOKIE_SAMESITE = settings.COOKIE_SAMESITE
 LOG_FORMAT = settings.LOG_FORMAT
 METRICS_ENABLED = settings.METRICS_ENABLED
+REDIS_URL = settings.REDIS_URL
 
 ANSIBLE_BASE_PATH = _ANSIBLE_DIR
 INVENTORY_PATH = os.path.join(_ANSIBLE_DIR, "inventory", "inventory.ini")

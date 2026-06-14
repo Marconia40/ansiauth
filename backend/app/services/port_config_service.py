@@ -26,8 +26,6 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
-from fastapi import BackgroundTasks
-
 from app.models.port import PortConfigRequest
 from app.services import (
     audit_service,
@@ -36,6 +34,7 @@ from app.services import (
     port_service,
     vlan_execution_service,
 )
+from app.worker import celery_app
 
 if TYPE_CHECKING:
     pass
@@ -906,12 +905,39 @@ def run_enable_port_job(
             _notify_group_job_complete(group_job_id, job_id, device)
 
 
+# ── Celery task wrappers ──────────────────────────────────────────────────────
+
+@celery_app.task(name="ansiauth.port.configure_port")
+def _configure_port_task(
+    job_id: str, config_dict: dict, device: str, audit_id: str,
+    retry_base_delay: float, pre_state: dict | None, group_job_id: str | None,
+) -> None:
+    from dataclasses import fields
+    config = PortConfigRequest(**{k: config_dict.get(k) for k in (f.name for f in fields(PortConfigRequest))})
+    run_configure_port_job(job_id, config, device, audit_id, retry_base_delay, pre_state, group_job_id)
+
+
+@celery_app.task(name="ansiauth.port.shutdown_port")
+def _shutdown_port_task(
+    job_id: str, interface: str, device: str, audit_id: str,
+    retry_base_delay: float, pre_state: dict | None, group_job_id: str | None,
+) -> None:
+    run_shutdown_port_job(job_id, interface, device, audit_id, retry_base_delay, pre_state, group_job_id)
+
+
+@celery_app.task(name="ansiauth.port.enable_port")
+def _enable_port_task(
+    job_id: str, interface: str, device: str, audit_id: str,
+    retry_base_delay: float, pre_state: dict | None, group_job_id: str | None,
+) -> None:
+    run_enable_port_job(job_id, interface, device, audit_id, retry_base_delay, pre_state, group_job_id)
+
+
 # ── Enqueue (public API) ──────────────────────────────────────────────────────
 
 def configure_port(
     config: PortConfigRequest,
     username: str,
-    background_tasks: BackgroundTasks,
     retry_base_delay: float = 1.0,
 ) -> tuple[list[dict], str]:
     """Create job + group-job records and schedule configure_port.
@@ -963,10 +989,10 @@ def configure_port(
             "mode": None, "access_vlan": None, "allowed_vlans": None,
         }
 
-    background_tasks.add_task(
-        run_configure_port_job,
+    import dataclasses
+    _configure_port_task.delay(
         job.job_id,
-        config,
+        dataclasses.asdict(config),
         device,
         audit.id,
         retry_base_delay,
@@ -983,7 +1009,6 @@ def shutdown_port(
     interface: str,
     device: str,
     username: str,
-    background_tasks: BackgroundTasks,
     retry_base_delay: float = 1.0,
 ) -> tuple[list[dict], str]:
     """Create job + group-job records and schedule shutdown_port."""
@@ -1023,8 +1048,7 @@ def shutdown_port(
         )
         pre_state = {"existed": None, "admin_up": None}
 
-    background_tasks.add_task(
-        run_shutdown_port_job,
+    _shutdown_port_task.delay(
         job.job_id,
         interface,
         device,
@@ -1043,7 +1067,6 @@ def enable_port(
     interface: str,
     device: str,
     username: str,
-    background_tasks: BackgroundTasks,
     retry_base_delay: float = 1.0,
 ) -> tuple[list[dict], str]:
     """Create job + group-job records and schedule enable_port."""
@@ -1083,8 +1106,7 @@ def enable_port(
         )
         pre_state = {"existed": None, "admin_up": None}
 
-    background_tasks.add_task(
-        run_enable_port_job,
+    _enable_port_task.delay(
         job.job_id,
         interface,
         device,

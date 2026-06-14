@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core import authz
 from app.core.dependencies import require_role
@@ -249,7 +249,6 @@ def list_ports(
 )
 def update_port_description(
     data: PortDescriptionUpdateRequest,
-    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     """Schedule a port-description update on a single device."""
@@ -273,7 +272,6 @@ def update_port_description(
         description=data.description,
         device=data.device,
         username=current_user["username"],
-        background_tasks=background_tasks,
         retry_base_delay=_RETRY_BASE_DELAY,
     )
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
@@ -297,7 +295,6 @@ def update_port_description(
 )
 def set_port_admin_state(
     data: PortAdminStateUpdateRequest,
-    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     """Schedule an admin-state change on a single port."""
@@ -317,7 +314,6 @@ def set_port_admin_state(
         enabled=data.enabled,
         device=data.device,
         username=current_user["username"],
-        background_tasks=background_tasks,
         retry_base_delay=_RETRY_BASE_DELAY,
     )
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
@@ -340,7 +336,6 @@ def set_port_admin_state(
 )
 def set_port_access_vlan(
     data: PortAccessVlanUpdateRequest,
-    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     """Schedule an access-VLAN assignment on a single port."""
@@ -361,7 +356,6 @@ def set_port_access_vlan(
         vlan_id=data.vlan_id,
         device=data.device,
         username=current_user["username"],
-        background_tasks=background_tasks,
         retry_base_delay=_RETRY_BASE_DELAY,
     )
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
@@ -386,7 +380,6 @@ def set_port_access_vlan(
 )
 def set_trunk_allowed_vlans(
     data: PortTrunkVlansUpdateRequest,
-    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     """Schedule a trunk allowed-VLAN update on a single port."""
@@ -408,7 +401,6 @@ def set_trunk_allowed_vlans(
         mode=data.mode,
         device=data.device,
         username=current_user["username"],
-        background_tasks=background_tasks,
         retry_base_delay=_RETRY_BASE_DELAY,
     )
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
@@ -433,7 +425,6 @@ def set_trunk_allowed_vlans(
 )
 def configure_port(
     data: PortConfigureRequest,
-    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     """Schedule a composite port configuration on a single port."""
@@ -472,7 +463,6 @@ def configure_port(
     jobs, group_job_id = port_config_service.configure_port(
         config=config,
         username=current_user["username"],
-        background_tasks=background_tasks,
         retry_base_delay=_RETRY_BASE_DELAY,
     )
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
@@ -495,7 +485,6 @@ def configure_port(
 )
 def shutdown_port(
     data: PortShutdownRequest,
-    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     """Schedule an administrative shutdown on a single port."""
@@ -515,7 +504,6 @@ def shutdown_port(
         interface=data.interface,
         device=data.device,
         username=current_user["username"],
-        background_tasks=background_tasks,
         retry_base_delay=_RETRY_BASE_DELAY,
     )
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
@@ -539,7 +527,6 @@ def shutdown_port(
 )
 def enable_port(
     data: PortEnableRequest,
-    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     """Schedule an administrative enable on a single port."""
@@ -559,7 +546,6 @@ def enable_port(
         interface=data.interface,
         device=data.device,
         username=current_user["username"],
-        background_tasks=background_tasks,
         retry_base_delay=_RETRY_BASE_DELAY,
     )
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}

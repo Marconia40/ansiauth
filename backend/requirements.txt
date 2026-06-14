@@ -25,6 +25,7 @@ PyJWT>=2.8,<3
 passlib>=1.7,<2
 python-daemon==3.1.2
 python-dotenv==1.2.2
+python-multipart>=0.0.9,<1
 PyYAML==6.0.3
 resolvelib==1.2.1
 starlette==1.0.0
@@ -38,3 +39,9 @@ alembic>=1.13
 apscheduler>=3.10,<4
 python-json-logger>=2.0,<4
 prometheus-fastapi-instrumentator>=6.0,<8
+celery[redis]>=5.3,<6
+redis>=5.0,<6
+paramiko>=2.9,<3
+bcrypt>=4.0,<6
+PyNaCl>=1.5,<2
+tzlocal>=5.0,<6

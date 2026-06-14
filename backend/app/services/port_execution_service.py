@@ -25,8 +25,6 @@ import logging
 import time
 import uuid
 
-from fastapi import BackgroundTasks
-
 from app.services import (
     audit_service,
     group_job_service,
@@ -34,6 +32,7 @@ from app.services import (
     port_service,
     vlan_execution_service,
 )
+from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +360,40 @@ def run_update_description_job(
     )
 
 
+# ── Celery task wrappers ──────────────────────────────────────────────────────
+
+@celery_app.task(name="ansiauth.port.update_description")
+def _update_description_task(
+    job_id: str, interface: str, description: str, device: str,
+    audit_id: str, retry_base_delay: float, pre_state: dict | None, group_job_id: str | None,
+) -> None:
+    run_update_description_job(job_id, interface, description, device, audit_id, retry_base_delay, pre_state, group_job_id)
+
+
+@celery_app.task(name="ansiauth.port.set_admin_state")
+def _set_admin_state_task(
+    job_id: str, interface: str, enabled: bool, device: str,
+    audit_id: str, retry_base_delay: float, pre_state: dict | None, group_job_id: str | None,
+) -> None:
+    run_set_admin_state_job(job_id, interface, enabled, device, audit_id, retry_base_delay, pre_state, group_job_id)
+
+
+@celery_app.task(name="ansiauth.port.set_access_vlan")
+def _set_access_vlan_task(
+    job_id: str, interface: str, vlan_id: int, device: str,
+    audit_id: str, retry_base_delay: float, pre_state: dict | None, group_job_id: str | None,
+) -> None:
+    run_set_access_vlan_job(job_id, interface, vlan_id, device, audit_id, retry_base_delay, pre_state, group_job_id)
+
+
+@celery_app.task(name="ansiauth.port.set_trunk_allowed_vlans")
+def _set_trunk_allowed_vlans_task(
+    job_id: str, interface: str, vlans: list, mode: str, device: str,
+    audit_id: str, retry_base_delay: float, pre_state: dict | None, group_job_id: str | None,
+) -> None:
+    run_set_trunk_allowed_vlans_job(job_id, interface, vlans, mode, device, audit_id, retry_base_delay, pre_state, group_job_id)
+
+
 # ── Enqueue ──────────────────────────────────────────────────────────────────
 
 def enqueue_update_description_job(
@@ -368,7 +401,6 @@ def enqueue_update_description_job(
     description: str,
     device: str,
     username: str,
-    background_tasks: BackgroundTasks,
     retry_base_delay: float = 1.0,
 ) -> tuple[list[dict], str]:
     """Create job + group-job records and schedule the runner.
@@ -414,8 +446,7 @@ def enqueue_update_description_job(
         )
         pre_state = {"existed": None, "description": None}
 
-    background_tasks.add_task(
-        run_update_description_job,
+    _update_description_task.delay(
         job.job_id,
         interface,
         description,
@@ -601,7 +632,6 @@ def enqueue_set_admin_state_job(
     enabled: bool,
     device: str,
     username: str,
-    background_tasks: BackgroundTasks,
     retry_base_delay: float = 1.0,
 ) -> tuple[list[dict], str]:
     """Create job + group-job records and schedule the admin-state runner."""
@@ -643,8 +673,7 @@ def enqueue_set_admin_state_job(
         )
         pre_state = {"existed": None, "admin_up": None}
 
-    background_tasks.add_task(
-        run_set_admin_state_job,
+    _set_admin_state_task.delay(
         job.job_id,
         interface,
         bool(enabled),
@@ -852,7 +881,6 @@ def enqueue_set_access_vlan_job(
     vlan_id: int,
     device: str,
     username: str,
-    background_tasks: BackgroundTasks,
     retry_base_delay: float = 1.0,
 ) -> tuple[list[dict], str]:
     """Create job + group-job records and schedule the access-VLAN runner."""
@@ -893,8 +921,7 @@ def enqueue_set_access_vlan_job(
         )
         pre_state = {"existed": None, "mode": None, "access_vlan": None}
 
-    background_tasks.add_task(
-        run_set_access_vlan_job,
+    _set_access_vlan_task.delay(
         job.job_id,
         interface,
         int(vlan_id),
@@ -1142,7 +1169,6 @@ def enqueue_set_trunk_allowed_vlans_job(
     mode: str,
     device: str,
     username: str,
-    background_tasks: BackgroundTasks,
     retry_base_delay: float = 1.0,
 ) -> tuple[list[dict], str]:
     """Create job + group-job records and schedule the trunk-VLAN runner."""
@@ -1183,8 +1209,7 @@ def enqueue_set_trunk_allowed_vlans_job(
         )
         pre_state = {"existed": None, "mode": None, "allowed_vlans": None}
 
-    background_tasks.add_task(
-        run_set_trunk_allowed_vlans_job,
+    _set_trunk_allowed_vlans_task.delay(
         job.job_id,
         interface,
         list(vlans),
