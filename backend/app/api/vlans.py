@@ -1,5 +1,4 @@
 import logging
-import threading
 import time
 import uuid
 
@@ -129,7 +128,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
     try:
         _job = job_service.get_job(job_id)
         if _job and _job.status == "cancelled":
-            audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+            audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
             return
 
         rate_limiter.wait_for_slot(device)
@@ -138,7 +137,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
         with lock:
             _job = job_service.get_job(job_id)
             if _job and _job.status == "cancelled":
-                audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+                audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
                 return
 
             job_service.update_job(job_id, "running")
@@ -151,7 +150,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
                 error_msg = f"Cannot determine VLAN state on device '{device}' — aborting operation"
                 logger.error("Job %s: pre-state check failed on device=%s", job_id, device)
                 job_service.update_job(job_id, "failed", error=error_msg, retry_count=0, rollback_performed=False)
-                audit_service.update_audit_record(audit_id, "failed", {
+                audit_service.append_audit_event(audit_id, "failed", {
                     "error": {"type": "precheck_failed", "message": error_msg},
                     "error_type": "permanent",
                     "pre_state": pre_state,
@@ -173,7 +172,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
                         result={"output": f"VLAN {vlan_id} already configured, no changes needed"},
                         current_step="completed",
                     )
-                    audit_service.update_audit_record(audit_id, "completed", {
+                    audit_service.append_audit_event(audit_id, "completed", {
                         "reason": "vlan_already_exists_no_op",
                         "duration_seconds": round(duration, 2),
                         "pre_state": pre_state,
@@ -184,7 +183,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
                     error_msg = "VLAN already exists with a different name"
                     logger.warning("Job %s: validation failed — %s on device=%s", job_id, error_msg, device)
                     job_service.update_job(job_id, "failed", error=error_msg)
-                    audit_service.update_audit_record(audit_id, "failed", {
+                    audit_service.append_audit_event(audit_id, "failed", {
                         "validation": "failed",
                         "reason": "vlan_already_exists",
                         "error": {"type": "validation_error", "message": error_msg},
@@ -239,7 +238,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
                     job_id, "failed", error=error_msg,
                     retry_count=retry_count, rollback_performed=rollback_performed,
                 )
-                audit_service.update_audit_record(audit_id, "failed", {
+                audit_service.append_audit_event(audit_id, "failed", {
                     "retries": retry_count,
                     "rollback_performed": rollback_performed,
                     "duration_seconds": round(duration, 2),
@@ -252,7 +251,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
                     job_id, "completed", result={"output": result["stdout"]},
                     retry_count=retry_count,
                 )
-                audit_service.update_audit_record(audit_id, "completed", {
+                audit_service.append_audit_event(audit_id, "completed", {
                     "retries": retry_count,
                     "rollback_performed": False,
                     "duration_seconds": round(duration, 2),
@@ -268,7 +267,7 @@ def _run_device_create_job(job_id: str, vlan_id: int, name: str, device: str, au
         error_msg = str(exc)
         logger.error("Job %s: unexpected failure on device=%s: %s", job_id, device, error_msg)
         job_service.update_job(job_id, "failed", error=error_msg)
-        audit_service.update_audit_record(audit_id, "failed", {
+        audit_service.append_audit_event(audit_id, "failed", {
             "error": {"type": "unexpected_error", "message": error_msg},
             "duration_seconds": round(duration, 2),
             "error_type": "permanent",
@@ -291,7 +290,7 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
     try:
         _job = job_service.get_job(job_id)
         if _job and _job.status == "cancelled":
-            audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+            audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
             return
 
         rate_limiter.wait_for_slot(device)
@@ -300,7 +299,7 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
         with lock:
             _job = job_service.get_job(job_id)
             if _job and _job.status == "cancelled":
-                audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+                audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
                 return
 
             job_service.update_job(job_id, "running")
@@ -313,7 +312,7 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
                 error_msg = f"Cannot determine VLAN state on device '{device}' — aborting operation"
                 logger.error("Job %s: pre-state check failed on device=%s", job_id, device)
                 job_service.update_job(job_id, "failed", error=error_msg, retry_count=0, rollback_performed=False)
-                audit_service.update_audit_record(audit_id, "failed", {
+                audit_service.append_audit_event(audit_id, "failed", {
                     "error": {"type": "precheck_failed", "message": error_msg},
                     "error_type": "permanent",
                     "pre_state": pre_state,
@@ -376,7 +375,7 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
                 job_service.update_job(
                     job_id, "completed", result={"output": stdout}, retry_count=retry_count,
                 )
-                audit_service.update_audit_record(audit_id, "completed", {
+                audit_service.append_audit_event(audit_id, "completed", {
                     "retries": retry_count,
                     "rollback_performed": False,
                     "duration_seconds": round(duration, 2),
@@ -426,7 +425,7 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
                     job_id, "failed", error=error_msg,
                     retry_count=retry_count, rollback_performed=rollback_performed,
                 )
-                audit_service.update_audit_record(audit_id, "failed", {
+                audit_service.append_audit_event(audit_id, "failed", {
                     "retries": retry_count,
                     "rollback_performed": rollback_performed,
                     "duration_seconds": round(duration, 2),
@@ -440,7 +439,7 @@ def _run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str):
         error_msg = str(exc)
         logger.error("Job %s: unexpected failure on device=%s: %s", job_id, device, error_msg)
         job_service.update_job(job_id, "failed", error=error_msg)
-        audit_service.update_audit_record(audit_id, "failed", {
+        audit_service.append_audit_event(audit_id, "failed", {
             "error": {"type": "unexpected_error", "message": error_msg},
             "duration_seconds": round(duration, 2),
             "error_type": "permanent",
@@ -463,7 +462,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
     try:
         _job = job_service.get_job(job_id)
         if _job and _job.status == "cancelled":
-            audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+            audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
             return
 
         rate_limiter.wait_for_slot(device)
@@ -472,7 +471,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
         with lock:
             _job = job_service.get_job(job_id)
             if _job and _job.status == "cancelled":
-                audit_service.update_audit_record(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
+                audit_service.append_audit_event(audit_id, "cancelled", {"reason": "cancelled_before_execution"})
                 return
 
             job_service.update_job(job_id, "running")
@@ -485,7 +484,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
                 error_msg = f"Cannot determine VLAN state on device '{device}' — aborting operation"
                 logger.error("Job %s: pre-state check failed on device=%s", job_id, device)
                 job_service.update_job(job_id, "failed", error=error_msg, retry_count=0, rollback_performed=False)
-                audit_service.update_audit_record(audit_id, "failed", {
+                audit_service.append_audit_event(audit_id, "failed", {
                     "error": {"type": "precheck_failed", "message": error_msg},
                     "error_type": "permanent",
                     "pre_state": pre_state,
@@ -498,7 +497,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
                 error_msg = f"VLAN {vlan_id} does not exist on device '{device}'"
                 logger.warning("Job %s: validation failed — %s", job_id, error_msg)
                 job_service.update_job(job_id, "failed", error=error_msg)
-                audit_service.update_audit_record(audit_id, "failed", {
+                audit_service.append_audit_event(audit_id, "failed", {
                     "validation": "failed",
                     "reason": "vlan_not_found",
                     "error": {"type": "validation_error", "message": error_msg},
@@ -516,7 +515,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
                     result={"output": f"VLAN {vlan_id} already has this name, no changes needed"},
                     current_step="completed",
                 )
-                audit_service.update_audit_record(audit_id, "completed", {
+                audit_service.append_audit_event(audit_id, "completed", {
                     "reason": "vlan_name_unchanged_no_op",
                     "duration_seconds": round(duration, 2),
                     "pre_state": pre_state,
@@ -572,7 +571,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
                     job_id, "failed", error=error_msg,
                     retry_count=retry_count, rollback_performed=rollback_performed,
                 )
-                audit_service.update_audit_record(audit_id, "failed", {
+                audit_service.append_audit_event(audit_id, "failed", {
                     "retries": retry_count,
                     "rollback_performed": rollback_performed,
                     "duration_seconds": round(duration, 2),
@@ -585,7 +584,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
                     job_id, "completed", result={"output": result["stdout"]},
                     retry_count=retry_count,
                 )
-                audit_service.update_audit_record(audit_id, "completed", {
+                audit_service.append_audit_event(audit_id, "completed", {
                     "retries": retry_count,
                     "rollback_performed": False,
                     "duration_seconds": round(duration, 2),
@@ -601,7 +600,7 @@ def _run_update_job(job_id: str, vlan_id: int, description: str, device: str, au
         error_msg = str(exc)
         logger.error("Job %s: unexpected failure on device=%s: %s", job_id, device, error_msg)
         job_service.update_job(job_id, "failed", error=error_msg)
-        audit_service.update_audit_record(audit_id, "failed", {
+        audit_service.append_audit_event(audit_id, "failed", {
             "error": {"type": "unexpected_error", "message": error_msg},
             "duration_seconds": round(duration, 2),
             "error_type": "permanent",
@@ -632,6 +631,8 @@ def get_vlans(
             except RuntimeError as e:
                 raise DeviceExecutionError(str(e))
         return {"success": True, "data": result}
+    if device is None and vlan_service.EXECUTION_MODE != "mock":
+        raise ValidationError("'device' query parameter is required")
     try:
         data = vlan_service.get_vlans(device)
     except ValueError as e:
@@ -644,6 +645,7 @@ def get_vlans(
 @router.post("/")
 def create_vlan(
     vlan: VLANCreate,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_role("operator")),
 ):
     try:
@@ -676,11 +678,10 @@ def create_vlan(
             device=dev_name,
             request_id=request_id,
         )
-        threading.Thread(
-            target=_run_device_create_job,
-            args=(job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id),
-            daemon=True,
-        ).start()
+        background_tasks.add_task(
+            _run_device_create_job,
+            job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id,
+        )
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
 
     return {"success": True, "jobs": job_entries}
@@ -737,6 +738,7 @@ def update_vlan(
 ):
     try:
         vlan_validator.validate_vlan_id_range(vlan_id)
+        vlan_validator.validate_vlan_not_reserved(vlan_id)
         vlan_validator.validate_description(data.description)
     except ValueError as e:
         raise ValidationError(str(e))

@@ -3,9 +3,17 @@ from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-SECRET_KEY = "supersecretkey_change_in_production"
+from app.core.config import ACCESS_TOKEN_EXPIRE_MINUTES, JWT_SECRET_KEY
+
+if not JWT_SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY must be set in .env")
+
+if ACCESS_TOKEN_EXPIRE_MINUTES <= 0 or ACCESS_TOKEN_EXPIRE_MINUTES > 15:
+    raise RuntimeError(
+        f"ACCESS_TOKEN_EXPIRE_MINUTES must be between 1 and 15, got: {ACCESS_TOKEN_EXPIRE_MINUTES}"
+    )
+
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 5
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
@@ -21,8 +29,8 @@ def verify_password(plain: str, hashed: str) -> bool:
 def create_access_token(data: dict) -> str:
     payload = data.copy()
     payload["exp"] = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=ALGORITHM)
 
 
 def verify_token(token: str) -> dict:
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    return jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])

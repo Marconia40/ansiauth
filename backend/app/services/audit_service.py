@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.db.models import AuditLogModel
@@ -22,6 +22,7 @@ def _to_record(row: AuditLogModel) -> AuditRecord:
         job_id=row.job_id,
         device=row.device,
         request_id=row.request_id,
+        parent_audit_id=str(row.parent_audit_id) if row.parent_audit_id is not None else None,
     )
 
 
@@ -60,6 +61,9 @@ def get_audit_log(
     user: Optional[str] = None,
     action: Optional[str] = None,
     resource: Optional[str] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    device_id: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
 ) -> list[AuditRecord]:
@@ -71,42 +75,121 @@ def get_audit_log(
             q = q.filter(AuditLogModel.action == action)
         if resource:
             q = q.filter(AuditLogModel.resource == resource)
+        if from_date is not None:
+            _from = from_date if from_date.tzinfo else from_date.replace(tzinfo=timezone.utc)
+            q = q.filter(AuditLogModel.timestamp >= _from)
+        if to_date is not None:
+            _to = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
+            q = q.filter(AuditLogModel.timestamp <= _to)
+        if device_id is not None:
+            q = q.filter(AuditLogModel.device == device_id)
         rows = q.offset(skip).limit(limit).all()
         return [_to_record(r) for r in rows]
 
 
-def update_audit_status(audit_id: str, status: str) -> None:
-    """Update the status of an existing audit record after job execution."""
-    with get_session() as session:
-        row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
-        if row:
-            row.status = status
-    logger.debug("Audit %s status → %s", audit_id, status)
-
-
-def update_audit_record(
-    audit_id: str,
+def append_audit_event(
+    parent_audit_id: str,
     status: str,
     extra_details: Optional[dict] = None,
-) -> None:
-    """Update status and merge execution metadata into the audit record details."""
+) -> Optional[AuditRecord]:
+    """Append a new status-event row linked to an existing audit record. Never mutates."""
     with get_session() as session:
-        row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
-        if row:
-            row.status = status
-            if extra_details:
-                row.details = {**(row.details or {}), **extra_details}
-    logger.debug("Audit %s: status=%s extra=%s", audit_id, status, extra_details)
+        parent = session.query(AuditLogModel).filter_by(id=int(parent_audit_id)).first()
+        if not parent:
+            logger.warning("append_audit_event: parent %s not found", parent_audit_id)
+            return None
+        row = AuditLogModel(
+            timestamp=datetime.now(timezone.utc),
+            user=parent.user,
+            action=parent.action,
+            resource=parent.resource,
+            resource_id=parent.resource_id,
+            details={**(parent.details or {}), **(extra_details or {})},
+            status=status,
+            job_id=parent.job_id,
+            device=parent.device,
+            request_id=parent.request_id,
+            parent_audit_id=int(parent_audit_id),
+        )
+        session.add(row)
+        session.flush()
+        record = _to_record(row)
+    logger.debug("Audit %s: appended event status=%s parent=%s", record.id, status, parent_audit_id)
+    return record
 
 
 def ensure_audit_final_state(audit_id: str) -> None:
-    """Force any pending/stuck audit record to failed. Called in finally blocks."""
+    """Append a 'failed' event if no terminal follow-up exists yet. Safety net for unexpected exits."""
     with get_session() as session:
-        row = session.query(AuditLogModel).filter_by(id=int(audit_id)).first()
-        if row and row.status not in ("completed", "failed", "cancelled"):
-            logger.warning("Audit %s stuck in '%s' — forcing to failed", audit_id, row.status)
-            row.status = "failed"
-            row.details = {**(row.details or {}), "error": {"type": "unexpected_termination"}}
+        already_terminal = (
+            session.query(AuditLogModel)
+            .filter(
+                AuditLogModel.parent_audit_id == int(audit_id),
+                AuditLogModel.status.in_(["completed", "failed", "cancelled"]),
+            )
+            .first()
+        )
+        if already_terminal:
+            return
+    logger.warning("Audit %s: no terminal event found — appending 'failed'", audit_id)
+    append_audit_event(audit_id, "failed", {"error": {"type": "unexpected_termination"}})
+
+
+def purge_old_records(retention_days: int, triggered_by: str = "scheduler") -> int:
+    """Delete audit records older than retention_days. Returns the number of rows deleted.
+
+    Deletes in chunks of 1000 to avoid long table locks on SQLite.
+    Records that are parents of newer rows are preserved to keep chain integrity.
+    Logs a system audit event after purge.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    total_deleted = 0
+
+    while True:
+        with get_session() as session:
+            # Find IDs that are referenced as parent_audit_id — never delete these
+            referenced_ids = {
+                row[0]
+                for row in session.query(AuditLogModel.parent_audit_id)
+                .filter(AuditLogModel.parent_audit_id.isnot(None))
+                .all()
+            }
+            batch_ids = [
+                row[0]
+                for row in session.query(AuditLogModel.id)
+                .filter(
+                    AuditLogModel.timestamp < cutoff,
+                    AuditLogModel.id.notin_(referenced_ids) if referenced_ids else True,
+                )
+                .limit(1000)
+                .all()
+            ]
+            if not batch_ids:
+                break
+            deleted = (
+                session.query(AuditLogModel)
+                .filter(AuditLogModel.id.in_(batch_ids))
+                .delete(synchronize_session=False)
+            )
+            total_deleted += deleted
+
+    if total_deleted > 0 or triggered_by != "scheduler":
+        log_action(
+            user="system",
+            action="audit_purge",
+            resource="audit_log",
+            details={
+                "retention_days": retention_days,
+                "deleted_count": total_deleted,
+                "triggered_by": triggered_by,
+            },
+            status="success",
+        )
+        logger.info(
+            "Audit purge complete: deleted=%d retention_days=%d triggered_by=%s",
+            total_deleted, retention_days, triggered_by,
+        )
+    return total_deleted
 
 
 def clear_audit_log() -> None:

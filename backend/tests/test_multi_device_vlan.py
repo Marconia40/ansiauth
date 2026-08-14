@@ -13,7 +13,9 @@ def test_multi_device_creates_multiple_audit_rows(client, admin_client):
     jobs = {entry["job_id"] for entry in response.json()["jobs"]}
 
     log = admin_client.get("/api/v1/audit/").json()
-    entries = [e for e in log if e["action"] == "create_vlan"]
+    # With append-only each device produces 2 rows (pending + follow-up).
+    # Filter to follow-up events to count one final outcome per device.
+    entries = [e for e in log if e["action"] == "create_vlan" and e["parent_audit_id"] is not None]
 
     assert len(entries) == 2
 
@@ -56,10 +58,13 @@ def test_multi_device_inventory_matching(admin_client, monkeypatch):
 
     time.sleep(1)
 
-    assert len(captured) == 2, f"Expected 2 playbook calls, got {len(captured)}"
+    # Filter to only the calls belonging to this test — background threads from
+    # earlier tests may still be executing and appending to captured.
+    my_calls = [c for c in captured if c["extravars"].get("vlan_id") == 110]
+    assert len(my_calls) == 2, f"Expected 2 playbook calls for vlan_id=110, got {len(my_calls)} (total captured: {len(captured)})"
 
     seen_hosts = set()
-    for call in captured:
+    for call in my_calls:
         inv = call["inventory"]
         assert inv is not None, "Dynamic inventory was not passed to run_playbook"
         hostname = inv.split()[0]

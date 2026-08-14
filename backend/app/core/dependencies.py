@@ -6,7 +6,7 @@ from app.core.security import verify_token
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
-ROLE_HIERARCHY = {"observer": 1, "operator": 2, "admin": 3}
+ROLE_HIERARCHY = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 4}
 
 
 def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:

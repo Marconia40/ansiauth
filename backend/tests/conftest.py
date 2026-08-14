@@ -1,7 +1,8 @@
 import os
 
-# Must be set before app imports so config.py picks up the test URL.
+# Must be set before app imports so config.py picks up these values.
 os.environ["DATABASE_URL"] = "sqlite:///./test.db"
+os.environ["JWT_SECRET_KEY"] = "test_jwt_secret_key_not_for_production"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,6 +49,11 @@ def observer_client():
 
 
 @pytest.fixture
+def super_admin_client():
+    return _make_client("super-admin")
+
+
+@pytest.fixture
 def unauth_client():
     return TestClient(app)
 
@@ -66,6 +72,33 @@ def reset_rate_limiter():
     rate_limiter.reset()
     yield
     rate_limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_login_attempts():
+    from app.services import login_attempt_service
+    login_attempt_service.reset_all()
+    yield
+    login_attempt_service.reset_all()
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limit_middleware():
+    from app.core import rate_limit_middleware as rl
+    rl.reset()
+    yield
+    rl.reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_refresh_tokens():
+    from app.db.models import RefreshTokenModel
+    from app.db.session import get_session
+    with get_session() as session:
+        session.query(RefreshTokenModel).delete(synchronize_session=False)
+    yield
+    with get_session() as session:
+        session.query(RefreshTokenModel).delete(synchronize_session=False)
 
 
 @pytest.fixture(autouse=True)

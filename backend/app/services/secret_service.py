@@ -2,14 +2,14 @@ import logging
 
 from cryptography.fernet import Fernet
 
-from app.core.config import SECRET_KEY
+from app.core.config import FERNET_KEY
 
 logger = logging.getLogger(__name__)
 
-if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY must be set in .env")
+if not FERNET_KEY:
+    raise RuntimeError("FERNET_KEY must be set in .env")
 
-_fernet = Fernet(SECRET_KEY.encode() if isinstance(SECRET_KEY, str) else SECRET_KEY)
+_fernet = Fernet(FERNET_KEY.encode() if isinstance(FERNET_KEY, str) else FERNET_KEY)
 
 
 def encrypt_password(plain: str) -> str:

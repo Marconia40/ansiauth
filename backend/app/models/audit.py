@@ -16,3 +16,4 @@ class AuditRecord(BaseModel):
     job_id: Optional[str] = None
     device: Optional[str] = None
     request_id: Optional[str] = None
+    parent_audit_id: Optional[str] = None

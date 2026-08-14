@@ -89,9 +89,10 @@ def test_ensure_final_state_clears_stuck_pending():
 
     job_service.ensure_final_state(job.job_id)
 
-    assert job.status == "failed"
-    assert job.error == "Unexpected termination"
-    assert job.finished_at is not None
+    updated = job_service.get_job(job.job_id)
+    assert updated.status == "failed"
+    assert updated.error == "Unexpected termination"
+    assert updated.finished_at is not None
 
 
 def test_ensure_final_state_does_not_touch_completed():
@@ -101,7 +102,8 @@ def test_ensure_final_state_does_not_touch_completed():
 
     job_service.ensure_final_state(job.job_id)
 
-    assert job.status == "completed"
+    updated = job_service.get_job(job.job_id)
+    assert updated.status == "completed"
 
 
 def test_ensure_final_state_clears_stuck_running():
@@ -111,7 +113,8 @@ def test_ensure_final_state_clears_stuck_running():
 
     job_service.ensure_final_state(job.job_id)
 
-    assert job.status == "failed"
+    updated = job_service.get_job(job.job_id)
+    assert updated.status == "failed"
 
 
 def test_ensure_audit_final_state_clears_stuck_pending(admin_client):
@@ -123,13 +126,17 @@ def test_ensure_audit_final_state_clears_stuck_pending(admin_client):
 
     audit_service.ensure_audit_final_state(record.id)
 
+    # Append-only: the original row stays "pending"; a new follow-up row is inserted.
     from app.db.models import AuditLogModel
     from app.db.session import get_session
     with get_session() as session:
-        row = session.query(AuditLogModel).filter_by(id=int(record.id)).first()
-        status = row.status
-        details = dict(row.details or {})
-    assert status == "failed"
+        follow_up = (
+            session.query(AuditLogModel)
+            .filter_by(parent_audit_id=int(record.id), status="failed")
+            .first()
+        )
+        assert follow_up is not None
+        details = dict(follow_up.details or {})
     assert details.get("error", {}).get("type") == "unexpected_termination"
 
 
@@ -166,7 +173,7 @@ def test_jobs_endpoint_returns_all_created_jobs(operator_client, client):
     assert response.status_code == 200
     created_ids = {e["job_id"] for e in response.json()["jobs"]}
 
-    all_jobs = {j["job_id"] for j in client.get("/api/v1/jobs/").json()["data"]}
+    all_jobs = {j["job_id"] for j in client.get("/api/v1/jobs/").json()["items"]}
     assert created_ids.issubset(all_jobs)
 
 
