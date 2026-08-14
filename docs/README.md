@@ -5,7 +5,7 @@
 This project implements a REST API for multi-vendor network device automation.
 The system abstracts vendor-specific configuration through a unified interface and uses Ansible as the automation engine.
 
-It supports real execution against Cisco devices (tested with GNS3 + Cisco IOSv) and a mock mode for development and testing without real hardware.
+It supports real execution against Cisco IOS and Huawei VRP devices (tested with GNS3 + Cisco IOSv and Huawei S-series) and a mock mode for development and testing without real hardware.
 
 ---
 
@@ -69,6 +69,7 @@ pip install -r backend/requirements.txt
 ```bash
 ansible-galaxy collection install cisco.ios
 ansible-galaxy collection install ansible.netcommon
+ansible-galaxy collection install community.network
 ```
 
 ### 5. Configure environment variables
@@ -490,8 +491,9 @@ Devices must be registered before being targeted by VLAN operations. Passwords a
 | `GET` | `/api/v1/devices/{name}` | admin | Get device |
 | `PUT` | `/api/v1/devices/{name}` | admin | Update device (re-encrypts password if changed) |
 | `DELETE` | `/api/v1/devices/{name}` | admin | Remove device |
+| `POST` | `/api/v1/devices/{name}/save` | operator | Save running config to flash |
 
-### Example — Register a device
+### Example — Register a Cisco device
 
 ```json
 POST /api/v1/devices/
@@ -504,7 +506,30 @@ POST /api/v1/devices/
 }
 ```
 
-> **Vendor values:** Use `"cisco_ios"` for Cisco IOS devices. This maps to `ansible_network_os=ios` in the Ansible inventory.
+### Example — Register a Huawei device
+
+```json
+POST /api/v1/devices/
+{
+  "name": "huawei1",
+  "host": "192.168.1.10",
+  "vendor": "huawei_vrp",
+  "username": "admin",
+  "password": "Huawei@123"
+}
+```
+
+> **Vendor values:** Use `"cisco_ios"` (or `"cisco"`) for Cisco IOS. Use `"huawei_vrp"` (or `"huawei"`) for Huawei VRP (S-series and CE-series switches). The vendor determines which Ansible playbooks and connection parameters are used.
+
+### Save Device Configuration
+
+Explicitly persists the running configuration to flash (non-volatile storage). The operation runs asynchronously via the job system and returns a `job_id`.
+
+```
+POST /api/v1/devices/{name}/save
+```
+
+For Huawei devices, this runs `save force` to skip the interactive confirmation prompt. For Cisco IOS devices, configuration is already saved automatically at the end of every VLAN playbook via `save_when: always`, but the endpoint is available if an explicit save is needed.
 
 ---
 
@@ -563,9 +588,31 @@ The purge action itself is recorded in the audit log.
 
 ---
 
+## Multi-Vendor Support
+
+The API supports multiple network operating systems through a vendor driver abstraction. Each vendor driver implements the same interface (`BaseVendorDriver`) and selects the correct Ansible modules and connection parameters for its platform.
+
+| Vendor value | Platform | Ansible collection | Transport |
+|---|---|---|---|
+| `cisco_ios` / `cisco` | Cisco IOS (IOSv, IOS-XE) | `cisco.ios` | `network_cli` |
+| `huawei_vrp` / `huawei` | Huawei VRP (S-series, CE-series) | `community.network` | `network_cli` |
+
+**Cisco IOS** uses `cisco.ios.ios_config` for VLAN operations. Configuration is auto-saved at the end of each playbook via `save_when: always`.
+
+**Huawei VRP** uses `community.network.ce_config` for configuration tasks and `community.network.ce_command` for operational queries. The `ce_config` module handles `system-view` / `quit` transitions internally; explicit mode commands are not required in playbooks. VLAN descriptions use the `description` command (not `name`), consistent with the S-series `display vlan` output format.
+
+---
+
 ## Ansible Integration
 
-Playbooks are located in `backend/ansible/project/vendors/cisco/`. ansible-runner is used to execute them with per-device dynamic inventories.
+Playbooks are organized by vendor under `backend/ansible/project/vendors/`:
+
+| Vendor | Playbook directory |
+|---|---|
+| Cisco IOS | `backend/ansible/project/vendors/cisco/` |
+| Huawei VRP | `backend/ansible/project/vendors/huawei/` |
+
+ansible-runner is used to execute them with per-device dynamic inventories.
 
 Each playbook call receives:
 * A dynamically built, **isolated** inventory string with device credentials (prevents race conditions during parallel execution)
@@ -585,11 +632,11 @@ Each playbook call receives:
 
 ---
 
-## Real Network Integration (GNS3 + Cisco IOSv)
+## Real Network Integration (GNS3)
 
-The API has been tested against Cisco IOSv devices running in GNS3.
+The API has been tested against real devices in GNS3: Cisco IOSv and Huawei S-series switches.
 
-### SSH configuration
+### Cisco IOSv — SSH configuration
 
 Cisco IOSv uses legacy SSH algorithms. Add this to `~/.ssh/config`:
 
@@ -601,6 +648,13 @@ Host 10.10.10.*
 ```
 
 This resolves `no matching key exchange method` and `no matching host key type` errors that occur with modern OpenSSH clients connecting to older Cisco IOS images.
+
+### Huawei S-series — notes
+
+* Register the device with `"vendor": "huawei_vrp"` and use the management IP as `"host"`
+* The `community.network` Ansible collection must be installed (`ansible-galaxy collection install community.network`)
+* VLAN display is parsed from `display vlan` output; both tabular format (S-series) and block format (CE-series) are supported automatically
+* Running config must be saved explicitly with `POST /api/v1/devices/{name}/save` — unlike Cisco, Huawei VRP does not auto-save after each playbook
 
 ### Ansible inventory configuration
 
@@ -703,6 +757,9 @@ Tests run in mock mode by default — no real devices required.
 | Health check endpoint (`/health`) | ✅ |
 | Real Ansible execution | ✅ |
 | GNS3 / Cisco IOSv integration | ✅ |
+| Huawei VRP driver (VLAN CRUD + save_config) | ✅ |
+| Save device configuration endpoint | ✅ |
+| HTTPS / TLS (via `SSL_CERTFILE` env var) | ✅ |
 | Automated test suite (pytest, 16 test files) | ✅ |
 | Database migrations (Alembic) | ✅ |
 | Per-device concurrency locking | ✅ |
@@ -719,19 +776,21 @@ Tests run in mock mode by default — no real devices required.
 * Cisco IOSv requires legacy SSH crypto configuration (see SSH section above)
 * `FERNET_KEY` rotation is not supported — changing it invalidates all stored device passwords; devices must be re-registered
 * Batch Ansible execution (single playbook run across multiple devices) is not supported — each device gets its own playbook invocation
-* Only Cisco IOS (`cisco_ios`) is fully supported; Huawei driver is registered but not implemented (returns an error on use)
+* Huawei VRP does not auto-save after playbook execution — use `POST /api/v1/devices/{name}/save` to persist configuration to flash
+* In-process rate limiter and device locks do not work across multiple backend instances; Redis-backed primitives are required for horizontal scaling
 
 ---
 
 ## Future Improvements
 
-* Huawei VRP vendor driver (VLAN, port, and interface operations)
 * Physical port management API (`/api/v1/devices/{id}/ports/`)
 * Virtual interface (SVI / loopback) management API
 * Global device configuration (hostname, SNMP, NTP, static routes, backup/restore)
+* Full configuration restore / manual rollback endpoint (`POST /api/v1/devices/{name}/restore-config`)
 * Device groups for bulk operations
-* HTTPS/TLS enforcement (currently HTTP only)
+* Redis-backed rate limiter and device locks for multi-instance horizontal scaling
 * Prometheus metrics endpoint (`/metrics`)
+* Alembic migrations for `refresh_tokens` and `login_attempts` tables (currently created via `create_all()` only)
 * WebSocket / SSE support for real-time job status push (currently requires polling)
 * `FERNET_KEY` rotation utility
 
@@ -744,7 +803,7 @@ To replicate the environment:
 1. Clone the repository
 2. Create and activate a virtual environment: `python -m venv venv && source venv/bin/activate`
 3. Install dependencies: `pip install -r backend/requirements.txt`
-4. Install Ansible collections: `ansible-galaxy collection install cisco.ios ansible.netcommon`
+4. Install Ansible collections: `ansible-galaxy collection install cisco.ios ansible.netcommon community.network`
 5. Create `backend/.env` with all required variables (see **Environment Variables** section)
 6. Run the API: `PYTHONPATH=backend uvicorn app.main:app --reload`
 7. On first boot, the admin user is created automatically from `BOOTSTRAP_ADMIN_PASSWORD`

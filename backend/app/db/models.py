@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy.orm import relationship
 
 from app.db.base import Base
 
@@ -46,6 +47,12 @@ class DeviceModel(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
+    )
+
+    group_members = relationship(
+        "DeviceGroupMemberModel",
+        back_populates="device",
+        cascade="all, delete-orphan",
     )
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_name"),)
@@ -113,3 +120,44 @@ class AuditLogModel(Base):
     device = Column(String, nullable=True)
     request_id = Column(String, nullable=True)
     parent_audit_id = Column(Integer, ForeignKey("audit_logs.id"), nullable=True, index=True)
+
+
+class DeviceGroupModel(Base):
+    __tablename__ = "device_groups"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False, unique=True, index=True)
+    description = Column(String, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    members = relationship(
+        "DeviceGroupMemberModel",
+        back_populates="group",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (UniqueConstraint("name", name="uq_device_group_name"),)
+
+
+class DeviceGroupMemberModel(Base):
+    __tablename__ = "device_group_members"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(Integer, ForeignKey("device_groups.id"), nullable=False, index=True)
+    device_name = Column(String, ForeignKey("devices.name"), nullable=False, index=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    group = relationship("DeviceGroupModel", back_populates="members")
+    device = relationship("DeviceModel", back_populates="group_members")
+
+    __table_args__ = (
+        UniqueConstraint("group_id", "device_name", name="uq_group_member"),
+    )

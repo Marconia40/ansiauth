@@ -1,0 +1,11 @@
+---
+- name: Create VLAN on Huawei VRP device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Ensure VLAN exists with name
+      community.network.ce_config:
+        lines:
+          - description {{ vlan_name }}
+        parents: vlan {{ vlan_id }}

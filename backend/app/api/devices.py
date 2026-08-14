@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 
 from app.core.dependencies import require_role
 from app.core.exceptions import NotFoundError, ValidationError
@@ -105,6 +105,29 @@ def update_device(name: str, data: DeviceUpdate, current_user: dict = Depends(re
         details={"name": name, "updated_fields": audit_fields},
     )
     return {"success": True, "data": _to_public(device)}
+
+
+@router.post(
+    "/{name}/save",
+    summary="Save device configuration",
+    description=(
+        "Persist the running configuration to flash on the target device. "
+        "Runs asynchronously — poll the returned job_id for the result. "
+        "Only supported for vendors with a save_config implementation (e.g. Huawei VRP). "
+        "Requires operator role or higher."
+    ),
+)
+def save_device_config(
+    name: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role("operator")),
+):
+    device = device_service.get_device(name)
+    if not device:
+        raise NotFoundError(f"Device '{name}' not found")
+    from app.services.vlan_execution_service import enqueue_save_job
+    entry = enqueue_save_job(name, current_user["username"], background_tasks)
+    return {"success": True, "data": entry}
 
 
 @router.delete(

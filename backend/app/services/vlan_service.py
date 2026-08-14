@@ -120,6 +120,17 @@ def get_vlans(device_id: str | None = None) -> list[dict]:
     return driver.get_vlans(dev, pw)
 
 
+def save_config_on_device(device_id: str) -> dict:
+    if EXECUTION_MODE == "mock":
+        logger.info("Mock: save config on %s", device_id)
+        return {"rc": 0, "stdout": "Simulated config saved", "stderr": ""}
+    dev = _resolve_device(device_id)
+    pw = secret_service.decrypt_password(dev.encrypted_password)
+    driver = _get_driver(dev)
+    logger.info("Real mode: save config on %s vendor=%s platform=%s", dev.name, dev.vendor, dev.platform)
+    return driver.save_config(dev, pw)
+
+
 def vlan_exists(device_id: str, vlan_id: int) -> bool:
     """Return True if the given VLAN is already configured on the device."""
     try:

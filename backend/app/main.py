@@ -73,7 +73,7 @@ def _install_audit_immutability_trigger(engine) -> None:
 
 _install_audit_immutability_trigger(get_engine())
 
-from app.api import audit, auth, devices, health, jobs, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, device_groups, devices, health, jobs, users, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service, job_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
@@ -196,6 +196,12 @@ def _custom_openapi():
         }
     }
     schema["security"] = [{"BearerAuth": []}]
+    # Remove per-endpoint security overrides that reference the now-replaced
+    # OAuth2PasswordBearer scheme — global BearerAuth must apply instead.
+    for path_item in schema.get("paths", {}).values():
+        for operation in path_item.values():
+            if isinstance(operation, dict):
+                operation.pop("security", None)
     app.openapi_schema = schema
     return schema
 
@@ -293,6 +299,7 @@ app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], responses=
 app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"], responses=_err)
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"], responses=_err)
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], responses=_err)
+app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)
 app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], responses=_err)
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"], responses=_err)
 

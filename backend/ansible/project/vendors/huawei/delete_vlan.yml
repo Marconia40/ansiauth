@@ -1,0 +1,10 @@
+---
+- name: Delete VLAN on Huawei VRP device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Remove VLAN
+      community.network.ce_config:
+        lines:
+          - undo vlan {{ vlan_id }}

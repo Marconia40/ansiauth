@@ -19,3 +19,6 @@ class BaseVendorDriver:
 
     def get_vlans(self, device, password: str) -> list[dict]:
         raise NotImplementedError
+
+    def save_config(self, device, password: str) -> dict:
+        raise NotImplementedError

@@ -601,6 +601,59 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
         job_service.ensure_final_state(job_id)
 
 
+def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: float = 1.0):
+    from app.services import device_locks, rate_limiter
+
+    start_time = time.time()
+    logger.info("Job %s: queued — save config on device=%s", job_id, device)
+
+    try:
+        rate_limiter.wait_for_slot(device)
+        lock = device_locks.get_device_lock(device)
+        with lock:
+            job_service.update_job(job_id, "running")
+            logger.info("Job %s: started — save config on device=%s", job_id, device)
+
+            result, retry_count = _execute_with_retry(
+                lambda: vlan_service.save_config_on_device(device),
+                job_id,
+                retry_base_delay=retry_base_delay,
+            )
+            duration = time.time() - start_time
+
+            if result["rc"] != 0:
+                error_msg = result.get("stderr") or result.get("stdout") or "save_config playbook failed"
+                logger.error("Job %s: failed — save config on device=%s: %s", job_id, device, error_msg)
+                job_service.update_job(job_id, "failed", error=error_msg, retry_count=retry_count)
+                audit_service.append_audit_event(audit_id, "failed", {
+                    "retries": retry_count,
+                    "duration_seconds": round(duration, 2),
+                    "error": _structured_error(result),
+                    "error_type": classify_error(result),
+                })
+            else:
+                job_service.update_job(job_id, "completed", result={"output": result["stdout"]}, retry_count=retry_count)
+                audit_service.append_audit_event(audit_id, "completed", {
+                    "retries": retry_count,
+                    "duration_seconds": round(duration, 2),
+                })
+                logger.info("Job %s: completed — config saved on device=%s in %.2fs", job_id, device, duration)
+
+    except Exception as exc:
+        duration = time.time() - start_time
+        error_msg = str(exc)
+        logger.error("Job %s: unexpected failure on device=%s: %s", job_id, device, error_msg)
+        job_service.update_job(job_id, "failed", error=error_msg)
+        audit_service.append_audit_event(audit_id, "failed", {
+            "error": {"type": "unexpected_error", "message": error_msg},
+            "duration_seconds": round(duration, 2),
+            "error_type": "permanent",
+        })
+
+    finally:
+        job_service.ensure_final_state(job_id)
+
+
 # ── Enqueue helpers (called by route handlers) ────────────────────────────────
 
 def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> list[dict]:
@@ -643,6 +696,21 @@ def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, backgro
         )
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
     return job_entries
+
+
+def enqueue_save_job(device_name: str, username: str, background_tasks: BackgroundTasks, retry_base_delay: float = 1.0) -> dict:
+    job = job_service.create_job(
+        playbook="save_config.yml",
+        device=device_name,
+        parameters={},
+    )
+    audit = audit_service.log_action(
+        user=username, action="save_config", resource="device",
+        details={"device": device_name},
+        status="pending", job_id=job.job_id, device=device_name,
+    )
+    background_tasks.add_task(run_save_job, job.job_id, device_name, audit.id, retry_base_delay)
+    return {"device": device_name, "job_id": job.job_id, "status": job.status}
 
 
 def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> list[dict]:

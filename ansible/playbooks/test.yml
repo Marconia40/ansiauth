@@ -1,0 +1,14 @@
+---
+- name: Test Huawei
+  hosts: huawei
+  gather_facts: no
+
+  tasks:
+    - name: Show version
+      community.network.ce_command:
+        commands:
+          - display version
+      register: output
+
+    - debug:
+        var: output.stdout_lines

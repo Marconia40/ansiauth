@@ -1,0 +1,12 @@
+---
+- name: Create VLAN on Huawei VRP device
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Create VLAN {{ vlan_id }}
+      community.network.ce_command:
+        commands:
+          - system-view
+          - vlan {{ vlan_id }}
+          - name {{ vlan_name }}
+          - return
