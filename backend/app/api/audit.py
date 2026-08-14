@@ -10,7 +10,16 @@ from app.services import audit_service
 router = APIRouter()
 
 
-@router.post("/purge")
+@router.post(
+    "/purge",
+    summary="Purge audit log",
+    description=(
+        "Delete audit records older than `retention_days`. "
+        "Defaults to the server-configured retention period. "
+        "Parent records referenced by newer child rows are preserved to maintain chain integrity. "
+        "Requires super-admin role."
+    ),
+)
 def purge_audit_log(
     retention_days: Optional[int] = Query(default=None, ge=1),
     current_user: dict = Depends(require_role("super-admin")),
@@ -23,7 +32,15 @@ def purge_audit_log(
     return {"success": True, "data": {"deleted": deleted, "retention_days": days}}
 
 
-@router.get("/")
+@router.get(
+    "/",
+    summary="List audit log",
+    description=(
+        "Return append-only audit log entries in reverse chronological order. "
+        "Supports filtering by `user`, `action`, `resource`, `device_id`, and UTC date range. "
+        "Paginated via `skip`/`limit`. Requires admin role or higher."
+    ),
+)
 def get_audit_log(
     user: Optional[str] = None,
     action: Optional[str] = None,

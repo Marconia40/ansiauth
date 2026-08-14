@@ -11,7 +11,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/")
+@router.post(
+    "/",
+    summary="Create user",
+    description=(
+        "Create a new user account. Admin role is required; "
+        "only super-admins may create super-admin accounts. "
+        "Passwords are hashed with PBKDF2-SHA256 and never returned in responses."
+    ),
+)
 def create_user(data: UserCreate, current_user: dict = Depends(require_role("admin"))):
     if data.role == "super-admin" and current_user["role"] != "super-admin":
         raise HTTPException(status_code=403, detail="Only super-admins can create super-admin accounts")
@@ -29,7 +37,15 @@ def create_user(data: UserCreate, current_user: dict = Depends(require_role("adm
     return {"success": True, "data": user.model_dump()}
 
 
-@router.get("/")
+@router.get(
+    "/",
+    summary="List users",
+    description=(
+        "Return all user accounts. Active users only by default; "
+        "pass `include_inactive=true` to include deactivated accounts. "
+        "Paginated — defaults to 50 per page. Requires admin role or higher."
+    ),
+)
 def list_users(
     current_user: dict = Depends(require_role("admin")),
     include_inactive: bool = Query(default=False),
@@ -48,7 +64,11 @@ def list_users(
     }
 
 
-@router.get("/{user_id}")
+@router.get(
+    "/{user_id}",
+    summary="Get user",
+    description="Return a single user by numeric ID. Requires admin role or higher.",
+)
 def get_user(user_id: int, current_user: dict = Depends(require_role("admin"))):
     user = user_service.get_by_id(user_id)
     if user is None:
@@ -56,7 +76,15 @@ def get_user(user_id: int, current_user: dict = Depends(require_role("admin"))):
     return {"success": True, "data": user.model_dump()}
 
 
-@router.put("/{user_id}")
+@router.put(
+    "/{user_id}",
+    summary="Update user",
+    description=(
+        "Update user fields: email, role, password, or active status. "
+        "All fields are optional. The last active admin and last active super-admin "
+        "cannot be deactivated via this endpoint. Requires super-admin role."
+    ),
+)
 def update_user(user_id: int, data: UserUpdate, current_user: dict = Depends(require_role("super-admin"))):
     try:
         user = user_service.update_user(user_id, data)
@@ -72,7 +100,14 @@ def update_user(user_id: int, data: UserUpdate, current_user: dict = Depends(req
     return {"success": True, "data": user.model_dump()}
 
 
-@router.delete("/{user_id}")
+@router.delete(
+    "/{user_id}",
+    summary="Deactivate user",
+    description=(
+        "Soft-delete a user account. The last active admin or super-admin cannot be deactivated. "
+        "The user record is retained for audit purposes. Requires super-admin role."
+    ),
+)
 def deactivate_user(user_id: int, current_user: dict = Depends(require_role("super-admin"))):
     try:
         user = user_service.deactivate_user(user_id)

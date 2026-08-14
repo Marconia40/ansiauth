@@ -10,7 +10,16 @@ from app.services.auth_service import authenticate_user
 router = APIRouter()
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    summary="Login",
+    description=(
+        "Authenticate with username and password using OAuth2 form data. "
+        "Returns a short-lived JWT access token and a rotating refresh token. "
+        "Accounts are locked after repeated failures."
+    ),
+)
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     ip = request.client.host if request.client else "unknown"
     username = form_data.username
@@ -63,7 +72,15 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token}
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    summary="Refresh access token",
+    description=(
+        "Exchange a valid refresh token for a new access token and a rotated refresh token. "
+        "The old refresh token is invalidated on use."
+    ),
+)
 def refresh(body: RefreshRequest):
     try:
         new_refresh_token, username = refresh_token_service.validate_and_rotate(body.refresh_token)
@@ -86,13 +103,26 @@ def refresh(body: RefreshRequest):
     return {"access_token": access_token, "token_type": "bearer", "refresh_token": new_refresh_token}
 
 
-@router.post("/logout", status_code=200)
+@router.post(
+    "/logout",
+    status_code=200,
+    summary="Logout",
+    description="Revoke a refresh token immediately. Subsequent refresh attempts with the same token will return 401.",
+)
 def logout(body: LogoutRequest):
     revoked = refresh_token_service.revoke(body.refresh_token)
     return {"success": True, "data": {"revoked": revoked}}
 
 
-@router.post("/unlock/{username}", status_code=200)
+@router.post(
+    "/unlock/{username}",
+    status_code=200,
+    summary="Unlock account",
+    description=(
+        "Clear all failed login attempts for a locked user account. "
+        "Requires admin role or higher."
+    ),
+)
 def unlock_account(username: str, current_user: dict = Depends(require_role("admin"))):
     count = login_attempt_service.unlock_username(username)
     audit_service.log_action(

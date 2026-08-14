@@ -46,6 +46,9 @@ RATE_LIMIT_PER_USER: int = _parse_int("RATE_LIMIT_PER_USER", 200)
 RATE_LIMIT_LOGIN: int = _parse_int("RATE_LIMIT_LOGIN", 5)
 REFRESH_TOKEN_EXPIRE_DAYS: int = _parse_int("REFRESH_TOKEN_EXPIRE_DAYS", 7)
 
+SSL_CERTFILE: str | None = os.getenv("SSL_CERTFILE") or None
+SSL_KEYFILE: str | None = os.getenv("SSL_KEYFILE") or None
+
 _raw_retention = os.getenv("AUDIT_RETENTION_DAYS", "90")
 try:
     AUDIT_RETENTION_DAYS = int(_raw_retention)

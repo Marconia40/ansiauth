@@ -1,13 +1,22 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 _VALID_ROLES = {"super-admin", "admin", "operator", "observer"}
 
 
 class UserCreate(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "username": "operator1",
+            "password": "securepassword1",
+            "role": "operator",
+            "email": "operator1@example.com",
+        }
+    })
+
     username: str = Field(..., min_length=3, max_length=64)
     password: str = Field(..., min_length=8)
     role: str = Field(default="observer")
@@ -29,6 +38,10 @@ class UserRead(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"email": "newmail@example.com", "role": "admin"}
+    })
+
     email: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None

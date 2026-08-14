@@ -22,12 +22,20 @@ def _to_public(device) -> dict:
     ).model_dump()
 
 
-@router.get("/")
+@router.get(
+    "/",
+    summary="List devices",
+    description="Return all registered network devices. Credentials are never included in responses. Requires observer role or higher.",
+)
 def list_devices(current_user: dict = Depends(require_role("observer"))):
     return {"success": True, "data": [_to_public(d) for d in device_service.get_devices()]}
 
 
-@router.get("/{name}")
+@router.get(
+    "/{name}",
+    summary="Get device",
+    description="Return a single device by its unique name. Requires observer role or higher.",
+)
 def get_device(name: str, current_user: dict = Depends(require_role("observer"))):
     device = device_service.get_device(name)
     if not device:
@@ -35,7 +43,15 @@ def get_device(name: str, current_user: dict = Depends(require_role("observer"))
     return {"success": True, "data": _to_public(device)}
 
 
-@router.post("/")
+@router.post(
+    "/",
+    summary="Register device",
+    description=(
+        "Add a new network device to the inventory. "
+        "The password is encrypted at rest using AES-256 and never returned in responses. "
+        "Requires admin role."
+    ),
+)
 def create_device(data: DeviceCreate, current_user: dict = Depends(require_role("admin"))):
     try:
         device = device_service.create_device(
@@ -57,7 +73,15 @@ def create_device(data: DeviceCreate, current_user: dict = Depends(require_role(
     return {"success": True, "data": _to_public(device)}
 
 
-@router.put("/{name}")
+@router.put(
+    "/{name}",
+    summary="Update device",
+    description=(
+        "Update connection details for a registered device. "
+        "All fields are optional — only provided fields are changed. "
+        "Requires admin role."
+    ),
+)
 def update_device(name: str, data: DeviceUpdate, current_user: dict = Depends(require_role("admin"))):
     changed = data.model_dump(exclude_none=True)
     if not changed:
@@ -83,7 +107,11 @@ def update_device(name: str, data: DeviceUpdate, current_user: dict = Depends(re
     return {"success": True, "data": _to_public(device)}
 
 
-@router.delete("/{name}")
+@router.delete(
+    "/{name}",
+    summary="Delete device",
+    description="Permanently remove a device from the inventory. Requires admin role.",
+)
 def delete_device(name: str, current_user: dict = Depends(require_role("admin"))):
     device = device_service.delete_device(name)
     if not device:

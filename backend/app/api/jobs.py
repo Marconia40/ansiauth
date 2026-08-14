@@ -41,7 +41,16 @@ def _ensure_aware(dt: Optional[datetime]) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-@router.get("/")
+@router.get(
+    "/",
+    summary="List jobs",
+    description=(
+        "List background Ansible execution jobs with optional filters. "
+        "Supports filtering by status (`pending`, `running`, `completed`, `failed`, `cancelled`), "
+        "device, and date range. Paginated — defaults to 50 per page. "
+        "Accessible to all authenticated users."
+    ),
+)
 def list_jobs(
     current_user: dict = Depends(get_current_user),
     status: Optional[str] = Query(default=None),
@@ -78,7 +87,11 @@ def list_jobs(
     }
 
 
-@router.get("/{job_id}")
+@router.get(
+    "/{job_id}",
+    summary="Get job",
+    description="Return the full status and result of a single background job by its UUID. Accessible to all authenticated users.",
+)
 def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     job = job_service.get_job(job_id)
     if not job:
@@ -86,7 +99,15 @@ def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     return {"success": True, "data": _format_job(job)}
 
 
-@router.post("/{job_id}/cancel")
+@router.post(
+    "/{job_id}/cancel",
+    summary="Cancel job",
+    description=(
+        "Request cancellation of a pending job. "
+        "Jobs that have already started cannot be cancelled — a 409 is returned in that case. "
+        "Accessible to all authenticated users."
+    ),
+)
 def cancel_job(job_id: str, current_user: dict = Depends(get_current_user)):
     job = job_service.cancel_job(job_id)
     if not job:

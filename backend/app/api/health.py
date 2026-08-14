@@ -20,7 +20,16 @@ def _ping_db() -> bool:
         return False
 
 
-@router.get("/health", tags=["health"])
+@router.get(
+    "/health",
+    tags=["health"],
+    summary="Health check",
+    description=(
+        "Returns API and database liveness status. "
+        "Returns 200 when healthy, 503 when the database is unreachable. "
+        "No authentication required."
+    ),
+)
 def health():
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_ping_db)
