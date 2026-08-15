@@ -19,7 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.config import AUDIT_RETENTION_DAYS, DATABASE_URL, SSL_CERTFILE
-from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, DeviceExecutionError, NotFoundError, ValidationError
 from app.schemas.error import ErrorResponse, make_error  # noqa: F401 — re-exported for OpenAPI
 from app.db.base import Base
 from app.db.session import get_engine, init_db
@@ -48,6 +48,21 @@ def _migrate_device_platform(engine) -> None:
 _migrate_device_platform(get_engine())
 
 
+def _migrate_rollback_success(engine) -> None:
+    """Add the rollback_success column to jobs if it was not present in an older DB."""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "jobs" in inspector.get_table_names():
+        existing_cols = {c["name"] for c in inspector.get_columns("jobs")}
+        if "rollback_success" not in existing_cols:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN rollback_success BOOLEAN DEFAULT NULL"))
+                conn.commit()
+            logger.info("Migration applied: added 'rollback_success' column to jobs")
+
+_migrate_rollback_success(get_engine())
+
+
 def _migrate_audit_log_columns(engine) -> None:
     """Add columns to audit_logs that were introduced after the initial schema."""
     from sqlalchemy import inspect as sa_inspect, text
@@ -70,6 +85,110 @@ def _migrate_audit_log_columns(engine) -> None:
 _migrate_audit_log_columns(get_engine())
 
 
+def _migrate_group_job_id(engine) -> None:
+    """Add the group_job_id column to jobs if it was not present in an older DB."""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "jobs" in inspector.get_table_names():
+        existing_cols = {c["name"] for c in inspector.get_columns("jobs")}
+        if "group_job_id" not in existing_cols:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN group_job_id VARCHAR DEFAULT NULL"))
+                conn.commit()
+            logger.info("Migration applied: added 'group_job_id' column to jobs")
+
+_migrate_group_job_id(get_engine())
+
+
+def _migrate_device_site_id(engine) -> None:
+    """Add the site_id column to devices if it was not present in an older DB."""
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "devices" in inspector.get_table_names():
+        existing_cols = {c["name"] for c in inspector.get_columns("devices")}
+        if "site_id" not in existing_cols:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE devices ADD COLUMN site_id INTEGER REFERENCES sites(id)"))
+                conn.commit()
+            logger.info("Migration applied: added 'site_id' column to devices")
+
+_migrate_device_site_id(get_engine())
+
+
+def _backfill_user_allowed_sites(engine) -> None:
+    """Ensure each non-admin user with no allowed_sites rows gets one row per existing site.
+
+    Runs on every startup but is idempotent — never duplicates existing rows.
+    Lets the policy switch be non-breaking for already-deployed databases.
+    """
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    needed = {"users", "sites", "user_allowed_sites"}
+    if not needed.issubset(set(inspector.get_table_names())):
+        return
+    with engine.connect() as conn:
+        # Only seed users who have zero allowed_sites rows and aren't admins —
+        # that way an admin who explicitly empties a user's set never gets it re-filled.
+        result = conn.execute(text("""
+            INSERT INTO user_allowed_sites (user_id, site_id, created_at)
+            SELECT u.id, s.id, CURRENT_TIMESTAMP
+              FROM users u
+             CROSS JOIN sites s
+             WHERE u.role NOT IN ('admin', 'super-admin')
+               AND NOT EXISTS (SELECT 1 FROM user_allowed_sites x WHERE x.user_id = u.id)
+        """))
+        inserted = getattr(result, "rowcount", 0) or 0
+        if inserted > 0:
+            conn.commit()
+            logger.info("Backfilled %d user_allowed_sites rows", inserted)
+
+_backfill_user_allowed_sites(get_engine())
+
+
+def _migrate_device_group_site_id(engine) -> None:
+    """Add the site_id column to device_groups (idempotent) and backfill rows
+    whose members all live in the same site. Mixed-site groups are left with
+    site_id=NULL — admins must clean them up before non-admin RBAC will surface them.
+    """
+    from sqlalchemy import inspect as sa_inspect, text
+    inspector = sa_inspect(engine)
+    if "device_groups" not in inspector.get_table_names():
+        return
+    existing_cols = {c["name"] for c in inspector.get_columns("device_groups")}
+    if "site_id" not in existing_cols:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE device_groups ADD COLUMN site_id INTEGER REFERENCES sites(id)"))
+            conn.commit()
+        logger.info("Migration applied: added 'site_id' column to device_groups")
+    # Backfill only NULL-site groups whose members all share a single site.
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            UPDATE device_groups
+               SET site_id = (
+                   SELECT MIN(d.site_id)
+                     FROM device_group_members m
+                     JOIN devices d ON d.name = m.device_name
+                    WHERE m.group_id = device_groups.id
+                      AND d.site_id IS NOT NULL
+               )
+             WHERE site_id IS NULL
+               AND id IN (
+                   SELECT m.group_id
+                     FROM device_group_members m
+                     JOIN devices d ON d.name = m.device_name
+                    GROUP BY m.group_id
+                   HAVING MIN(d.site_id) = MAX(d.site_id)
+                      AND MIN(d.site_id) IS NOT NULL
+               )
+        """))
+        affected = getattr(result, "rowcount", 0) or 0
+        if affected > 0:
+            conn.commit()
+            logger.info("Backfilled site_id on %d device_groups", affected)
+
+_migrate_device_group_site_id(get_engine())
+
+
 def _install_audit_immutability_trigger(engine) -> None:
     """Create a BEFORE UPDATE trigger that prevents any mutation of audit_logs rows."""
     from sqlalchemy import text
@@ -86,7 +205,7 @@ def _install_audit_immutability_trigger(engine) -> None:
 
 _install_audit_immutability_trigger(get_engine())
 
-from app.api import audit, auth, device_groups, devices, health, jobs, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service, job_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
@@ -242,6 +361,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Total-Count"],
 )
 
 
@@ -306,6 +426,12 @@ async def not_found_error_handler(request: Request, exc: NotFoundError):
     return JSONResponse(status_code=404, content=make_error(404, str(exc), "NOT_FOUND"))
 
 
+@app.exception_handler(ConflictError)
+async def conflict_error_handler(request: Request, exc: ConflictError):
+    logger.warning("Conflict: %s", str(exc))
+    return JSONResponse(status_code=409, content=make_error(409, str(exc), "CONFLICT"))
+
+
 @app.exception_handler(DeviceExecutionError)
 async def device_execution_error_handler(request: Request, exc: DeviceExecutionError):
     logger.error("Device execution error: %s", str(exc))
@@ -327,8 +453,10 @@ app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"], respons
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"], responses=_err)
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], responses=_err)
 app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)
+app.include_router(sites.router, prefix="/api/v1/sites", tags=["sites"], responses=_err)
 app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], responses=_err)
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"], responses=_err)
+app.include_router(group_jobs.router, prefix="/api/v1/group-jobs", tags=["group-jobs"], responses=_err)
 
 
 @app.get("/")

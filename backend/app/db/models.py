@@ -27,9 +27,33 @@ class UserModel(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
+    allowed_sites = relationship(
+        "SiteModel",
+        secondary="user_allowed_sites",
+        back_populates="allowed_users",
+    )
+
     __table_args__ = (
         UniqueConstraint("username", name="uq_user_username"),
         UniqueConstraint("email", name="uq_user_email"),
+    )
+
+
+class UserAllowedSiteModel(Base):
+    """Many-to-many association table: which sites a (non-admin) user may access."""
+
+    __tablename__ = "user_allowed_sites"
+
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    site_id = Column(
+        Integer, ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -43,6 +67,12 @@ class DeviceModel(Base):
     platform = Column(String, nullable=True)  # nullable for backward compat with existing rows
     username = Column(String, nullable=False)
     encrypted_password = Column(String, nullable=False)
+    site_id = Column(
+        Integer,
+        ForeignKey("sites.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -54,6 +84,7 @@ class DeviceModel(Base):
         back_populates="device",
         cascade="all, delete-orphan",
     )
+    site = relationship("SiteModel", back_populates="devices")
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_name"),)
 
@@ -75,13 +106,30 @@ class JobModel(Base):
     retry_count = Column(Integer, nullable=False, default=0)
     max_retries = Column(Integer, nullable=False, default=3)
     rollback_performed = Column(Boolean, nullable=False, default=False)
+    rollback_success = Column(Boolean, nullable=True)
     pre_state = Column(JSON, nullable=True)
     last_error = Column(Text, nullable=True)
     current_step = Column(String, nullable=True)
+    group_job_id = Column(String, nullable=True, index=True)
 
     __table_args__ = (
         Index("ix_jobs_status_created_at", "status", "created_at"),
     )
+
+
+class GroupJobModel(Base):
+    __tablename__ = "group_jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_job_id = Column(String, nullable=False, unique=True, index=True)
+    status = Column(String, nullable=False, default="pending", index=True)
+    operation = Column(String, nullable=True)
+    playbook = Column(String, nullable=True)
+    parameters = Column(JSON, nullable=True)
+    device_results = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class RefreshTokenModel(Base):
@@ -128,6 +176,12 @@ class DeviceGroupModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True, index=True)
     description = Column(String, nullable=True)
+    site_id = Column(
+        Integer,
+        ForeignKey("sites.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -139,8 +193,38 @@ class DeviceGroupModel(Base):
         back_populates="group",
         cascade="all, delete-orphan",
     )
+    site = relationship("SiteModel", back_populates="device_groups")
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_group_name"),)
+
+
+class SiteModel(Base):
+    __tablename__ = "sites"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False, unique=True, index=True)
+    description = Column(String, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    devices = relationship("DeviceModel", back_populates="site")
+    device_groups = relationship("DeviceGroupModel", back_populates="site")
+    allowed_users = relationship(
+        "UserModel",
+        secondary="user_allowed_sites",
+        back_populates="allowed_sites",
+    )
+
+    __table_args__ = (UniqueConstraint("name", name="uq_site_name"),)
 
 
 class DeviceGroupMemberModel(Base):

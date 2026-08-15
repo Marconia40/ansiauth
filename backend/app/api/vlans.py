@@ -2,6 +2,7 @@ import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
+from app.core import authz
 from app.core.dependencies import require_role
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
 from app.schemas.vlan import VLANCreate, VLANDelete, VLANUpdate
@@ -34,6 +35,7 @@ def get_vlans(
     from app.services import device_locks
 
     if devices:
+        authz.ensure_devices_allowed(current_user, devices)
         result = {}
         for dev in devices:
             try:
@@ -52,6 +54,9 @@ def get_vlans(
 
     if device is None and vlan_service.EXECUTION_MODE != "mock":
         raise ValidationError("'device' query parameter is required")
+
+    if device is not None:
+        authz.ensure_device_allowed(current_user, device)
 
     try:
         if device is not None:
@@ -95,8 +100,9 @@ def create_vlan(
     for dev_name in vlan.devices:
         if not device_service.get_device(dev_name):
             raise NotFoundError(f"Device '{dev_name}' not found")
-    jobs = vlan_execution_service.enqueue_create_jobs(vlan, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
-    return {"success": True, "jobs": jobs}
+    authz.ensure_devices_allowed(current_user, vlan.devices)
+    jobs, group_job_id = vlan_execution_service.enqueue_create_jobs(vlan, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
 @router.delete(
@@ -122,8 +128,9 @@ def delete_vlan(
     for dev_name in data.devices:
         if not device_service.get_device(dev_name):
             raise NotFoundError(f"Device '{dev_name}' not found")
-    jobs = vlan_execution_service.enqueue_delete_jobs(vlan_id, data.devices, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
-    return {"success": True, "jobs": jobs}
+    authz.ensure_devices_allowed(current_user, data.devices)
+    jobs, group_job_id = vlan_execution_service.enqueue_delete_jobs(vlan_id, data.devices, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
 @router.patch(
@@ -149,5 +156,6 @@ def update_vlan(
     for dev_name in data.devices:
         if not device_service.get_device(dev_name):
             raise NotFoundError(f"Device '{dev_name}' not found")
-    jobs = vlan_execution_service.enqueue_update_jobs(vlan_id, data, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
-    return {"success": True, "jobs": jobs}
+    authz.ensure_devices_allowed(current_user, data.devices)
+    jobs, group_job_id = vlan_execution_service.enqueue_update_jobs(vlan_id, data, current_user["username"], background_tasks, _RETRY_BASE_DELAY)
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}

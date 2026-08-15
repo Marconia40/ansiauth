@@ -7,8 +7,9 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getVlans, createVlan, updateVlan, deleteVlan } from '@/services/api';
+import { getDevices, getVlans, createVlan, updateVlan, deleteVlan, getSites } from '@/services/api';
 import type { Device } from '@/types/device';
+import type { Site } from '@/types/site';
 import type { VlanEntry } from '@/types/vlan';
 
 function extractMessage(error: unknown, fallback: string): string {
@@ -18,10 +19,11 @@ function extractMessage(error: unknown, fallback: string): string {
 
 export default function VlansPage() {
   const { user } = useAuth();
-  const { trackJob } = useJobNotifications();
+  const { trackJob, trackGroupJob } = useJobNotifications();
   const canMutate = !!user && user.role !== 'observer';
 
-  const [selectedDevice, setSelectedDevice] = useState('');
+  const [selectedDevices, setSelectedDevices] = useState<string[]>([]);
+  const [siteFilter, setSiteFilter] = useState<string>(''); // '' = All sites
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingVlanId, setDeletingVlanId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -56,7 +58,25 @@ export default function VlansPage() {
     queryFn: getDevices,
   });
 
-  const effectiveDevice = selectedDevice || (devices?.[0]?.name ?? '');
+  const { data: sites } = useQuery<Site[]>({
+    queryKey: ['sites'],
+    queryFn: getSites,
+  });
+  const siteList = sites ?? [];
+
+  // Narrow the device list by selected site (UX filter only — backend unchanged).
+  const filteredDevices = (devices ?? []).filter(
+    (d) => !siteFilter || String(d.site_id ?? '') === siteFilter,
+  );
+
+  // When the visible set shrinks, drop checkboxes that are no longer in scope.
+  const visibleNames = filteredDevices.map((d) => d.name);
+  const inScopeSelected = selectedDevices.filter((n) => visibleNames.includes(n));
+
+  const effectiveDevices =
+    inScopeSelected.length > 0
+      ? inScopeSelected
+      : filteredDevices[0]?.name ? [filteredDevices[0].name] : [];
 
   const {
     data: vlans,
@@ -65,9 +85,9 @@ export default function VlansPage() {
     error: vlansError,
     refetch,
   } = useQuery<VlanEntry[]>({
-    queryKey: ['vlans', effectiveDevice],
-    queryFn: () => getVlans(effectiveDevice),
-    enabled: !!effectiveDevice,
+    queryKey: ['vlans', effectiveDevices[0]],
+    queryFn: () => getVlans(effectiveDevices[0]),
+    enabled: effectiveDevices.length > 0,
   });
 
   async function handleCreate(e: React.FormEvent) {
@@ -78,12 +98,16 @@ export default function VlansPage() {
     setErrorMessage(null);
     const capturedVlanId = newVlanId;
     try {
-      const jobs = await createVlan({ vlan_id: Number(newVlanId), name: newVlanName.trim(), devices: [effectiveDevice] });
+      const result = await createVlan({ vlan_id: Number(newVlanId), name: newVlanName.trim(), devices: effectiveDevices });
       setNewVlanId('');
       setNewVlanName('');
       await refetch();
-      if (jobs.length > 0) {
-        trackJob(jobs[0].job_id, `Create VLAN ${capturedVlanId}`, effectiveDevice);
+      if (effectiveDevices.length > 1) {
+        trackGroupJob(result.group_job_id, `Create VLAN ${capturedVlanId}`);
+      } else {
+        for (const j of result.jobs) {
+          trackJob(j.job_id, `Create VLAN ${capturedVlanId}`, j.device);
+        }
       }
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Create failed'));
@@ -109,12 +133,16 @@ export default function VlansPage() {
     setErrorMessage(null);
     const capturedVlanId = editingVlanId!;
     try {
-      const jobs = await updateVlan(editingVlanId!, { description: editingName.trim(), devices: [effectiveDevice] });
+      const result = await updateVlan(editingVlanId!, { description: editingName.trim(), devices: effectiveDevices });
       setEditingVlanId(null);
       setEditingName('');
       await refetch();
-      if (jobs.length > 0) {
-        trackJob(jobs[0].job_id, `Update VLAN ${capturedVlanId}`, effectiveDevice);
+      if (effectiveDevices.length > 1) {
+        trackGroupJob(result.group_job_id, `Update VLAN ${capturedVlanId}`);
+      } else {
+        for (const j of result.jobs) {
+          trackJob(j.job_id, `Update VLAN ${capturedVlanId}`, j.device);
+        }
       }
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Operation failed'));
@@ -124,15 +152,20 @@ export default function VlansPage() {
   }
 
   async function handleDelete(vlan: VlanEntry) {
-    if (!window.confirm(`Delete VLAN ${vlan.vlan_id} from ${effectiveDevice}?`)) return;
+    const deviceList = effectiveDevices.join(', ');
+    if (!window.confirm(`Delete VLAN ${vlan.vlan_id} from ${deviceList}?`)) return;
     setDeletingVlanId(vlan.vlan_id);
     setIsSubmitting(true);
     setErrorMessage(null);
     try {
-      const jobs = await deleteVlan(vlan.vlan_id, { devices: [effectiveDevice] });
+      const result = await deleteVlan(vlan.vlan_id, { devices: effectiveDevices });
       await refetch();
-      if (jobs.length > 0) {
-        trackJob(jobs[0].job_id, `Delete VLAN ${vlan.vlan_id}`, effectiveDevice);
+      if (effectiveDevices.length > 1) {
+        trackGroupJob(result.group_job_id, `Delete VLAN ${vlan.vlan_id}`);
+      } else {
+        for (const j of result.jobs) {
+          trackJob(j.job_id, `Delete VLAN ${vlan.vlan_id}`, j.device);
+        }
       }
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Delete failed'));
@@ -149,7 +182,7 @@ export default function VlansPage() {
         actions={
           <button
             onClick={() => refetch()}
-            disabled={vlansLoading || vlansFetching || !effectiveDevice || isSubmitting}
+            disabled={vlansLoading || vlansFetching || effectiveDevices.length === 0 || isSubmitting}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {vlansFetching ? 'Refreshing...' : 'Refresh'}
@@ -158,29 +191,62 @@ export default function VlansPage() {
       />
       <p className="text-sm text-gray-500 mb-6">View VLANs configured on managed devices</p>
 
-      <div className="mb-6">
+      <div className="mb-6 space-y-3">
+        <div className="flex items-center gap-2">
+          <label htmlFor="site-filter" className="text-sm text-gray-700">Site:</label>
+          <select
+            id="site-filter"
+            value={siteFilter}
+            onChange={(e) => setSiteFilter(e.target.value)}
+            className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">All Sites</option>
+            {siteList.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </div>
+
         {devicesLoading ? (
           <LoadingSpinner size="sm" />
         ) : devicesError ? (
           <ErrorMessage error={extractMessage(devicesError, 'Could not load devices')} />
-        ) : devices && devices.length > 0 ? (
-          <select
-            value={effectiveDevice}
-            onChange={(e) => setSelectedDevice(e.target.value)}
-            className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            {devices.map((device) => (
-              <option key={device.name} value={device.name}>
-                {device.name}
-              </option>
+        ) : filteredDevices.length > 0 ? (
+          <div className="flex flex-wrap gap-3">
+            {filteredDevices.map((device) => (
+              <label
+                key={device.name}
+                className="flex items-center gap-1.5 text-sm cursor-pointer select-none"
+              >
+                <input
+                  type="checkbox"
+                  checked={effectiveDevices.includes(device.name)}
+                  onChange={(e) => {
+                    setSelectedDevices((prev) =>
+                      e.target.checked
+                        ? [...prev, device.name]
+                        : prev.filter((d) => d !== device.name),
+                    );
+                  }}
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-gray-700">
+                  {device.name}
+                  {device.site_name && (
+                    <span className="ml-1 text-xs text-gray-400">({device.site_name})</span>
+                  )}
+                </span>
+              </label>
             ))}
-          </select>
+          </div>
         ) : (
-          <p className="text-sm text-gray-400">No devices available.</p>
+          <p className="text-sm text-gray-400">
+            {siteFilter ? 'No devices in this site.' : 'No devices available.'}
+          </p>
         )}
       </div>
 
-      {effectiveDevice && (
+      {effectiveDevices.length > 0 && (
         <>
           {canMutate && (
             <form onSubmit={handleCreate} className="flex gap-2 mb-6 items-center">

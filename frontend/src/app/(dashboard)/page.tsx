@@ -5,11 +5,15 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
+import { StatusBadge } from '@/components/StatusBadge';
+import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { useAuth } from '@/context/AuthContext';
-import { getDevices, getJobs, getAuditLogs } from '@/services/api';
+import { getDevices, getJobs, getAuditLogs, getSites } from '@/services/api';
+import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Device } from '@/types/device';
 import type { Job } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
+import type { Site } from '@/types/site';
 
 function extractMessage(error: unknown, fallback: string): string {
   const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
@@ -19,15 +23,9 @@ function extractMessage(error: unknown, fallback: string): string {
 function statusColor(status: string): string {
   if (status === 'completed' || status === 'success') return 'text-green-600';
   if (status === 'failed' || status === 'error' || status === 'cancelled') return 'text-red-600';
-  if (status === 'pending' || status === 'running' || status === 'retrying') return 'text-amber-600';
+  if ((ACTIVE_JOB_STATUSES as string[]).includes(status)) return 'text-amber-600';
+  if (status === 'partial_failure' || status === 'partial_success' || status === 'rollback_performed') return 'text-orange-600';
   return 'text-gray-600';
-}
-
-function statusBadge(status: string): string {
-  if (status === 'completed' || status === 'success') return 'bg-green-100 text-green-700';
-  if (status === 'failed' || status === 'error' || status === 'cancelled') return 'bg-red-100 text-red-700';
-  if (status === 'pending' || status === 'running' || status === 'retrying') return 'bg-amber-100 text-amber-700';
-  return 'bg-gray-100 text-gray-700';
 }
 
 function formatDuration(job: Job): string {
@@ -69,23 +67,33 @@ export default function DashboardPage() {
   });
 
   const {
-    data: auditLogs,
+    data: auditData,
     isLoading: auditLoading,
     isFetching: auditFetching,
     error: auditError,
     refetch: refetchAudit,
-  } = useQuery<AuditLog[]>({
+  } = useQuery<{ items: AuditLog[]; total: number }>({
     queryKey: ['dashboard-audit'],
     queryFn: () => getAuditLogs({ limit: 50 }),
   });
 
-  const isFetching = devicesFetching || jobsFetching || auditFetching;
+  const {
+    data: sites,
+    isFetching: sitesFetching,
+    refetch: refetchSites,
+  } = useQuery<Site[]>({
+    queryKey: ['sites'],
+    queryFn: getSites,
+  });
+
+  const isFetching = devicesFetching || jobsFetching || auditFetching || sitesFetching;
   const isLoading = devicesLoading || jobsLoading || auditLoading;
 
   function handleRefresh() {
     refetchDevices();
     refetchJobs();
     refetchAudit();
+    refetchSites();
   }
 
   if (isLoading) {
@@ -112,8 +120,9 @@ export default function DashboardPage() {
   }
 
   const deviceList = devices ?? [];
-  const jobs = (Array.isArray(jobsRaw) ? jobsRaw : []) as Job[];
-  const logs = auditLogs ?? [];
+  const jobs = (jobsRaw?.items ?? []) as Job[];
+  const logs: AuditLog[] = auditData?.items ?? [];
+  const totalAudit = auditData?.total ?? logs.length;
 
   const totalDevices = deviceList.length;
   const ciscoDevices = deviceList.filter((d) => d.vendor.toLowerCase().includes('cisco')).length;
@@ -126,10 +135,19 @@ export default function DashboardPage() {
     (j) => j.status !== 'pending' && j.status !== 'running' && j.status !== 'retrying',
   ).length;
   const successRate = finishedJobs === 0 ? 'N/A' : `${Math.round((completedJobs / finishedJobs) * 100)}%`;
-  const auditCount = auditError ? null : logs.length;
+  const auditCount = auditError ? null : totalAudit;
 
   const recentJobs = jobs.slice(0, 5);
   const recentLogs = logs.slice(0, 5);
+
+  // Devices-per-site widget data: prefer authoritative counts from /sites; add an
+  // "Unassigned" entry derived from the devices list.
+  const siteList = sites ?? [];
+  const unassignedCount = deviceList.filter((d) => d.site_id == null).length;
+  const sitesWithCounts: { label: string; count: number; key: string }[] = [
+    ...siteList.map((s) => ({ label: s.name, count: s.device_count, key: `site-${s.id}` })),
+    ...(unassignedCount > 0 ? [{ label: 'Unassigned', count: unassignedCount, key: 'unassigned' }] : []),
+  ];
 
   return (
     <div>
@@ -204,6 +222,23 @@ export default function DashboardPage() {
         )}
       </div>
 
+      {/* Devices per site */}
+      <div className="mb-10">
+        <h2 className="text-sm font-semibold text-gray-700 mb-3">Devices per Site</h2>
+        {sitesWithCounts.length === 0 ? (
+          <p className="text-sm text-gray-400 py-4">No sites defined yet.</p>
+        ) : (
+          <div className="flex flex-wrap gap-3">
+            {sitesWithCounts.map((s) => (
+              <div key={s.key} className="border border-gray-200 rounded-md px-4 py-2 min-w-[8rem]">
+                <p className="text-xs text-gray-500 truncate" title={s.label}>{s.label}</p>
+                <p className="text-2xl font-semibold tabular-nums text-gray-900 mt-0.5">{s.count}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Quick Actions */}
       <div className="mb-10">
         <h2 className="text-sm font-semibold text-gray-700 mb-3">Quick Actions</h2>
@@ -261,20 +296,25 @@ export default function DashboardPage() {
               </tr>
             </thead>
             <tbody>
-              {recentJobs.map((job) => (
-                <tr key={job.job_id} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="px-4 py-2 font-mono text-xs text-gray-700">{job.job_id.slice(0, 8)}…</td>
-                  <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
-                  <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
-                  <td className="px-4 py-2">
-                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${statusBadge(job.status)}`}>
-                      {job.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2 text-gray-600">{formatDuration(job)}</td>
-                  <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
-                </tr>
-              ))}
+              {recentJobs.map((job) => {
+                const isActive = (ACTIVE_JOB_STATUSES as string[]).includes(job.status);
+                return (
+                  <tr key={job.job_id} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-xs text-gray-700">{job.job_id.slice(0, 8)}…</td>
+                    <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
+                    <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
+                    <td className="px-4 py-2">
+                      <StatusBadge status={job.status} />
+                    </td>
+                    <td className="px-4 py-2 text-gray-600">
+                      {isActive
+                        ? <ElapsedTimer startedAt={job.started_at} className="text-xs text-amber-600" />
+                        : formatDuration(job)}
+                    </td>
+                    <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

@@ -5,44 +5,41 @@ import uuid
 from fastapi import BackgroundTasks
 
 from app.core.exceptions import DeviceExecutionError
-from app.services import audit_service, job_service, vlan_service
+from app.services import audit_service, group_job_service, job_service, vlan_service
+from app.services.retry_policy import RetryDecision, classify_error as _classify_error_string
 
 logger = logging.getLogger(__name__)
 
 # Ansible exits with rc=4 when hosts are unreachable, rc=6 when unreachable+failed.
-# rc=255 covers ansible-runner connection errors. These are always transient.
+# rc=255 covers ansible-runner connection errors. These are always transient at the
+# Ansible level regardless of the error text.
 _TRANSIENT_RC_CODES = frozenset({4, 6, 255})
 
-# Keyword fallback for rc=2 errors that are still connection-related (e.g. timeout
-# during a task, SSH refused mid-session). "unreachable" is intentionally excluded:
-# Ansible's PLAY RECAP always prints "unreachable=0" even on healthy runs, which
-# would cause every task failure to be misclassified as transient.
-_RETRYABLE_KEYWORDS = (
-    "timeout",
-    "timed out",
-    "connection refused",
-    "connection reset",
-    "unable to connect",
-    "ssh failure",
-    "ssh error",
-    "ssh connect",
-    "network is unreachable",
-    "no route to host",
-)
+# Hard cap so a mis-tuned retry_base_delay never locks a device for too long.
+_MAX_RETRY_DELAY: float = 5.0
+
+
+def _classify_result(result: dict) -> RetryDecision:
+    """Classify an Ansible result dict.
+
+    rc-code check takes priority; string classification is delegated to
+    retry_policy so both paths share the same keyword tables.
+    """
+    if result.get("rc") in _TRANSIENT_RC_CODES:
+        return RetryDecision(
+            should_retry=True,
+            classification="transient",
+            reason=f"ansible rc={result.get('rc')}",
+        )
+    return _classify_error_string(_combined_error(result))
 
 
 def classify_error(result: dict) -> str:
+    """Return 'transient' or 'permanent' for an Ansible result dict.
+
+    Kept for backward compat — used by _structured_error and audit events.
     """
-    Returns:
-        'transient' → retryable (network/SSH issues)
-        'permanent' → non-retryable (validation, logic, fail task)
-    """
-    if result.get("rc") in _TRANSIENT_RC_CODES:
-        return "transient"
-    error_text = _combined_error(result).lower()
-    if any(kw in error_text for kw in _RETRYABLE_KEYWORDS):
-        return "transient"
-    return "permanent"
+    return _classify_result(result).classification
 
 
 def _combined_error(result: dict) -> str:
@@ -77,7 +74,7 @@ def _get_pre_state(vlan_id: int, device: str) -> dict:
     return _vlans_api._capture_pre_state_vlan(vlan_id, device)
 
 
-def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay: float = 1.0) -> tuple[dict, int]:
+def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay: float = 1.0, device: str = "") -> tuple[dict, int]:
     """Call fn() up to max_retries+1 times, backing off on transient errors.
 
     Returns (result_dict, retry_count).
@@ -91,14 +88,17 @@ def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay:
             result = {"rc": 1, "stdout": "", "stderr": str(exc)}
         if result["rc"] == 0:
             break
-        error_type = classify_error(result)
-        error_text = _combined_error(result)
-        logger.info("Job %s classified error as %s: %s", job_id, error_type, error_text[:200])
-        if error_type == "permanent":
+        decision = _classify_result(result)
+        logger.info(
+            "Job %s classified error as %s: %s",
+            job_id, decision.classification, decision.reason,
+        )
+        if not decision.should_retry:
             break
         if attempt >= max_retries:
+            logger.warning("Job %s exhausted retries", job_id)
             break
-        delay = retry_base_delay * (2 ** attempt)
+        delay = min(retry_base_delay * (2 ** attempt), _MAX_RETRY_DELAY)
         retry_count += 1
         error = _combined_error(result)
         job_service.update_job(
@@ -108,14 +108,232 @@ def _execute_with_retry(fn, job_id: str, max_retries: int = 3, retry_base_delay:
             current_step="retrying",
         )
         logger.info(
-            "Job %s: transient error, retry %d/%d in %.1fs: %s",
-            job_id, retry_count, max_retries, delay, error.strip(),
+            "Job %s device %s retry attempt %d/%d — waiting %ds",
+            job_id, device, retry_count, max_retries, int(delay),
         )
         time.sleep(delay)
     return result, retry_count
 
 
-def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None):
+def _rollback_create(vlan_id: int, device: str, job_id: str, pre_state: dict) -> tuple[bool, bool | None]:
+    """Rollback a failed create operation by deleting the VLAN.
+
+    Returns (rollback_performed, rollback_success).
+    rollback_performed=False + rollback_success=None → no rollback triggered (VLAN existed before).
+    rollback_performed=True + rollback_success=False → rollback attempted but failed.
+    rollback_performed=True + rollback_success=True  → rollback confirmed via state check.
+    """
+    if pre_state.get("existed") is not False:
+        logger.info(
+            "Job %s rollback skipped — VLAN %s existed before operation on device=%s",
+            job_id, vlan_id, device,
+        )
+        return False, None
+
+    logger.info("Job %s rollback started for VLAN %s on device=%s", job_id, vlan_id, device)
+    job_service.update_job(job_id, current_step="rollback_started")
+    _rb_t0 = time.time()
+
+    try:
+        rb = vlan_service.delete_vlan(vlan_id, device)
+    except Exception as exc:
+        _rb_ms = round((time.time() - _rb_t0) * 1000)
+        logger.error(
+            "Job %s rollback exception for VLAN %s on device=%s in %dms: %s",
+            job_id, vlan_id, device, _rb_ms, exc,
+        )
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+        job_service.update_job(job_id, current_step="rollback_completed")
+        return True, False
+
+    _rb_ms = round((time.time() - _rb_t0) * 1000)
+    rc = rb.get("rc", 1) if isinstance(rb, dict) else 1
+    if rc != 0:
+        logger.info("Job %s rollback executed for VLAN %s on device=%s in %dms", job_id, vlan_id, device, _rb_ms)
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+        job_service.update_job(job_id, current_step="rollback_completed")
+        return True, False
+
+    logger.info("Job %s rollback executed for VLAN %s on device=%s in %dms", job_id, vlan_id, device, _rb_ms)
+
+    # rc=0: verify the VLAN is actually gone
+    try:
+        post_vlans = vlan_service.get_vlans(device)
+        success = not any(v.vlan_id == vlan_id for v in post_vlans)
+    except Exception as exc:
+        logger.warning(
+            "Job %s rollback state check failed for VLAN %s on device=%s: %s",
+            job_id, vlan_id, device, exc,
+        )
+        success = False
+
+    if success:
+        logger.info("Job %s rollback verification succeeded for VLAN %s on device=%s", job_id, vlan_id, device)
+    else:
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+    job_service.update_job(job_id, current_step="rollback_completed")
+    return True, success
+
+
+def _rollback_delete(vlan_id: int, device: str, job_id: str, pre_state: dict) -> tuple[bool, bool | None]:
+    """Rollback a failed delete operation by recreating the VLAN.
+
+    Returns (rollback_performed, rollback_success).
+    rollback_performed=False + rollback_success=None → no rollback triggered (VLAN never existed).
+    rollback_performed=True + rollback_success=False → rollback attempted but failed.
+    rollback_performed=True + rollback_success=True  → rollback confirmed via state check.
+    """
+    if pre_state.get("existed") is not True:
+        logger.info(
+            "Job %s rollback skipped — VLAN %s did not exist before operation on device=%s",
+            job_id, vlan_id, device,
+        )
+        return False, None
+
+    vlan_data = pre_state.get("vlan_data") or {}
+    original_name = vlan_data.get("name", "")
+    logger.info("Job %s rollback started for VLAN %s on device=%s", job_id, vlan_id, device)
+    job_service.update_job(job_id, current_step="rollback_started")
+    _rb_t0 = time.time()
+
+    try:
+        rb = vlan_service.create_vlan_on_device(vlan_id, original_name, device)
+    except Exception as exc:
+        _rb_ms = round((time.time() - _rb_t0) * 1000)
+        logger.error(
+            "Job %s rollback exception for VLAN %s on device=%s in %dms: %s",
+            job_id, vlan_id, device, _rb_ms, exc,
+        )
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+        job_service.update_job(job_id, current_step="rollback_completed")
+        return True, False
+
+    _rb_ms = round((time.time() - _rb_t0) * 1000)
+    rc = rb.get("rc", 1) if isinstance(rb, dict) else 1
+    if rc != 0:
+        logger.info("Job %s rollback executed for VLAN %s on device=%s in %dms", job_id, vlan_id, device, _rb_ms)
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+        job_service.update_job(job_id, current_step="rollback_completed")
+        return True, False
+
+    logger.info("Job %s rollback executed for VLAN %s on device=%s in %dms", job_id, vlan_id, device, _rb_ms)
+
+    # rc=0: verify the VLAN is actually present again
+    try:
+        post_vlans = vlan_service.get_vlans(device)
+        success = any(v.vlan_id == vlan_id for v in post_vlans)
+    except Exception as exc:
+        logger.warning(
+            "Job %s rollback state check failed for VLAN %s on device=%s: %s",
+            job_id, vlan_id, device, exc,
+        )
+        success = False
+
+    if success:
+        logger.info("Job %s rollback verification succeeded for VLAN %s on device=%s", job_id, vlan_id, device)
+    else:
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+    job_service.update_job(job_id, current_step="rollback_completed")
+    return True, success
+
+
+def _rollback_update(vlan_id: int, device: str, job_id: str, pre_state: dict) -> tuple[bool, bool | None]:
+    """Rollback a failed update by restoring the previous VLAN name.
+
+    Returns (rollback_performed, rollback_success).
+    rollback_performed=False + rollback_success=None → no rollback triggered (no previous name).
+    rollback_performed=True + rollback_success=False → rollback attempted but failed.
+    rollback_performed=True + rollback_success=True  → rollback confirmed via state check.
+    """
+    prev_name = (pre_state.get("vlan_data") or {}).get("name")
+    if prev_name is None:
+        logger.info(
+            "Job %s rollback skipped — no previous name in pre-state for VLAN %s on device=%s",
+            job_id, vlan_id, device,
+        )
+        return False, None
+
+    logger.info("Job %s rollback started for VLAN %s on device=%s", job_id, vlan_id, device)
+    job_service.update_job(job_id, current_step="rollback_started")
+    _rb_t0 = time.time()
+
+    try:
+        rb = vlan_service.update_vlan_description(vlan_id, prev_name, device)
+    except Exception as exc:
+        _rb_ms = round((time.time() - _rb_t0) * 1000)
+        logger.error(
+            "Job %s rollback exception for VLAN %s on device=%s in %dms: %s",
+            job_id, vlan_id, device, _rb_ms, exc,
+        )
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+        job_service.update_job(job_id, current_step="rollback_completed")
+        return True, False
+
+    _rb_ms = round((time.time() - _rb_t0) * 1000)
+    rc = rb.get("rc", 1) if isinstance(rb, dict) else 1
+    if rc != 0:
+        logger.info(
+            "Job %s rollback executed for VLAN %s on device=%s in %dms (name='%s')",
+            job_id, vlan_id, device, _rb_ms, prev_name,
+        )
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+        job_service.update_job(job_id, current_step="rollback_completed")
+        return True, False
+
+    logger.info(
+        "Job %s rollback executed for VLAN %s on device=%s in %dms (name='%s')",
+        job_id, vlan_id, device, _rb_ms, prev_name,
+    )
+
+    # rc=0: verify the name was actually restored
+    try:
+        post_vlans = vlan_service.get_vlans(device)
+        match = next((v for v in post_vlans if v.vlan_id == vlan_id), None)
+        success = bool(match and match.name.lower() == prev_name.lower())
+    except Exception as exc:
+        logger.warning(
+            "Job %s rollback state check failed for VLAN %s on device=%s: %s",
+            job_id, vlan_id, device, exc,
+        )
+        success = False
+
+    if success:
+        logger.info("Job %s rollback verification succeeded for VLAN %s on device=%s", job_id, vlan_id, device)
+    else:
+        logger.warning("Job %s rollback verification failed for VLAN %s on device=%s", job_id, vlan_id, device)
+    job_service.update_job(job_id, current_step="rollback_completed")
+    return True, success
+
+
+def _notify_group_job_complete(group_job_id: str, job_id: str, device: str) -> None:
+    """Push the final per-device job state into the parent GroupJob and re-aggregate its status."""
+    try:
+        job = job_service.get_job(job_id)
+        if not job:
+            return
+        duration_ms = None
+        if job.started_at and job.finished_at:
+            from datetime import timezone as _tz
+            started = job.started_at if job.started_at.tzinfo else job.started_at.replace(tzinfo=_tz.utc)
+            finished = job.finished_at if job.finished_at.tzinfo else job.finished_at.replace(tzinfo=_tz.utc)
+            duration_ms = round((finished - started).total_seconds() * 1000)
+        group_job_service.update_device_result(
+            group_job_id=group_job_id,
+            device=device,
+            job_id=job_id,
+            status=job.status,
+            current_step=job.current_step,
+            retry_count=job.retry_count,
+            rollback_performed=job.rollback_performed,
+            rollback_success=job.rollback_success,
+            error=job.error,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        logger.warning("Could not update group job %s for device=%s: %s", group_job_id, device, exc)
+
+
+def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None, group_job_id: str | None = None):
     from app.services import device_locks, rate_limiter
 
     start_time = time.time()
@@ -189,42 +407,13 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
                 lambda: vlan_service.create_vlan_on_device(vlan_id, name, device),
                 job_id,
                 retry_base_delay=retry_base_delay,
+                device=device,
             )
 
             duration = time.time() - start_time
-            rollback_performed = False
 
             if result["rc"] != 0:
-                if pre_state.get("existed") is False:
-                    try:
-                        rb = vlan_service.delete_vlan(vlan_id, device)
-                        logger.info("Rollback raw result: %s", rb)
-                        if isinstance(rb, dict):
-                            rollback_performed = rb.get("rc", 1) == 0
-                        else:
-                            rollback_performed = False
-                        if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
-                            try:
-                                post_vlans = vlan_service.get_vlans(device)
-                                rollback_performed = not any(v.vlan_id == vlan_id for v in post_vlans)
-                                logger.info(
-                                    "Rollback state check: VLAN %s %s on %s",
-                                    vlan_id, "absent" if rollback_performed else "still present", device,
-                                )
-                            except Exception:
-                                pass
-                        logger.warning(
-                            "Job %s: rollback executed for VLAN %s — %s",
-                            job_id, vlan_id, "succeeded" if rollback_performed else "failed",
-                        )
-                    except Exception as rb_exc:
-                        logger.error("Rollback exception: %s", rb_exc)
-                        rollback_performed = False
-                rollback_performed = bool(rollback_performed)
-                logger.info(
-                    "Rollback decision — existed=%s rollback_performed=%s",
-                    pre_state.get("existed"), rollback_performed,
-                )
+                rollback_performed, rollback_success = _rollback_create(vlan_id, device, job_id, pre_state)
 
                 error_msg = result.get("stderr") or result.get("stdout") or "Execution failed"
                 error_output = _combined_error(result)
@@ -235,10 +424,13 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
                 job_service.update_job(
                     job_id, "failed", error=error_msg,
                     retry_count=retry_count, rollback_performed=rollback_performed,
+                    rollback_success=rollback_success,
+                    current_step="rollback_completed" if rollback_performed else None,
                 )
                 audit_service.append_audit_event(audit_id, "failed", {
                     "retries": retry_count,
                     "rollback_performed": rollback_performed,
+                    "rollback_success": rollback_success,
                     "duration_seconds": round(duration, 2),
                     "error": _structured_error(result),
                     "error_type": classify_error(result),
@@ -274,9 +466,11 @@ def run_create_job(job_id: str, vlan_id: int, name: str, device: str, audit_id: 
 
     finally:
         job_service.ensure_final_state(job_id)
+        if group_job_id:
+            _notify_group_job_complete(group_job_id, job_id, device)
 
 
-def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None):
+def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None, group_job_id: str | None = None):
     from app.services import device_locks, rate_limiter
 
     start_time = time.time()
@@ -337,6 +531,7 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
                     lambda: vlan_service.delete_vlan(vlan_id, device),
                     job_id,
                     retry_base_delay=retry_base_delay,
+                    device=device,
                 )
                 last_result = result
 
@@ -378,39 +573,7 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
                     job_id, vlan_id, device, duration, retry_count,
                 )
             else:
-                if pre_state.get("existed") is True:
-                    try:
-                        vlan_data = pre_state.get("vlan_data") or {}
-                        rb = vlan_service.create_vlan_on_device(
-                            vlan_id, vlan_data.get("name", ""), device
-                        )
-                        logger.info("Rollback raw result: %s", rb)
-                        if isinstance(rb, dict):
-                            rollback_performed = rb.get("rc", 1) == 0
-                        else:
-                            rollback_performed = False
-                        if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
-                            try:
-                                post_vlans = vlan_service.get_vlans(device)
-                                rollback_performed = any(v.vlan_id == vlan_id for v in post_vlans)
-                                logger.info(
-                                    "Rollback state check: VLAN %s %s on %s",
-                                    vlan_id, "present" if rollback_performed else "absent", device,
-                                )
-                            except Exception:
-                                pass
-                        logger.warning(
-                            "Job %s: rollback executed for VLAN %s — %s",
-                            job_id, vlan_id, "succeeded" if rollback_performed else "failed",
-                        )
-                    except Exception as rb_exc:
-                        logger.error("Rollback exception: %s", rb_exc)
-                        rollback_performed = False
-                rollback_performed = bool(rollback_performed)
-                logger.info(
-                    "Rollback decision — existed=%s rollback_performed=%s",
-                    pre_state.get("existed"), rollback_performed,
-                )
+                rollback_performed, rollback_success = _rollback_delete(vlan_id, device, job_id, pre_state)
 
                 logger.error(
                     "Job %s: failed — delete VLAN %s on device=%s: %s",
@@ -419,10 +582,13 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
                 job_service.update_job(
                     job_id, "failed", error=error_msg,
                     retry_count=retry_count, rollback_performed=rollback_performed,
+                    rollback_success=rollback_success,
+                    current_step="rollback_completed" if rollback_performed else None,
                 )
                 audit_service.append_audit_event(audit_id, "failed", {
                     "retries": retry_count,
                     "rollback_performed": rollback_performed,
+                    "rollback_success": rollback_success,
                     "duration_seconds": round(duration, 2),
                     "error": _structured_error(last_result),
                     "error_type": classify_error(last_result),
@@ -443,9 +609,11 @@ def run_delete_job(job_id: str, vlan_id: int, device: str, audit_id: str, retry_
 
     finally:
         job_service.ensure_final_state(job_id)
+        if group_job_id:
+            _notify_group_job_complete(group_job_id, job_id, device)
 
 
-def run_update_job(job_id: str, vlan_id: int, description: str, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None):
+def run_update_job(job_id: str, vlan_id: int, description: str, device: str, audit_id: str, retry_base_delay: float = 1.0, pre_state: dict | None = None, group_job_id: str | None = None):
     from app.services import device_locks, rate_limiter
 
     start_time = time.time()
@@ -520,44 +688,13 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
                 lambda: vlan_service.update_vlan_description(vlan_id, description, device),
                 job_id,
                 retry_base_delay=retry_base_delay,
+                device=device,
             )
 
             duration = time.time() - start_time
-            rollback_performed = False
 
             if result["rc"] != 0:
-                prev_name = (pre_state.get("vlan_data") or {}).get("name")
-                if prev_name is not None:
-                    try:
-                        rb = vlan_service.update_vlan_description(vlan_id, prev_name, device)
-                        logger.info("Rollback raw result: %s", rb)
-                        if isinstance(rb, dict):
-                            rollback_performed = rb.get("rc", 1) == 0
-                        else:
-                            rollback_performed = False
-                        if not rollback_performed and isinstance(rb, dict) and rb.get("rc") == 2:
-                            try:
-                                post_vlans = vlan_service.get_vlans(device)
-                                match = next((v for v in post_vlans if v.vlan_id == vlan_id), None)
-                                rollback_performed = bool(match and match.name.lower() == prev_name.lower())
-                                logger.info(
-                                    "Rollback state check: VLAN %s name=%s expected=%s",
-                                    vlan_id, match.name if match else None, prev_name,
-                                )
-                            except Exception:
-                                pass
-                        logger.warning(
-                            "Job %s: rollback executed for VLAN %s — %s (restored name '%s')",
-                            job_id, vlan_id, "succeeded" if rollback_performed else "failed", prev_name,
-                        )
-                    except Exception as rb_exc:
-                        logger.error("Rollback exception: %s", rb_exc)
-                        rollback_performed = False
-                rollback_performed = bool(rollback_performed)
-                logger.info(
-                    "Rollback decision — existed=%s rollback_performed=%s",
-                    pre_state.get("existed"), rollback_performed,
-                )
+                rollback_performed, rollback_success = _rollback_update(vlan_id, device, job_id, pre_state)
 
                 error_msg = result.get("stderr") or result.get("stdout") or "Execution failed"
                 error_output = _combined_error(result)
@@ -568,10 +705,13 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
                 job_service.update_job(
                     job_id, "failed", error=error_msg,
                     retry_count=retry_count, rollback_performed=rollback_performed,
+                    rollback_success=rollback_success,
+                    current_step="rollback_completed" if rollback_performed else None,
                 )
                 audit_service.append_audit_event(audit_id, "failed", {
                     "retries": retry_count,
                     "rollback_performed": rollback_performed,
+                    "rollback_success": rollback_success,
                     "duration_seconds": round(duration, 2),
                     "error": _structured_error(result),
                     "error_type": classify_error(result),
@@ -607,9 +747,11 @@ def run_update_job(job_id: str, vlan_id: int, description: str, device: str, aud
 
     finally:
         job_service.ensure_final_state(job_id)
+        if group_job_id:
+            _notify_group_job_complete(group_job_id, job_id, device)
 
 
-def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: float = 1.0):
+def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: float = 1.0, group_job_id: str | None = None):
     from app.services import device_locks, rate_limiter
 
     start_time = time.time()
@@ -625,6 +767,7 @@ def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: floa
                 lambda: vlan_service.save_config_on_device(device),
                 job_id,
                 retry_base_delay=retry_base_delay,
+                device=device,
             )
             duration = time.time() - start_time
 
@@ -659,19 +802,95 @@ def run_save_job(job_id: str, device: str, audit_id: str, retry_base_delay: floa
 
     finally:
         job_service.ensure_final_state(job_id)
+        if group_job_id:
+            _notify_group_job_complete(group_job_id, job_id, device)
+
+
+# ── Sequential group runners ──────────────────────────────────────────────────
+#
+# Each group runner executes one background task per group job. Devices run
+# strictly one after the other. A device failure is caught inside run_*_job
+# (which never propagates exceptions) so the loop always continues to the
+# next device — providing fault isolation across the fleet.
+#
+# device_tasks tuples carry only the data needed to call the corresponding
+# run_*_job; retry_base_delay and group_job_id are passed as separate args.
+
+def _log_group_outcome(group_job_id: str, operation: str) -> None:
+    """Fetch and log the final aggregate status after all devices have run."""
+    try:
+        gj = group_job_service.get_group_job(group_job_id)
+        if gj:
+            s = gj.execution_summary()
+            logger.info(
+                "GroupJob %s: %s complete — status=%s completed=%d/%d",
+                group_job_id, operation, gj.status, s["completed"], s["total_devices"],
+            )
+    except Exception as exc:
+        logger.warning("GroupJob %s: could not fetch final status: %s", group_job_id, exc)
+
+
+def run_group_create_job(
+    group_job_id: str,
+    device_tasks: list[tuple],  # (job_id, vlan_id, name, device, audit_id, pre_state)
+    retry_base_delay: float = 1.0,
+) -> None:
+    logger.info("GroupJob %s: sequential create starting — %d device(s)", group_job_id, len(device_tasks))
+    for job_id, vlan_id, name, device, audit_id, pre_state in device_tasks:
+        logger.info("GroupJob %s: executing device=%s", group_job_id, device)
+        run_create_job(job_id, vlan_id, name, device, audit_id, retry_base_delay,
+                       pre_state=pre_state, group_job_id=group_job_id)
+        logger.info("GroupJob %s: finished device=%s", group_job_id, device)
+    _log_group_outcome(group_job_id, "create")
+
+
+def run_group_delete_job(
+    group_job_id: str,
+    device_tasks: list[tuple],  # (job_id, vlan_id, device, audit_id, pre_state)
+    retry_base_delay: float = 1.0,
+) -> None:
+    logger.info("GroupJob %s: sequential delete starting — %d device(s)", group_job_id, len(device_tasks))
+    for job_id, vlan_id, device, audit_id, pre_state in device_tasks:
+        logger.info("GroupJob %s: executing device=%s", group_job_id, device)
+        run_delete_job(job_id, vlan_id, device, audit_id, retry_base_delay,
+                       pre_state=pre_state, group_job_id=group_job_id)
+        logger.info("GroupJob %s: finished device=%s", group_job_id, device)
+    _log_group_outcome(group_job_id, "delete")
+
+
+def run_group_update_job(
+    group_job_id: str,
+    device_tasks: list[tuple],  # (job_id, vlan_id, description, device, audit_id, pre_state)
+    retry_base_delay: float = 1.0,
+) -> None:
+    logger.info("GroupJob %s: sequential update starting — %d device(s)", group_job_id, len(device_tasks))
+    for job_id, vlan_id, description, device, audit_id, pre_state in device_tasks:
+        logger.info("GroupJob %s: executing device=%s", group_job_id, device)
+        run_update_job(job_id, vlan_id, description, device, audit_id, retry_base_delay,
+                       pre_state=pre_state, group_job_id=group_job_id)
+        logger.info("GroupJob %s: finished device=%s", group_job_id, device)
+    _log_group_outcome(group_job_id, "update")
 
 
 # ── Enqueue helpers (called by route handlers) ────────────────────────────────
 
-def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> list[dict]:
+def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> tuple[list[dict], str]:
     from app.services import device_locks
     request_id = str(uuid.uuid4())
+    group_job = group_job_service.create_group_job(
+        operation="create_vlan",
+        playbook="create_vlan.yml",
+        parameters={"vlan_id": vlan.vlan_id, "name": vlan.name},
+        devices=list(vlan.devices),
+    )
+    device_tasks = []
     job_entries = []
     for dev_name in vlan.devices:
         job = job_service.create_job(
             playbook="create_vlan.yml",
             device=dev_name,
             parameters={"vlan_id": vlan.vlan_id, "name": vlan.name},
+            group_job_id=group_job.group_job_id,
         )
         audit = audit_service.log_action(
             user=username, action="create_vlan", resource="vlan",
@@ -684,23 +903,29 @@ def enqueue_create_jobs(vlan, username: str, background_tasks: BackgroundTasks, 
         except TimeoutError:
             logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan.vlan_id)
             pre_state = {"existed": None, "vlan_data": None}
-        background_tasks.add_task(
-            run_create_job, job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id, retry_base_delay,
-            pre_state=pre_state,
-        )
+        device_tasks.append((job.job_id, vlan.vlan_id, vlan.name, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
-    return job_entries
+    background_tasks.add_task(run_group_create_job, group_job.group_job_id, device_tasks, retry_base_delay)
+    return job_entries, group_job.group_job_id
 
 
-def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> list[dict]:
+def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> tuple[list[dict], str]:
     from app.services import device_locks
     request_id = str(uuid.uuid4())
+    group_job = group_job_service.create_group_job(
+        operation="delete_vlan",
+        playbook="delete_vlan.yml",
+        parameters={"vlan_id": vlan_id},
+        devices=devices,
+    )
+    device_tasks = []
     job_entries = []
     for dev_name in devices:
         job = job_service.create_job(
             playbook="delete_vlan.yml",
             device=dev_name,
             parameters={"vlan_id": vlan_id},
+            group_job_id=group_job.group_job_id,
         )
         audit = audit_service.log_action(
             user=username, action="delete_vlan", resource="vlan",
@@ -713,38 +938,51 @@ def enqueue_delete_jobs(vlan_id: int, devices: list[str], username: str, backgro
         except TimeoutError:
             logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan_id)
             pre_state = {"existed": None, "vlan_data": None}
-        background_tasks.add_task(
-            run_delete_job, job.job_id, vlan_id, dev_name, audit.id, retry_base_delay,
-            pre_state=pre_state,
-        )
+        device_tasks.append((job.job_id, vlan_id, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
-    return job_entries
+    background_tasks.add_task(run_group_delete_job, group_job.group_job_id, device_tasks, retry_base_delay)
+    return job_entries, group_job.group_job_id
 
 
 def enqueue_save_job(device_name: str, username: str, background_tasks: BackgroundTasks, retry_base_delay: float = 1.0) -> dict:
+    group_job = group_job_service.create_group_job(
+        operation="save_config",
+        playbook="save_config.yml",
+        parameters={},
+        devices=[device_name],
+    )
     job = job_service.create_job(
         playbook="save_config.yml",
         device=device_name,
         parameters={},
+        group_job_id=group_job.group_job_id,
     )
     audit = audit_service.log_action(
         user=username, action="save_config", resource="device",
         details={"device": device_name},
         status="pending", job_id=job.job_id, device=device_name,
     )
-    background_tasks.add_task(run_save_job, job.job_id, device_name, audit.id, retry_base_delay)
-    return {"device": device_name, "job_id": job.job_id, "status": job.status}
+    background_tasks.add_task(run_save_job, job.job_id, device_name, audit.id, retry_base_delay, group_job.group_job_id)
+    return {"device": device_name, "job_id": job.job_id, "status": job.status, "group_job_id": group_job.group_job_id}
 
 
-def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> list[dict]:
+def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: BackgroundTasks, retry_base_delay: float) -> tuple[list[dict], str]:
     from app.services import device_locks
     request_id = str(uuid.uuid4())
+    group_job = group_job_service.create_group_job(
+        operation="update_vlan",
+        playbook="update_vlan.yml",
+        parameters={"vlan_id": vlan_id, "description": data.description},
+        devices=list(data.devices),
+    )
+    device_tasks = []
     job_entries = []
     for dev_name in data.devices:
         job = job_service.create_job(
             playbook="update_vlan.yml",
             device=dev_name,
             parameters={"vlan_id": vlan_id, "description": data.description},
+            group_job_id=group_job.group_job_id,
         )
         audit = audit_service.log_action(
             user=username, action="update_vlan", resource="vlan",
@@ -757,9 +995,7 @@ def enqueue_update_jobs(vlan_id: int, data, username: str, background_tasks: Bac
         except TimeoutError:
             logger.warning("Device %s busy during pre-state capture for VLAN %s — job will abort on start", dev_name, vlan_id)
             pre_state = {"existed": None, "vlan_data": None}
-        background_tasks.add_task(
-            run_update_job, job.job_id, vlan_id, data.description, dev_name, audit.id, retry_base_delay,
-            pre_state=pre_state,
-        )
+        device_tasks.append((job.job_id, vlan_id, data.description, dev_name, audit.id, pre_state))
         job_entries.append({"device": dev_name, "job_id": job.job_id, "status": job.status})
-    return job_entries
+    background_tasks.add_task(run_group_update_job, group_job.group_job_id, device_tasks, retry_base_delay)
+    return job_entries, group_job.group_job_id

@@ -8,9 +8,10 @@ import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
 import { RequireRole } from '@/components/RequireRole';
-import { getUsers, createUser, updateUser, deleteUser } from '@/services/api';
+import { getUsers, createUser, updateUser, deleteUser, getSites } from '@/services/api';
 import type { User, UserUpdate } from '@/types/user';
 import type { Role } from '@/types/auth';
+import type { Site } from '@/types/site';
 
 function extractMessage(error: unknown, fallback: string): string {
   const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
@@ -43,11 +44,13 @@ export default function UsersPage() {
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newRole, setNewRole] = useState<Role>('observer');
+  const [newAllowedSites, setNewAllowedSites] = useState<number[]>([]);
 
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
   const [editingUsername, setEditingUsername] = useState('');
   const [editingRole, setEditingRole] = useState<Role>('observer');
   const [editingPassword, setEditingPassword] = useState('');
+  const [editingAllowedSites, setEditingAllowedSites] = useState<number[]>([]);
 
   const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -80,6 +83,17 @@ export default function UsersPage() {
 
   const users = normalizeUsers(usersRaw);
 
+  const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
+  const siteList = sites ?? [];
+
+  function toggleSite(setter: (next: number[]) => void, current: number[], siteId: number) {
+    if (current.includes(siteId)) {
+      setter(current.filter((s) => s !== siteId));
+    } else {
+      setter([...current, siteId].sort((a, b) => a - b));
+    }
+  }
+
   useEffect(() => {
     if (user && user.role !== 'admin' && user.role !== 'super-admin') {
       router.push('/');
@@ -101,10 +115,12 @@ export default function UsersPage() {
         username,
         password: newPassword.trim(),
         role: newRole,
+        allowed_site_ids: newAllowedSites.length > 0 ? newAllowedSites : undefined,
       });
       setNewUsername('');
       setNewPassword('');
       setNewRole('observer');
+      setNewAllowedSites([]);
       await refetch();
       setSuccessMessage(`User ${username} created successfully`);
     } catch (err) {
@@ -119,6 +135,7 @@ export default function UsersPage() {
     setEditingUsername(user.username);
     setEditingRole(user.role as Role);
     setEditingPassword('');
+    setEditingAllowedSites(user.allowed_site_ids ?? []);
     setSuccessMessage(null);
     setErrorMessage(null);
   }
@@ -128,6 +145,7 @@ export default function UsersPage() {
     setEditingUsername('');
     setEditingRole('observer');
     setEditingPassword('');
+    setEditingAllowedSites([]);
   }
 
   async function handleUpdate() {
@@ -136,7 +154,11 @@ export default function UsersPage() {
     setErrorMessage(null);
     const username = editingUsername;
     try {
-      const body: UserUpdate = { role: editingRole };
+      const body: UserUpdate = {
+        role: editingRole,
+        // Always send the current selection — `[]` clears, a list replaces.
+        allowed_site_ids: editingAllowedSites,
+      };
       if (editingPassword.trim()) {
         body.password = editingPassword.trim();
       }
@@ -145,6 +167,7 @@ export default function UsersPage() {
       setEditingUsername('');
       setEditingRole('observer');
       setEditingPassword('');
+      setEditingAllowedSites([]);
       await refetch();
       setSuccessMessage(`User ${username} updated successfully`);
     } catch (err) {
@@ -189,42 +212,62 @@ export default function UsersPage() {
       <p className="text-sm text-gray-500 mb-6">Manage platform users and permissions</p>
 
       <RequireRole roles={['operator', 'admin', 'super-admin']}>
-        <form onSubmit={handleCreate} className="flex flex-wrap gap-2 mb-6 items-center">
-          <input
-            type="text"
-            placeholder="Username"
-            value={newUsername}
-            onChange={(e) => setNewUsername(e.target.value)}
-            disabled={isSubmitting}
-            required
-            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            disabled={isSubmitting}
-            required
-            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-          />
-          <select
-            value={newRole}
-            onChange={(e) => setNewRole(e.target.value as Role)}
-            disabled={isSubmitting}
-            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-          >
-            {ROLES.map((r) => (
-              <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-            ))}
-          </select>
-          <button
-            type="submit"
-            disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
-            className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isSubmitting && deletingUserId === null && editingUserId === null ? 'Creating...' : 'Create User'}
-          </button>
+        <form onSubmit={handleCreate} className="mb-6 space-y-2">
+          <div className="flex flex-wrap gap-2 items-center">
+            <input
+              type="text"
+              placeholder="Username"
+              value={newUsername}
+              onChange={(e) => setNewUsername(e.target.value)}
+              disabled={isSubmitting}
+              required
+              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              disabled={isSubmitting}
+              required
+              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            />
+            <select
+              value={newRole}
+              onChange={(e) => setNewRole(e.target.value as Role)}
+              disabled={isSubmitting}
+              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            >
+              {ROLES.map((r) => (
+                <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
+              className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSubmitting && deletingUserId === null && editingUserId === null ? 'Creating...' : 'Create User'}
+            </button>
+          </div>
+          {siteList.length > 0 && (
+            <div className="flex flex-wrap gap-3 text-sm">
+              <span className="text-gray-600">Allowed sites:</span>
+              {siteList.map((s) => (
+                <label key={s.id} className="flex items-center gap-1.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={newAllowedSites.includes(s.id)}
+                    onChange={() => toggleSite(setNewAllowedSites, newAllowedSites, s.id)}
+                    disabled={isSubmitting}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-gray-700">{s.name}</span>
+                </label>
+              ))}
+              <span className="text-xs text-gray-400">(admins bypass scoping)</span>
+            </div>
+          )}
         </form>
       </RequireRole>
 
@@ -259,6 +302,7 @@ export default function UsersPage() {
             <tr className="border-b border-gray-200 bg-gray-50">
               <th className="text-left px-4 py-2 font-medium text-gray-700">Username</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Role</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Allowed Sites</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Actions</th>
             </tr>
           </thead>
@@ -293,6 +337,36 @@ export default function UsersPage() {
                       </select>
                     ) : (
                       ROLE_LABELS[user.role as Role] ?? user.role
+                    )}
+                  </td>
+                  <td className="px-4 py-2 text-gray-900 align-top">
+                    {isEditing ? (
+                      siteList.length === 0 ? (
+                        <span className="text-xs text-gray-400">No sites defined</span>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {siteList.map((s) => (
+                            <label key={s.id} className="flex items-center gap-1 text-xs cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={editingAllowedSites.includes(s.id)}
+                                onChange={() => toggleSite(setEditingAllowedSites, editingAllowedSites, s.id)}
+                                disabled={isSubmitting}
+                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="text-gray-700">{s.name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )
+                    ) : (
+                      (user.role === 'admin' || user.role === 'super-admin') ? (
+                        <span className="text-xs text-gray-400">All (admin)</span>
+                      ) : user.allowed_site_names && user.allowed_site_names.length > 0 ? (
+                        <span className="text-xs text-gray-700">{user.allowed_site_names.join(', ')}</span>
+                      ) : (
+                        <span className="text-xs text-gray-400">— (unassigned)</span>
+                      )
                     )}
                   </td>
                   <td className="px-4 py-2">

@@ -2,7 +2,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from app.db.models import AuditLogModel
+from sqlalchemy import or_
+
+from app.db.models import AuditLogModel, DeviceModel
 from app.db.session import get_session
 from app.models.audit import AuditRecord
 
@@ -57,34 +59,115 @@ def log_action(
     return record
 
 
+def _apply_filters(
+    q,
+    *,
+    session,
+    user: Optional[str],
+    action: Optional[str],
+    resource: Optional[str],
+    status: Optional[str],
+    from_date: Optional[datetime],
+    to_date: Optional[datetime],
+    device_id: Optional[str],
+    site_id: Optional[int],
+    allowed_devices: Optional[set[str]] = None,
+):
+    if user:
+        q = q.filter(AuditLogModel.user == user)
+    if action:
+        q = q.filter(AuditLogModel.action == action)
+    if resource:
+        q = q.filter(AuditLogModel.resource == resource)
+    if status:
+        q = q.filter(AuditLogModel.status == status)
+    if from_date is not None:
+        _from = from_date if from_date.tzinfo else from_date.replace(tzinfo=timezone.utc)
+        q = q.filter(AuditLogModel.timestamp >= _from)
+    if to_date is not None:
+        _to = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
+        q = q.filter(AuditLogModel.timestamp <= _to)
+    if device_id is not None:
+        q = q.filter(AuditLogModel.device == device_id)
+    if site_id is not None:
+        # Show device-related rows whose device is owned by `site_id`, plus rows
+        # that are not tied to a device at all (per spec: "If action is unrelated
+        # to device: keep visible").
+        device_names = [
+            r[0] for r in session.query(DeviceModel.name).filter(DeviceModel.site_id == site_id).all()
+        ]
+        if device_names:
+            q = q.filter(or_(AuditLogModel.device.is_(None), AuditLogModel.device.in_(device_names)))
+        else:
+            # Empty site → only keep rows unrelated to a device.
+            q = q.filter(AuditLogModel.device.is_(None))
+    if allowed_devices is not None:
+        # Restricted (non-admin) caller: keep rows for their devices + device-less
+        # rows (login, user-management, etc.). Spec: device-unrelated entries stay visible.
+        if not allowed_devices:
+            q = q.filter(AuditLogModel.device.is_(None))
+        else:
+            q = q.filter(or_(AuditLogModel.device.is_(None), AuditLogModel.device.in_(allowed_devices)))
+    return q
+
+
 def get_audit_log(
     user: Optional[str] = None,
     action: Optional[str] = None,
     resource: Optional[str] = None,
+    status: Optional[str] = None,
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
     device_id: Optional[str] = None,
+    site_id: Optional[int] = None,
+    allowed_devices: Optional[set[str]] = None,
     skip: int = 0,
     limit: int = 100,
 ) -> list[AuditRecord]:
     with get_session() as session:
-        q = session.query(AuditLogModel).order_by(AuditLogModel.timestamp.desc())
-        if user:
-            q = q.filter(AuditLogModel.user == user)
-        if action:
-            q = q.filter(AuditLogModel.action == action)
-        if resource:
-            q = q.filter(AuditLogModel.resource == resource)
-        if from_date is not None:
-            _from = from_date if from_date.tzinfo else from_date.replace(tzinfo=timezone.utc)
-            q = q.filter(AuditLogModel.timestamp >= _from)
-        if to_date is not None:
-            _to = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
-            q = q.filter(AuditLogModel.timestamp <= _to)
-        if device_id is not None:
-            q = q.filter(AuditLogModel.device == device_id)
+        q = _apply_filters(
+            session.query(AuditLogModel).order_by(AuditLogModel.timestamp.desc()),
+            session=session,
+            user=user,
+            action=action,
+            resource=resource,
+            status=status,
+            from_date=from_date,
+            to_date=to_date,
+            device_id=device_id,
+            site_id=site_id,
+            allowed_devices=allowed_devices,
+        )
         rows = q.offset(skip).limit(limit).all()
         return [_to_record(r) for r in rows]
+
+
+def count_audit_log(
+    user: Optional[str] = None,
+    action: Optional[str] = None,
+    resource: Optional[str] = None,
+    status: Optional[str] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
+    device_id: Optional[str] = None,
+    site_id: Optional[int] = None,
+    allowed_devices: Optional[set[str]] = None,
+) -> int:
+    with get_session() as session:
+        q = _apply_filters(
+            session.query(AuditLogModel),
+            session=session,
+            user=user,
+            action=action,
+            resource=resource,
+            status=status,
+            from_date=from_date,
+            to_date=to_date,
+            device_id=device_id,
+            site_id=site_id,
+            allowed_devices=allowed_devices,
+        )
+        return q.count()
 
 
 def append_audit_event(

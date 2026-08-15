@@ -8,9 +8,9 @@ from app.core.config import ACCESS_TOKEN_EXPIRE_MINUTES, JWT_SECRET_KEY
 if not JWT_SECRET_KEY:
     raise RuntimeError("JWT_SECRET_KEY must be set in .env")
 
-if ACCESS_TOKEN_EXPIRE_MINUTES <= 0 or ACCESS_TOKEN_EXPIRE_MINUTES > 15:
+if ACCESS_TOKEN_EXPIRE_MINUTES <= 0 or ACCESS_TOKEN_EXPIRE_MINUTES > 60:
     raise RuntimeError(
-        f"ACCESS_TOKEN_EXPIRE_MINUTES must be between 1 and 15, got: {ACCESS_TOKEN_EXPIRE_MINUTES}"
+        f"ACCESS_TOKEN_EXPIRE_MINUTES must be between 1 and 60, got: {ACCESS_TOKEN_EXPIRE_MINUTES}"
     )
 
 ALGORITHM = "HS256"

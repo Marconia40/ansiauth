@@ -18,6 +18,10 @@ VALID_ROLES = frozenset({"super-admin", "admin", "operator", "observer"})
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _to_user_read(row: UserModel) -> UserRead:
+    # Resolve allowed_sites while the session is still open. Admins are unrestricted
+    # by policy, but we still return whatever rows happen to exist so the UI can
+    # show their assignments without conditional rendering.
+    allowed = list(row.allowed_sites or [])
     return UserRead(
         id=row.id,
         username=row.username,
@@ -26,6 +30,8 @@ def _to_user_read(row: UserModel) -> UserRead:
         is_active=row.is_active,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        allowed_site_ids=sorted(s.id for s in allowed),
+        allowed_site_names=sorted(s.name for s in allowed),
     )
 
 
@@ -70,6 +76,18 @@ def create_user(data: UserCreate) -> UserRead:
     username = data.username.lower()
     email = data.email.lower() if data.email else None
 
+    # Validate every requested allowed_site_id up front so we don't half-create the user.
+    site_ids = list(data.allowed_site_ids or [])
+    if site_ids:
+        from app.db.models import SiteModel
+        with get_session() as session:
+            existing = {
+                r[0] for r in session.query(SiteModel.id).filter(SiteModel.id.in_(site_ids)).all()
+            }
+            missing = set(site_ids) - existing
+            if missing:
+                raise ValueError(f"Unknown site IDs: {sorted(missing)}")
+
     with get_session() as session:
         if _get_row_by_username(username, session):
             raise ValueError(f"Username '{username}' is already taken")
@@ -89,9 +107,15 @@ def create_user(data: UserCreate) -> UserRead:
         )
         session.add(row)
         session.flush()
+        if site_ids:
+            from app.db.models import UserAllowedSiteModel
+            for sid in sorted(set(site_ids)):
+                session.add(UserAllowedSiteModel(user_id=row.id, site_id=sid))
+            session.flush()
+            session.refresh(row)
         result = _to_user_read(row)
 
-    logger.info("User created: username=%s role=%s", username, data.role)
+    logger.info("User created: username=%s role=%s allowed_sites=%s", username, data.role, sorted(set(site_ids)))
     return result
 
 
@@ -118,6 +142,10 @@ def list_users(include_inactive: bool = False) -> list[UserRead]:
 
 def update_user(user_id: int, data: UserUpdate) -> UserRead:
     """Update mutable user fields. Deactivation goes through deactivate_user()."""
+    # Distinguish "not provided" vs "explicitly set to []" for allowed_site_ids.
+    explicit = data.model_dump(exclude_unset=True)
+    has_allowed_sites_patch = "allowed_site_ids" in explicit
+
     with get_session() as session:
         row = _get_row_by_id(user_id, session)
         if row is None:
@@ -145,8 +173,26 @@ def update_user(user_id: int, data: UserUpdate) -> UserRead:
         elif data.is_active is True:
             row.is_active = True
 
+        if has_allowed_sites_patch:
+            from app.db.models import SiteModel, UserAllowedSiteModel
+            requested = set(data.allowed_site_ids or [])
+            if requested:
+                existing = {
+                    r[0]
+                    for r in session.query(SiteModel.id).filter(SiteModel.id.in_(requested)).all()
+                }
+                missing = requested - existing
+                if missing:
+                    raise ValueError(f"Unknown site IDs: {sorted(missing)}")
+            session.query(UserAllowedSiteModel).filter_by(user_id=user_id).delete(
+                synchronize_session=False
+            )
+            for sid in sorted(requested):
+                session.add(UserAllowedSiteModel(user_id=user_id, site_id=sid))
+
         row.updated_at = datetime.now(timezone.utc)
         session.flush()
+        session.refresh(row)
         result = _to_user_read(row)
 
     logger.info("User %d updated", user_id)

@@ -18,7 +18,8 @@ def _login(client, username="lifecycle_user", password="lifecycle_pass_99"):
 
 
 def _refresh(client, refresh_token):
-    return client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+    client.cookies.set("refresh_token", refresh_token)
+    return client.post("/api/v1/auth/refresh")
 
 
 def _logout(client, refresh_token):
@@ -82,7 +83,7 @@ def test_new_access_token_is_usable(unauth_client):
     r = _refresh(unauth_client, tokens["refresh_token"])
     new_access = r.json()["access_token"]
 
-    r = unauth_client.get("/api/v1/vlans/", headers={"Authorization": f"Bearer {new_access}"})
+    r = unauth_client.get("/api/v1/vlans/?device=mock_device", headers={"Authorization": f"Bearer {new_access}"})
     assert r.status_code == 200
 
 
@@ -168,7 +169,7 @@ def test_logout_does_not_invalidate_access_token(unauth_client):
     access = tokens["access_token"]
     _logout(unauth_client, tokens["refresh_token"])
 
-    r = unauth_client.get("/api/v1/vlans/", headers={"Authorization": f"Bearer {access}"})
+    r = unauth_client.get("/api/v1/vlans/?device=mock_device", headers={"Authorization": f"Bearer {access}"})
     assert r.status_code == 200
 
 

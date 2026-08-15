@@ -28,3 +28,9 @@ export interface VlanJobResult {
   device: string;
   job_id: string;
 }
+
+// Aggregate result returned by multi-device VLAN operations
+export interface VlanOperationResult {
+  group_job_id: string;
+  jobs: VlanJobResult[];
+}

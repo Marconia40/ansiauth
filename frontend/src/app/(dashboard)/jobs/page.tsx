@@ -1,253 +1,562 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getJobs, getJob } from '@/services/api';
+import { StatusBadge } from '@/components/StatusBadge';
+import { ElapsedTimer } from '@/components/ElapsedTimer';
+import { JobDetailModal } from '@/components/JobDetailModal';
+import { getJobs, getSites } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
-import type { Job, JobStatus } from '@/types/job';
+import { ACTIVE_JOB_STATUSES } from '@/types/job';
+import type { Job } from '@/types/job';
+import type { Site } from '@/types/site';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+type SortKey = 'newest' | 'oldest' | 'duration' | 'failures_first';
+type DateRange = 'today' | '7d' | '30d' | 'all';
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function extractMessage(error: unknown, fallback: string): string {
   const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
   return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
 }
 
-function statusClass(status: JobStatus | string): string {
-  if (status === 'completed') return 'text-green-600';
-  if (status === 'failed' || status === 'cancelled') return 'text-red-600';
-  if (status === 'running' || status === 'retrying' || status === 'pending') return 'text-amber-600';
-  return 'text-gray-600';
+function getDurationMs(job: Job): number | null {
+  if (!job.started_at || !job.finished_at) return null;
+  return new Date(job.finished_at).getTime() - new Date(job.started_at).getTime();
 }
 
-function statusBadge(status: JobStatus | string): string {
-  if (status === 'completed') return 'bg-green-100 text-green-700';
-  if (status === 'failed' || status === 'cancelled') return 'bg-red-100 text-red-700';
-  if (status === 'running' || status === 'retrying' || status === 'pending') return 'bg-amber-100 text-amber-700';
-  return 'bg-gray-100 text-gray-700';
-}
-
-function formatDuration(job: Job): string {
-  if (job.started_at && job.finished_at) {
-    const ms = new Date(job.finished_at).getTime() - new Date(job.started_at).getTime();
-    return `${(ms / 1000).toFixed(1)}s`;
-  }
-  return '—';
+function formatDurationMs(ms: number | null): string {
+  if (ms == null) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function formatDate(ts: string | null | undefined): string {
-  if (!ts) return 'N/A';
-  return new Date(ts).toLocaleString();
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString(undefined, {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
 }
 
-function normalizeJobs(data: unknown): Job[] {
-  if (Array.isArray(data)) return data as Job[];
-  if (data && typeof data === 'object') {
-    const d = data as Record<string, unknown>;
-    if (Array.isArray(d.items)) return d.items as Job[];
-    if (Array.isArray(d.jobs)) return d.jobs as Job[];
-  }
-  return [];
+function isToday(ts: string | null | undefined): boolean {
+  if (!ts) return false;
+  const d = new Date(ts);
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
 }
+
+function startOfDay(offsetDays = 0): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime() - offsetDays * 86_400_000;
+}
+
+// ── Summary bar ───────────────────────────────────────────────────────────────
+
+function SummaryBar({ jobs, total }: { jobs: Job[]; total: number }) {
+  const todayCount = jobs.filter(j => isToday(j.created_at)).length;
+  const terminal = jobs.filter(j => j.status === 'completed' || j.status === 'failed');
+  const successRate =
+    terminal.length === 0
+      ? null
+      : Math.round((terminal.filter(j => j.status === 'completed').length / terminal.length) * 100);
+  const failureCount = jobs.filter(j => j.status === 'failed').length;
+  const rollbackCount = jobs.filter(j => j.rollback_performed).length;
+
+  const stats: { label: string; value: string | number; warn: boolean }[] = [
+    { label: 'Jobs today', value: todayCount, warn: false },
+    { label: 'Success rate', value: successRate != null ? `${successRate}%` : '—', warn: successRate != null && successRate < 90 },
+    { label: 'Failures', value: failureCount, warn: failureCount > 0 },
+    { label: 'Rollbacks', value: rollbackCount, warn: rollbackCount > 0 },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+      {stats.map(s => (
+        <div key={s.label} className="bg-white border border-gray-200 rounded-md px-4 py-3">
+          <div className={`text-2xl font-semibold tabular-nums ${s.warn ? 'text-red-600' : 'text-gray-900'}`}>
+            {s.value}
+          </div>
+          <div className="text-xs text-gray-500 mt-0.5">{s.label}</div>
+        </div>
+      ))}
+      {total > jobs.length && (
+        <p className="col-span-2 sm:col-span-4 text-xs text-gray-400 -mt-1">
+          Stats reflect this page only ({jobs.length} of {total} jobs loaded)
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── Shared select class ───────────────────────────────────────────────────────
+
+const SELECT_CLS =
+  'px-2 py-1.5 text-sm border border-gray-300 rounded-md bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400';
+
+// ── Filter + sort bar ─────────────────────────────────────────────────────────
+
+interface FilterBarProps {
+  devices: string[];
+  playbooks: string[];
+  sites: Site[];
+  filterSite: string;
+  setFilterSite: (v: string) => void;
+  filterDevice: string;
+  setFilterDevice: (v: string) => void;
+  filterStatus: string;
+  setFilterStatus: (v: string) => void;
+  filterPlaybook: string;
+  setFilterPlaybook: (v: string) => void;
+  filterDateRange: DateRange;
+  setFilterDateRange: (v: DateRange) => void;
+  sort: SortKey;
+  setSort: (v: SortKey) => void;
+  pageSize: number;
+  setPageSize: (v: number) => void;
+  hasActiveFilters: boolean;
+  onClearFilters: () => void;
+}
+
+function FilterBar({
+  devices,
+  playbooks,
+  sites,
+  filterSite,
+  setFilterSite,
+  filterDevice,
+  setFilterDevice,
+  filterStatus,
+  setFilterStatus,
+  filterPlaybook,
+  setFilterPlaybook,
+  filterDateRange,
+  setFilterDateRange,
+  sort,
+  setSort,
+  pageSize,
+  setPageSize,
+  hasActiveFilters,
+  onClearFilters,
+}: FilterBarProps) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-3">
+      <select value={filterSite} onChange={e => setFilterSite(e.target.value)} className={SELECT_CLS}>
+        <option value="">All Sites</option>
+        {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+
+      <select value={filterDevice} onChange={e => setFilterDevice(e.target.value)} className={SELECT_CLS}>
+        <option value="">All devices</option>
+        {devices.map(d => <option key={d} value={d}>{d}</option>)}
+      </select>
+
+      <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className={SELECT_CLS}>
+        <option value="">All statuses</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+        <option value="running">Running</option>
+        <option value="pending">Queued</option>
+        <option value="retrying">Retrying</option>
+        <option value="cancelled">Cancelled</option>
+        <option value="rollback_performed">Rollback executed</option>
+      </select>
+
+      {playbooks.length > 0 && (
+        <select value={filterPlaybook} onChange={e => setFilterPlaybook(e.target.value)} className={SELECT_CLS}>
+          <option value="">All actions</option>
+          {playbooks.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
+      )}
+
+      <select value={filterDateRange} onChange={e => setFilterDateRange(e.target.value as DateRange)} className={SELECT_CLS}>
+        <option value="all">All time</option>
+        <option value="today">Today</option>
+        <option value="7d">Last 7 days</option>
+        <option value="30d">Last 30 days</option>
+      </select>
+
+      {hasActiveFilters && (
+        <button onClick={onClearFilters} className="text-xs text-gray-500 hover:text-gray-700 underline px-1">
+          Clear
+        </button>
+      )}
+
+      <div className="ml-auto flex items-center gap-3">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-400 whitespace-nowrap">Per page:</span>
+          <select value={pageSize} onChange={e => setPageSize(Number(e.target.value))} className={SELECT_CLS}>
+            {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-400 whitespace-nowrap">Sort:</span>
+          <select value={sort} onChange={e => setSort(e.target.value as SortKey)} className={SELECT_CLS}>
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="duration">Longest duration</option>
+            <option value="failures_first">Failures first</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Pagination controls ───────────────────────────────────────────────────────
+
+function Pagination({
+  page,
+  totalPages,
+  totalItems,
+  pageSize,
+  onPrev,
+  onNext,
+  onGoTo,
+}: {
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  pageSize: number;
+  onPrev: () => void;
+  onNext: () => void;
+  onGoTo: (p: number) => void;
+}) {
+  const [inputVal, setInputVal] = useState(String(page));
+
+  useEffect(() => { setInputVal(String(page)); }, [page]);
+
+  const firstItem = (page - 1) * pageSize + 1;
+  const lastItem = Math.min(page * pageSize, totalItems);
+
+  function handleKey(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== 'Enter') return;
+    const n = parseInt(inputVal, 10);
+    if (!isNaN(n) && n >= 1 && n <= totalPages) onGoTo(n);
+    else setInputVal(String(page));
+  }
+
+  function handleBlur() {
+    const n = parseInt(inputVal, 10);
+    if (!isNaN(n) && n >= 1 && n <= totalPages) onGoTo(n);
+    else setInputVal(String(page));
+  }
+
+  if (totalPages <= 1) return null;
+
+  return (
+    <div className="flex items-center justify-between mt-4 text-sm">
+      <span className="text-xs text-gray-400">
+        {firstItem}–{lastItem} of {totalItems}
+      </span>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onPrev}
+          disabled={page <= 1}
+          className="px-2.5 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          ← Prev
+        </button>
+
+        <div className="flex items-center gap-1 text-xs text-gray-500">
+          <span>Page</span>
+          <input
+            type="text"
+            value={inputVal}
+            onChange={e => setInputVal(e.target.value)}
+            onKeyDown={handleKey}
+            onBlur={handleBlur}
+            className="w-10 px-1.5 py-0.5 text-center border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+            aria-label="Page number"
+          />
+          <span>of {totalPages}</span>
+        </div>
+
+        <button
+          onClick={onNext}
+          disabled={page >= totalPages}
+          className="px-2.5 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Next →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function JobsPage() {
+  const [filterSite, setFilterSite] = useState('');
+  const [filterDevice, setFilterDevice] = useState('');
+  const [filterStatus, setFilterStatus] = useState('');
+  const [filterPlaybook, setFilterPlaybook] = useState('');
+  const [filterDateRange, setFilterDateRange] = useState<DateRange>('all');
+  const [sort, setSort] = useState<SortKey>('newest');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const { jobs: trackedJobs } = useJobNotifications();
-  const trackedIds = new Set(trackedJobs.map((n) => n.jobId));
 
-  const {
-    data: jobsRaw,
-    isLoading: jobsLoading,
-    error: jobsError,
-    refetch,
-    isFetching,
-  } = useQuery({
-    queryKey: ['jobs'],
-    queryFn: () => getJobs(),
+  const { jobs: trackedJobs } = useJobNotifications();
+  const trackedIds = new Set(trackedJobs.map(n => n.jobId));
+
+  const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
+  const siteList = sites ?? [];
+
+  // reset to page 1 when server-side params change
+  useEffect(() => { setPage(1); }, [filterStatus, filterDevice, filterSite, pageSize]);
+
+  const { data, isLoading, error, refetch, isFetching } = useQuery({
+    queryKey: ['jobs', page, pageSize, filterStatus, filterDevice, filterSite],
+    queryFn: () => getJobs({
+      page,
+      page_size: pageSize,
+      status: filterStatus || undefined,
+      device: filterDevice || undefined,
+      site_id: filterSite ? Number(filterSite) : undefined,
+    }),
     refetchInterval: (query) => {
-      const jobs = normalizeJobs(query.state.data);
-      const hasActive = jobs.some((j) => j.status === 'pending' || j.status === 'running');
+      const items = (query.state.data as { items: Job[] } | undefined)?.items ?? [];
+      const hasActive = items.some(j => (ACTIVE_JOB_STATUSES as string[]).includes(j.status));
       return hasActive ? 2500 : false;
     },
   });
 
-  const jobs = normalizeJobs(jobsRaw);
+  const pageItems: Job[] = data?.items ?? [];
+  const serverTotal: number = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(serverTotal / pageSize));
 
-  const {
-    data: selectedJob,
-    isLoading: detailLoading,
-    error: detailError,
-  } = useQuery({
-    queryKey: ['job', selectedJobId],
-    queryFn: () => getJob(selectedJobId!),
-    enabled: !!selectedJobId,
-    refetchInterval: (query) => {
-      const job = query.state.data as Job | undefined;
-      if (!job) return false;
-      return (job.status === 'pending' || job.status === 'running') ? 2500 : false;
-    },
-  });
+  // client-side filters applied on top of the server page
+  const displayItems = useMemo(() => {
+    const cutoffs: Record<DateRange, number | null> = {
+      today: startOfDay(),
+      '7d': startOfDay(7),
+      '30d': startOfDay(30),
+      all: null,
+    };
 
-  const detail = selectedJob;
+    let jobs = pageItems;
+    if (filterPlaybook) jobs = jobs.filter(j => j.playbook === filterPlaybook);
+    const cut = cutoffs[filterDateRange];
+    if (cut != null) jobs = jobs.filter(j => j.created_at != null && new Date(j.created_at).getTime() >= cut);
+
+    const result = [...jobs];
+    if (sort === 'newest') {
+      result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    } else if (sort === 'oldest') {
+      result.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    } else if (sort === 'duration') {
+      result.sort((a, b) => (getDurationMs(b) ?? -1) - (getDurationMs(a) ?? -1));
+    } else if (sort === 'failures_first') {
+      const rank = (j: Job): number => {
+        if (j.status === 'failed') return 0;
+        if (j.status === 'retrying') return 1;
+        if (j.rollback_performed) return 2;
+        return 3;
+      };
+      result.sort((a, b) => rank(a) - rank(b));
+    }
+    return result;
+  }, [pageItems, filterPlaybook, filterDateRange, sort]);
+
+  const uniqueDevices = useMemo(() => {
+    const s = new Set(pageItems.map(j => j.device).filter(Boolean) as string[]);
+    return Array.from(s).sort();
+  }, [pageItems]);
+
+  const uniquePlaybooks = useMemo(() => {
+    const s = new Set(pageItems.map(j => j.playbook).filter(Boolean) as string[]);
+    return Array.from(s).sort();
+  }, [pageItems]);
+
+  const hasActiveFilters =
+    !!filterSite || !!filterDevice || !!filterStatus || !!filterPlaybook || filterDateRange !== 'all';
+
+  function clearFilters() {
+    setFilterSite('');
+    setFilterDevice('');
+    setFilterStatus('');
+    setFilterPlaybook('');
+    setFilterDateRange('all');
+  }
 
   return (
     <div>
       <PageHeader
-        title="Jobs"
+        title="Execution History"
         actions={
           <button
             onClick={() => refetch()}
-            disabled={jobsLoading || isFetching}
+            disabled={isLoading || isFetching}
             className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isFetching ? 'Refreshing...' : 'Refresh'}
           </button>
         }
       />
-      <p className="text-sm text-gray-500 mb-6">View network automation job execution</p>
+      <p className="text-sm text-gray-500 mb-6">Network automation job execution history</p>
 
-      {jobsLoading ? (
+      {isLoading ? (
         <div className="py-12 flex justify-center">
           <LoadingSpinner size="lg" />
         </div>
-      ) : jobsError ? (
+      ) : error ? (
         <div className="py-6">
-          <ErrorMessage error={extractMessage(jobsError, 'Could not load jobs')} />
-          <button
-            onClick={() => refetch()}
-            className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
-          >
+          <ErrorMessage error={extractMessage(error, 'Could not load jobs')} />
+          <button onClick={() => refetch()} className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50">
             Retry
           </button>
         </div>
-      ) : jobs.length === 0 ? (
-        <p className="py-12 text-center text-gray-400 text-sm">No jobs executed yet.</p>
       ) : (
-        <table className="w-full border-collapse text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 bg-gray-50">
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Job ID</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Playbook</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Device</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Status</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Retries</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Rollback</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Error</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Duration</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {jobs.map((job) => (
-              <tr
-                key={job.job_id}
-                onClick={() =>
-                  setSelectedJobId(job.job_id === selectedJobId ? null : job.job_id)
-                }
-                className={`border-b border-gray-100 cursor-pointer hover:bg-blue-50 transition-colors ${
-                  job.job_id === selectedJobId ? 'bg-blue-50' : ''
-                }`}
-              >
-                <td className="px-4 py-2 font-mono text-xs text-gray-700">
-                  <span>{job.job_id.slice(0, 8)}…</span>
-                  {trackedIds.has(job.job_id) && (
-                    <span className="ml-1.5 px-1 py-0.5 rounded text-xs bg-blue-100 text-blue-600 font-sans font-medium">
-                      tracked
-                    </span>
-                  )}
-                </td>
-                <td className="px-4 py-2 text-gray-900">{job.playbook ?? '—'}</td>
-                <td className="px-4 py-2 text-gray-900">{job.device ?? '—'}</td>
-                <td className="px-4 py-2">
-                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${statusBadge(job.status)}`}>
-                    {job.status}
-                  </span>
-                </td>
-                <td className="px-4 py-2 text-gray-600">
-                  {job.retry_count} / {job.max_retries}
-                </td>
-                <td className="px-4 py-2 text-gray-600">
-                  {job.rollback_performed ? 'Yes' : 'No'}
-                </td>
-                <td className="px-4 py-2 text-gray-600 max-w-[160px] truncate">
-                  {job.error ?? job.last_error ?? '—'}
-                </td>
-                <td className="px-4 py-2 text-gray-600">{formatDuration(job)}</td>
-                <td className="px-4 py-2 text-gray-600">{formatDate(job.created_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <>
+          <SummaryBar jobs={pageItems} total={serverTotal} />
+
+          <FilterBar
+            devices={uniqueDevices}
+            playbooks={uniquePlaybooks}
+            sites={siteList}
+            filterSite={filterSite}
+            setFilterSite={setFilterSite}
+            filterDevice={filterDevice}
+            setFilterDevice={setFilterDevice}
+            filterStatus={filterStatus}
+            setFilterStatus={setFilterStatus}
+            filterPlaybook={filterPlaybook}
+            setFilterPlaybook={setFilterPlaybook}
+            filterDateRange={filterDateRange}
+            setFilterDateRange={setFilterDateRange}
+            sort={sort}
+            setSort={setSort}
+            pageSize={pageSize}
+            setPageSize={setPageSize}
+            hasActiveFilters={hasActiveFilters}
+            onClearFilters={clearFilters}
+          />
+
+          {displayItems.length === 0 ? (
+            <div className="py-12 text-center">
+              <p className="text-gray-400 text-sm">No jobs match the current filters.</p>
+              {hasActiveFilters && (
+                <button onClick={clearFilters} className="mt-2 text-xs text-blue-600 hover:underline">
+                  Clear filters
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              <p className="text-xs text-gray-400 mb-2">
+                {serverTotal} total
+                {hasActiveFilters && ` — showing ${displayItems.length} on this page`}
+              </p>
+
+              <table className="w-full border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-gray-200 bg-gray-50">
+                    <th className="text-left px-4 py-2 font-medium text-gray-700">Job ID</th>
+                    <th className="text-left px-4 py-2 font-medium text-gray-700">Action</th>
+                    <th className="text-left px-4 py-2 font-medium text-gray-700">Device</th>
+                    <th className="text-left px-4 py-2 font-medium text-gray-700">Status</th>
+                    <th className="text-left px-4 py-2 font-medium text-gray-700">Duration</th>
+                    <th className="text-left px-4 py-2 font-medium text-gray-700">Created</th>
+                    <th className="px-4 py-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayItems.map(job => {
+                    const isActive = (ACTIVE_JOB_STATUSES as string[]).includes(job.status);
+                    const durationMs = getDurationMs(job);
+
+                    return (
+                      <tr key={job.job_id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-600">
+                          {job.job_id.slice(0, 8)}…
+                          {trackedIds.has(job.job_id) && (
+                            <span className="ml-1.5 px-1 py-0.5 rounded bg-blue-100 text-blue-600 font-sans font-medium">
+                              tracked
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="px-4 py-2.5 text-gray-900">{job.playbook ?? '—'}</td>
+
+                        <td className="px-4 py-2.5 text-gray-900">{job.device ?? '—'}</td>
+
+                        <td className="px-4 py-2.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <StatusBadge status={job.status} />
+                            {job.retry_count > 0 && (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700">
+                                ↺ retried
+                              </span>
+                            )}
+                            {job.rollback_performed && (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-orange-50 text-orange-600">
+                                ↩ rollback
+                              </span>
+                            )}
+                          </div>
+                          {job.status === 'failed' && (job.error ?? job.last_error) && (
+                            <p className="mt-0.5 text-xs text-red-500 truncate max-w-[220px]">
+                              {job.error ?? job.last_error}
+                            </p>
+                          )}
+                        </td>
+
+                        <td className="px-4 py-2.5 text-gray-600 tabular-nums text-sm">
+                          {isActive
+                            ? <ElapsedTimer startedAt={job.started_at} className="text-xs text-amber-600" />
+                            : formatDurationMs(durationMs)}
+                        </td>
+
+                        <td className="px-4 py-2.5 text-gray-500 text-xs whitespace-nowrap">
+                          {formatDate(job.created_at)}
+                        </td>
+
+                        <td className="px-4 py-2.5 text-right">
+                          <button
+                            onClick={() => setSelectedJobId(job.job_id)}
+                            className="text-xs text-blue-600 hover:underline whitespace-nowrap"
+                          >
+                            Details
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+
+              <Pagination
+                page={page}
+                totalPages={totalPages}
+                totalItems={serverTotal}
+                pageSize={pageSize}
+                onPrev={() => setPage(p => Math.max(1, p - 1))}
+                onNext={() => setPage(p => Math.min(totalPages, p + 1))}
+                onGoTo={setPage}
+              />
+            </>
+          )}
+        </>
       )}
 
       {selectedJobId && (
-        <div className="mt-8 border border-gray-200 rounded-md p-6 bg-gray-50">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold text-gray-700">Job Detail</h2>
-            <button
-              onClick={() => setSelectedJobId(null)}
-              className="text-xs text-gray-400 hover:text-gray-600"
-            >
-              Close
-            </button>
-          </div>
-
-          {detailLoading ? (
-            <LoadingSpinner size="sm" />
-          ) : detailError ? (
-            <ErrorMessage error={extractMessage(detailError, 'Could not load job detail')} />
-          ) : detail ? (
-            <dl className="grid grid-cols-[max-content_1fr] gap-x-8 gap-y-2 text-sm">
-              <dt className="text-gray-500">Job ID</dt>
-              <dd className="font-mono text-gray-900 break-all">{detail.job_id}</dd>
-
-              <dt className="text-gray-500">Playbook</dt>
-              <dd className="text-gray-900">{detail.playbook ?? 'N/A'}</dd>
-
-              <dt className="text-gray-500">Status</dt>
-              <dd className={`font-medium ${statusClass(detail.status)}`}>{detail.status}</dd>
-
-              <dt className="text-gray-500">Device</dt>
-              <dd className="text-gray-900">{detail.device ?? 'N/A'}</dd>
-
-              <dt className="text-gray-500">Current Step</dt>
-              <dd className="text-gray-900">{detail.current_step ?? 'N/A'}</dd>
-
-              <dt className="text-gray-500">Retry Count</dt>
-              <dd className="text-gray-900">{detail.retry_count} / {detail.max_retries}</dd>
-
-              <dt className="text-gray-500">Rollback Performed</dt>
-              <dd className="text-gray-900">{detail.rollback_performed ? 'Yes' : 'No'}</dd>
-
-              <dt className="text-gray-500">Error</dt>
-              <dd className="text-red-600">{detail.error ?? '—'}</dd>
-
-              <dt className="text-gray-500">Last Error</dt>
-              <dd className="text-red-600">{detail.last_error ?? '—'}</dd>
-
-              <dt className="text-gray-500">Started At</dt>
-              <dd className="text-gray-900">{formatDate(detail.started_at)}</dd>
-
-              <dt className="text-gray-500">Finished At</dt>
-              <dd className="text-gray-900">{formatDate(detail.finished_at)}</dd>
-
-              <dt className="text-gray-500">Created At</dt>
-              <dd className="text-gray-900">{formatDate(detail.created_at)}</dd>
-
-              {detail.pre_state != null && (
-                <>
-                  <dt className="text-gray-500 pt-1">Pre-State</dt>
-                  <dd>
-                    <pre className="text-xs text-gray-700 bg-white border border-gray-200 rounded p-2 overflow-auto max-h-40">
-                      {JSON.stringify(detail.pre_state, null, 2)}
-                    </pre>
-                  </dd>
-                </>
-              )}
-            </dl>
-          ) : null}
-        </div>
+        <JobDetailModal jobId={selectedJobId} onClose={() => setSelectedJobId(null)} />
       )}
     </div>
   );

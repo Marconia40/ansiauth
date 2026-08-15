@@ -8,3 +8,7 @@ class DeviceExecutionError(Exception):
 
 class NotFoundError(Exception):
     pass
+
+
+class ConflictError(Exception):
+    pass

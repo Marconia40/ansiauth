@@ -31,9 +31,11 @@ def _to_job(row: JobModel) -> Job:
         retry_count=row.retry_count,
         max_retries=row.max_retries,
         rollback_performed=row.rollback_performed,
+        rollback_success=row.rollback_success,
         pre_state=row.pre_state,
         last_error=row.last_error,
         current_step=row.current_step,
+        group_job_id=row.group_job_id,
     )
 
 
@@ -42,6 +44,7 @@ def create_job(
     device: Optional[str] = None,
     parameters: Optional[dict] = None,
     max_retries: int = 3,
+    group_job_id: Optional[str] = None,
 ) -> Job:
     with get_session() as session:
         row = JobModel(
@@ -54,6 +57,7 @@ def create_job(
             created_at=datetime.now(timezone.utc),
             rollback_performed=False,
             retry_count=0,
+            group_job_id=group_job_id,
         )
         session.add(row)
         session.flush()
@@ -79,6 +83,8 @@ def query_jobs(
     device: Optional[str] = None,
     from_date: Optional[datetime] = None,
     to_date: Optional[datetime] = None,
+    site_id: Optional[int] = None,
+    allowed_devices: Optional[set[str]] = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[Job], int]:
@@ -94,6 +100,21 @@ def query_jobs(
         if to_date is not None:
             td = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
             q = q.filter(JobModel.created_at <= td)
+        if site_id is not None:
+            from app.db.models import DeviceModel
+            device_names = [
+                r[0] for r in session.query(DeviceModel.name).filter(DeviceModel.site_id == site_id).all()
+            ]
+            if device_names:
+                q = q.filter(JobModel.device.in_(device_names))
+            else:
+                # No devices in this site → result must be empty.
+                return [], 0
+        if allowed_devices is not None:
+            # Empty set → caller has no visibility; short-circuit to empty result.
+            if not allowed_devices:
+                return [], 0
+            q = q.filter(JobModel.device.in_(allowed_devices))
         total = q.count()
         rows = (
             q.order_by(JobModel.created_at.desc())
@@ -111,6 +132,7 @@ def update_job(
     error: Optional[str] = None,
     retry_count: Optional[int] = None,
     rollback_performed: Optional[bool] = None,
+    rollback_success: Optional[bool] = None,
     pre_state: Optional[dict] = None,
     last_error: Optional[str] = None,
     current_step: Optional[str] = None,
@@ -129,16 +151,17 @@ def update_job(
             row.retry_count = retry_count
         if rollback_performed is not None:
             row.rollback_performed = rollback_performed
+        if rollback_success is not None:
+            row.rollback_success = rollback_success
         if pre_state is not None:
             row.pre_state = pre_state
         if last_error is not None:
             row.last_error = last_error
-        if current_step is not None:
-            row.current_step = current_step
 
         now = datetime.now(timezone.utc)
         if status == "running":
             row.started_at = now
+            row.current_step = "executing"
             logger.info("Job %s started", job_id)
         elif status == "completed":
             row.finished_at = now
@@ -156,6 +179,10 @@ def update_job(
                 "Job %s failed after %.2fs (retries=%d rollback=%s): %s",
                 job_id, duration, row.retry_count, row.rollback_performed, error or result,
             )
+
+        # Explicit current_step overrides the status-derived value above
+        if current_step is not None:
+            row.current_step = current_step
 
 
 def ensure_final_state(job_id: str) -> None:

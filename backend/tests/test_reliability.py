@@ -232,7 +232,7 @@ def test_rollback_on_update_failure(client, monkeypatch):
 
     monkeypatch.setattr(vlan_service, "update_vlan_description", track_update)
 
-    response = client.patch("/api/v1/vlans/10", json={"description": "New name", "devices": ["mock_device"]})
+    response = client.patch("/api/v1/vlans/10", json={"description": "New-name", "devices": ["mock_device"]})
     assert response.status_code == 200
     job_id = response.json()["jobs"][0]["job_id"]
 

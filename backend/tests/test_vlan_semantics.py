@@ -86,7 +86,7 @@ def test_update_nonexistent_vlan_fails(operator_client, client):
     """update_vlan must fail when VLAN does not exist on the device."""
     # VLAN 999 is not in mock_vlans [10, 20, 30]
     response = operator_client.patch(
-        "/api/v1/vlans/999", json={"description": "Should fail", "devices": ["mock_device"]}
+        "/api/v1/vlans/999", json={"description": "Should-fail", "devices": ["mock_device"]}
     )
     assert response.status_code == 200
     job_id = response.json()["jobs"][0]["job_id"]
@@ -107,7 +107,7 @@ def test_update_existing_vlan_succeeds(operator_client, client):
     """update_vlan must succeed when VLAN exists on the device."""
     # VLAN 10 exists in mock_vlans
     response = operator_client.patch(
-        "/api/v1/vlans/10", json={"description": "Updated name", "devices": ["mock_device"]}
+        "/api/v1/vlans/10", json={"description": "Updated-name", "devices": ["mock_device"]}
     )
     assert response.status_code == 200
     job_id = response.json()["jobs"][0]["job_id"]

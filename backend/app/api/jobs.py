@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core import authz
 from app.core.dependencies import get_current_user
 from app.core.exceptions import NotFoundError
 from app.services import audit_service, job_service
@@ -15,6 +16,12 @@ _VALID_STATUSES = frozenset({"pending", "running", "completed", "failed", "cance
 
 
 def _format_job(job) -> dict:
+    started = _ensure_aware(job.started_at)
+    finished = _ensure_aware(job.finished_at)
+    duration_ms = (
+        round((finished - started).total_seconds() * 1000)
+        if started and finished else None
+    )
     return {
         "job_id": job.job_id,
         "status": job.status,
@@ -28,9 +35,17 @@ def _format_job(job) -> dict:
         "retry_count": job.retry_count,
         "max_retries": job.max_retries,
         "rollback_performed": job.rollback_performed,
+        "rollback_success": job.rollback_success,
         "pre_state": job.pre_state,
         "last_error": job.last_error,
         "current_step": job.current_step,
+        "group_job_id": job.group_job_id,
+        "execution_summary": {
+            "attempts": job.retry_count + 1 if job.status in ("completed", "failed") else None,
+            "rollback_performed": job.rollback_performed,
+            "rollback_success": job.rollback_success,
+            "duration_ms": duration_ms,
+        },
     }
 
 
@@ -55,6 +70,7 @@ def list_jobs(
     current_user: dict = Depends(get_current_user),
     status: Optional[str] = Query(default=None),
     device_id: Optional[str] = Query(default=None),
+    site_id: Optional[int] = Query(default=None, ge=1),
     from_date: Optional[datetime] = Query(default=None),
     to_date: Optional[datetime] = Query(default=None),
     page: int = Query(default=1, ge=1),
@@ -75,6 +91,8 @@ def list_jobs(
         device=device_id,
         from_date=from_date,
         to_date=to_date,
+        site_id=site_id,
+        allowed_devices=authz.allowed_device_names_for(current_user),
         page=page,
         page_size=page_size,
     )
@@ -96,6 +114,8 @@ def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     job = job_service.get_job(job_id)
     if not job:
         raise NotFoundError(f"Job '{job_id}' not found")
+    if job.device:
+        authz.ensure_device_allowed(current_user, job.device)
     return {"success": True, "data": _format_job(job)}
 
 
@@ -109,6 +129,12 @@ def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     ),
 )
 def cancel_job(job_id: str, current_user: dict = Depends(get_current_user)):
+    # Look up first so we can authz before mutating state.
+    existing = job_service.get_job(job_id)
+    if not existing:
+        raise NotFoundError(f"Job '{job_id}' not found")
+    if existing.device:
+        authz.ensure_device_allowed(current_user, existing.device)
     job = job_service.cancel_job(job_id)
     if not job:
         raise NotFoundError(f"Job '{job_id}' not found")
