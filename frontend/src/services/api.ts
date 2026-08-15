@@ -6,6 +6,14 @@ import type { User, UserCreate, UserUpdate } from '@/types/user';
 import type { Job, GroupJob } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
 import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
+import type {
+  PortAccessVlanUpdateRequest,
+  PortAdminStateUpdateRequest,
+  PortDescriptionUpdateRequest,
+  PortListResponse,
+  PortOperationResult,
+  PortTrunkVlansUpdateRequest,
+} from '@/types/port';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -302,6 +310,75 @@ export async function updateVlan(vlanId: number, body: VlanUpdate): Promise<Vlan
 
 export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<VlanOperationResult> {
   const { data } = await client.delete<VlanRawResponse>(`/vlans/${vlanId}`, { data: body });
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+// ── Ports ─────────────────────────────────────────────────────────────────────
+
+export async function getPorts(device: string): Promise<PortListResponse> {
+  return unwrap(
+    client.get<ApiResponse<PortListResponse>>('/ports/', {
+      params: { device },
+    }),
+  );
+}
+
+type PortJobRawResponse = {
+  success: boolean;
+  group_job_id: string;
+  jobs: { device: string; job_id: string; status?: string }[];
+};
+
+export async function updatePortDescription(
+  body: PortDescriptionUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/description', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setPortAdminState(
+  body: PortAdminStateUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/admin-state', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setPortAccessVlan(
+  body: PortAccessVlanUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/access-vlan', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setTrunkAllowedVlans(
+  body: PortTrunkVlansUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/trunk-vlans', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function configurePort(body: {
+  device: string;
+  port_name: string;
+  enabled?: boolean | null;
+  description?: string | null;
+  mode?: 'access' | 'trunk' | null;
+  access_vlan?: number | null;
+  allowed_vlans?: number[] | null;
+  allowed_vlan_operation?: 'replace' | 'add' | 'remove';
+}): Promise<PortOperationResult> {
+  const payload: Record<string, unknown> = {
+    device: body.device,
+    interface: body.port_name,
+  };
+  // null / undefined → omit field (no change); boolean → send; "" → send (clears description)
+  if (body.enabled != null) payload.admin_enabled = body.enabled;
+  if (body.description != null) payload.description = body.description;
+  if (body.mode != null) payload.mode = body.mode;
+  if (body.access_vlan != null) payload.access_vlan = body.access_vlan;
+  if (body.allowed_vlans != null && body.allowed_vlans.length > 0) payload.allowed_vlans = body.allowed_vlans;
+  if (body.allowed_vlan_operation) payload.allowed_vlan_operation = body.allowed_vlan_operation;
+  const { data } = await client.post<PortJobRawResponse>('/ports/configure', payload);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 

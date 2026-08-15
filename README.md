@@ -93,9 +93,73 @@ You must create your own:
 
 ## Running the API
 
+The backend talks to **either SQLite (default, dev) or PostgreSQL 16 (recommended for staging/prod)**.
+Pick a path:
+
+### Option A — Local SQLite (no containers)
+
 ```bash
-uvicorn backend.app.main:app --reload
+cd backend
+alembic upgrade head        # one-time per fresh DB
+uvicorn app.main:app --reload
 ```
+
+The default `DATABASE_URL` is a file at `backend/app/db/app.db`. No extra config needed.
+
+### Option B — PostgreSQL via docker-compose
+
+A `docker-compose.yml` at the repo root brings up Postgres 16 + the backend:
+
+```bash
+docker compose up -d            # start db + backend
+docker compose logs -f backend  # tail backend logs
+docker compose down             # stop, keep data
+docker compose down -v          # stop and wipe the postgres volume
+```
+
+The compose file:
+- Builds the backend from `backend/Dockerfile` (Python 3.12 + Ansible).
+- Runs `alembic upgrade head` automatically before starting uvicorn.
+- Exposes the API on `http://localhost:8000` and Postgres on `localhost:5432`.
+- Stores DB data in the named volume `ansiauth-postgres-data`.
+
+Overrides (env vars or a root-level `.env`):
+
+| Variable                   | Default                                                              |
+|----------------------------|----------------------------------------------------------------------|
+| `JWT_SECRET_KEY`           | dev placeholder — **set this in production**                         |
+| `FERNET_KEY`               | empty — generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `BOOTSTRAP_ADMIN_PASSWORD` | `bootstrap_dev_password_123` — change before first boot              |
+| `EXECUTION_MODE`           | `mock`                                                               |
+
+### Option C — Existing PostgreSQL (no compose)
+
+Point any `DATABASE_URL` you like at an external Postgres instance:
+
+```bash
+export DATABASE_URL="postgresql+psycopg://user:pass@host:5432/dbname"
+cd backend
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+### Running the test suite against either backend
+
+```bash
+# SQLite (default)
+cd backend && pytest
+
+# Postgres — spin up a one-off container, point pytest at it
+podman run -d --rm --name pg-test \
+  -e POSTGRES_DB=ansiauth_test -e POSTGRES_USER=ansiauth -e POSTGRES_PASSWORD=ansiauth_dev \
+  -p 55432:5432 postgres:16-alpine
+
+DATABASE_URL="postgresql+psycopg://ansiauth:ansiauth_dev@127.0.0.1:55432/ansiauth_test" \
+  pytest
+```
+
+`conftest.py` detects a Postgres URL and drops/recreates the `public` schema
+on each session so runs are deterministic.
 
 ## Example Request
 ```bash

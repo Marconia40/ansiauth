@@ -1,0 +1,92 @@
+# Local + CI stack for AnsiAuth on PostgreSQL.
+#
+# Usage:
+#   docker compose up -d              # start db + backend + worker
+#   docker compose logs -f backend    # tail backend logs
+#   docker compose logs -f worker     # tail celery worker logs
+#   docker compose down               # stop, keep data
+#   docker compose down -v            # stop and wipe the postgres volume
+#
+# The backend reads DATABASE_URL from its environment (Step 2's Settings
+# class). When this file is in use, that URL points at the `db` service
+# below; outside compose the default is SQLite at backend/app/db/app.db.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ansiauth-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  db:
+    image: postgres:16-alpine
+    container_name: ansiauth-postgres
+    environment:
+      POSTGRES_DB: ansiauth
+      POSTGRES_USER: ansiauth
+      POSTGRES_PASSWORD: ansiauth_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - ansiauth-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ansiauth -d ansiauth"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ansiauth-backend
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # ── Database ──
+      DATABASE_URL: postgresql+psycopg://ansiauth:ansiauth_dev_password@db:5432/ansiauth
+      # ── Secrets — override in a .env file or your secret manager ──
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev_jwt_secret_change_me_change_me_change_me}
+      FERNET_KEY: ${FERNET_KEY:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-bootstrap_dev_password_123}
+      # ── Cookies — running over HTTP inside compose, so disable Secure ──
+      COOKIE_SECURE: "false"
+      # ── Execution mode — keep the stack self-contained by default ──
+      EXECUTION_MODE: ${EXECUTION_MODE:-mock}
+      # ── Celery + Redis ──
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ansiauth-worker
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # ── Database — same Postgres instance as the backend ──
+      DATABASE_URL: postgresql+psycopg://ansiauth:ansiauth_dev_password@db:5432/ansiauth
+      # ── Secrets — must match the backend ──
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev_jwt_secret_change_me_change_me_change_me}
+      FERNET_KEY: ${FERNET_KEY:-}
+      # ── Execution mode ──
+      EXECUTION_MODE: ${EXECUTION_MODE:-mock}
+      # ── Celery + Redis ──
+      REDIS_URL: redis://redis:6379/0
+
+volumes:
+  ansiauth-postgres-data:

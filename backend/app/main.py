@@ -1,16 +1,32 @@
 import logging
+import os
+from dotenv import load_dotenv
 
-# uvicorn's dictConfig only configures its own loggers and leaves the root
-# logger at WARNING with no handlers, so all app INFO/DEBUG output is silently
-# dropped when running via `uvicorn app.main:app`. Calling basicConfig here
-# (after uvicorn has already run its dictConfig) adds a stderr handler at INFO
-# to the root logger. uvicorn's own loggers are unaffected because they set
-# propagate=False and have their own handlers.
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
-    force=True,
-)
+# Read LOG_FORMAT early — before any other imports — so the root logger is
+# configured before uvicorn's dictConfig runs its own handler setup. force=True
+# ensures our handler wins regardless of order. uvicorn's own loggers are
+# unaffected because they set propagate=False.
+load_dotenv()
+
+_log_format = os.getenv("LOG_FORMAT", "text").lower()
+if _log_format == "json":
+    try:
+        from pythonjsonlogger.jsonlogger import JsonFormatter as _JsonFormatter
+    except ImportError:  # python-json-logger < 3
+        from pythonjsonlogger import jsonlogger as _jl  # type: ignore[no-redef]
+        _JsonFormatter = _jl.JsonFormatter  # type: ignore[assignment]
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(_JsonFormatter(
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+        rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    ))
+    logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+        force=True,
+    )
 
 from contextlib import asynccontextmanager
 
@@ -18,194 +34,35 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.core.config import AUDIT_RETENTION_DAYS, DATABASE_URL, SSL_CERTFILE
-from app.core.exceptions import ConflictError, DeviceExecutionError, NotFoundError, ValidationError
+from app.core.config import (
+    ARTIFACT_RETENTION_DAYS,
+    AUDIT_RETENTION_DAYS,
+    CLEANUP_INTERVAL_HOURS,
+    CORS_ORIGINS,
+    DATABASE_URL,
+    LOGIN_ATTEMPT_RETENTION_DAYS,
+    METRICS_ENABLED,
+    SSL_CERTFILE,
+)
+from app.core.exceptions import (
+    ConflictError,
+    DeviceExecutionError,
+    NotFoundError,
+    UnsupportedVendorError,
+    ValidationError,
+)
 from app.schemas.error import ErrorResponse, make_error  # noqa: F401 — re-exported for OpenAPI
-from app.db.base import Base
-from app.db.session import get_engine, init_db
+from app.db.session import init_db
 import app.db.models  # noqa: F401 — registers models with Base.metadata
 
 logger = logging.getLogger(__name__)
 
-# Initialize database on module load so it is ready before any request.
+# Initialize the engine and session factory. Schema management is owned by
+# Alembic — run `alembic upgrade head` before starting the app on a fresh DB.
 init_db(DATABASE_URL)
-Base.metadata.create_all(bind=get_engine())
 logger.info("Database ready: %s", DATABASE_URL)
 
-
-def _migrate_device_platform(engine) -> None:
-    """Add the platform column to devices if it was not present in an older DB."""
-    from sqlalchemy import inspect as sa_inspect, text
-    inspector = sa_inspect(engine)
-    if "devices" in inspector.get_table_names():
-        existing_cols = {c["name"] for c in inspector.get_columns("devices")}
-        if "platform" not in existing_cols:
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE devices ADD COLUMN platform VARCHAR DEFAULT 'ios'"))
-                conn.commit()
-            logger.info("Migration applied: added 'platform' column to devices")
-
-_migrate_device_platform(get_engine())
-
-
-def _migrate_rollback_success(engine) -> None:
-    """Add the rollback_success column to jobs if it was not present in an older DB."""
-    from sqlalchemy import inspect as sa_inspect, text
-    inspector = sa_inspect(engine)
-    if "jobs" in inspector.get_table_names():
-        existing_cols = {c["name"] for c in inspector.get_columns("jobs")}
-        if "rollback_success" not in existing_cols:
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN rollback_success BOOLEAN DEFAULT NULL"))
-                conn.commit()
-            logger.info("Migration applied: added 'rollback_success' column to jobs")
-
-_migrate_rollback_success(get_engine())
-
-
-def _migrate_audit_log_columns(engine) -> None:
-    """Add columns to audit_logs that were introduced after the initial schema."""
-    from sqlalchemy import inspect as sa_inspect, text
-    inspector = sa_inspect(engine)
-    if "audit_logs" not in inspector.get_table_names():
-        return
-    existing_cols = {c["name"] for c in inspector.get_columns("audit_logs")}
-    additions = []
-    if "parent_audit_id" not in existing_cols:
-        additions.append("ALTER TABLE audit_logs ADD COLUMN parent_audit_id INTEGER REFERENCES audit_logs(id)")
-    if "request_id" not in existing_cols:
-        additions.append("ALTER TABLE audit_logs ADD COLUMN request_id VARCHAR")
-    if additions:
-        with engine.connect() as conn:
-            for stmt in additions:
-                conn.execute(text(stmt))
-            conn.commit()
-        logger.info("Migration applied: added columns to audit_logs: %s", [s.split("ADD COLUMN ")[1].split()[0] for s in additions])
-
-_migrate_audit_log_columns(get_engine())
-
-
-def _migrate_group_job_id(engine) -> None:
-    """Add the group_job_id column to jobs if it was not present in an older DB."""
-    from sqlalchemy import inspect as sa_inspect, text
-    inspector = sa_inspect(engine)
-    if "jobs" in inspector.get_table_names():
-        existing_cols = {c["name"] for c in inspector.get_columns("jobs")}
-        if "group_job_id" not in existing_cols:
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN group_job_id VARCHAR DEFAULT NULL"))
-                conn.commit()
-            logger.info("Migration applied: added 'group_job_id' column to jobs")
-
-_migrate_group_job_id(get_engine())
-
-
-def _migrate_device_site_id(engine) -> None:
-    """Add the site_id column to devices if it was not present in an older DB."""
-    from sqlalchemy import inspect as sa_inspect, text
-    inspector = sa_inspect(engine)
-    if "devices" in inspector.get_table_names():
-        existing_cols = {c["name"] for c in inspector.get_columns("devices")}
-        if "site_id" not in existing_cols:
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE devices ADD COLUMN site_id INTEGER REFERENCES sites(id)"))
-                conn.commit()
-            logger.info("Migration applied: added 'site_id' column to devices")
-
-_migrate_device_site_id(get_engine())
-
-
-def _backfill_user_allowed_sites(engine) -> None:
-    """Ensure each non-admin user with no allowed_sites rows gets one row per existing site.
-
-    Runs on every startup but is idempotent — never duplicates existing rows.
-    Lets the policy switch be non-breaking for already-deployed databases.
-    """
-    from sqlalchemy import inspect as sa_inspect, text
-    inspector = sa_inspect(engine)
-    needed = {"users", "sites", "user_allowed_sites"}
-    if not needed.issubset(set(inspector.get_table_names())):
-        return
-    with engine.connect() as conn:
-        # Only seed users who have zero allowed_sites rows and aren't admins —
-        # that way an admin who explicitly empties a user's set never gets it re-filled.
-        result = conn.execute(text("""
-            INSERT INTO user_allowed_sites (user_id, site_id, created_at)
-            SELECT u.id, s.id, CURRENT_TIMESTAMP
-              FROM users u
-             CROSS JOIN sites s
-             WHERE u.role NOT IN ('admin', 'super-admin')
-               AND NOT EXISTS (SELECT 1 FROM user_allowed_sites x WHERE x.user_id = u.id)
-        """))
-        inserted = getattr(result, "rowcount", 0) or 0
-        if inserted > 0:
-            conn.commit()
-            logger.info("Backfilled %d user_allowed_sites rows", inserted)
-
-_backfill_user_allowed_sites(get_engine())
-
-
-def _migrate_device_group_site_id(engine) -> None:
-    """Add the site_id column to device_groups (idempotent) and backfill rows
-    whose members all live in the same site. Mixed-site groups are left with
-    site_id=NULL — admins must clean them up before non-admin RBAC will surface them.
-    """
-    from sqlalchemy import inspect as sa_inspect, text
-    inspector = sa_inspect(engine)
-    if "device_groups" not in inspector.get_table_names():
-        return
-    existing_cols = {c["name"] for c in inspector.get_columns("device_groups")}
-    if "site_id" not in existing_cols:
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE device_groups ADD COLUMN site_id INTEGER REFERENCES sites(id)"))
-            conn.commit()
-        logger.info("Migration applied: added 'site_id' column to device_groups")
-    # Backfill only NULL-site groups whose members all share a single site.
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            UPDATE device_groups
-               SET site_id = (
-                   SELECT MIN(d.site_id)
-                     FROM device_group_members m
-                     JOIN devices d ON d.name = m.device_name
-                    WHERE m.group_id = device_groups.id
-                      AND d.site_id IS NOT NULL
-               )
-             WHERE site_id IS NULL
-               AND id IN (
-                   SELECT m.group_id
-                     FROM device_group_members m
-                     JOIN devices d ON d.name = m.device_name
-                    GROUP BY m.group_id
-                   HAVING MIN(d.site_id) = MAX(d.site_id)
-                      AND MIN(d.site_id) IS NOT NULL
-               )
-        """))
-        affected = getattr(result, "rowcount", 0) or 0
-        if affected > 0:
-            conn.commit()
-            logger.info("Backfilled site_id on %d device_groups", affected)
-
-_migrate_device_group_site_id(get_engine())
-
-
-def _install_audit_immutability_trigger(engine) -> None:
-    """Create a BEFORE UPDATE trigger that prevents any mutation of audit_logs rows."""
-    from sqlalchemy import text
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TRIGGER IF NOT EXISTS audit_log_immutable
-            BEFORE UPDATE ON audit_logs
-            BEGIN
-                SELECT RAISE(ABORT, 'audit_logs rows are immutable — use append_audit_event() instead');
-            END
-        """))
-        conn.commit()
-    logger.info("Audit immutability trigger installed")
-
-_install_audit_immutability_trigger(get_engine())
-
-from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, sites, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.services import audit_service, job_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
@@ -213,22 +70,22 @@ job_service.mark_orphaned_jobs_failed()
 
 
 def _bootstrap_admin() -> None:
-    """Create the initial admin user from env vars if no admin exists in the DB."""
+    """Create the initial super-admin user from env vars if no super-admin exists in the DB."""
     from app.core.config import BOOTSTRAP_ADMIN_USER, BOOTSTRAP_ADMIN_PASSWORD
     from app.db.models import UserModel
     from app.db.session import get_session
 
     with get_session() as session:
-        has_admin = session.query(UserModel).filter_by(role="admin", is_active=True).first() is not None
+        has_superadmin = session.query(UserModel).filter_by(role="super-admin", is_active=True).first() is not None
 
-    if has_admin:
-        logger.info("Bootstrap skipped: active admin already exists")
+    if has_superadmin:
+        logger.info("Bootstrap skipped: active super-admin already exists")
         return
 
     if not BOOTSTRAP_ADMIN_PASSWORD:
         logger.warning(
-            "No active admin exists and BOOTSTRAP_ADMIN_PASSWORD is not set — "
-            "set this env var to seed an initial admin on first boot."
+            "No active super-admin exists and BOOTSTRAP_ADMIN_PASSWORD is not set — "
+            "set this env var to seed an initial super-admin on first boot."
         )
         return
 
@@ -241,7 +98,7 @@ def _bootstrap_admin() -> None:
         UserCreate(
             username=BOOTSTRAP_ADMIN_USER,
             password=BOOTSTRAP_ADMIN_PASSWORD,
-            role="admin",
+            role="super-admin",
         )
     )
     audit_service.log_action(
@@ -252,7 +109,7 @@ def _bootstrap_admin() -> None:
         details={"username": user.username},
         status="success",
     )
-    logger.info("Bootstrap: created admin user '%s' (id=%d)", user.username, user.id)
+    logger.info("Bootstrap: created super-admin user '%s' (id=%d)", user.username, user.id)
 
 
 _bootstrap_admin()
@@ -261,6 +118,7 @@ _bootstrap_admin()
 def _make_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
     from app.services import audit_service as _audit
+    from app.services import cleanup_service as _cleanup
 
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(
@@ -270,17 +128,42 @@ def _make_scheduler():
         minute=0,
         id="audit_purge_daily",
     )
+    scheduler.add_job(
+        lambda: _cleanup.run_all(
+            artifact_retention_days=ARTIFACT_RETENTION_DAYS,
+            login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
+        ),
+        trigger="interval",
+        hours=CLEANUP_INTERVAL_HOURS,
+        id="cleanup_sweep_interval",
+    )
     return scheduler
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    from app.services import cleanup_service as _cleanup
+
+    # Single startup pass so a long-running deployment doesn't have to wait a
+    # full interval before unbounded tables are pruned for the first time.
+    _cleanup.run_all(
+        artifact_retention_days=ARTIFACT_RETENTION_DAYS,
+        login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
+    )
+
     scheduler = _make_scheduler()
     scheduler.start()
-    logger.info("Audit retention scheduler started (retention=%d days, runs daily at 02:00 UTC)", AUDIT_RETENTION_DAYS)
+    logger.info(
+        "Schedulers started: audit_purge_daily (retention=%d days, 02:00 UTC); "
+        "cleanup_sweep_interval (every %d h, artifacts=%d days, login_attempts=%d days)",
+        AUDIT_RETENTION_DAYS,
+        CLEANUP_INTERVAL_HOURS,
+        ARTIFACT_RETENTION_DAYS,
+        LOGIN_ATTEMPT_RETENTION_DAYS,
+    )
     yield
     scheduler.shutdown(wait=False)
-    logger.info("Audit retention scheduler stopped")
+    logger.info("Schedulers stopped")
 
 
 app = FastAPI(
@@ -354,15 +237,16 @@ if SSL_CERTFILE:
 # rate limiting or auth middleware can reject them.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-Total-Count"],
 )
+
+if METRICS_ENABLED:
+    from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
+    Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
 @app.exception_handler(HTTPException)
@@ -438,6 +322,23 @@ async def device_execution_error_handler(request: Request, exc: DeviceExecutionE
     return JSONResponse(status_code=500, content=make_error(500, str(exc), "DEVICE_EXECUTION_ERROR"))
 
 
+@app.exception_handler(UnsupportedVendorError)
+async def unsupported_vendor_error_handler(request: Request, exc: UnsupportedVendorError):
+    # Detailed vendor / platform context goes to the log only.
+    logger.info(
+        "Unsupported vendor for %s: vendor=%s platform=%s",
+        exc.operation, exc.vendor, exc.platform,
+    )
+    return JSONResponse(
+        status_code=501,
+        content=make_error(
+            501,
+            f"{exc.operation} is not yet supported for this vendor.",
+            "VENDOR_NOT_SUPPORTED",
+        ),
+    )
+
+
 @app.exception_handler(Exception)
 async def generic_error_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error: %s", str(exc))
@@ -450,6 +351,7 @@ _err = {s: {"model": ErrorResponse} for s in (400, 401, 403, 404, 409, 422, 429,
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], responses=_err)
 app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"], responses=_err)
+app.include_router(ports.router, prefix="/api/v1/ports", tags=["ports"], responses=_err)
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"], responses=_err)
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], responses=_err)
 app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)

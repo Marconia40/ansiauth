@@ -1,14 +1,21 @@
 """TEST-003 — Audit immutability regression suite.
 
-Uses a SQLAlchemy before_execute event listener to intercept any UPDATE
-statement targeting audit_logs before it reaches the database. This is
-implementation-agnostic — it catches mutations from the ORM, raw SQL, or
-bulk-update calls, complementing the DB-level BEFORE UPDATE trigger that
-is also installed at startup.
+Two complementary defences are exercised here:
+
+* A SQLAlchemy ``before_execute`` listener (installed per-test by the
+  ``update_interceptor`` fixture) catches any UPDATE statement targeting
+  ``audit_logs`` before it reaches the database. Useful for asserting that
+  high-level service calls don't issue updates.
+* The application-layer ``audit_guard.AuditImmutabilityError`` raised by the
+  ``before_flush`` listener installed in :func:`app.db.session.init_db` —
+  the portable replacement for the old SQLite-only BEFORE UPDATE trigger.
+  This guard fires earlier (at flush time) so direct ORM mutations never
+  even reach the ``before_execute`` interceptor.
 """
 import pytest
 from sqlalchemy import event
 
+from app.db.audit_guard import AuditImmutabilityError
 from app.db.models import AuditLogModel
 from app.db.session import get_engine, get_session
 from app.services import audit_service
@@ -160,11 +167,15 @@ def test_all_statuses_present_in_chain():
 
 # ── Direct mutation is intercepted ───────────────────────────────────────────
 
-def test_direct_mutation_caught_by_interceptor(update_interceptor):
-    """Attempting to UPDATE audit_logs via ORM is caught by the before_execute listener."""
+def test_direct_mutation_caught_by_guard():
+    """Attempting to UPDATE audit_logs via ORM raises AuditImmutabilityError
+    at flush time — caught by the app-layer guard installed in init_db.
+
+    No fixture-level interceptor is needed: the guard fires before the SQL
+    is generated, so the UPDATE never reaches the engine."""
     record = audit_service.log_action("admin", "immutability_test", "audit_log", {})
 
-    with pytest.raises(AssertionError, match="Illegal UPDATE on audit_logs"):
+    with pytest.raises(AuditImmutabilityError, match=r"audit_logs row id=\d+ is immutable"):
         with get_session() as session:
             row = session.query(AuditLogModel).filter_by(id=int(record.id)).first()
             row.status = "tampered"

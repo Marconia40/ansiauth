@@ -123,7 +123,7 @@ def test_operator_cannot_delete_vlan(operator_client):
 
 def test_token_accepted_within_expiry_window(unauth_client):
     import os
-    from jose import jwt as jose_jwt
+    import jwt as jose_jwt  # name retained for blame-stable diff; PyJWT has the same encode/decode signatures
     from datetime import datetime, timezone, timedelta
 
     token = jose_jwt.encode(
@@ -141,7 +141,7 @@ def test_token_accepted_within_expiry_window(unauth_client):
 
 def test_token_rejected_after_expiry(unauth_client):
     import os
-    from jose import jwt as jose_jwt
+    import jwt as jose_jwt  # name retained for blame-stable diff; PyJWT has the same encode/decode signatures
     from datetime import datetime, timezone, timedelta
 
     expired_token = jose_jwt.encode(

@@ -1,0 +1,28 @@
+---
+# Step 3.2 — Administratively enable (undo shutdown) a port on Huawei VRP.
+#
+# Semantic counterpart to shutdown_port.yml.  The driver calls this playbook
+# when the explicit intent is "bring this port up", making run logs
+# self-describing without requiring callers to decode a boolean flag.
+#
+# VRP candidate-config model: the undo shutdown command is staged and committed
+# atomically; if the commit fails, the port state is unchanged.
+#
+# Vars expected:
+#   interface (str) — vendor-native interface name (e.g. GigabitEthernet0/0/1)
+#   device    (str) — diagnostic only
+
+- name: Administratively enable (undo shutdown) a port on Huawei VRP
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Enable port
+      ansible.netcommon.cli_command:
+        command: |
+          system-view
+          interface {{ interface }}
+          undo shutdown
+          commit
+          quit
+          quit

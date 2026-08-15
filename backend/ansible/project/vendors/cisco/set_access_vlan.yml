@@ -1,0 +1,26 @@
+---
+# Step 2.3 — Set access VLAN on Cisco IOS.
+#
+# Pre-condition (enforced by the orchestration layer, not here):
+#   * the interface is already in `switchport mode access`.
+#   * the VLAN id is valid and not in the IOS legacy range 1002–1005.
+#
+# IOS commits to running config immediately; `save_when: always` persists
+# to startup so a reload doesn't revert the change.
+#
+# Vars expected:
+#   interface (str)
+#   vlan_id   (int)
+#   device    (str) — diagnostic only
+
+- name: Set access VLAN on Cisco IOS device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Apply access VLAN
+      cisco.ios.ios_config:
+        parents: "interface {{ interface }}"
+        lines:
+          - "switchport access vlan {{ vlan_id }}"
+        save_when: always

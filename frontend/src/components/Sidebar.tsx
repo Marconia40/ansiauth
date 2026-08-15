@@ -8,6 +8,7 @@ import type { Role } from '@/types/auth';
 const NAV_ITEMS: { href: string; label: string; minRole: Role }[] = [
   { href: '/', label: 'Dashboard', minRole: 'observer' },
   { href: '/vlans', label: 'VLANs', minRole: 'observer' },
+  { href: '/ports', label: 'Ports', minRole: 'observer' },
   { href: '/devices', label: 'Devices', minRole: 'observer' },
   { href: '/device-groups', label: 'Device Groups', minRole: 'observer' },
   { href: '/sites', label: 'Sites', minRole: 'observer' },

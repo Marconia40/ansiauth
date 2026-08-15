@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.services.vendors.base import BaseVendorDriver
+from app.services.vendors.port_driver_base import BasePortDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 #      extends BaseVendorDriver and implements all abstract methods.
 #   2. Add the vendor string(s) to a new frozenset below.
 #   3. Add an ``if vendor in _<VENDOR>_VENDORS:`` branch in get_vendor_driver.
+#   4. For port-management support, create app/services/vendors/<vendor>/port_driver.py
+#      extending BasePortDriver and wire it into get_port_driver below.
 #   No changes are required anywhere else in the service or API layers.
 _CISCO_VENDORS = frozenset({"cisco", "cisco_ios"})
 _HUAWEI_VENDORS = frozenset({"huawei", "huawei_vrp"})
@@ -81,3 +84,63 @@ def get_vendor_driver(vendor: str, platform: str) -> BaseVendorDriver:
         from app.services.vendors.huawei.vlan_driver import HuaweiVlanDriver
         return HuaweiVlanDriver()
     raise ValueError(f"No driver registered for vendor='{vendor}' platform='{platform}'")
+
+
+def get_port_driver(device: Device) -> BasePortDriver:
+    """Return the appropriate port driver for *device*.
+
+    Mirrors ``get_driver`` (VLAN) so the port-management service layer can
+    stay fully vendor-agnostic.  Step 1.1 ships the Huawei implementation
+    only; a future Cisco port driver will register here without touching
+    callers.
+
+    Parameters
+    ----------
+    device:
+        Domain device object exposing .name, .vendor, .platform.
+
+    Returns
+    -------
+    BasePortDriver
+        Concrete read-only port driver instance.
+
+    Raises
+    ------
+    UnsupportedVendorError
+        If no port driver is registered for device.vendor / device.platform.
+        Carries the raw vendor / platform strings so the API layer can keep
+        internal logs diagnostic while presenting a friendly client message.
+    """
+    logger.info(
+        "Resolving port driver for device=%s vendor=%s platform=%s",
+        device.name, device.vendor, device.platform,
+    )
+    return get_port_vendor_driver(device.vendor, device.platform)
+
+
+def get_port_vendor_driver(vendor: str, platform: str) -> BasePortDriver:
+    """Return the port driver for the given vendor / platform strings.
+
+    Internal routing core for port drivers.  Application code should prefer
+    ``get_port_driver(device)`` so vendor strings stay encapsulated here.
+
+    Raises
+    ------
+    UnsupportedVendorError
+        If no port driver is registered for the given vendor / platform pair.
+        Internal logs still record the exact ``vendor='X' platform='Y'``
+        tuple for diagnostics.
+    """
+    if vendor in _HUAWEI_VENDORS:
+        from app.services.vendors.huawei.port_driver import HuaweiPortDriver
+        return HuaweiPortDriver()
+    if vendor in _CISCO_VENDORS:
+        from app.services.vendors.cisco.port_driver import CiscoPortDriver
+        return CiscoPortDriver()
+    from app.core.exceptions import UnsupportedVendorError
+    logger.warning(
+        "No port driver registered for vendor='%s' platform='%s' — "
+        "returning UnsupportedVendorError to caller",
+        vendor, platform,
+    )
+    raise UnsupportedVendorError(vendor=vendor, platform=platform, operation="Port management")

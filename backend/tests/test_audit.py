@@ -428,14 +428,20 @@ def test_follow_up_row_inherits_fields_from_parent(operator_client, admin_client
 
 
 def test_no_update_issued_on_audit_log(operator_client, admin_client):
-    """The DB trigger must block any direct UPDATE on audit_logs."""
+    """Direct UPDATE on audit_logs must be refused.
+
+    The Step-6 app-layer guard (``AuditImmutabilityError``) fires first on any
+    backend; older SQLite-only installs would have raised ``OperationalError``
+    / ``IntegrityError`` from the BEFORE UPDATE trigger instead. Accept either
+    so the test passes against both code paths."""
+    from app.db.audit_guard import AuditImmutabilityError
     from app.db.models import AuditLogModel
     from app.db.session import get_session
     import sqlalchemy.exc
 
     record = audit_service.log_action("admin", "test_action", "test", {})
 
-    with pytest.raises((sqlalchemy.exc.OperationalError, sqlalchemy.exc.IntegrityError)):
+    with pytest.raises((AuditImmutabilityError, sqlalchemy.exc.OperationalError, sqlalchemy.exc.IntegrityError)):
         with get_session() as session:
             row = session.query(AuditLogModel).filter_by(id=int(record.id)).first()
             row.status = "tampered"
