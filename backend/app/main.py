@@ -1,4 +1,17 @@
 import logging
+
+# uvicorn's dictConfig only configures its own loggers and leaves the root
+# logger at WARNING with no handlers, so all app INFO/DEBUG output is silently
+# dropped when running via `uvicorn app.main:app`. Calling basicConfig here
+# (after uvicorn has already run its dictConfig) adds a stderr handler at INFO
+# to the root logger. uvicorn's own loggers are unaffected because they set
+# propagate=False and have their own handlers.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+    force=True,
+)
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -210,12 +223,26 @@ app.openapi = _custom_openapi
 
 from app.core.rate_limit_middleware import RateLimitMiddleware  # noqa: E402
 from app.core.tls_middleware import HSTSMiddleware, HTTPSRedirectMiddleware  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 app.add_middleware(RateLimitMiddleware)
 
 if SSL_CERTFILE:
     app.add_middleware(HTTPSRedirectMiddleware)
     app.add_middleware(HSTSMiddleware)
+
+# CORS must be outermost so preflight OPTIONS requests are handled before
+# rate limiting or auth middleware can reject them.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(HTTPException)

@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from app.core.dependencies import require_role
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
@@ -31,20 +31,39 @@ def get_vlans(
     devices: list[str] | None = Query(default=None),
     current_user: dict = Depends(require_role("observer")),
 ):
+    from app.services import device_locks
+
     if devices:
         result = {}
         for dev in devices:
             try:
-                result[dev] = vlan_service.get_vlans(dev)
+                with device_locks.acquire(dev, timeout=10):
+                    result[dev] = [v.to_dict() for v in vlan_service.get_vlans(dev)]
+            except TimeoutError:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"status": "device_busy", "device": dev, "message": "Device is busy with another operation, retry shortly"},
+                )
             except ValueError as e:
                 raise NotFoundError(str(e))
             except RuntimeError as e:
                 raise DeviceExecutionError(str(e))
         return {"success": True, "data": result}
+
     if device is None and vlan_service.EXECUTION_MODE != "mock":
         raise ValidationError("'device' query parameter is required")
+
     try:
-        data = vlan_service.get_vlans(device)
+        if device is not None:
+            with device_locks.acquire(device, timeout=10):
+                data = [v.to_dict() for v in vlan_service.get_vlans(device)]
+        else:
+            data = [v.to_dict() for v in vlan_service.get_vlans(device)]
+    except TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "device_busy", "device": device, "message": "Device is busy with another operation, retry shortly"},
+        )
     except ValueError as e:
         raise NotFoundError(str(e))
     except RuntimeError as e:

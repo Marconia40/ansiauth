@@ -5,11 +5,10 @@
 
   tasks:
     - name: Display VLAN information
-      community.network.ce_command:
-        commands:
-          - display vlan
+      ansible.netcommon.cli_command:
+        command: display vlan
       register: vlan_output
 
     - name: Return VLAN output
       debug:
-        msg: "{{ vlan_output.stdout[0] }}"
+        msg: "{{ vlan_output.stdout }}"

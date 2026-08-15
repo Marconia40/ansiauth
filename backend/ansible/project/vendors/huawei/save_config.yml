@@ -5,6 +5,5 @@
 
   tasks:
     - name: Persist running config to flash
-      community.network.ce_command:
-        commands:
-          - save force
+      ansible.netcommon.cli_command:
+        command: save force

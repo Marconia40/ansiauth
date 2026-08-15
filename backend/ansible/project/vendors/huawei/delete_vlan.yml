@@ -5,6 +5,9 @@
 
   tasks:
     - name: Remove VLAN
-      community.network.ce_config:
-        lines:
-          - undo vlan {{ vlan_id }}
+      ansible.netcommon.cli_command:
+        command: |
+          system-view
+          undo vlan {{ vlan_id }}
+          commit
+          quit

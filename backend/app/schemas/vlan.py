@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class VLANCreate(BaseModel):
@@ -9,6 +9,11 @@ class VLANCreate(BaseModel):
     vlan_id: int = Field(..., ge=1, le=4094)
     name: str = Field(..., min_length=1, max_length=32)
     devices: list[str] = Field(..., min_length=1)
+
+    @field_validator('name', mode='before')
+    @classmethod
+    def strip_name(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
 
 class VLANDelete(BaseModel):
@@ -26,3 +31,8 @@ class VLANUpdate(BaseModel):
 
     description: str = Field(..., max_length=64)
     devices: list[str] = Field(..., min_length=1)
+
+    @field_validator('description', mode='before')
+    @classmethod
+    def strip_description(cls, v):
+        return v.strip() if isinstance(v, str) else v

@@ -4,8 +4,12 @@
   gather_facts: no
 
   tasks:
-    - name: Ensure VLAN exists with name
-      community.network.ce_config:
-        lines:
-          - description {{ vlan_name }}
-        parents: vlan {{ vlan_id }}
+    - name: Configure VLAN with description
+      ansible.netcommon.cli_command:
+        command: |
+          system-view
+          vlan {{ vlan_id }}
+          description {{ vlan_name }}
+          quit
+          commit
+          quit
