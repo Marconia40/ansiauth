@@ -19,6 +19,7 @@ To honor the user's traceability requirement, this phase adds **exactly**:
 | New endpoints | 6 | `POST /devices/{name}/move`, `GET /sites/{id}/groups`, `POST/DELETE/GET /users/{id}/grants`, `PUT /users/{id}/system-admin` |
 | New settings | 1 flag | `MSP_STRICT_HIERARCHY: bool = False` in `core/config.py` |
 | Rewritten endpoints (behind flag) | 3 | `GET /devices`, `GET /device-groups`, `GET /sites` (SQL scope predicate when flag on) |
+| Converted endpoints (ESC-1..4, always-on) | 17 | 2 in `devices.py` (get, save), 3 in `jobs.py`, 9 in `ports.py`, 5 in `vlans.py`, 1 in `auth.py` — mechanical `ensure_device_allowed`/`require_role` → `require_scope` swaps. See §7.1. |
 | Deleted files | 0 | Legacy `authz.py`, `dependencies.require_role` stay intact — deleted in Phase 5. |
 
 **Absolute limit:** no other new services, dependencies, or files. If a task appears to need a 4th service or 2nd dependency, reject it and inline the logic into one of the three services above.
@@ -284,6 +285,78 @@ def require_system_admin(...): ...       # for site create/delete + PUT /users/{
 
 ---
 
+## 7.1 T3.4b — Convert remaining legacy-authz callers (ESC-1..4 from Phase 0 grep audit)
+
+The Phase 0 grep audit (`docs/upgrades/phases/artifacts/phase0-grep-audit.txt`) surfaced 17 endpoints that use legacy `ensure_device_allowed` / `require_role` and are not covered by T3.1–T3.4. All of them are **mechanical one-line swaps** — the target dependency already exists in `core/scope.py::OP_MIN_ROLE`.
+
+**These conversions are always-on (not flag-gated)** because they only change *how* authz runs, not *who* is allowed. The old `ensure_device_allowed(user, name)` returned 403 iff the user was not permitted; `require_scope("read_device")` returns 403 iff `effective_role(...)` < observer. Once Phase 2 has populated `role_assignments`, the two must be equivalent — that equivalence is what test T3.5 (snapshot-diff) proves.
+
+### ESC-1 — `backend/app/api/jobs.py`
+
+| Line | Current | Target |
+|---|---|---|
+| `:73-95` | `list_jobs(site_id, allowed_devices=authz.allowed_device_names_for(user))` | Rewrite `job_service.list_jobs` to accept `user` and JOIN through `role_assignments`. Handler drops `allowed_devices` param. |
+| `:118` | `authz.ensure_device_allowed(current_user, job.device)` inside `retry_job` | `Depends(require_scope("write_device_config"))` on the endpoint; delete the imperative line. |
+| `:137` | Same, inside `cancel_job` | Same treatment. |
+
+Note: `list_jobs` cannot use `require_scope` at the endpoint layer (there is no single resource in the path). Push the SQL scope predicate into `job_service.list_jobs` — same pattern as `Inventory.list`.
+
+### ESC-2 — `backend/app/api/ports.py` (9 endpoints)
+
+| Line | Current dep | Target dep |
+|---|---|---|
+| `:164` | `require_role("observer")` + `ensure_device_allowed` | `require_scope("read_device")` |
+| `:252, :298, :339, :383, :428, :488, :530` (write endpoints) | `require_role("operator")` + `ensure_device_allowed` | `require_scope("write_device_config")` |
+| `:180, :263, :308, :350, :394, :444, :498, :540` | imperative `authz.ensure_device_allowed(...)` lines | delete (the dep now enforces) |
+
+Every handler goes from ~6 lines to ~4 lines after the swap. No behavior change.
+
+### ESC-3 — `backend/app/api/vlans.py` (5 endpoints)
+
+| Line | Current dep | Target dep |
+|---|---|---|
+| `:33` (list_vlans) | `require_role("observer")` + `ensure_devices_allowed` | `require_scope("read_device")` |
+| `:91` (get_vlan) | `require_role("observer")` + `ensure_device_allowed` | `require_scope("read_device")` |
+| `:119, :145` (create/update) | `require_role("admin"/"operator")` + `ensure_devices_allowed` | `require_scope("write_device_config")` |
+| `:38, :59, :102, :129, :156` | imperative `ensure_device[s]_allowed(...)` lines | delete |
+
+Corner case: `set_vlan` operates on a **batch** of devices. `require_scope` at the endpoint layer only handles one target. Handle by:
+- Keep `require_scope("write_device_config")` on the endpoint (validates the *first* / any device — irrelevant since the batch is validated by the loop).
+- Inside `vlan_service.set_vlan`, iterate the device list and call `effective_role(user, 'device', name)` for each; if any returns below operator, raise 403 with the specific device name in the message.
+- No new dependency needed — the pure function is reused.
+
+### ESC-4 — `backend/app/api/auth.py::unlock_account`
+
+| Line | Current | Target |
+|---|---|---|
+| `:156` | `Depends(require_role("admin"))` | `Depends(require_system_admin)` |
+
+**Reason:** account unlock is a security-sensitive op with no site scope. Promoting to `require_system_admin` matches D26's philosophy: activation/deactivation and lockout management live at the system level.
+
+**Not a change in behavior for the current single-admin deployment (D24)**: today's `admin` user becomes `is_system_admin=TRUE` after Phase 2, so they still pass this gate.
+
+### Also folded into T3.4b — 2 devices.py callers not covered above
+
+Line references from grep audit §1.5:
+- `backend/app/api/devices.py:50` — `ensure_device_allowed` inside `get_device`. Handled by `require_scope("read_device")` — same swap as ESC-2/3.
+- `backend/app/api/devices.py:147` — `ensure_device_allowed` inside `save_device_config`. Handled by `require_scope("write_device_config")`.
+
+Both were implied by the §7 endpoint table but adding the explicit swap here so the T3.4b work-list is self-contained.
+
+### Tests for T3.4b
+
+Regression-only — no new behavior to prove. The existing `test_site_scoped_rbac.py`, `test_ports_api.py`, `test_vlans.py`, `test_jobs.py`, `test_port_write_api.py`, `test_port_service.py` must all still pass. Snapshot-diff (T3.5) provides the cross-check that the new dep chain returns the same set of allowed devices as the old.
+
+### Traceability check after T3.4b lands
+
+After T3.4b:
+```
+grep -rn "ensure_device_allowed\|ensure_devices_allowed" backend/app/
+```
+should return only the definitions in `backend/app/core/authz.py`. Zero remaining callers in `backend/app/api/`. If any survive, T3.4b is incomplete.
+
+---
+
 ## 8. Service-layer edits (concrete)
 
 `backend/app/services/site_service.py`:
@@ -348,6 +421,7 @@ Same as today. Legacy `require_role` and `authz.py` still run. New endpoints (`/
   - cross-site as site-admin on both: allowed.
   - move with pending Job: 409 (D_active_job).
 - **T3.4 — site groups listing** (`test_msp_site_groups_listing.py`).
+- **T3.4b — regression only** (ESC-1..4 swaps). No new test file. Every existing `test_site_scoped_rbac.py`, `test_ports_api.py`, `test_vlans.py`, `test_jobs.py`, `test_port_write_api.py`, `test_port_service.py`, `test_rbac.py`, `test_auth.py` must still pass. If any regresses, the swap is wrong (or `role_assignments` backfill is wrong).
 - **T3.5 — snapshot-diff test** (`test_msp_authz_snapshot_diff.py`): with `MSP_STRICT_HIERARCHY=true`, for every seeded user assert the visible-devices set equals the legacy result. R3.
 - **T3.6 — D19 test** (`test_msp_delete_group_auto_moves_devices.py`).
 - **T3.7 — D7 test** (`test_msp_default_group_immutable.py`) — rename/delete/demote all rejected.
@@ -393,4 +467,6 @@ Same as today. Legacy `require_role` and `authz.py` still run. New endpoints (`/
 - [ ] `grep -c "OP_MIN_ROLE\|require_scope" backend/app` returns matches only in `core/scope.py` and `api/` — no other module.
 - [ ] `Inventory`, `RoleAssignmentService`, `effective_role` each in one file; grep confirms no duplication.
 - [ ] Deprecation warning present in `PUT /users/{id}/allowed-sites` response.
+- [ ] **T3.4b:** `grep -rn "ensure_device_allowed\|ensure_devices_allowed" backend/app/api/` returns zero hits.
+- [ ] **T3.4b:** `backend/app/api/auth.py::unlock_account` uses `require_system_admin`.
 - [ ] `CHANGELOG.md` updated.

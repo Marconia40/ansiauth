@@ -63,7 +63,7 @@ init_db(DATABASE_URL)
 logger.info("Database ready: %s", DATABASE_URL)
 
 from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
-from app.services import audit_service, job_service, user_service  # noqa: E402
+from app.services import audit_service, job_service, site_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
 job_service.mark_orphaned_jobs_failed()
@@ -113,6 +113,9 @@ def _bootstrap_admin() -> None:
 
 
 _bootstrap_admin()
+# MSP: Phase 1 — idempotent bootstrap of the mandatory Base-Infrastructure
+# Site + its Default DeviceGroup. Safe to call every boot.
+site_service.ensure_base_infrastructure()
 
 
 def _make_scheduler():
