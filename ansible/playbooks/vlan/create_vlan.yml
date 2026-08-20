@@ -1,0 +1,19 @@
+- name: Create VLAN
+  hosts: "{{ target_hosts }}"
+  gather_facts: no
+
+  tasks:
+    - name: Create VLAN on Cisco
+      when: ansible_network_os == "ios"
+      cisco.ios.ios_config:
+        lines:
+          - "vlan {{ vlan_id }}"
+          - "name {{ vlan_name }}"
+
+    - name: Create VLAN on Huawei
+      when: ansible_network_os == "ce"
+      community.network.ce_config:
+        lines:
+          - "vlan {{ vlan_id }}"
+          - "name {{ vlan_name }}"
+          

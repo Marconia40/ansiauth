@@ -1,0 +1,30 @@
+[1;35m[WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.[0m
+[0;35m[DEPRECATION WARNING]: community.network.ce_config has been deprecated. This collection and all content in it is unmaintained and deprecated. This feature will be removed from collection 'community.network' version 6.0.0.[0m
+
+PLAY [Create VLAN] *************************************************************
+
+TASK [Create VLAN on Cisco] ****************************************************
+[0;31m[ERROR]: Task failed: Error while evaluating conditional: 'ansible_network_os' is undefined[0m
+[0;31m[0m
+[0;31mTask failed.[0m
+[0;31mOrigin: /home/marconia/Documents/finalProject/ansiauth/ansible/playbooks/vlan/create_vlan.yml:6:7[0m
+[0;31m[0m
+[0;31m4[0m
+[0;31m5   tasks:[0m
+[0;31m6     - name: Create VLAN on Cisco[0m
+[0;31m        ^ column 7[0m
+[0;31m[0m
+[0;31m<<< caused by >>>[0m
+[0;31m[0m
+[0;31mError while evaluating conditional: 'ansible_network_os' is undefined[0m
+[0;31mOrigin: /home/marconia/Documents/finalProject/ansiauth/ansible/playbooks/vlan/create_vlan.yml:7:13[0m
+[0;31m[0m
+[0;31m5   tasks:[0m
+[0;31m6     - name: Create VLAN on Cisco[0m
+[0;31m7       when: ansible_network_os == "ios"[0m
+[0;31m              ^ column 13[0m
+[0;31m[0m
+[0;31mfatal: [localhost]: FAILED! => {"changed": false, "msg": "Task failed: Error while evaluating conditional: 'ansible_network_os' is undefined"}[0m
+
+PLAY RECAP *********************************************************************
+[0;31mlocalhost[0m                  : ok=0    changed=0    unreachable=0    [0;31mfailed=1   [0m skipped=0    rescued=0    ignored=0   
