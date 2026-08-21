@@ -3,6 +3,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from app.core.config import COOKIE_SAMESITE, COOKIE_SECURE, REFRESH_TOKEN_EXPIRE_MINUTES
 from app.core.dependencies import require_role
+from app.core.scope import require_system_admin
 from app.core.security import create_access_token
 from app.schemas.auth import TokenResponse
 from app.services import audit_service, login_attempt_service, refresh_token_service
@@ -150,10 +151,15 @@ def logout(request: Request, response: Response):
     summary="Unlock account",
     description=(
         "Clear all failed login attempts for a locked user account. "
-        "Requires admin role or higher."
+        "**MSP Phase 3 (ESC-4):** promoted from admin → system-admin — "
+        "unlock has no site scope and is treated as a system-level operation "
+        "(consistent with D26 activation/deactivation semantics)."
     ),
 )
-def unlock_account(username: str, current_user: dict = Depends(require_role("admin"))):
+def unlock_account(
+    username: str,
+    current_user: dict = Depends(require_system_admin),
+):
     count = login_attempt_service.unlock_username(username)
     audit_service.log_action(
         user=current_user["username"],

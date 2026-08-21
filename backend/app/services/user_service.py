@@ -96,21 +96,40 @@ def create_user(data: UserCreate) -> UserRead:
             if existing:
                 raise ValueError(f"Email '{email}' is already registered")
 
+        # MSP: Phase 3 — mirror the Phase 2 backfill at user-creation time so
+        # fresh users get an ``is_system_admin`` bit + observer role_assignments
+        # matching their legacy role + allowed_sites. Keeps ``require_scope``
+        # decisions correct without waiting for the next migration.
+        is_system_admin = data.role in {"admin", "super-admin"}
         row = UserModel(
             username=username,
             email=email,
             hashed_password=_pwd_context.hash(data.password),
             role=data.role,
             is_active=True,
+            is_system_admin=is_system_admin,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
         session.add(row)
         session.flush()
         if site_ids:
-            from app.db.models import UserAllowedSiteModel
+            from app.db.models import (
+                RoleAssignmentModel,
+                UserAllowedSiteModel,
+            )
             for sid in sorted(set(site_ids)):
                 session.add(UserAllowedSiteModel(user_id=row.id, site_id=sid))
+                # Observer site-wide grant mirrors the legacy allowed_sites
+                # entry. Additive: does not conflict with later admin/operator
+                # grants issued via /users/{id}/grants.
+                if data.role not in {"admin", "super-admin"}:
+                    session.add(RoleAssignmentModel(
+                        user_id=row.id,
+                        site_id=sid,
+                        device_group_id=None,
+                        role="observer",
+                    ))
             session.flush()
             session.refresh(row)
         result = _to_user_read(row)

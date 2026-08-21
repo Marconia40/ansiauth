@@ -1,12 +1,18 @@
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.config import settings
 from app.core.dependencies import require_role
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.scope import require_authenticated, require_scope, require_system_admin
 from app.schemas.site import SiteCreate, SiteRead, SiteUpdate
 from app.services import audit_service, site_service
-from app.services.site_service import SiteHasDevicesError
+from app.services.site_service import (
+    BASE_INFRA_SITE_KIND,
+    DEFAULT_GROUP_NAME,
+    SiteHasDevicesError,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -15,9 +21,24 @@ router = APIRouter()
 @router.post(
     "/",
     summary="Create site",
-    description="Create a named site. Names are trimmed and must be unique. Requires admin role.",
+    description=(
+        "Create a named site with its Default group. Names are trimmed and must "
+        "be unique. Requires system-admin under MSP-strict; admin otherwise."
+    ),
 )
-def create_site(data: SiteCreate, current_user: dict = Depends(require_role("admin"))):
+def create_site(
+    data: SiteCreate,
+    current_user: dict = Depends(require_authenticated),
+):
+    if settings.MSP_STRICT_HIERARCHY:
+        if not current_user.get("is_system_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="create_site requires system-admin",
+            )
+    else:
+        if current_user["role"] not in {"admin", "super-admin"}:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
         site = site_service.create_site(name=data.name, description=data.description)
     except ValueError as e:
@@ -29,40 +50,109 @@ def create_site(data: SiteCreate, current_user: dict = Depends(require_role("adm
         resource_id=str(site.id),
         details={"name": site.name},
     )
+    # Second audit row for the Default group creation — per phase-3 §8, the
+    # site + group are one atomic operation but the audit surface makes both
+    # transitions visible.
+    if site.id is not None:
+        audit_service.log_action(
+            user=current_user["username"],
+            action="create_device_group",
+            resource="device_group",
+            details={
+                "name": DEFAULT_GROUP_NAME,
+                "site_id": site.id,
+                "is_default": True,
+                "reason": "site_bootstrap",
+            },
+        )
     return {"success": True, "data": site.model_dump()}
 
 
 @router.get(
     "/",
     summary="List sites",
-    description="Return all sites with device counts, sorted by name. Requires observer role or higher.",
+    description=(
+        "Return sites visible to the caller. Under MSP-strict this reads from "
+        "role_assignments and hides Base-Infrastructure from non system-admins (D14)."
+    ),
 )
-def list_sites(current_user: dict = Depends(require_role("observer"))):
-    sites = site_service.list_sites()
+def list_sites(current_user: dict = Depends(require_authenticated)):
+    if settings.MSP_STRICT_HIERARCHY:
+        sites = site_service.list_sites_for_user(current_user)
+    else:
+        sites = site_service.list_sites()
     return {"success": True, "data": [s.model_dump() for s in sites]}
 
 
 @router.get(
     "/{site_id}",
     summary="Get site",
-    description="Return a single site by ID. Requires observer role or higher.",
+    description="Return a single site by ID.",
 )
-def get_site(site_id: int, current_user: dict = Depends(require_role("observer"))):
+def get_site(site_id: int, current_user: dict = Depends(require_authenticated)):
     site = site_service.get_site(site_id)
     if not site:
         raise NotFoundError(f"Site {site_id} not found")
+    if settings.MSP_STRICT_HIERARCHY:
+        from app.services.effective_role import effective_role
+        from app.db.models import SiteModel
+        from app.db.session import get_session
+        with get_session() as session:
+            role = effective_role(session, current_user, "site", site_id)
+            kind = (
+                session.query(SiteModel.kind).filter(SiteModel.id == site_id).scalar()
+            )
+        # D14: Base-Infrastructure is invisible to non system-admins even if a
+        # stray grant somehow lands on it.
+        if kind == BASE_INFRA_SITE_KIND and not current_user.get("is_system_admin"):
+            raise NotFoundError(f"Site {site_id} not found")
+        if role is None:
+            raise NotFoundError(f"Site {site_id} not found")
     return {"success": True, "data": site.model_dump()}
+
+
+@router.get(
+    "/{site_id}/groups",
+    summary="List groups in site",
+    description="Return every DeviceGroup that belongs to this site.",
+)
+def list_groups_for_site(
+    site_id: int,
+    current_user: dict = Depends(require_scope("list_site_groups")),
+):
+    from app.services import device_group_service
+    groups = device_group_service.list_site_groups(site_id)
+    if groups is None:
+        raise NotFoundError(f"Site {site_id} not found")
+    return {"success": True, "data": [g.model_dump() for g in groups]}
 
 
 @router.put(
     "/{site_id}",
     summary="Update site",
-    description="Update a site's name or description. Requires admin role.",
+    description="Update a site's name or description. Requires admin role on the site.",
 )
-def update_site(site_id: int, data: SiteUpdate, current_user: dict = Depends(require_role("admin"))):
+def update_site(
+    site_id: int,
+    data: SiteUpdate,
+    current_user: dict = Depends(require_authenticated),
+):
     changed = data.model_dump(exclude_none=True)
     if not changed:
         raise ValidationError("No fields provided for update")
+    if settings.MSP_STRICT_HIERARCHY:
+        from app.services.effective_role import effective_role
+        from app.db.session import get_session
+        with get_session() as session:
+            role = effective_role(session, current_user, "site", site_id)
+        if not current_user.get("is_system_admin") and role != "admin":
+            raise HTTPException(
+                status_code=403,
+                detail=f"edit site requires admin on site {site_id} (got {role or 'none'})",
+            )
+    else:
+        if current_user["role"] not in {"admin", "super-admin"}:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
         site = site_service.update_site(
             site_id=site_id,
@@ -87,15 +177,28 @@ def update_site(site_id: int, data: SiteUpdate, current_user: dict = Depends(req
     "/{site_id}",
     summary="Delete site",
     description=(
-        "Permanently delete a site. Returns 409 Conflict if the site still owns devices — "
-        "devices are never cascade-deleted. Requires admin role."
+        "Permanently delete a site. Base-Infrastructure is never deletable. "
+        "Returns 409 if the site still owns devices. Requires system-admin under "
+        "MSP-strict; admin otherwise."
     ),
 )
-def delete_site(site_id: int, current_user: dict = Depends(require_role("admin"))):
+def delete_site(site_id: int, current_user: dict = Depends(require_authenticated)):
+    if settings.MSP_STRICT_HIERARCHY:
+        if not current_user.get("is_system_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="delete_site requires system-admin",
+            )
+    else:
+        if current_user["role"] not in {"admin", "super-admin"}:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
         deleted = site_service.delete_site(site_id)
     except SiteHasDevicesError as e:
         raise ConflictError(str(e))
+    except ValueError as e:
+        # Raised for Base-Infrastructure deletion attempts.
+        raise ValidationError(str(e))
     if not deleted:
         raise NotFoundError(f"Site {site_id} not found")
     audit_service.log_action(
