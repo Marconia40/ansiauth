@@ -494,6 +494,117 @@ request shapes after this.
 #### Grep-audit gate
 - Pre-merge run of the Phase 5 §3.9 gate returns zero hits.
 
+### Phase 6 — Postgres RLS + Optional Hardening (M5)
+
+Adds Postgres Row-Level Security as **defense-in-depth** on top of the
+app-layer `require_scope` gate that Phases 3–4 established. Confirmed as
+first-class (not optional) per decision D12. No new capability, no new
+services, no behavioural change on the happy path — RLS is a silent
+enforcement layer for the day a service handler forgets to apply its scope
+filter.
+
+#### Added
+- **`backend/migrations/versions/f6msp5_msp_rls.py`** (new). Postgres-only
+  (SQLite skips cleanly). `ENABLE + FORCE ROW LEVEL SECURITY` on
+  `sites`, `device_groups`, `devices`, `audit_logs`, plus one `SELECT`
+  policy per table scoped by the two GUCs the middleware sets:
+    - `app.user_id`          — integer PK of the calling user (`0` = deny)
+    - `app.is_system_admin`  — boolean; `true` bypasses every predicate
+  Write policies (`INSERT` / `UPDATE` / `DELETE`) are **permissive** —
+  one per operation, `USING (true)` — so the app layer's `require_scope`
+  stays the sole write gate. Splitting by operation matters: a
+  `FOR ALL USING (true)` policy would OR-combine with the scoped SELECT
+  policy and make every read wide open.
+- **`backend/app/core/rls_context.py`** (new). Owns the request-scoped
+  context that the SQLAlchemy `after_begin` hook reads to run
+  `SELECT set_config('app.user_id', …, true)` on every Postgres
+  transaction. Exposes:
+    - `current_user_ctx: ContextVar` — populated per request by the
+      middleware; empty default → deny.
+    - `system_context()` — context manager marking trusted internal
+      execution (bootstrap, scheduler jobs, Celery); the hook then writes
+      `is_system_admin=true`.
+    - `install_session_rls_hook(sessionmaker)` — the `after_begin`
+      listener; called from `init_db` right after the sessionmaker is
+      built.
+    - `install_worker_system_context()` — pins the Celery worker process
+      to system context for its lifetime (tasks have no JWT).
+- **`backend/app/core/rls_middleware.py`** (new). `RLSSessionMiddleware`
+  decodes the `Authorization: Bearer` header best-effort (invalid /
+  missing tokens leave the context empty → RLS deny-default), resolves
+  the caller's `users.id` for the `app.user_id` GUC, and populates
+  `current_user_ctx` for the duration of the request.
+- **`backend/tests/test_msp_rls.py`** (new, 7 tests). Postgres-only —
+  skipped on SQLite AND skipped when the connecting role has SUPERUSER or
+  BYPASSRLS (both cause Postgres to silently skip RLS regardless of
+  FORCE). Exercises:
+    - Non-system-admin sees only granted sites / groups / devices.
+    - Base Infrastructure invisible to non-system-admins even with a
+      stray grant on it (D14 defense-in-depth).
+    - System-admin GUC bypasses every predicate.
+    - Raw `SELECT` bypassing the app-layer scope filter still cannot
+      leak other-site rows — the whole point of the phase.
+
+#### Changed
+- **`backend/app/db/session.py::init_db`** — calls
+  `install_session_rls_hook(_SessionLocal)` right after creating the
+  sessionmaker. Idempotent, no-op on SQLite.
+- **`backend/app/main.py`** — three edits:
+    1. `app.add_middleware(RLSSessionMiddleware)` before the rate limiter
+       (so error paths still run under a defined context).
+    2. `_bootstrap_admin()`, `ensure_base_infrastructure()`, and
+       `job_service.mark_orphaned_jobs_failed()` wrapped in
+       `with system_context()` — they run before any request and would
+       otherwise hit the RLS deny-default.
+    3. Scheduler jobs (`audit_purge_daily`, `cleanup_sweep_interval`) and
+       the lifespan startup cleanup now run inside `system_context`
+       closures — background code has no JWT.
+- **`backend/app/worker.py::_init_db_for_worker`** — calls
+  `install_worker_system_context()` after `init_db`, pinning the whole
+  worker process to system context. Celery tasks have no JWT.
+
+#### Security
+- Under the recommended deployment (app connects as a non-SUPERUSER role
+  that owns runtime privileges on the schema), a service handler that
+  forgets to filter its query — e.g. a stray `SELECT * FROM devices` —
+  still cannot return rows the caller's grants don't cover. Every
+  ID-guessing / IDOR class of bug is defeated at the DB layer.
+- Read-only RLS by design: write policies are permissive (`USING(true)`)
+  so `require_scope` remains the sole write gate. Duplicating the check
+  in RLS risks silent inconsistencies (an INSERT rejected at the DB but
+  accepted at the app looks like a bug). See
+  `docs/upgrades/phases/phase-6-rls-and-optional.md` §2.2 for the full
+  rationale.
+
+#### Deployment notes
+- **The docker-compose default puts the app on the Postgres bootstrap
+  user (`POSTGRES_USER=ansiauth`).** Postgres forbids demoting the
+  bootstrap user from SUPERUSER — the migration detects this via
+  `pg_roles.oid = 10` and logs a warning; the policies are installed but
+  **not enforced** because the connecting SUPERUSER bypasses them
+  silently.
+- For actual RLS enforcement (prod, staging, or any dev setup that wants
+  to validate the policies), the app must connect as a **separate
+  non-SUPERUSER role** with runtime CRUD on the public schema. Ownership
+  of the tables can stay with the bootstrap user (that's the migration /
+  admin identity); the runtime user just needs `USAGE ON SCHEMA public`
+  + `SELECT/INSERT/UPDATE/DELETE ON ALL TABLES` grants. The migration's
+  `_demote_app_role` step then executes cleanly and RLS enforces from
+  that point forward.
+- The migration's `downgrade()` re-promotes any role it demoted
+  (idempotent SUPERUSER / BYPASSRLS restore); safe rollback via
+  `alembic downgrade -1`.
+
+#### Migration & compatibility
+- Alembic head advance: `e5msp4_cleanup → f6msp5_rls`.
+- Round-trip clean on both dialects (SQLite: no-op both directions;
+  Postgres: policies drop cleanly, RLS disabled).
+- No API changes, no schema changes, no ORM changes — Phase 6 is a
+  pure security layer on top of the Phase 5 model.
+- Backend test count: **945 passed, 7 skipped** on SQLite (unchanged
+  from Phase 5 + the 7 RLS tests that skip when RLS isn't testable).
+  On Postgres with a non-super app role, expect **945 + 7 = 952 passed**.
+
 <!--
 Each subsequent phase appends its own section below when it lands. Template:
 
