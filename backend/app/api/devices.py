@@ -107,8 +107,13 @@ def create_device(
         with get_session() as session:
             role = effective_role(session, current_user, "site", data.site_id) if data.site_id else None
         if not current_user.get("is_system_admin") and role != "admin":
-            raise ValidationError(
-                f"register_device requires admin on site {data.site_id} (got {role or 'none'})"
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"register_device requires admin on site {data.site_id} "
+                    f"(got {role or 'none'})"
+                ),
             )
         try:
             device = Inventory().register(
@@ -119,7 +124,7 @@ def create_device(
                 username=data.username,
                 password=data.password,
                 site_id=data.site_id,
-                device_group_id=None,  # DeviceCreate has no group field pre-Phase-4
+                device_group_id=data.device_group_id,
                 actor=current_user,
             )
         except ValueError as e:
@@ -176,27 +181,24 @@ def update_device(
     if not provided:
         raise ValidationError("No fields provided for update")
     if settings.MSP_STRICT_HIERARCHY:
-        # Reject site_id in body: per MSP, site is derived from device_group.
-        # Callers change site via POST /devices/{name}/move.
-        if "site_id" in provided:
-            raise ValidationError(
-                "site_id cannot be set via PUT /devices/{name} when MSP hierarchy "
-                "is enforced; use POST /devices/{name}/move instead"
-            )
         from app.services.effective_role import effective_role
         from app.db.session import get_session
         with get_session() as session:
             role = effective_role(session, current_user, "device", name)
         if not current_user.get("is_system_admin") and role != "admin":
-            raise ValidationError(
-                f"edit_device requires admin on device '{name}' (got {role or 'none'})"
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"edit_device requires admin on device '{name}' "
+                    f"(got {role or 'none'})"
+                ),
             )
     else:
         if current_user["role"] not in {"admin", "super-admin"}:
             from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="Insufficient permissions")
     try:
-        site_id_kwarg = {"site_id": data.site_id} if "site_id" in provided else {}
         device = device_service.update_device(
             name=name,
             host=data.host,
@@ -204,7 +206,6 @@ def update_device(
             platform=data.platform,
             username=data.username,
             password=data.password,
-            **site_id_kwarg,
         )
     except ValueError as e:
         raise ValidationError(str(e))

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
@@ -215,12 +216,14 @@ export default function SitesPage() {
               <th className="text-left px-4 py-2 font-medium text-gray-700">Name</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Description</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Devices</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">Default group</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Actions</th>
             </tr>
           </thead>
           <tbody>
             {sites.map((site) => {
               const isEditing = editingSiteId === site.id;
+              const isBaseInfra = site.kind === 'BASE_INFRASTRUCTURE';
               return (
                 <tr key={site.id} className="border-b border-gray-100 hover:bg-gray-50">
                   <td className="px-4 py-2 text-gray-900">
@@ -229,11 +232,26 @@ export default function SitesPage() {
                         type="text"
                         value={editingName}
                         onChange={(e) => setEditingName(e.target.value)}
-                        disabled={isSubmitting}
+                        disabled={isSubmitting || isBaseInfra}
                         className="border border-gray-300 rounded-md px-2 py-1 text-sm w-40 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                       />
                     ) : (
-                      <span className="font-medium">{site.name}</span>
+                      <span className="flex items-center gap-2">
+                        <Link
+                          href={`/sites/${site.id}`}
+                          className="font-medium text-blue-700 hover:underline"
+                        >
+                          {site.name}
+                        </Link>
+                        {isBaseInfra && (
+                          <span
+                            title="System-managed base site — visible to system-admins only (D14)"
+                            className="text-[10px] px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full uppercase tracking-wide"
+                          >
+                            Base Infra
+                          </span>
+                        )}
+                      </span>
                     )}
                   </td>
                   <td className="px-4 py-2 text-gray-700">
@@ -251,6 +269,11 @@ export default function SitesPage() {
                     )}
                   </td>
                   <td className="px-4 py-2 text-gray-700">{site.device_count}</td>
+                  <td className="px-4 py-2 text-gray-700">
+                    <span className="inline-block text-xs px-2 py-0.5 bg-gray-100 text-gray-700 rounded-full font-mono">
+                      #{site.default_group_id}
+                    </span>
+                  </td>
                   <td className="px-4 py-2">
                     {isEditing ? (
                       <div className="flex flex-wrap gap-2 items-center">
@@ -281,13 +304,22 @@ export default function SitesPage() {
                           </button>
                         </RequireRole>
                         <RequireRole roles={['admin', 'super-admin']}>
-                          <button
-                            onClick={() => handleDelete(site)}
-                            disabled={isSubmitting}
-                            className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {deletingSiteId === site.id ? 'Deleting...' : 'Delete'}
-                          </button>
+                          {isBaseInfra ? (
+                            <span
+                              className="text-xs text-gray-400 italic"
+                              title="Base-Infrastructure is system-managed and cannot be deleted"
+                            >
+                              locked
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => handleDelete(site)}
+                              disabled={isSubmitting}
+                              className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {deletingSiteId === site.id ? 'Deleting...' : 'Delete'}
+                            </button>
+                          )}
                         </RequireRole>
                       </div>
                     )}

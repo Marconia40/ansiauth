@@ -28,9 +28,18 @@ def seed_users():
 
 # --- Access control ---
 
-def test_audit_log_requires_admin(observer_client, operator_client):
-    assert observer_client.get("/api/v1/audit/").status_code == 403
-    assert operator_client.get("/api/v1/audit/").status_code == 403
+def test_audit_log_scoped_for_non_system_admin(observer_client, operator_client):
+    """MSP: Phase 4 (D27) — the audit endpoint no longer gates on the admin
+    role. Non system-admin callers get 200 with a *scoped* result set:
+    only rows for devices/groups/sites their grants cover, plus
+    device-unrelated auth events. See test_msp_audit_scoping.py for
+    positive-side coverage."""
+    r_obs = observer_client.get("/api/v1/audit/")
+    r_op = operator_client.get("/api/v1/audit/")
+    assert r_obs.status_code == 200, r_obs.text
+    assert r_op.status_code == 200, r_op.text
+    assert isinstance(r_obs.json(), list)
+    assert isinstance(r_op.json(), list)
 
 
 def test_audit_log_without_token(unauth_client):

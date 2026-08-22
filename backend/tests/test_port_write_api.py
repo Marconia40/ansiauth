@@ -59,14 +59,54 @@ def _client(role: str, username: str | None = None) -> TestClient:
 
 @pytest.fixture(autouse=True)
 def _clean_sites():
-    """Reset site assignments before every test to prevent cross-test pollution."""
+    """Reset site assignments before every test to prevent cross-test pollution.
+
+    MSP: Phase 4 — SQLite FK enforcement + M3 NOT NULL flips mean the old
+    'null devices.site_id and delete sites' pattern no longer works. Delete
+    dependents in FK order and reseed Base-Infrastructure + mock devices.
+    """
+    from app.db.models import DeviceGroupMemberModel, DeviceGroupModel, RoleAssignmentModel
+    from app.services import device_service, site_service
     with get_session() as session:
+        session.query(DeviceGroupMemberModel).delete(synchronize_session=False)
+        session.query(DeviceModel).delete(synchronize_session=False)
+        session.query(RoleAssignmentModel).delete(synchronize_session=False)
         session.query(UserAllowedSiteModel).delete(synchronize_session=False)
-        session.query(SiteModel).delete(synchronize_session=False)
-        session.query(DeviceModel).update(
-            {DeviceModel.site_id: None}, synchronize_session=False
+        session.query(SiteModel).update(
+            {SiteModel.default_group_id: None}, synchronize_session=False,
         )
+        session.query(DeviceGroupModel).delete(synchronize_session=False)
+        session.query(SiteModel).delete(synchronize_session=False)
+    site_service.ensure_base_infrastructure()
+    device_service.seed_defaults()
+    # MSP: Phase 4 — the conftest autouse fixture seeded observer/operator
+    # grants across every REGULAR site *before* this fixture wiped them.
+    # Re-seed them now so tests that authenticate as those roles can still
+    # see mock_device (which lives in the freshly-created Mock Site).
+    _reseed_test_grants()
     yield
+
+
+def _reseed_test_grants():
+    from app.db.models import (
+        RoleAssignmentModel, SiteModel, UserAllowedSiteModel, UserModel,
+    )
+    with get_session() as session:
+        regular_site_ids = [
+            r[0] for r in session.query(SiteModel.id).filter(
+                SiteModel.kind == "REGULAR"
+            ).all()
+        ]
+        for role in ("observer", "operator"):
+            user_row = session.query(UserModel).filter_by(username=role).first()
+            if user_row is None:
+                continue
+            for sid in regular_site_ids:
+                session.add(UserAllowedSiteModel(user_id=user_row.id, site_id=sid))
+                session.add(RoleAssignmentModel(
+                    user_id=user_row.id, site_id=sid,
+                    device_group_id=None, role=role,
+                ))
 
 
 @pytest.fixture
@@ -122,21 +162,48 @@ def _seed_site(admin_client: TestClient, name: str) -> int:
 
 
 def _attach_device_to_site(device_name: str, site_id: int | None) -> None:
+    """MSP: Phase 4 — also set ``device_group_id`` (NOT NULL post-M3) to the
+    target site's Default group so authz decisions read a coherent scope."""
     with get_session() as session:
         dev = session.query(DeviceModel).filter_by(name=device_name).first()
         assert dev is not None, f"Device '{device_name}' not in DB"
-        dev.site_id = site_id
+        if site_id is None:
+            # Fall back to Base-Infra so device_group_id stays valid.
+            base = session.query(
+                SiteModel.id, SiteModel.default_group_id,
+            ).filter(SiteModel.kind == "BASE_INFRASTRUCTURE").first()
+            dev.site_id = base[0]
+            dev.device_group_id = base[1]
+        else:
+            row = session.query(SiteModel).filter_by(id=site_id).first()
+            assert row is not None and row.default_group_id is not None
+            dev.site_id = site_id
+            dev.device_group_id = row.default_group_id
 
 
 def _grant_site(username: str, site_ids: list[int]) -> None:
+    """MSP: Phase 4 — write both legacy ``UserAllowedSiteModel`` (kept for
+    T3.5 snapshot-diff parity) and ``RoleAssignmentModel`` (authoritative
+    post-Phase 3) so authz decisions succeed regardless of the flag."""
+    from app.db.models import RoleAssignmentModel
     with get_session() as session:
         row = session.query(UserModel).filter_by(username=username).first()
         assert row is not None
         session.query(UserAllowedSiteModel).filter_by(user_id=row.id).delete(
             synchronize_session=False
         )
+        session.query(RoleAssignmentModel).filter(
+            RoleAssignmentModel.user_id == row.id,
+            RoleAssignmentModel.device_group_id.is_(None),
+        ).delete(synchronize_session=False)
+        # Match the role the user is expected to hold at these sites — the
+        # test users are `_ensure_user("site_op_ok", role="operator")` so
+        # granting `operator` matches the JWT role their client uses.
         for sid in site_ids:
             session.add(UserAllowedSiteModel(user_id=row.id, site_id=sid))
+            session.add(RoleAssignmentModel(
+                user_id=row.id, site_id=sid, device_group_id=None, role=row.role,
+            ))
 
 
 def _ensure_user(username: str, role: str = "operator") -> None:

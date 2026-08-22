@@ -171,7 +171,7 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AnsiAuth — Network Automation API",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Ansible-powered network automation platform for VLAN lifecycle management, "
         "multi-device orchestration, and audit-compliant configuration changes on "

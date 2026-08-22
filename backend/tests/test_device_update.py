@@ -27,6 +27,8 @@ _BASE = {
     "platform": "ios",
     "username": "admin",
     "password": "secret",
+    # MSP: Phase 4 — DeviceCreate.site_id required (Base-Infra id=1).
+    "site_id": 1,
 }
 
 

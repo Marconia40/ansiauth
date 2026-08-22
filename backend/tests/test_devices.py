@@ -16,6 +16,10 @@ _PAYLOAD = {
     "vendor": "cisco_ios",
     "username": "admin",
     "password": "admin",
+    # MSP: Phase 4 — DeviceCreate.site_id is required. Base-Infrastructure is
+    # id=1 by bootstrap convention and admin_client is a system-admin so has
+    # visibility.
+    "site_id": 1,
 }
 
 
@@ -100,10 +104,16 @@ def test_create_vlan_device_not_registered(admin_client):
 
 
 def test_device_creation_is_audited(admin_client):
+    """MSP: Phase 4 — device create routes through ``Inventory.register``,
+    which emits an audit row with ``action='register_device'`` (was
+    ``create_device`` in the legacy path)."""
     audit_service.clear_audit_log()
     admin_client.post("/api/v1/devices/", json={**_PAYLOAD, "name": "sw2"})
     log = admin_client.get("/api/v1/audit/").json()
-    entry = next(e for e in log if e["action"] == "create_device")
+    entry = next(
+        e for e in log
+        if e["action"] in ("register_device", "create_device")
+    )
     assert entry["resource"] == "device"
     assert entry["details"]["name"] == "sw2"
     audit_service.clear_audit_log()

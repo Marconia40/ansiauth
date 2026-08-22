@@ -117,8 +117,15 @@ class Settings(BaseSettings):
     # Inventory / effective_role / require_scope. New endpoints (/move,
     # /grants, /system-admin, /sites/{id}/groups) are always available.
     MSP_STRICT_HIERARCHY: bool = Field(
-        default=False,
-        description="MSP: Phase 3 cutover gate. See docs/upgrades/phases/phase-3-application-cutover.md.",
+        default=True,
+        description=(
+            "MSP: Phase 4 default. Enforces every MSP invariant at the app "
+            "layer: list/get endpoints scope through role_assignments, "
+            "device mutations require per-scope grants, and audit reads use "
+            "D27 scoping. Kept as an env-var escape hatch for one release; "
+            "Phase 5 removes the flag entirely. Set to false only to roll "
+            "back list/get scoping in an emergency."
+        ),
     )
 
     @field_validator("CORS_ORIGINS", mode="before")

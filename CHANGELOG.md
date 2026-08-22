@@ -232,6 +232,145 @@ Full spec: [`docs/upgrades/phases/phase-3-application-cutover.md`](docs/upgrades
   the swap table, and the existing `test_auth::test_operator_cannot_delete_vlan`
   contract confirms admin is intentional.
 
+### Phase 4 — Enforcement (M3) + Frontend Cutover — **BREAKING RELEASE (v1.1)**
+Full spec: [`docs/upgrades/phases/phase-4-enforcement.md`](docs/upgrades/phases/phase-4-enforcement.md).
+
+This is the breaking release. `MSP_STRICT_HIERARCHY` is now the default; the
+DB schema enforces every MSP invariant; the frontend surfaces the new
+device-level "Move…" action per D8 and a per-user grants editor. API version
+bumped to `1.1.0` in both OpenAPI (`app.main`) and `frontend/package.json`.
+
+#### Added
+- **Alembic migration `e4msp3_msp_enforce`**
+  - Preflight verification re-runs every M2 invariant check and aborts with a
+    clear `RuntimeError` (naming the violated invariant) if Phase 2 didn't
+    complete cleanly on this DB.
+  - **NOT NULL** flips on `devices.device_group_id` and `device_groups.site_id`.
+  - **Partial unique indexes**:
+    - `ux_sites_single_base_infra` — exactly one `kind='BASE_INFRASTRUCTURE'`.
+    - `ux_device_groups_one_default_per_site` — one `is_default=TRUE` per site.
+  - **Per-site UNIQUE(site_id, name)** on `device_groups` (D6). Replaces the
+    non-unique lookup index `ix_device_groups_name_nonunique` that Phase 2
+    installed as a transitional stopgap.
+  - **FK tightening**: `device_groups.site_id → sites.id` moves from
+    `SET NULL` to `RESTRICT`. Deletes of a site with any groups now fail
+    loudly at the DB layer.
+  - SQLite: every constraint change goes through `batch_alter_table` (SQLite
+    lacks `ALTER TABLE … DROP CONSTRAINT`).
+- **`app.core.config.MSP_STRICT_HIERARCHY` default flipped `False → True`.**
+  Still available as an environment-variable escape hatch for one release;
+  Phase 5 removes the flag entirely.
+- **`app.core.audit_service._apply_msp_audit_scoping` — D27.** One-SQL scoping
+  path for `GET /audit`. System-admins see everything; every other caller
+  sees rows for devices in their visible-device set, plus rows for groups
+  and sites their grants cover, plus `resource='auth'` events and rows
+  about themselves.
+- **`app.db.session._sqlite_enable_fk`** — `PRAGMA foreign_keys=ON` fires on
+  every new SQLite connection so `RESTRICT` / `CASCADE` rules are actually
+  applied. Postgres enforces FKs by default.
+- **Deprecation headers** on `POST /device-groups/{id}/members` and
+  `DELETE /device-groups/{id}/members/{device_name}`: every response now
+  carries `Deprecation: true`, `Sunset: Phase-5`, and a `Link` header
+  pointing at the successor `/devices/{name}/move` endpoint. Both endpoints
+  still respond (internally forwarding to `Inventory.move`) so pre-cutover
+  clients keep working through the deprecation window.
+- **Frontend**
+  - `frontend/src/types/{device,site,user}.ts` — reshaped to the strict
+    schema: `Device.site_id`/`site_name`/`device_group_id`/`device_group_name`
+    are all non-null; `Site.kind` / `Site.default_group_id` land as
+    first-class fields; `User.is_system_admin` is optional (login endpoint
+    doesn't surface it yet — TODO for a follow-up).
+  - `frontend/src/services/api.ts` — new `moveDevice`, `listSiteGroups`,
+    `listGrants`, `grant`, `revoke`, `setSystemAdmin` helpers; existing
+    `addDeviceToGroup` / `removeDeviceFromGroup` marked `@deprecated`.
+  - `frontend/src/app/(dashboard)/devices/page.tsx` — Site dropdown is
+    required; Group dropdown cascades on Site change and pre-selects the
+    Default group; new **Move…** row action opens a modal with a **Reset
+    to Default** shortcut (per D8).
+  - `frontend/src/app/(dashboard)/sites/page.tsx` — Base-Infrastructure row
+    shows a badge and hides the Delete button; every site row displays its
+    Default group id; the site name links to the new detail page.
+  - `frontend/src/app/(dashboard)/sites/[id]/page.tsx` — **new route** —
+    fetches `GET /sites/{id}` + `GET /sites/{id}/groups`, renders each group
+    with a nested devices list and a per-row Move action.
+  - `frontend/src/app/(dashboard)/users/page.tsx` — legacy
+    `allowed_site_ids` checkboxes removed; replaced by a **Grants…** modal
+    that lists existing grants and issues new ones via
+    `POST /users/{id}/grants`; system-admins get a per-user
+    **System-admin** toggle.
+
+#### Changed
+- `app/schemas/device.py`
+  - `DeviceCreate.site_id: int` is **required** (was `Optional[int]`); a new
+    `device_group_id: int | None` slots in for optional group placement —
+    when omitted the device lands in the site's Default group.
+  - `DeviceUpdate` uses `model_config = ConfigDict(extra='forbid')` +
+    a `model_validator` that raises a clear ValueError pointing at
+    `POST /devices/{name}/move` when a caller sends `site_id` or
+    `device_group_id`.
+  - `DevicePublic.site_id`, `site_name`, `device_group_id`, `device_group_name`
+    all flipped to non-optional (`M3` guarantees they're populated).
+- `app/api/audit.py::get_audit_log` gated on `require_authenticated` (was
+  `require_role("admin")`) under the MSP flag — the D27 scoping filter *is*
+  the authorization; the legacy admin-only gate stays under flag-off for
+  behavioral parity with pre-Phase-4 deployments.
+- `app/services/device_group_service.py::delete_group` — the M2M-junction
+  fallback is gone (M3 guarantees `devices.device_group_id IS NOT NULL`).
+- `app/services/site_service.py::delete_site` — order tightened for M3's
+  RESTRICT FK: null `sites.default_group_id` first, delete groups, delete
+  site.
+- `app/services/device_service.py::seed_defaults` — mock devices are now
+  placed in a **REGULAR** `Mock Site` (auto-created on first call) so
+  operator/observer test users granted "every REGULAR site" can see them
+  (D14 hides Base-Infrastructure from non system-admins).
+
+#### Deprecated
+- `POST /api/v1/device-groups/{group_id}/members`.
+- `DELETE /api/v1/device-groups/{group_id}/members/{device_name}`.
+- `PUT /api/v1/users/{user_id}/allowed-sites` (already deprecated in
+  Phase 3 — this release begins the sunset window).
+- `frontend/src/services/api.ts::addDeviceToGroup` / `removeDeviceFromGroup`
+  — marked `@deprecated` (removed in Phase 5).
+
+#### Notes / acknowledged deviations from the plan
+- **`sites.default_group_id` stays nullable at the DB level** despite the
+  plan calling for NOT NULL. The cyclic FK (sites ↔ device_groups) requires
+  a two-step INSERT (site first, then default group, then back-ref), and no
+  portable pattern makes that land under a NOT NULL constraint. Enforced at
+  the `site_service.create_site` layer inside a single transaction, and the
+  M3 preflight verification aborts the migration if any row violates it.
+  Documented in `db/models.py` and the migration module docstring.
+- **`sites.default_group_id → device_groups.id` FK stays `RESTRICT`** rather
+  than `CASCADE` — dropping a Default group by cascade would silently orphan
+  the site's `default_group_id` reference. The application-level
+  `delete_site` and `delete_group` code paths null the reference *before*
+  deleting groups, so RESTRICT is a safety net.
+
+#### Migration order (staging → prod)
+1. Merge PR. M3 does **not** run yet.
+2. Deploy backend to staging with `MSP_STRICT_HIERARCHY=false`. Verify no
+   regression against the prior flag-off snapshot.
+3. Run `alembic upgrade head` in staging to land M3. Preflight verification
+   runs automatically; abort message on failure names the invariant.
+4. Set `MSP_STRICT_HIERARCHY=true` in staging (this becomes the default in
+   this release; the env override is here for one-release rollback).
+5. Deploy frontend to staging. Execute the manual FE smoke checklist in
+   `docs/upgrades/phases/phase-4-enforcement.md §5.4`.
+6. Repeat for prod, one region at a time if applicable.
+7. Announce the deprecation for the two group-level member endpoints, the
+   `PUT /users/{id}/allowed-sites` shim, and any PUT-based site changes.
+
+#### Rollback
+- **Config-level:** `MSP_STRICT_HIERARCHY=false` restores flag-off list/get
+  behavior. Does not revert M3's DB constraints — those stay.
+- **DB-level:** `alembic downgrade -1` undoes M3 in full — drops the
+  partial unique indexes, relaxes NOT NULL, restores `SET NULL` on the
+  group→site FK, reinstates the non-unique lookup index on
+  `device_groups.name`.
+- **Full revert:** revert the frontend + schema PR first, then
+  `alembic downgrade -1`. Legacy paths still work because Phase 2 backfill
+  guarantees every column is populated correctly.
+
 <!--
 Each subsequent phase appends its own section below when it lands. Template:
 

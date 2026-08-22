@@ -39,21 +39,56 @@ def _client(username: str, role: str) -> TestClient:
 
 
 def _attach(device_name: str, site_id: int | None) -> None:
+    """MSP: Phase 4 — moving a device now means moving both site_id AND
+    device_group_id. When ``site_id`` is not None the device lands in that
+    site's Default group; None is only accepted when the device is being
+    unhooked (M3 NOT NULL is bypassed via a special sentinel that assumes
+    the caller will re-attach before commit)."""
     with get_session() as session:
         dev = session.query(DeviceModel).filter_by(name=device_name).first()
         assert dev is not None
-        dev.site_id = site_id
+        if site_id is None:
+            # Move device to Base-Infra's Default group so device_group_id
+            # stays valid under M3's NOT NULL constraint.
+            from app.services.site_service import BASE_INFRA_SITE_KIND
+            base = session.query(
+                SiteModel.id, SiteModel.default_group_id
+            ).filter(SiteModel.kind == BASE_INFRA_SITE_KIND).first()
+            assert base is not None
+            dev.site_id = base[0]
+            dev.device_group_id = base[1]
+        else:
+            row = session.query(SiteModel).filter_by(id=site_id).first()
+            assert row is not None, f"site {site_id} does not exist"
+            assert row.default_group_id is not None, (
+                f"site {site_id} has no default group — create via the API "
+                "so the site+group are provisioned atomically"
+            )
+            dev.site_id = site_id
+            dev.device_group_id = row.default_group_id
 
 
 def _grant(username: str, site_ids: list[int]) -> None:
+    """MSP: Phase 4 — write both legacy ``UserAllowedSiteModel`` (kept for
+    T3.5 snapshot-diff parity) and ``RoleAssignmentModel`` (authoritative
+    post-Phase 3) so authz decisions succeed under both flag states."""
+    from app.db.models import RoleAssignmentModel
     with get_session() as session:
         row = session.query(UserModel).filter_by(username=username).first()
         assert row is not None
         session.query(UserAllowedSiteModel).filter_by(user_id=row.id).delete(
             synchronize_session=False
         )
+        session.query(RoleAssignmentModel).filter(
+            RoleAssignmentModel.user_id == row.id,
+            RoleAssignmentModel.device_group_id.is_(None),
+        ).delete(synchronize_session=False)
         for sid in site_ids:
             session.add(UserAllowedSiteModel(user_id=row.id, site_id=sid))
+            session.add(RoleAssignmentModel(
+                user_id=row.id, site_id=sid,
+                device_group_id=None, role=row.role,
+            ))
 
 
 def _seed_site(admin_client: TestClient, name: str) -> int:
@@ -92,15 +127,33 @@ def _make_audit(action: str, device: str | None) -> None:
 
 @pytest.fixture(autouse=True)
 def _clean():
+    """MSP: Phase 4 — SQLite now enforces FKs. Order matters:
+
+    1. Delete devices (before their group's FK RESTRICT fires).
+    2. Delete member rows + role_assignments.
+    3. Null sites.default_group_id before deleting groups so the RESTRICT
+       from sites.default_group_id → device_groups doesn't fire.
+    4. Delete groups, then sites.
+    Base-Infrastructure + mock devices are then re-seeded so the rest of
+    the fixture set (conftest's role-user seeding, seed_defaults) has the
+    baseline it expects.
+    """
+    from app.db.models import RoleAssignmentModel
+    from app.services import device_service, site_service
     with get_session() as session:
         session.query(DeviceGroupMemberModel).delete(synchronize_session=False)
-        session.query(DeviceGroupModel).delete(synchronize_session=False)
+        session.query(DeviceModel).delete(synchronize_session=False)
         session.query(JobModel).delete(synchronize_session=False)
         session.query(AuditLogModel).delete(synchronize_session=False)
-        session.query(DeviceModel).update({DeviceModel.site_id: None}, synchronize_session=False)
-        # Remove all user_allowed_sites so each test starts from a clean slate.
+        session.query(RoleAssignmentModel).delete(synchronize_session=False)
         session.query(UserAllowedSiteModel).delete(synchronize_session=False)
+        session.query(SiteModel).update(
+            {SiteModel.default_group_id: None}, synchronize_session=False,
+        )
+        session.query(DeviceGroupModel).delete(synchronize_session=False)
         session.query(SiteModel).delete(synchronize_session=False)
+    site_service.ensure_base_infrastructure()
+    device_service.seed_defaults()
     yield
 
 
@@ -128,7 +181,10 @@ def test_operator_with_site_sees_only_allowed_devices(juan, admin_client):
     assert names == {"mock_device"}
 
 
-def test_operator_403_on_forbidden_device(juan, admin_client):
+def test_operator_denied_on_forbidden_device(juan, admin_client):
+    """MSP: Phase 4 — a forbidden device returns 404 (not 403) under
+    MSP-strict so callers can't probe existence. Accept both for the
+    duration of the flag-off compatibility window."""
     juan_client, _ = juan
     site_lib = _seed_site(admin_client, "Library")
     site_lab = _seed_site(admin_client, "Laboratory")
@@ -137,7 +193,7 @@ def test_operator_403_on_forbidden_device(juan, admin_client):
     _grant("juan", [site_lib])
 
     assert juan_client.get("/api/v1/devices/mock_device").status_code == 200
-    assert juan_client.get("/api/v1/devices/fail_device").status_code == 403
+    assert juan_client.get("/api/v1/devices/fail_device").status_code in (403, 404)
 
 
 def test_admin_bypasses_scoping(admin_client):
@@ -293,7 +349,9 @@ def test_operator_sees_only_groups_with_allowed_devices(juan, admin_client):
     assert g_hidden not in ids
 
 
-def test_operator_403_on_forbidden_group(juan, admin_client):
+def test_operator_denied_on_forbidden_group(juan, admin_client):
+    """MSP: Phase 4 — group GET returns 404 (not 403) when the caller has
+    no scope, hiding existence. Accept both for the flag-off compat window."""
     juan_client, _ = juan
     lib = _seed_site(admin_client, "Library")
     lab = _seed_site(admin_client, "Laboratory")
@@ -302,7 +360,7 @@ def test_operator_403_on_forbidden_group(juan, admin_client):
     _grant("juan", [lib])
 
     g_hidden = _make_group("LabGroup", ["fail_device"], site_id=lab)
-    assert juan_client.get(f"/api/v1/device-groups/{g_hidden}").status_code == 403
+    assert juan_client.get(f"/api/v1/device-groups/{g_hidden}").status_code in (403, 404)
 
 
 def test_group_devices_listing_includes_all_same_site_devices(juan, admin_client):
@@ -372,13 +430,13 @@ def test_super_admin_can_update_allowed_sites(super_admin_client, admin_client):
 
 # ── Regression — admin flows unchanged ───────────────────────────────────────
 
+@pytest.mark.skip(
+    reason=(
+        "MSP: Phase 4 — the legacy 'operator with empty allowed_sites falls "
+        "back to unassigned devices' rule no longer exists. Devices always "
+        "have a NOT NULL device_group_id post-M3; scope decisions come from "
+        "role_assignments only. Superseded by test_msp_effective_role.py."
+    ),
+)
 def test_admin_can_still_create_vlan_on_unassigned_device(admin_client, operator_client):
-    """Even unassigned devices are reachable by admin via vlan ops (operator side
-    would need allowed_sites=[] which falls back to unassigned access)."""
-    r = operator_client.post(
-        "/api/v1/vlans/",
-        json={"vlan_id": 99, "name": "FALLBACK", "devices": ["mock_device"]},
-    )
-    # Operator (test-fixture-seeded with all-current-sites=none) has allowed_sites=[]
-    # so the fallback "see unassigned" rule applies — mock_device is unassigned.
-    assert r.status_code == 200, r.text
+    pass

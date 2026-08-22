@@ -9,14 +9,45 @@ from app.db.session import get_session
 
 @pytest.fixture(autouse=True)
 def _clean_sites():
-    """Wipe sites + clear devices.site_id around every test."""
-    with get_session() as session:
-        session.query(DeviceModel).update({DeviceModel.site_id: None}, synchronize_session=False)
-        session.query(SiteModel).delete(synchronize_session=False)
+    """Wipe sites + dependent tables around every test.
+
+    MSP: Phase 4 — SQLite doesn't enforce FK RESTRICT by default, so simply
+    deleting from ``sites`` leaves orphans in ``device_groups`` /
+    ``device_group_members`` / ``role_assignments`` that still carry
+    ``site_id``. Under M3 the partial unique index
+    ``ux_device_groups_one_default_per_site`` then blocks the next site
+    create (whose row.id can recycle to 1). Wipe every dependent row too,
+    null out the mock devices' authoritative FKs so
+    ``ensure_base_infrastructure`` can rebuild cleanly, and reseed both.
+    """
+    from app.db.models import (
+        DeviceGroupMemberModel,
+        DeviceGroupModel,
+        RoleAssignmentModel,
+    )
+    from app.services import device_service, site_service
+
+    def _wipe_and_reseed():
+        with get_session() as session:
+            # Post-M3 devices.device_group_id is NOT NULL — we can't null the
+            # FK before dropping groups. Delete devices outright and let
+            # seed_defaults re-create them inside Base-Infra's Default.
+            session.query(DeviceGroupMemberModel).delete(synchronize_session=False)
+            session.query(DeviceModel).delete(synchronize_session=False)
+            session.query(RoleAssignmentModel).delete(synchronize_session=False)
+            # Null sites.default_group_id first so RESTRICT doesn't block the
+            # group delete.
+            session.query(SiteModel).update(
+                {SiteModel.default_group_id: None}, synchronize_session=False,
+            )
+            session.query(DeviceGroupModel).delete(synchronize_session=False)
+            session.query(SiteModel).delete(synchronize_session=False)
+        site_service.ensure_base_infrastructure()
+        device_service.seed_defaults()
+
+    _wipe_and_reseed()
     yield
-    with get_session() as session:
-        session.query(DeviceModel).update({DeviceModel.site_id: None}, synchronize_session=False)
-        session.query(SiteModel).delete(synchronize_session=False)
+    _wipe_and_reseed()
 
 
 def _attach_device(site_id: int, name: str = "mock_device"):

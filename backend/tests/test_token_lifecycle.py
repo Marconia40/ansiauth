@@ -30,12 +30,42 @@ def _logout(client, refresh_token):
 
 @pytest.fixture(autouse=True)
 def seed_lifecycle_user():
+    """MSP: Phase 4 — a fresh observer user has no grants and therefore
+    cannot see mock_device (now in the REGULAR "Mock Site" per
+    ``seed_defaults``). Attach a site-wide observer grant on Mock Site so
+    the lifecycle flow tests (which end with a
+    ``GET /vlans/?device=mock_device``) still pass under strict-hierarchy.
+    """
+    from app.db.models import RoleAssignmentModel, SiteModel, UserModel
     if user_service.get_by_username("lifecycle_user") is None:
-        user_service.create_user(UserCreate(username="lifecycle_user", password="lifecycle_pass_99", role="observer"))
+        user_service.create_user(UserCreate(
+            username="lifecycle_user", password="lifecycle_pass_99", role="observer",
+        ))
+    with get_session() as session:
+        uid = session.query(UserModel.id).filter_by(username="lifecycle_user").scalar()
+        mock_site_id = session.query(SiteModel.id).filter_by(name="Mock Site").scalar()
+        if uid and mock_site_id:
+            existing = (
+                session.query(RoleAssignmentModel)
+                .filter_by(user_id=uid, site_id=mock_site_id, device_group_id=None)
+                .first()
+            )
+            if existing is None:
+                session.add(RoleAssignmentModel(
+                    user_id=uid, site_id=mock_site_id, device_group_id=None,
+                    role="observer",
+                ))
     yield
     with get_session() as session:
         from app.db.models import UserModel
-        session.query(UserModel).filter_by(username="lifecycle_user").delete(synchronize_session=False)
+        uid = session.query(UserModel.id).filter_by(username="lifecycle_user").scalar()
+        if uid is not None:
+            session.query(RoleAssignmentModel).filter_by(user_id=uid).delete(
+                synchronize_session=False
+            )
+        session.query(UserModel).filter_by(username="lifecycle_user").delete(
+            synchronize_session=False
+        )
 
 
 # ── Login returns refresh token ───────────────────────────────────────────────

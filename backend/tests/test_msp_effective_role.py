@@ -5,6 +5,8 @@ MSP_IMPLEMENTATION_PLAN.md §10.5 and the phase-3 spec §5.
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.db.models import (
@@ -18,52 +20,48 @@ from app.db.session import get_session
 from app.services.effective_role import effective_role
 
 
+VALID_RESOURCE_TYPES = frozenset({"site", "device_group", "device"})
+
+
 @pytest.fixture()
 def isolated_msp_scaffold():
     """Fresh scaffold: two sites, one group per site, one device per group,
     one user with a single site-wide observer grant on the first site.
 
-    Cleans up on teardown so tests remain independent.
+    Uses uuid-suffixed names so re-runs never collide, and tears down in
+    FK-safe order under SQLite FK enforcement (Phase 4).
     """
-    created_user_ids: list[int] = []
-    created_site_ids: list[int] = []
+    tag = uuid.uuid4().hex[:6]
+    site_a_name = f"msp-eff-A-{tag}"
+    site_b_name = f"msp-eff-B-{tag}"
+    dev_a_name = f"msp-eff-dev-A-{tag}"
+    dev_b_name = f"msp-eff-dev-B-{tag}"
+    user_name = f"msp-eff-user-{tag}"
 
     with get_session() as session:
-        site_a = SiteModel(name="msp-eff-A", kind="REGULAR")
-        site_b = SiteModel(name="msp-eff-B", kind="REGULAR")
+        site_a = SiteModel(name=site_a_name, kind="REGULAR")
+        site_b = SiteModel(name=site_b_name, kind="REGULAR")
         session.add_all([site_a, site_b])
         session.flush()
-        group_a = DeviceGroupModel(name="msp-eff-A-Default", site_id=site_a.id, is_default=True)
-        group_b = DeviceGroupModel(name="msp-eff-B-Default", site_id=site_b.id, is_default=True)
+        group_a = DeviceGroupModel(name=f"Default-{tag}-A", site_id=site_a.id, is_default=True)
+        group_b = DeviceGroupModel(name=f"Default-{tag}-B", site_id=site_b.id, is_default=True)
         session.add_all([group_a, group_b])
         session.flush()
         site_a.default_group_id = group_a.id
         site_b.default_group_id = group_b.id
         dev_a = DeviceModel(
-            name="msp-eff-dev-A",
-            host="10.0.0.1",
-            vendor="cisco",
-            platform="ios",
-            username="u",
-            encrypted_password="x",
-            device_group_id=group_a.id,
-            site_id=site_a.id,
+            name=dev_a_name, host="10.0.0.1", vendor="cisco", platform="ios",
+            username="u", encrypted_password="x",
+            device_group_id=group_a.id, site_id=site_a.id,
         )
         dev_b = DeviceModel(
-            name="msp-eff-dev-B",
-            host="10.0.0.2",
-            vendor="cisco",
-            platform="ios",
-            username="u",
-            encrypted_password="x",
-            device_group_id=group_b.id,
-            site_id=site_b.id,
+            name=dev_b_name, host="10.0.0.2", vendor="cisco", platform="ios",
+            username="u", encrypted_password="x",
+            device_group_id=group_b.id, site_id=site_b.id,
         )
         session.add_all([dev_a, dev_b])
         user = UserModel(
-            username="msp-eff-user",
-            hashed_password="x",
-            role="observer",
+            username=user_name, hashed_password="x", role="observer",
             is_system_admin=False,
         )
         session.add(user)
@@ -75,36 +73,38 @@ def isolated_msp_scaffold():
         session.flush()
         scaffold = {
             "user": {"id": user.id, "username": user.username, "is_system_admin": False},
+            "user_id": user.id,
             "site_a_id": site_a.id, "site_b_id": site_b.id,
             "group_a_id": group_a.id, "group_b_id": group_b.id,
-            "dev_a_name": dev_a.name, "dev_b_name": dev_b.name,
+            "dev_a_name": dev_a_name, "dev_b_name": dev_b_name,
+            "site_ids": [site_a.id, site_b.id],
+            "device_names": [dev_a_name, dev_b_name],
         }
-        created_user_ids.append(user.id)
-        created_site_ids.extend([site_a.id, site_b.id])
 
     yield scaffold
 
-    # Teardown — cascades take care of grants + groups + devices.
+    # Teardown — FK-safe order under SQLite FK enforcement.
     with get_session() as session:
-        session.query(RoleAssignmentModel).filter(
-            RoleAssignmentModel.user_id.in_(created_user_ids)
-        ).delete(synchronize_session=False)
+        session.query(RoleAssignmentModel).filter_by(user_id=scaffold["user_id"]).delete(
+            synchronize_session=False
+        )
         session.query(DeviceModel).filter(
-            DeviceModel.name.in_(["msp-eff-dev-A", "msp-eff-dev-B"])
+            DeviceModel.name.in_(scaffold["device_names"])
         ).delete(synchronize_session=False)
-        session.query(DeviceGroupModel).filter(
-            DeviceGroupModel.id.in_([]) | (DeviceGroupModel.site_id.in_(created_site_ids))
-        ).delete(synchronize_session=False)
-        # Break cyclic FK before deleting the site.
-        for sid in created_site_ids:
+        # Null the sites' default_group_id back-ref before dropping groups
+        # (RESTRICT FK on sites.default_group_id → device_groups.id).
+        for sid in scaffold["site_ids"]:
             row = session.query(SiteModel).filter_by(id=sid).first()
             if row is not None:
                 row.default_group_id = None
         session.flush()
-        session.query(SiteModel).filter(SiteModel.id.in_(created_site_ids)).delete(
-            synchronize_session=False
-        )
-        session.query(UserModel).filter(UserModel.id.in_(created_user_ids)).delete(
+        session.query(DeviceGroupModel).filter(
+            DeviceGroupModel.site_id.in_(scaffold["site_ids"])
+        ).delete(synchronize_session=False)
+        session.query(SiteModel).filter(
+            SiteModel.id.in_(scaffold["site_ids"])
+        ).delete(synchronize_session=False)
+        session.query(UserModel).filter_by(id=scaffold["user_id"]).delete(
             synchronize_session=False
         )
 

@@ -2,7 +2,13 @@ import axios from 'axios';
 import type { AuthUser } from '@/types/auth';
 import type { VlanEntry, VlanCreate, VlanUpdate, VlanDelete, VlanOperationResult } from '@/types/vlan';
 import type { Device, DeviceCreate, DeviceUpdate } from '@/types/device';
-import type { User, UserCreate, UserUpdate } from '@/types/user';
+import type {
+  RoleAssignment,
+  RoleAssignmentCreate,
+  User,
+  UserCreate,
+  UserUpdate,
+} from '@/types/user';
 import type { Job, GroupJob } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
 import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
@@ -404,6 +410,22 @@ export async function deleteDevice(name: string) {
   return unwrap(client.delete(`/devices/${name}`));
 }
 
+/**
+ * MSP: Phase 4 — the sole authoritative way to change a device's group or
+ * site. Pass `null` for `device_group_id` to move the device to its
+ * current site's Default group (the D8 "remove from group" action).
+ */
+export async function moveDevice(
+  name: string,
+  deviceGroupId: number | null,
+): Promise<Device> {
+  return unwrap(
+    client.post<ApiResponse<Device>>(`/devices/${name}/move`, {
+      device_group_id: deviceGroupId,
+    }),
+  );
+}
+
 // ── Jobs ──────────────────────────────────────────────────────────────────────
 
 export async function getJobs(params?: {
@@ -511,10 +533,19 @@ export async function getDeviceGroupDevices(groupId: number): Promise<string[]> 
           : [];
 }
 
+/**
+ * @deprecated Phase 4 — prefer `moveDevice(name, groupId)`. The group-level
+ * endpoints still respond (with `Deprecation: true` header) but will be
+ * removed in Phase 5.
+ */
 export async function addDeviceToGroup(groupId: number, deviceName: string): Promise<unknown> {
   return unwrap(client.post(`/device-groups/${groupId}/members`, { device_name: deviceName }));
 }
 
+/**
+ * @deprecated Phase 4 — prefer `moveDevice(name, null)` to send the device
+ * back to its site's Default group. Kept for one release.
+ */
 export async function removeDeviceFromGroup(groupId: number, deviceName: string): Promise<void> {
   return unwrap(client.delete(`/device-groups/${groupId}/members/${deviceName}`));
 }
@@ -539,4 +570,51 @@ export async function updateSite(siteId: number, body: SiteUpdate): Promise<Site
 
 export async function deleteSite(siteId: number): Promise<void> {
   return unwrap(client.delete(`/sites/${siteId}`));
+}
+
+/**
+ * MSP: Phase 4 — new endpoint listing every group that belongs to the
+ * given site. Used by the device registration modal to populate the Group
+ * dropdown after the caller picks a Site.
+ */
+export async function listSiteGroups(siteId: number): Promise<DeviceGroup[]> {
+  return unwrap(client.get<ApiResponse<DeviceGroup[]>>(`/sites/${siteId}/groups`));
+}
+
+// ── Grants / system-admin (MSP Phase 3+) ────────────────────────────────────
+
+export async function listGrants(userId: number): Promise<RoleAssignment[]> {
+  return unwrap(
+    client.get<ApiResponse<RoleAssignment[]>>(`/users/${userId}/grants`),
+  );
+}
+
+export async function grant(
+  userId: number,
+  body: RoleAssignmentCreate,
+): Promise<RoleAssignment> {
+  return unwrap(
+    client.post<ApiResponse<RoleAssignment>>(`/users/${userId}/grants`, body),
+  );
+}
+
+export async function revoke(userId: number, grantId: number): Promise<void> {
+  await client.delete(`/users/${userId}/grants/${grantId}`);
+}
+
+/**
+ * MSP: Phase 4 — toggle the system-admin flag on a user. Requires the
+ * caller to be a system-admin themselves. Blocks demoting the last active
+ * system-admin (400).
+ */
+export async function setSystemAdmin(
+  userId: number,
+  isSystemAdmin: boolean,
+): Promise<{ id: number; is_system_admin: boolean }> {
+  return unwrap(
+    client.put<ApiResponse<{ id: number; is_system_admin: boolean }>>(
+      `/users/${userId}/system-admin`,
+      { is_system_admin: isSystemAdmin },
+    ),
+  );
 }

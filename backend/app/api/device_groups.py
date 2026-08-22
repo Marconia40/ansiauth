@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.core import authz
 from app.core.config import settings
@@ -169,18 +169,27 @@ def delete_group(group_id: int, current_user: dict = Depends(require_authenticat
 
 @router.post(
     "/{group_id}/members",
-    summary="Add device to group",
+    summary="Add device to group (legacy compat)",
     description=(
-        "Add a device to a group. Idempotent — an existing member returns 200 "
-        "with added=false. Under MSP-strict, this delegates to Inventory.move so "
-        "the device's authoritative group FK is updated too. Requires admin role."
+        "**Deprecated (Phase 4).** Prefer `POST /devices/{name}/move` — the "
+        "device-level move is the sole authoritative surface for changing a "
+        "device's group. This endpoint continues to work and internally "
+        "delegates to `Inventory.move` so results are byte-identical. Removed "
+        "in Phase 5. Requires admin role."
     ),
+    deprecated=True,
 )
 def add_member(
     group_id: int,
     data: DeviceGroupMemberCreate,
+    response: Response,
     current_user: dict = Depends(require_authenticated),
 ):
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Phase-5"
+    response.headers["Link"] = (
+        '</api/v1/devices/{name}/move>; rel="successor-version"'
+    )
     if settings.MSP_STRICT_HIERARCHY:
         from app.services.effective_role import effective_role
         from app.db.session import get_session
@@ -233,8 +242,14 @@ def add_member(
 def remove_member(
     group_id: int,
     device_name: str,
+    response: Response,
     current_user: dict = Depends(require_authenticated),
 ):
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Phase-5"
+    response.headers["Link"] = (
+        '</api/v1/devices/{name}/move>; rel="successor-version"'
+    )
     if settings.MSP_STRICT_HIERARCHY:
         # Authz mirrors the device-level move: caller needs operator on the
         # device (same-site) because the D8 semantics land the device in its
