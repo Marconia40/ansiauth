@@ -34,7 +34,7 @@ def _do_failed_login(client, username: str = "brute_user", password: str = "wron
 @pytest.fixture(autouse=True)
 def seed_brute_user():
     if user_service.get_by_username("brute_user") is None:
-        user_service.create_user(UserCreate(username="brute_user", password="correct_password_123", role="observer"))
+        user_service.create_user(UserCreate(username="brute_user", password="correct_password_123"))
     yield
     from app.db.session import get_session
     from app.db.models import UserModel

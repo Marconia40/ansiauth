@@ -110,24 +110,6 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = True
     COOKIE_SAMESITE: str = "strict"
 
-    # ── MSP (Phase 3+) ────────────────────────────────────────────────────────
-    # Flag-gates the cutover from legacy site-scoped RBAC (allowed_sites +
-    # role) to per-scope role_assignments. When False, list/get endpoints for
-    # devices, groups and sites keep the legacy authz path; when True they use
-    # Inventory / effective_role / require_scope. New endpoints (/move,
-    # /grants, /system-admin, /sites/{id}/groups) are always available.
-    MSP_STRICT_HIERARCHY: bool = Field(
-        default=True,
-        description=(
-            "MSP: Phase 4 default. Enforces every MSP invariant at the app "
-            "layer: list/get endpoints scope through role_assignments, "
-            "device mutations require per-scope grants, and audit reads use "
-            "D27 scoping. Kept as an env-var escape hatch for one release; "
-            "Phase 5 removes the flag entirely. Set to false only to roll "
-            "back list/get scoping in an emergency."
-        ),
-    )
-
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def _parse_origins(cls, value):
@@ -198,7 +180,6 @@ COOKIE_SAMESITE = settings.COOKIE_SAMESITE
 LOG_FORMAT = settings.LOG_FORMAT
 METRICS_ENABLED = settings.METRICS_ENABLED
 REDIS_URL = settings.REDIS_URL
-MSP_STRICT_HIERARCHY = settings.MSP_STRICT_HIERARCHY
 
 ANSIBLE_BASE_PATH = _ANSIBLE_DIR
 INVENTORY_PATH = os.path.join(_ANSIBLE_DIR, "inventory", "inventory.ini")

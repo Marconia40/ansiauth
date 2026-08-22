@@ -18,18 +18,18 @@ def clean_users():
         session.query(UserModel).delete()
 
 
-def _create(username="alice", role="operator", password="password123", email=None):
+def _create(username="alice", is_system_admin=False, password="password123", email=None):
     return user_service.create_user(
-        UserCreate(username=username, password=password, role=role, email=email)
+        UserCreate(username=username, password=password, is_system_admin=is_system_admin, email=email)
     )
 
 
 # ── create_user ───────────────────────────────────────────────────────────────
 
 def test_create_user_returns_user_read():
-    user = _create(username="alice", role="operator")
+    user = _create(username="alice")
     assert user.username == "alice"
-    assert user.role == "operator"
+    assert user.is_system_admin is False
     assert user.is_active is True
     assert user.id is not None
 
@@ -144,10 +144,10 @@ def test_update_user_email_normalised():
     assert updated.email == "upper@case.com"
 
 
-def test_update_user_role():
-    user = _create(username="sam", role="operator")
-    updated = user_service.update_user(user.id, UserUpdate(role="admin"))
-    assert updated.role == "admin"
+def test_update_user_email_lower():
+    user = _create(username="sam")
+    updated = user_service.update_user(user.id, UserUpdate(email="Sam@Ex.COM"))
+    assert updated.email == "sam@ex.com"
 
 
 def test_update_user_password_hashed():
@@ -183,21 +183,21 @@ def test_deactivate_user_sets_is_active_false():
     assert result.is_active is False
 
 
-def test_deactivate_last_admin_raises():
-    user = _create(username="yvonne", role="admin")
-    with pytest.raises(ValueError, match="last active admin"):
+def test_deactivate_last_system_admin_raises():
+    user = _create(username="yvonne", is_system_admin=True)
+    with pytest.raises(ValueError, match="last active system-admin"):
         user_service.deactivate_user(user.id)
 
 
-def test_deactivate_non_last_admin_allowed():
-    a1 = _create(username="admin1", role="admin")
-    a2 = _create(username="admin2", role="admin")
+def test_deactivate_non_last_system_admin_allowed():
+    a1 = _create(username="admin1", is_system_admin=True)
+    _create(username="admin2", is_system_admin=True)
     result = user_service.deactivate_user(a1.id)
     assert result.is_active is False
 
 
-def test_deactivate_operator_allowed():
-    user = _create(username="zara", role="operator")
+def test_deactivate_non_system_admin_allowed():
+    user = _create(username="zara", is_system_admin=False)
     result = user_service.deactivate_user(user.id)
     assert result.is_active is False
 

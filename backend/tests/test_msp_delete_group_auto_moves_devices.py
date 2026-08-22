@@ -32,7 +32,6 @@ def d19_scaffold():
                 username="u",
                 encrypted_password="x",
                 device_group_id=extra_group.id,
-                site_id=site.id,
             )
             session.add(dev)
             devices.append(dev.name)

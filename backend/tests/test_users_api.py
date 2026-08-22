@@ -20,9 +20,9 @@ def clean_users():
         session.query(AuditLogModel).delete()
 
 
-def _seed(username, role="operator", password="password123"):
+def _seed(username, is_system_admin=False, password="password123"):
     return user_service.create_user(
-        UserCreate(username=username, password=password, role=role)
+        UserCreate(username=username, password=password, is_system_admin=is_system_admin)
     )
 
 
@@ -30,7 +30,7 @@ def _seed(username, role="operator", password="password123"):
 
 def test_super_admin_can_create_user(super_admin_client):
     resp = super_admin_client.post("/api/v1/users/", json={
-        "username": "newuser", "password": "password123", "role": "operator"
+        "username": "newuser", "password": "password123"
     })
     assert resp.status_code == 200
     data = resp.json()["data"]
@@ -40,7 +40,7 @@ def test_super_admin_can_create_user(super_admin_client):
 
 def test_admin_can_create_user(admin_client):
     resp = admin_client.post("/api/v1/users/", json={
-        "username": "newuser", "password": "password123", "role": "operator"
+        "username": "newuser", "password": "password123"
     })
     assert resp.status_code == 200
 
@@ -52,23 +52,23 @@ def test_admin_can_create_super_admin_under_msp(admin_client):
     super-admins. The user-management privilege gate is the system-admin
     bit, not the specific role name."""
     resp = admin_client.post("/api/v1/users/", json={
-        "username": "newsa", "password": "password123", "role": "super-admin"
+        "username": "newsa", "password": "password123", "is_system_admin": True
     })
     assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["role"] == "super-admin"
+    assert resp.json()["data"]["is_system_admin"] is True
 
 
 def test_super_admin_can_create_super_admin(super_admin_client):
     resp = super_admin_client.post("/api/v1/users/", json={
-        "username": "newsa", "password": "password123", "role": "super-admin"
+        "username": "newsa", "password": "password123", "is_system_admin": True
     })
     assert resp.status_code == 200
-    assert resp.json()["data"]["role"] == "super-admin"
+    assert resp.json()["data"]["is_system_admin"] is True
 
 
 def test_operator_cannot_create_user(operator_client):
     resp = operator_client.post("/api/v1/users/", json={
-        "username": "newuser", "password": "password123", "role": "observer"
+        "username": "newuser", "password": "password123"
     })
     assert resp.status_code == 403
 
@@ -76,14 +76,14 @@ def test_operator_cannot_create_user(operator_client):
 def test_create_duplicate_username_returns_400(super_admin_client):
     _seed("existing")
     resp = super_admin_client.post("/api/v1/users/", json={
-        "username": "existing", "password": "password123", "role": "operator"
+        "username": "existing", "password": "password123"
     })
     assert resp.status_code == 400
 
 
 def test_create_user_writes_audit_log(super_admin_client, admin_client):
     super_admin_client.post("/api/v1/users/", json={
-        "username": "audited", "password": "password123", "role": "observer"
+        "username": "audited", "password": "password123"
     })
     with get_session() as session:
         entry = session.query(AuditLogModel).filter_by(action="create_user").first()
@@ -93,7 +93,7 @@ def test_create_user_writes_audit_log(super_admin_client, admin_client):
 
 def test_hashed_password_not_in_create_response(super_admin_client):
     resp = super_admin_client.post("/api/v1/users/", json={
-        "username": "safeuser", "password": "password123", "role": "observer"
+        "username": "safeuser", "password": "password123"
     })
     assert "hashed_password" not in str(resp.json())
 
@@ -193,30 +193,29 @@ def test_get_user_no_hashed_password(admin_client):
 
 def test_super_admin_can_update_user(super_admin_client):
     user = _seed("eve")
-    resp = super_admin_client.put(f"/api/v1/users/{user.id}", json={"role": "admin"})
+    resp = super_admin_client.put(f"/api/v1/users/{user.id}", json={"email": "eve@new.com"})
     assert resp.status_code == 200
-    assert resp.json()["data"]["role"] == "admin"
+    assert resp.json()["data"]["email"] == "eve@new.com"
 
 
-def test_admin_can_update_user_under_msp(admin_client):
-    """MSP: Phase 4 — see rationale on test_admin_can_create_super_admin_under_msp.
-    Admin is system-admin under D24 so user updates are permitted."""
+def test_admin_can_update_user(admin_client):
+    """Admin is system-admin under D24 so user updates are permitted."""
     user = _seed("frank")
-    resp = admin_client.put(f"/api/v1/users/{user.id}", json={"role": "admin"})
+    resp = admin_client.put(f"/api/v1/users/{user.id}", json={"email": "frank@new.com"})
     assert resp.status_code == 200, resp.text
 
 
 def test_update_user_writes_audit_log(super_admin_client):
     user = _seed("grace")
-    super_admin_client.put(f"/api/v1/users/{user.id}", json={"role": "admin"})
+    super_admin_client.put(f"/api/v1/users/{user.id}", json={"email": "grace@x.com"})
     with get_session() as session:
         entry = session.query(AuditLogModel).filter_by(action="update_user").first()
         assert entry is not None
-        assert entry.details["updated_fields"]["role"] == "admin"
+        assert entry.details["updated_fields"]["email"] == "grace@x.com"
 
 
 def test_update_nonexistent_user_returns_400(super_admin_client):
-    resp = super_admin_client.put("/api/v1/users/99999", json={"role": "observer"})
+    resp = super_admin_client.put("/api/v1/users/99999", json={"email": "x@y.com"})
     assert resp.status_code == 400
 
 
@@ -253,8 +252,8 @@ def test_deactivate_writes_audit_log(super_admin_client):
         assert entry.resource_id == str(user.id)
 
 
-def test_deactivate_last_admin_returns_400(super_admin_client):
-    user = _seed("lastadmin", role="admin")
+def test_deactivate_last_system_admin_returns_400(super_admin_client):
+    user = _seed("lastadmin", is_system_admin=True)
     resp = super_admin_client.delete(f"/api/v1/users/{user.id}")
     assert resp.status_code == 400
 

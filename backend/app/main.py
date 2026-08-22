@@ -70,22 +70,27 @@ job_service.mark_orphaned_jobs_failed()
 
 
 def _bootstrap_admin() -> None:
-    """Create the initial super-admin user from env vars if no super-admin exists in the DB."""
+    """Create the initial system-admin user from env vars if no system-admin
+    exists in the DB."""
     from app.core.config import BOOTSTRAP_ADMIN_USER, BOOTSTRAP_ADMIN_PASSWORD
     from app.db.models import UserModel
     from app.db.session import get_session
 
     with get_session() as session:
-        has_superadmin = session.query(UserModel).filter_by(role="super-admin", is_active=True).first() is not None
+        has_sysadmin = (
+            session.query(UserModel)
+            .filter_by(is_system_admin=True, is_active=True)
+            .first() is not None
+        )
 
-    if has_superadmin:
-        logger.info("Bootstrap skipped: active super-admin already exists")
+    if has_sysadmin:
+        logger.info("Bootstrap skipped: active system-admin already exists")
         return
 
     if not BOOTSTRAP_ADMIN_PASSWORD:
         logger.warning(
-            "No active super-admin exists and BOOTSTRAP_ADMIN_PASSWORD is not set — "
-            "set this env var to seed an initial super-admin on first boot."
+            "No active system-admin exists and BOOTSTRAP_ADMIN_PASSWORD is not set — "
+            "set this env var to seed an initial system-admin on first boot."
         )
         return
 
@@ -98,7 +103,7 @@ def _bootstrap_admin() -> None:
         UserCreate(
             username=BOOTSTRAP_ADMIN_USER,
             password=BOOTSTRAP_ADMIN_PASSWORD,
-            role="super-admin",
+            is_system_admin=True,
         )
     )
     audit_service.log_action(
@@ -109,7 +114,7 @@ def _bootstrap_admin() -> None:
         details={"username": user.username},
         status="success",
     )
-    logger.info("Bootstrap: created super-admin user '%s' (id=%d)", user.username, user.id)
+    logger.info("Bootstrap: created system-admin user '%s' (id=%d)", user.username, user.id)
 
 
 _bootstrap_admin()

@@ -101,7 +101,11 @@ def _apply_filters(
         # that are not tied to a device at all (per spec: "If action is unrelated
         # to device: keep visible").
         device_names = [
-            r[0] for r in session.query(DeviceModel.name).filter(DeviceModel.site_id == site_id).all()
+            r[0]
+            for r in session.query(DeviceModel.name)
+            .join(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
+            .filter(DeviceGroupModel.site_id == site_id)
+            .all()
         ]
         if device_names:
             q = q.filter(or_(AuditLogModel.device.is_(None), AuditLogModel.device.in_(device_names)))

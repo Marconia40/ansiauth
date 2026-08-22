@@ -1,7 +1,6 @@
 import logging
 from typing import Optional
 
-from app.core.config import settings
 from app.db.models import (
     DeviceGroupModel,
     DeviceModel,
@@ -33,7 +32,12 @@ class SiteHasDevicesError(Exception):
 
 
 def _to_read(row: SiteModel, session) -> SiteRead:
-    count = session.query(DeviceModel).filter_by(site_id=row.id).count()
+    count = (
+        session.query(DeviceModel)
+        .join(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
+        .filter(DeviceGroupModel.site_id == row.id)
+        .count()
+    )
     return SiteRead(
         id=row.id,
         name=row.name,
@@ -192,17 +196,12 @@ def delete_site(site_id: int) -> bool:
             raise ValueError(
                 "The Base-Infrastructure site is system-managed and cannot be deleted"
             )
-        # Legacy devices FK on sites.id (SET NULL) and the MSP-authoritative
-        # path via device_groups.site_id both count as "devices in this site"
-        # for the purposes of the delete guard.
-        legacy_count = session.query(DeviceModel).filter_by(site_id=site_id).count()
-        msp_count = (
+        device_count = (
             session.query(DeviceModel)
             .join(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
             .filter(DeviceGroupModel.site_id == site_id)
             .count()
         )
-        device_count = max(legacy_count, msp_count)
         if device_count > 0:
             raise SiteHasDevicesError(site_id, device_count)
         # Order matters under M3's RESTRICT FK: null the site's back-reference

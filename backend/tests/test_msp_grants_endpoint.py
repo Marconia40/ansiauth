@@ -14,7 +14,7 @@ from app.schemas.user import UserCreate
 @pytest.fixture()
 def target_user_and_site():
     username = f"grant-target-{uuid.uuid4().hex[:6]}"
-    user_service.create_user(UserCreate(username=username, password="p" * 12, role="observer"))
+    user_service.create_user(UserCreate(username=username, password="p" * 12))
     with get_session() as session:
         uid = session.query(UserModel.id).filter_by(username=username).scalar()
         site = SiteModel(name=f"grants-site-{uuid.uuid4().hex[:6]}", kind="REGULAR")

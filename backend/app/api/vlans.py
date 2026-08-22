@@ -2,9 +2,6 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core import authz
-from app.core.config import settings
-from app.core.dependencies import require_role
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
 from app.core.scope import require_authenticated
 from app.schemas.vlan import VLANCreate, VLANDelete, VLANUpdate
@@ -20,27 +17,14 @@ router = APIRouter()
 _RETRY_BASE_DELAY: float = 1.0
 
 
-def _authz_devices(user: dict, device_names, *, min_role: str) -> None:
-    """Enforce read/write access to every device in *device_names*.
+_LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
 
-    MSP: Phase 3 (ESC-3) — under the strict-hierarchy flag this uses
-    ``effective_role`` (per-scope grants). Under flag-off it falls back to
-    the legacy ``ensure_devices_allowed`` path so pre-MSP test fixtures with
-    site_id=NULL seed devices keep working; T3.5 snapshot-diff proves the two
-    return identical result sets once the MSP flag flips on in staging.
-    """
-    if not settings.MSP_STRICT_HIERARCHY:
-        _LVL_LEGACY = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 4}
-        if _LVL_LEGACY.get(user.get("role") or "", 0) < _LVL_LEGACY[min_role]:
-            raise HTTPException(
-                status_code=403,
-                detail="Insufficient permissions",
-            )
-        authz.ensure_devices_allowed(user, device_names)
-        return
+
+def _authz_devices(user: dict, device_names, *, min_role: str) -> None:
+    """Enforce read/write access to every device in *device_names* via the
+    caller's ``effective_role`` (per-scope grants)."""
     from app.services.effective_role import effective_role
     from app.db.session import get_session
-    _LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
     threshold = _LVL[min_role]
     with get_session() as session:
         for name in device_names:

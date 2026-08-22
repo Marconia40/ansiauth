@@ -866,19 +866,19 @@ function AuditPageContent() {
   );
 }
 
-// ── Page (role gate + Suspense boundary for useSearchParams) ──────────────────
+// ── Page (system-admin gate + Suspense boundary for useSearchParams) ─────────
 
 export default function AuditPage() {
   const { user } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
-    if (user && user.role !== 'super-admin') {
+    if (user && !user.is_system_admin) {
       router.push('/');
     }
   }, [user, router]);
 
-  if (!user || user.role !== 'super-admin') return null;
+  if (!user || !user.is_system_admin) return null;
 
   return (
     <Suspense

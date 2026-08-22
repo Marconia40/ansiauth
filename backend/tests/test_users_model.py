@@ -9,6 +9,7 @@ from app.schemas.user import UserCreate, UserRead, UserUpdate
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture(autouse=True)
 def clean_users():
     """Remove all user rows before and after each test for isolation."""
@@ -19,12 +20,12 @@ def clean_users():
         session.query(UserModel).delete()
 
 
-def _make_user(username="alice", role="operator", email=None):
+def _make_user(username="alice", is_system_admin=False, email=None):
     with get_session() as session:
         row = UserModel(
             username=username,
             hashed_password="$2b$12$fakehash",
-            role=role,
+            is_system_admin=is_system_admin,
             email=email,
         )
         session.add(row)
@@ -35,14 +36,15 @@ def _make_user(username="alice", role="operator", email=None):
 
 # ── ORM model tests ───────────────────────────────────────────────────────────
 
+
 def test_user_row_stored_and_retrievable():
     """A user row written to the DB can be read back with all fields."""
-    _make_user(username="bob", role="admin", email="bob@example.com")
+    _make_user(username="bob", is_system_admin=True, email="bob@example.com")
 
     with get_session() as session:
         row = session.query(UserModel).filter_by(username="bob").first()
         assert row is not None
-        assert row.role == "admin"
+        assert row.is_system_admin is True
         assert row.email == "bob@example.com"
         assert row.is_active is True
         assert row.created_at is not None
@@ -96,40 +98,35 @@ def test_soft_delete_via_is_active():
 
 # ── Schema tests ──────────────────────────────────────────────────────────────
 
+
 def test_user_create_valid():
-    schema = UserCreate(username="judy", password="secret123", role="observer")
+    schema = UserCreate(username="judy", password="secret123")
     assert schema.username == "judy"
-    assert schema.role == "observer"
+    assert schema.is_system_admin is False
     assert schema.email is None
 
 
-def test_user_create_rejects_invalid_role():
-    with pytest.raises(Exception):
-        UserCreate(username="mallory", password="secret123", role="superuser")
+def test_user_create_accepts_is_system_admin():
+    schema = UserCreate(username="root", password="secret123", is_system_admin=True)
+    assert schema.is_system_admin is True
 
 
 def test_user_create_rejects_short_username():
     with pytest.raises(Exception):
-        UserCreate(username="ab", password="secret123", role="observer")
+        UserCreate(username="ab", password="secret123")
 
 
 def test_user_create_rejects_short_password():
     with pytest.raises(Exception):
-        UserCreate(username="niobe", password="short", role="observer")
+        UserCreate(username="niobe", password="short")
 
 
 def test_user_update_all_optional():
     """UserUpdate with no fields must not raise — all fields are optional."""
     schema = UserUpdate()
-    assert schema.role is None
     assert schema.email is None
     assert schema.is_active is None
     assert schema.password is None
-
-
-def test_user_update_rejects_invalid_role():
-    with pytest.raises(Exception):
-        UserUpdate(role="godmode")
 
 
 def test_user_read_shape():
@@ -138,7 +135,7 @@ def test_user_read_shape():
     assert "id" in fields
     assert "username" in fields
     assert "email" in fields
-    assert "role" in fields
+    assert "is_system_admin" in fields
     assert "is_active" in fields
     assert "created_at" in fields
     assert "updated_at" in fields
@@ -147,6 +144,7 @@ def test_user_read_shape():
 
 # ── Migration round-trip test ─────────────────────────────────────────────────
 
+
 def test_users_table_exists_in_db():
     """The users table must be present — proves the migration was applied."""
     from sqlalchemy import inspect as sa_inspect
@@ -154,5 +152,6 @@ def test_users_table_exists_in_db():
     inspector = sa_inspect(get_engine())
     assert "users" in inspector.get_table_names()
     col_names = {c["name"] for c in inspector.get_columns("users")}
-    expected = {"id", "username", "email", "hashed_password", "role", "is_active", "created_at", "updated_at"}
+    expected = {"id", "username", "email", "hashed_password", "is_system_admin",
+                "is_active", "created_at", "updated_at"}
     assert expected.issubset(col_names)

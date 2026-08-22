@@ -102,5 +102,4 @@ docker compose start backend worker
 
 2026-08-19 23:50 — pre-Phase-1 — ~/ansiauth-backups/ansiauth_pre_msp_2026-08-19_2350.sql — sha256:6e17f33bf03637dd8d6521569f7427e863d3e591eb5ad52e764c15bfa27915e1
 
-2026-08-22 12:30 — pre-Phase-5 — ~/ansiauth-backups/ansiauth_pre_msp_2026-08-22_1230.sql — 
-sha256:caacd8eac663bf83cbd737062fdeb0ad74352942d84b4bb7e960abf037fb425b
+2026-08-22 12:30 — pre-Phase-5 — ~/ansiauth-backups/ansiauth_pre_msp_2026-08-22_1230.sql — sha256:caacd8eac663bf83cbd737062fdeb0ad74352942d84b4bb7e960abf037fb425b

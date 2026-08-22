@@ -43,52 +43,42 @@ export interface SystemAdminUpdate {
 }
 
 /**
- * Matches backend UserRead post-Phase 4.
+ * Matches backend UserRead post-Phase 5.
  *
- * MSP: `is_system_admin` replaces the legacy super-admin/admin distinction
- * for globally-privileged operations. Per-scope permissions live in
- * `grants` (populated by `listGrants` — not carried on this base shape to
- * keep the users list light).
+ * ``is_system_admin`` is the sole system-wide privilege bit; per-scope
+ * permissions live in ``role_assignments`` (fetched via ``listGrants``).
+ * The legacy ``role`` field is kept optional so components that display it
+ * for the currently-logged-in user (synthesized from ``is_system_admin``)
+ * still type-check — it is never populated by the backend for other users.
  */
 export interface User {
   id: number;
   username: string;
   email: string | null;
-  role: Role;
   is_active: boolean;
-  is_system_admin?: boolean;
+  is_system_admin: boolean;
   created_at: string;
   updated_at: string;
-  /** @deprecated Phase 4 — replaced by `grants`. Kept for one release. */
-  allowed_site_ids?: number[];
-  /** @deprecated Phase 4 — replaced by `grants`. Kept for one release. */
-  allowed_site_names?: string[];
+  role?: Role;
 }
 
 /**
- * Matches backend UserCreate.
- *
- * The legacy `allowed_site_ids` shape is retained through Phase 4 and
- * removed in Phase 5; new callers should create the user, then issue
- * `POST /users/{id}/grants` per desired scope.
+ * Matches backend UserCreate. To grant per-scope roles, create the user then
+ * issue `POST /users/{id}/grants`.
  */
 export interface UserCreate {
   username: string;
   password: string;
-  role: Role;
   email?: string;
-  /** @deprecated Phase 4 — prefer post-create `grant` calls. */
-  allowed_site_ids?: number[];
+  is_system_admin?: boolean;
 }
 
 /**
- * Matches backend UserUpdate.
+ * Matches backend UserUpdate — only mutable profile fields. Toggling
+ * ``is_system_admin`` has its own dedicated endpoint.
  */
 export interface UserUpdate {
   email?: string;
-  role?: Role;
   is_active?: boolean;
   password?: string;
-  /** @deprecated Phase 4 — replaced by the grants endpoints. */
-  allowed_site_ids?: number[];
 }

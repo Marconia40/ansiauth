@@ -101,9 +101,13 @@ def query_jobs(
             td = to_date if to_date.tzinfo else to_date.replace(tzinfo=timezone.utc)
             q = q.filter(JobModel.created_at <= td)
         if site_id is not None:
-            from app.db.models import DeviceModel
+            from app.db.models import DeviceGroupModel, DeviceModel
             device_names = [
-                r[0] for r in session.query(DeviceModel.name).filter(DeviceModel.site_id == site_id).all()
+                r[0]
+                for r in session.query(DeviceModel.name)
+                .join(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
+                .filter(DeviceGroupModel.site_id == site_id)
+                .all()
             ]
             if device_names:
                 q = q.filter(JobModel.device.in_(device_names))

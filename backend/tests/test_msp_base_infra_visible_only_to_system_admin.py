@@ -17,42 +17,9 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture()
 def flag_on():
-    """Force MSP_STRICT_HIERARCHY=True for the duration of the test.
-
-    ``test_audit_retention`` reloads ``app.core.config`` earlier in the run,
-    which leaves prior importers (``app.api.sites``, ``app.services.*``, …)
-    holding stale references to a superseded ``settings`` instance. Mutating
-    only ``config.settings`` therefore misses those readers. Iterate every
-    live ``settings`` object in ``sys.modules`` so every code path sees the
-    same value, and restore each on teardown.
-    """
-    import sys
-    from app.core import config
-    seen = _collect_settings_instances()
-    prev_values = [(s, s.MSP_STRICT_HIERARCHY) for s in seen]
-    for s in seen:
-        s.MSP_STRICT_HIERARCHY = True
-    try:
-        yield
-    finally:
-        for s, v in prev_values:
-            s.MSP_STRICT_HIERARCHY = v
-
-
-def _collect_settings_instances():
-    import sys
-    seen = []
-    seen_ids = set()
-    for mod in list(sys.modules.values()):
-        if mod is None:
-            continue
-        s = getattr(mod, "settings", None)
-        if s is None or id(s) in seen_ids:
-            continue
-        if hasattr(s, "MSP_STRICT_HIERARCHY"):
-            seen.append(s)
-            seen_ids.add(id(s))
-    return seen
+    """Legacy no-op fixture — MSP strict-hierarchy is unconditional post-Phase-5.
+    Retained so callers that request the fixture still resolve."""
+    yield
 
 
 @pytest.fixture()
@@ -62,7 +29,7 @@ def observer_scoped_client():
     site_service.ensure_base_infrastructure()
     username = f"d14-obs-{uuid.uuid4().hex[:6]}"
     with get_session() as session:
-        user = UserModel(username=username, hashed_password="x", role="observer", is_system_admin=False)
+        user = UserModel(username=username, hashed_password="x", is_system_admin=False)
         session.add(user)
         session.flush()
         user_id = user.id
