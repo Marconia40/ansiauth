@@ -4,7 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.core.config import EXECUTION_MODE
-from app.models.vlan import VLANInfo
+from app.models.vlan import VLAN
 from app.services import secret_service
 
 if TYPE_CHECKING:
@@ -12,16 +12,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_mock_vlans: list[VLANInfo] = [
-    VLANInfo(vlan_id=10, name="MGMT"),
-    VLANInfo(vlan_id=20, name="DATA"),
-    VLANInfo(vlan_id=30, name="VOICE"),
+_mock_vlans: list[VLAN] = [
+    VLAN(vlan_id=10, name="MGMT"),
+    VLAN(vlan_id=20, name="DATA"),
+    VLAN(vlan_id=30, name="VOICE"),
 ]
 
-_INITIAL_MOCK_VLANS: list[VLANInfo] = [
-    VLANInfo(vlan_id=10, name="MGMT"),
-    VLANInfo(vlan_id=20, name="DATA"),
-    VLANInfo(vlan_id=30, name="VOICE"),
+_INITIAL_MOCK_VLANS: list[VLAN] = [
+    VLAN(vlan_id=10, name="MGMT"),
+    VLAN(vlan_id=20, name="DATA"),
+    VLAN(vlan_id=30, name="VOICE"),
 ]
 
 
@@ -107,8 +107,8 @@ def update_vlan_description(vlan_id: int, description: str, device_id: str) -> d
     return driver.update_vlan(vlan_id, description, dev, pw)
 
 
-def get_vlans(device_id: str | None = None) -> list[VLANInfo]:
-    """Return VLANs configured on *device_id* as normalized ``VLANInfo`` objects.
+def get_vlans(device_id: str | None = None) -> list[VLAN]:
+    """Return VLANs configured on *device_id* as normalized ``VLAN`` objects.
 
     In mock mode the in-memory ``_mock_vlans`` list is returned directly.
     In real mode the vendor driver fetches live data from the device.

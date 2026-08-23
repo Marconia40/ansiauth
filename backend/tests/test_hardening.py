@@ -383,14 +383,14 @@ def test_single_device_job_runs_and_completes(client, monkeypatch):
 
 def test_delete_single_device_backward_compat(client, monkeypatch):
     """Single-device delete must still return jobs list and group_job_id."""
-    from app.models.vlan import VLANInfo
+    from app.models.vlan import VLAN
 
     call_n = {"n": 0}
 
     def counting_get(device_id=None):
         call_n["n"] += 1
         if call_n["n"] <= 2:
-            return [VLANInfo(vlan_id=662, name="DCOMPAT")]
+            return [VLAN(vlan_id=662, name="DCOMPAT")]
         return []
 
     monkeypatch.setattr(vlan_service, "get_vlans", counting_get)

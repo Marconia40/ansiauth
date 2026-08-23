@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from app.models.vlan import VLANInfo
+from app.models.vlan import VLAN
 
 import app.api.vlans as vlans_module
 from app.services import ansible_service, audit_service, job_service, vlan_service
@@ -66,7 +66,7 @@ def test_duplicate_vlan_fails_immediately_no_retries(operator_client, client, mo
     """A duplicate VLAN (exists with different name) must fail immediately with retry_count=0."""
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
     monkeypatch.setattr(vlan_service, "get_vlans",
-                        lambda device_id=None: [VLANInfo(vlan_id=50, name="EXISTING_NAME")])
+                        lambda device_id=None: [VLAN(vlan_id=50, name="EXISTING_NAME")])
 
     response = operator_client.post(
         "/api/v1/vlans/", json={"vlan_id": 50, "name": "DUPLICATE", "devices": ["mock_device"]}

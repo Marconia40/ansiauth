@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from app.models.vlan import VLANInfo
+from app.models.vlan import VLAN
 from app.services import audit_service, vlan_service
 import app.services.vlan_execution_service as svc
 
@@ -61,7 +61,7 @@ class TestRollbackCreate:
     def test_rollback_fails_when_vlan_still_present_after_delete(self, monkeypatch):
         """Verification: if VLAN is still present after delete, rollback_success=False."""
         monkeypatch.setattr(vlan_service, "delete_vlan", lambda *a: {"rc": 0})
-        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLANInfo(vlan_id=901, name="X")])
+        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLAN(vlan_id=901, name="X")])
         performed, success = svc._rollback_create(901, "dev", "job1", self._pre(False))
         assert performed is True
         assert success is False
@@ -107,7 +107,7 @@ class TestRollbackDelete:
     def test_rollback_success_when_vlan_present_after_recreate(self, monkeypatch):
         """Rollback succeeds if VLAN is present after recreate."""
         monkeypatch.setattr(vlan_service, "create_vlan_on_device", lambda *a: {"rc": 0})
-        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLANInfo(vlan_id=10, name="MGMT")])
+        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLAN(vlan_id=10, name="MGMT")])
         performed, success = svc._rollback_delete(10, "dev", "job1", self._pre(True))
         assert performed is True
         assert success is True
@@ -139,7 +139,7 @@ class TestRollbackUpdate:
     def test_rollback_success_when_name_restored(self, monkeypatch):
         """Rollback succeeds if VLAN has the original name after restore."""
         monkeypatch.setattr(vlan_service, "update_vlan_description", lambda *a: {"rc": 0})
-        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLANInfo(vlan_id=10, name="MGMT")])
+        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLAN(vlan_id=10, name="MGMT")])
         performed, success = svc._rollback_update(10, "dev", "job1", self._pre(True))
         assert performed is True
         assert success is True
@@ -148,7 +148,7 @@ class TestRollbackUpdate:
         """Verification: if VLAN name doesn't match original, rollback_success=False."""
         monkeypatch.setattr(vlan_service, "update_vlan_description", lambda *a: {"rc": 0})
         # Name is wrong after restore
-        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLANInfo(vlan_id=10, name="WRONG")])
+        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLAN(vlan_id=10, name="WRONG")])
         performed, success = svc._rollback_update(10, "dev", "job1", self._pre(True))
         assert performed is True
         assert success is False
@@ -156,7 +156,7 @@ class TestRollbackUpdate:
     def test_rollback_case_insensitive_name_match(self, monkeypatch):
         """Name comparison in verification must be case-insensitive."""
         monkeypatch.setattr(vlan_service, "update_vlan_description", lambda *a: {"rc": 0})
-        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLANInfo(vlan_id=10, name="mgmt")])  # lowercase
+        monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLAN(vlan_id=10, name="mgmt")])  # lowercase
         performed, success = svc._rollback_update(10, "dev", "job1", self._pre(True))  # pre_state has "MGMT"
         assert performed is True
         assert success is True
@@ -185,7 +185,7 @@ def test_rollback_verification_succeeded_log(monkeypatch, caplog):
 
 def test_rollback_verification_failed_log(monkeypatch, caplog):
     monkeypatch.setattr(vlan_service, "delete_vlan", lambda *a: {"rc": 0})
-    monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLANInfo(vlan_id=901, name="X")])
+    monkeypatch.setattr(vlan_service, "get_vlans", lambda *a: [VLAN(vlan_id=901, name="X")])
     pre = {"existed": False, "vlan_data": None}
     with caplog.at_level(logging.WARNING, logger="app.services.vlan_execution_service"):
         svc._rollback_create(901, "dev", "log-job", pre)
@@ -242,7 +242,7 @@ def test_rollback_success_false_in_job_response(client, monkeypatch):
     # After delete rc=0, get_vlans still shows VLAN present → verification fails
     monkeypatch.setattr(
         vlan_service, "get_vlans",
-        lambda *a: [VLANInfo(vlan_id=901, name="ROLLBACK_TEST")],
+        lambda *a: [VLAN(vlan_id=901, name="ROLLBACK_TEST")],
     )
 
     resp = client.post(
