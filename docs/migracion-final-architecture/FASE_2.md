@@ -331,34 +331,47 @@ la entidad, la otra es el resultado de una operación sobre ella), a pesar de qu
 tocar — no hace falta para el contrato `RecursoGestionable` (`aplicar()` devuelve lo
 que sea, `Orquestador` no le exige un tipo).
 
-**Absorber `validators/port_validator.py` completo — corrección sobre una
-versión anterior de esta fase.** La primera versión de este documento dejaba las
-5 funciones de validación viviendo en `validators/port_validator.py`, importadas
-por `Puerto`. Eso contradice un principio ya establecido en todo este plan (y en
-`FINAL_ARCHITECTURE.md`): "no quiero métodos aislados, nada en archivos de
-funciones sueltas" — si `Puerto` termina siendo el **único** caller real de esas
-5 funciones (confirmar con grep que nadie más las usa, debería dar cierto), es
-exactamente el archivo huérfano de un solo caller que ese principio rechaza.
-**Se copian las 5 funciones (`validate_interface_name`/`validate_access_vlan_id`/
-`validate_trunk_vlan_id`/`validate_trunk_vlan_list`/`validate_description`) como
-funciones privadas del módulo `models/port.py`** (`_validate_interface_name()`,
-etc. — mismo cuerpo, sin cambiar lógica), llamadas desde `Puerto.__post_init__()`/
-`validar()`. **`compress_vlans_cisco()`/`compress_vlans_huawei()`** (mismo
-archivo, líneas 106-144) **no son validación** — mover cada una a un método
-privado de `CiscoVendor`/`HuaweiVendor` respectivamente (los archivos que A2 de
-Fase 1 ya fusionó). Con las 5 funciones de validación copiadas y las 2 de
-formato movidas, `validators/port_validator.py` queda vacío — se borra en esta
-misma fase, no en Fase 6.
+**Absorber la *lógica* de `validators/port_validator.py` — el archivo en sí
+NO se borra en esta fase, corrección real encontrada implementando Línea A,
+no en el diseño original.** La premisa de "si `Puerto` termina siendo el
+**único** caller real, es el archivo huérfano de un solo caller que el
+principio de este plan rechaza" resultó **falsa** al confirmar con grep:
+`api/ports.py` importa `port_validator` a nivel de módulo y lo llama directo
+en los **7 endpoints de escritura** (12 call sites) — no se toca hasta Fase 5
+(A7, rewiring de `api/ports.py`). Si `validators/port_validator.py` se borra
+acá, `api/ports.py` truena con `ImportError` **al importar el módulo**, y como
+`app/main.py` importa ese router antes de arrancar FastAPI, la app entera no
+levanta — mucho más grave que cualquier otro "caller roto" que este plan
+documenta en otro lado (siempre "el endpoint tira 500", nunca "no arranca el
+proceso"), y viola el propio criterio de finalización de esta fase
+(`import app.main` sin error).
 
-**Mismo criterio para `validators/vlan_validator.py` — corrección equivalente.**
-`VLAN.__post_init__()`/`validate_name()` (arriba, A1) hoy están escritos
-importando `validate_vlan_id_range()`/`validate_vlan_not_reserved()`/
-`validate_vlan_name()` desde ese archivo — mismo problema: si `VLAN` es el único
-caller real, se copian las 3 funciones como privadas de `models/vlan.py` (más
-`validate_description()`, la 4ta función real del archivo, usada hoy por
-`api/vlans.py: update_vlan()` — confirmar en Fase 5, A6, que ese caller pasa a
-`Puerto`/`VLAN` también) y `validators/vlan_validator.py` se borra en esta
-fase, no en Fase 6.
+**Se copian igual las 5 funciones** (`validate_interface_name`/
+`validate_access_vlan_id`/`validate_trunk_vlan_id`/`validate_trunk_vlan_list`/
+`validate_description`) como funciones privadas del módulo `models/port.py`
+(`_validate_interface_name()`, etc. — mismo cuerpo, sin cambiar lógica),
+llamadas desde `Puerto.__post_init__()`/`validar()`. **`compress_vlans_cisco()`/
+`compress_vlans_huawei()`** (mismo archivo, líneas 106-144) **no son
+validación** — mover cada una a un método privado de `CiscoVendor`/
+`HuaweiVendor` respectivamente (los archivos que A2 de Fase 1 ya fusionó).
+**Pero `validators/port_validator.py` en sí queda vivo, sin tocar**, como
+duplicado temporal de esas 5 funciones — sigue siendo la fuente real para
+`api/ports.py` hasta que Fase 5 (A7) lo rewiree a construir `Puerto` en vez de
+llamar al validador directo. Recién ahí queda sin caller real y se borra —
+agregado a la tabla de `FASE_7.md` sección 1 (no estaba).
+
+**Mismo criterio para `validators/vlan_validator.py` — misma corrección,
+mismo motivo real.** `api/vlans.py` importa `vlan_validator` a nivel de módulo
+y lo llama directo en 3 endpoints (8 call sites: `validate_vlan_id_range`/
+`validate_vlan_not_reserved`/`validate_vlan_name`/`validate_description`) —
+no 1 caller puntual en `update_vlan()` como decía una versión anterior de esta
+nota, el alcance real es mayor. Se copian las 3 funciones que usa `VLAN`
+(`validate_vlan_id_range`/`validate_vlan_not_reserved`/`validate_vlan_name`)
+más `validate_description` (la 4ta función real del archivo, sin caller
+dentro de `VLAN` pero sí en `api/vlans.py: update_vlan()`) como privadas de
+`models/vlan.py`. **`validators/vlan_validator.py` en sí queda vivo, sin
+tocar**, mismo motivo que `port_validator.py` arriba — se borra en Fase 7,
+no acá, una vez que Fase 5 (A6) rewiree `api/vlans.py`.
 
 **`Repository[Puerto]`** — mismo criterio resuelto que `VLAN` (A1): PK compuesta real,
 sin `id` autoincrement separado.
@@ -661,9 +674,12 @@ en vez de `Depends(get_current_user)` en las rutas de ese archivo. Borrar
       `PortConfigResult` se mantiene sin tocar. `mutation_fields` funciona sobre los
       6 campos mutables. `aplicar()` despacha correcto para 1 campo y para 2+
       (composite).
-- [ ] `validators/port_validator.py` y `validators/vlan_validator.py` **no
-      existen** — sus funciones de validación son privadas de `models/port.py`/
-      `models/vlan.py`, `compress_vlans_*` movidas a `HuaweiVendor`/`CiscoVendor`.
+- [ ] Sus funciones de validación son privadas de `models/port.py`/`models/vlan.py`
+      (`Puerto`/`VLAN` ya no importan de `validators/*`), `compress_vlans_*`
+      movidas a `HuaweiVendor`/`CiscoVendor`. **`validators/port_validator.py` y
+      `validators/vlan_validator.py` siguen existiendo** — corrección real:
+      `api/ports.py`/`api/vlans.py` todavía los llaman directo, se borran recién
+      en Fase 7 cuando Fase 5 deje de necesitarlos (ver nota en A2).
 - [ ] `app/db/models.py` tiene `DeviceVlanModel`/`DevicePortModel`, cada una con PK
       compuesta real (`primary_key=True` en las 2 columnas de negocio), sin `id`
       autoincrement separado. `vlan_repository`/`puerto_repository` en

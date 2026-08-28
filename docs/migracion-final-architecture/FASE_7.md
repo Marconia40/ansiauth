@@ -40,6 +40,8 @@ entre fases:
 | `app/services/inventory_service.py` | `Inventory` (nueva ubicación, Fase 6) | Fase 6 |
 | `app/services/site_service.py` | `Site` + `SiteRepository` + `Inventory` | Fase 6 |
 | `app/services/device_group_service.py` | `DeviceGroup` + `Repository[DeviceGroup]` + `Inventory` | Fase 6 |
+| `app/validators/vlan_validator.py` | `VLAN` (funciones privadas de `models/vlan.py`, copiadas en Fase 2 A1) | Fase 5 (A6) — hasta entonces `api/vlans.py` lo llama directo, no borrar antes |
+| `app/validators/port_validator.py` | `Puerto` (funciones privadas de `models/port.py`, copiadas en Fase 2 A2) | Fase 5 (A7) — hasta entonces `api/ports.py` lo llama directo, no borrar antes |
 
 Si alguno de estos **todavía tiene un caller real** al llegar a esta fase (el
 grep lo va a mostrar), no borrarlo — es señal de que alguna fase anterior quedó
@@ -247,7 +249,7 @@ documento de arquitectura:
       corren sin error (sección 5).
 - [ ] Trazabilidad RF/RNF de `FINAL_ARCHITECTURE.md` §6 confirmada contra el
       código final (sección 6) — no solo contra el documento.
-- [ ] Los 11 archivos de la tabla de la sección 1 confirmados sin caller real y
+- [ ] Los 13 archivos de la tabla de la sección 1 confirmados sin caller real y
       borrados.
 - [ ] `app/composition.py` completo, contra la lista del `README.md`.
 - [ ] Catálogo de `FINAL_ARCHITECTURE.md` §1 verificado contra el código real,
