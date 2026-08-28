@@ -34,6 +34,7 @@ def test_ssh_failure_retries_and_fails(operator_client, client, monkeypatch):
 
     monkeypatch.setattr(ansible_service, "run_playbook", _ssh_failure)
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
+    monkeypatch.setattr("app.core.config.EXECUTION_MODE", "real")
     monkeypatch.setattr(vlan_service, "vlan_exists", lambda device_id, vlan_id: False)
 
     response = operator_client.post(
@@ -65,6 +66,7 @@ def test_ssh_failure_retries_and_fails(operator_client, client, monkeypatch):
 def test_duplicate_vlan_fails_immediately_no_retries(operator_client, client, monkeypatch):
     """A duplicate VLAN (exists with different name) must fail immediately with retry_count=0."""
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
+    monkeypatch.setattr("app.core.config.EXECUTION_MODE", "real")
     monkeypatch.setattr(vlan_service, "get_vlans",
                         lambda device_id=None: [VLAN(vlan_id=50, name="EXISTING_NAME")])
 
@@ -122,6 +124,7 @@ def test_permanent_ansible_error_no_retries(operator_client, client, monkeypatch
 
     monkeypatch.setattr(ansible_service, "run_playbook", _permanent_failure)
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
+    monkeypatch.setattr("app.core.config.EXECUTION_MODE", "real")
     monkeypatch.setattr(vlan_service, "vlan_exists", lambda device_id, vlan_id: False)
 
     response = operator_client.post(
@@ -166,6 +169,7 @@ def test_retry_count_visible_during_execution(operator_client, client, monkeypat
 
     monkeypatch.setattr(ansible_service, "run_playbook", _transient_then_succeed)
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
+    monkeypatch.setattr("app.core.config.EXECUTION_MODE", "real")
     monkeypatch.setattr(vlans_module, "_RETRY_BASE_DELAY", 0.05)
 
     response = operator_client.post(
