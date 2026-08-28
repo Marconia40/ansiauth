@@ -21,7 +21,6 @@ def _clean_sites():
     ``ensure_base_infrastructure`` can rebuild cleanly, and reseed both.
     """
     from app.db.models import (
-        DeviceGroupMemberModel,
         DeviceGroupModel,
         RoleAssignmentModel,
     )
@@ -29,10 +28,8 @@ def _clean_sites():
 
     def _wipe_and_reseed():
         with get_session() as session:
-            # Post-M3 devices.device_group_id is NOT NULL — we can't null the
-            # FK before dropping groups. Delete devices outright and let
-            # seed_defaults re-create them inside Base-Infra's Default.
-            session.query(DeviceGroupMemberModel).delete(synchronize_session=False)
+            # devices.device_group_id is NOT NULL — delete devices outright
+            # so seed_defaults can re-create them inside Base-Infra's Default.
             session.query(DeviceModel).delete(synchronize_session=False)
             session.query(RoleAssignmentModel).delete(synchronize_session=False)
             # Null sites.default_group_id first so RESTRICT doesn't block the
@@ -51,11 +48,19 @@ def _clean_sites():
 
 
 def _attach_device(site_id: int, name: str = "mock_device"):
-    """Bind an existing seed device to a site for delete-conflict scenarios."""
+    """Bind an existing seed device to a site (via the site's Default group)
+    for delete-conflict / device-count scenarios."""
+    from app.db.models import DeviceGroupModel, SiteModel as _Site
     with get_session() as session:
+        default_group_id = (
+            session.query(_Site.default_group_id).filter_by(id=site_id).scalar()
+        )
+        assert default_group_id is not None, (
+            f"site {site_id} has no default group — create_site must run first"
+        )
         dev = session.query(DeviceModel).filter_by(name=name).first()
         assert dev is not None, f"seed device '{name}' missing — check device_service.seed_defaults"
-        dev.site_id = site_id
+        dev.device_group_id = default_group_id
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────

@@ -46,7 +46,16 @@ from app.services import device_service
 
 
 def _make_client(role: str) -> TestClient:
-    token = create_access_token({"sub": role, "role": role})
+    """Create a TestClient whose bearer token asserts the given role.
+
+    ``role`` is one of ``observer|operator|admin|super-admin`` — mapped to
+    ``is_system_admin`` for the JWT claim (admin/super-admin → True) so that
+    fixtures preserve their pre-Phase-5 semantics: system-admin roles bypass
+    scope checks, observer/operator roles are enriched by per-scope grants
+    seeded in ``_seed_test_role_users_with_full_visibility``.
+    """
+    is_system_admin = role in {"admin", "super-admin"}
+    token = create_access_token({"sub": role, "is_system_admin": is_system_admin})
     client = TestClient(app)
     client.headers.update({"Authorization": f"Bearer {token}"})
     return client
@@ -136,18 +145,15 @@ def reset_refresh_tokens():
 
 @pytest.fixture(autouse=True)
 def _seed_test_role_users_with_full_visibility():
-    """Step 7.3 — site-scoped RBAC looks up the calling user by username.
-
-    The role-based test clients use synthetic JWTs (sub == role), so we seed real
-    DB users for those usernames and grant non-admin roles access to every
-    existing site. Tests that want to verify restricted access can revoke sites
-    explicitly. Admins/super-admins bypass scoping by policy and don't need
-    allowed_sites rows.
+    """Seed DB users matching the synthetic-JWT test clients and grant
+    observer/operator per-scope roles on every REGULAR site so require_scope
+    decisions succeed by default. Tests that want restricted access can
+    revoke grants explicitly. Admin/super-admin clients set
+    ``is_system_admin=True`` in the JWT and bypass scope checks.
     """
     from app.db.models import (
         RoleAssignmentModel,
         SiteModel,
-        UserAllowedSiteModel,
         UserModel,
     )
     from app.db.session import get_session
@@ -155,27 +161,26 @@ def _seed_test_role_users_with_full_visibility():
     from app.schemas.user import UserCreate
 
     # Match passwords other test modules already expect, so seed_users-style
-    # fixtures (test_audit.py, test_auth.py) that only create-if-missing find a
-    # user with the right credentials.
+    # fixtures (test_audit.py, test_auth.py) that only create-if-missing find
+    # a user with the right credentials.
     _accounts = [
-        ("admin", "admin123"),
-        ("operator", "operator123"),
-        ("observer", "observer123"),
-        ("super-admin", "superadmin123"),
+        ("admin", "admin123", True),
+        ("operator", "operator123", False),
+        ("observer", "observer123", False),
+        ("super-admin", "superadmin123", True),
     ]
-    for role, password in _accounts:
-        if user_service.get_by_username(role) is None:
+    for username, password, is_sys_admin in _accounts:
+        if user_service.get_by_username(username) is None:
             user_service.create_user(UserCreate(
-                username=role,
+                username=username,
                 password=password,
-                role=role,
+                is_system_admin=is_sys_admin,
             ))
 
     with get_session() as session:
-        # MSP: Phase 1 — exclude BASE_INFRASTRUCTURE from the "all sites"
-        # grant. Per D14, Base Infra is only visible to system-admins.
-        # Preserves the pre-MSP semantics: this fixture grants "every regular
-        # site" to operator/observer, which historically meant "every site".
+        # Per D14, Base Infra is only visible to system-admins — grant
+        # observer/operator on every REGULAR site to preserve pre-MSP
+        # semantics of "every site".
         all_site_ids = [
             r[0] for r in session.query(SiteModel.id).filter(
                 SiteModel.kind == "REGULAR"
@@ -185,20 +190,12 @@ def _seed_test_role_users_with_full_visibility():
             user_row = session.query(UserModel).filter_by(username=role).first()
             if user_row is None:
                 continue
-            session.query(UserAllowedSiteModel).filter_by(user_id=user_row.id).delete(
-                synchronize_session=False
-            )
-            # MSP: Phase 4 — role_assignments is now the authoritative source.
-            # Wipe stray site-wide grants for this user on regular sites and
-            # re-seed one observer/operator grant per site so ``require_scope``
-            # decisions match the legacy allowed_sites view.
             session.query(RoleAssignmentModel).filter(
                 RoleAssignmentModel.user_id == user_row.id,
                 RoleAssignmentModel.device_group_id.is_(None),
                 RoleAssignmentModel.site_id.in_(all_site_ids) if all_site_ids else False,
             ).delete(synchronize_session=False)
             for sid in all_site_ids:
-                session.add(UserAllowedSiteModel(user_id=user_row.id, site_id=sid))
                 session.add(RoleAssignmentModel(
                     user_id=user_row.id,
                     site_id=sid,

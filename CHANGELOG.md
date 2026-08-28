@@ -371,6 +371,129 @@ bumped to `1.1.0` in both OpenAPI (`app.main`) and `frontend/package.json`.
   `alembic downgrade -1`. Legacy paths still work because Phase 2 backfill
   guarantees every column is populated correctly.
 
+### Phase 5 — Cleanup (M4) — **ONE-WAY RELEASE (v1.2)**
+
+Removal-only phase. Drops every legacy column, table, endpoint, service
+function, and code branch kept for backward compatibility during Phases 3–4.
+This is the **point of no return**: the platform can no longer serve pre-MSP
+request shapes after this.
+
+#### Removed
+- **Alembic revision `e5msp4_cleanup`** (`backend/migrations/versions/
+  e5msp4_msp_cleanup.py`) drops:
+  - `devices.site_id` (column + `ix_devices_site_id` + `fk_devices_site_id`)
+  - `device_group_members` (table + indexes + `uq_group_member`)
+  - `user_allowed_sites` (table + indexes)
+  - `users.role` (column)
+
+  `downgrade()` recreates the empty structures so the Alembic chain remains
+  formally walkable, but it emits a NOTICE that dropped data is not
+  recoverable — restore from the pre-Phase-5 snapshot (see
+  `docs/upgrades/phases/artifacts/phase0-db-snapshot-runbook.md`) instead.
+
+- **ORM (`backend/app/db/models.py`)**:
+  - Classes: `DeviceGroupMemberModel`, `UserAllowedSiteModel`.
+  - Fields: `DeviceModel.site_id`, `DeviceModel.site`, `DeviceModel.group_members`;
+    `UserModel.role`, `UserModel.allowed_sites`.
+
+- **Service layer**:
+  - `device_group_service.add_member`, `.remove_member`,
+    `.list_group_devices`, `.remove_device_from_all_groups`, and
+    `.list_groups` (unused after the flag-off path was removed).
+  - `device_service.update_device`'s `site_id` handling (device moves go
+    through `POST /devices/{name}/move`) and `_to_domain`'s legacy
+    site-attribute derivation branch.
+  - `site_service.delete_site`'s legacy device-count via `devices.site_id`.
+  - `inventory_service.Inventory.list`'s flag-off fallback to
+    `authz.allowed_device_names_for`.
+
+- **`backend/app/core/authz.py`** deleted entirely:
+  `is_unrestricted`, `allowed_site_ids_for`, `allowed_device_names_for`,
+  `ensure_device_allowed`, `ensure_devices_allowed`,
+  `set_user_allowed_sites`, `get_user_allowed_sites`. Every importer
+  (`api/devices.py`, `api/device_groups.py`, `api/audit.py`, `api/jobs.py`,
+  `api/vlans.py`, `api/ports.py`, `services/inventory_service.py`) migrated
+  to `services/effective_role.py` / `services/inventory_service.py`.
+
+- **Config**: `Settings.MSP_STRICT_HIERARCHY` and the module-level
+  `MSP_STRICT_HIERARCHY` re-export from `backend/app/core/config.py`. Every
+  `if settings.MSP_STRICT_HIERARCHY` branch across the API layer collapsed
+  to the flag-on path.
+
+- **API routes**:
+  - `POST /device-groups/{id}/members` (successor: `POST /devices/{name}/move`).
+  - `DELETE /device-groups/{id}/members/{name}` (successor: `POST
+    /devices/{name}/move` with `device_group_id: null`).
+  - `PUT /users/{id}/allowed-sites` (successor: `POST /users/{id}/grants`).
+  - All `MSP_STRICT_HIERARCHY` flag branches inside
+    `api/{devices,device_groups,sites,users,audit,jobs,vlans,ports}.py`.
+
+- **User schema** (`app/schemas/user.py`) drops `role`, `allowed_site_ids`,
+  `allowed_site_names`. `UserCreate.is_system_admin: bool` replaces `role`
+  as the sole system-wide privilege input. `UserUpdate` no longer accepts
+  `role` (per-scope grants live at `PUT/POST /users/{id}/grants`;
+  system-admin toggling lives at `PUT /users/{id}/system-admin`).
+
+- **Auth flow**: JWT payload swaps the `role` claim for `is_system_admin`.
+  `core/scope.get_current_user` and `core/dependencies.get_current_user`
+  read `is_system_admin` (falling back to a legacy `role` claim only when
+  the explicit bit is absent — keeps synthetic-JWT test fixtures working).
+  `core/dependencies.require_role` and `ROLE_HIERARCHY` are gone.
+
+- **Frontend**:
+  - `services/api.ts`: `addDeviceToGroup`, `removeDeviceFromGroup` (both
+    deprecated Phase-4 shims), and their React-Query wrappers.
+  - `types/user.ts`: `User.role`, `User.allowed_site_ids`,
+    `User.allowed_site_names`, `UserCreate.role`, `UserCreate.allowed_site_ids`,
+    `UserUpdate.role`, `UserUpdate.allowed_site_ids`.
+  - `app/(dashboard)/device-groups/page.tsx` now calls
+    `moveDevice(name, groupId)` / `moveDevice(name, null)` in place of the
+    deprecated group-member endpoints (D8 semantics: "remove from group" is
+    the device-level move to the site's Default group).
+
+- **Tests**: `test_msp_deprecated_member_endpoints_still_work.py`,
+  `test_site_scoped_rbac.py`, `test_site_assignment.py`,
+  `test_site_aware_groups.py`, and `test_rbac.py` — all asserted pre-MSP or
+  pre-Phase-5 semantics that are now impossible (legacy
+  `allowed_sites`-based scoping, `role`-based hierarchy, deprecated group
+  member routes). `test_msp_m3_enforces_constraints.py::_cleanup_site` and
+  `tests/conftest.py::_seed_test_role_users_with_full_visibility` rewritten
+  to drop references to the removed models. Per-file details in the PR
+  diff.
+
+- **Scripts**: `backend/scripts/msp_post_backfill_report.py` — Phase-2
+  diagnostic that queried the now-dropped `user_allowed_sites` table.
+
+#### Added
+- `backend/migrations/versions/e5msp4_msp_cleanup.py` — the M4 migration
+  itself (see Removed for what it drops).
+- `backend/tests/migrations/test_msp_m4_drops_legacy.py` — asserts the M4
+  upgrade removes every legacy artefact and preserves every Phase-4 (M3)
+  invariant, plus a downgrade roundtrip that recreates the empty
+  structures.
+
+#### Changed
+- `_to_read` in both `device_group_service` and `site_service` counts
+  devices through `device_group.site_id` (the only site pointer left).
+- `services/inventory_service.Inventory.move` no longer maintains the
+  legacy `devices.site_id` mirror or the `device_group_members` junction —
+  the authoritative FK is the only write path.
+- `services/effective_role._resolve_scope` uses an inner (not outer) join
+  through `device_groups`, matching the post-Phase-4 NOT NULL guarantee.
+
+#### Migration & compatibility
+- **One-way in practice.** `alembic downgrade` recreates the empty
+  structures but cannot restore data. Recovery from a bad deploy is: revert
+  the Phase-5 PR → restore DB from the pre-Phase-5 snapshot
+  (`~/ansiauth-backups/ansiauth_pre_msp_2026-08-22_1230.sql` on the current
+  machine).
+- Any external client still calling the deprecated endpoints
+  (`/device-groups/*/members`, `/users/*/allowed-sites`) now receives 404.
+  Confirm via access logs before merging.
+
+#### Grep-audit gate
+- Pre-merge run of the Phase 5 §3.9 gate returns zero hits.
+
 <!--
 Each subsequent phase appends its own section below when it lands. Template:
 

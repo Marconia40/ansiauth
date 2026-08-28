@@ -261,19 +261,28 @@ export async function login(
 
   setAccessToken(data.access_token);
 
-  const payload = JSON.parse(atob(data.access_token.split('.')[1]));
+  return parseAuthUser(data.access_token);
+}
 
+// Post-Phase-5 JWTs carry ``is_system_admin`` instead of a legacy ``role``
+// claim. UI code that reads ``user.role`` gets ``admin`` for system-admins
+// and ``observer`` otherwise — per-scope permissions live in role_assignments
+// and are fetched separately.
+function parseAuthUser(token: string): AuthUser {
+  const payload = JSON.parse(atob(token.split('.')[1]));
+  const isSystemAdmin = Boolean(payload.is_system_admin);
+  const role = payload.role ?? (isSystemAdmin ? 'admin' : 'observer');
   return {
     username: payload.sub,
-    role: payload.role,
+    role,
+    is_system_admin: isSystemAdmin,
   };
 }
 
 export async function restoreSession(): Promise<AuthUser | null> {
   try {
     const token = await refreshAccessToken();
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    return { username: payload.sub, role: payload.role };
+    return parseAuthUser(token);
   } catch {
     clearAccessToken();
     return null;
@@ -531,23 +540,6 @@ export async function getDeviceGroupDevices(groupId: number): Promise<string[]> 
         : Array.isArray(data.data?.devices)
           ? data.data.devices
           : [];
-}
-
-/**
- * @deprecated Phase 4 — prefer `moveDevice(name, groupId)`. The group-level
- * endpoints still respond (with `Deprecation: true` header) but will be
- * removed in Phase 5.
- */
-export async function addDeviceToGroup(groupId: number, deviceName: string): Promise<unknown> {
-  return unwrap(client.post(`/device-groups/${groupId}/members`, { device_name: deviceName }));
-}
-
-/**
- * @deprecated Phase 4 — prefer `moveDevice(name, null)` to send the device
- * back to its site's Default group. Kept for one release.
- */
-export async function removeDeviceFromGroup(groupId: number, deviceName: string): Promise<void> {
-  return unwrap(client.delete(`/device-groups/${groupId}/members/${deviceName}`));
 }
 
 // ── Sites ─────────────────────────────────────────────────────────────────────

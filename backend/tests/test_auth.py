@@ -10,25 +10,25 @@ from app.services import user_service
 
 @pytest.fixture(autouse=True)
 def seed_auth_users():
-    """Reset the three test accounts with known passwords before each auth test.
-
-    MSP: Phase 4 — deleting a user cascades their ``role_assignments`` away,
-    which erases the observer/operator grants seeded by conftest. Re-seed
-    grants on every REGULAR site so tests that authenticate as observer/
-    operator can still hit /vlans and /audit through effective_role.
-    """
-    from app.db.models import RoleAssignmentModel, SiteModel, UserAllowedSiteModel
+    """Reset the three test accounts with known passwords before each auth
+    test. Deleting a user cascades role_assignments away, which erases the
+    observer/operator grants seeded by conftest — re-seed one grant per
+    REGULAR site so tests that authenticate as observer/operator can still
+    hit /vlans and /audit through effective_role."""
+    from app.db.models import RoleAssignmentModel, SiteModel
     _accounts = [
-        ("admin", "admin123", "admin"),
-        ("operator", "operator123", "operator"),
-        ("observer", "observer123", "observer"),
+        ("admin", "admin123", True),
+        ("operator", "operator123", False),
+        ("observer", "observer123", False),
     ]
     with get_session() as session:
         session.query(UserModel).filter(
             UserModel.username.in_([u for u, _, _ in _accounts])
         ).delete(synchronize_session=False)
-    for username, password, role in _accounts:
-        user_service.create_user(UserCreate(username=username, password=password, role=role))
+    for username, password, is_sys in _accounts:
+        user_service.create_user(UserCreate(
+            username=username, password=password, is_system_admin=is_sys,
+        ))
     with get_session() as session:
         regular_site_ids = [
             r[0] for r in session.query(SiteModel.id).filter(
@@ -40,7 +40,6 @@ def seed_auth_users():
             if row is None:
                 continue
             for sid in regular_site_ids:
-                session.add(UserAllowedSiteModel(user_id=row.id, site_id=sid))
                 session.add(RoleAssignmentModel(
                     user_id=row.id, site_id=sid,
                     device_group_id=None, role=role,

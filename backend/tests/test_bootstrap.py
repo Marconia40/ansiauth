@@ -39,7 +39,7 @@ def test_bootstrap_creates_admin_on_empty_db(monkeypatch):
     with get_session() as session:
         row = session.query(UserModel).filter_by(username="firstadmin").first()
         assert row is not None
-        assert row.role == "admin"
+        assert row.is_system_admin is True
         assert row.is_active is True
 
 
@@ -59,7 +59,7 @@ def test_bootstrap_idempotent_skips_if_admin_exists(monkeypatch):
     _run_bootstrap(monkeypatch, user="admin2", password="strongpassword2")
 
     with get_session() as session:
-        count = session.query(UserModel).filter_by(role="admin").count()
+        count = session.query(UserModel).filter_by(is_system_admin=True).count()
     assert count == 1  # second call must not create a second admin
 
 
@@ -67,7 +67,7 @@ def test_bootstrap_uses_custom_username(monkeypatch):
     _run_bootstrap(monkeypatch, user="netops", password="strongpassword1")
 
     with get_session() as session:
-        row = session.query(UserModel).filter_by(role="admin").first()
+        row = session.query(UserModel).filter_by(is_system_admin=True).first()
         assert row is not None
         assert row.username == "netops"
 
@@ -80,7 +80,7 @@ def test_bootstrap_no_password_env_logs_warning_and_skips(monkeypatch, caplog):
         _run_bootstrap(monkeypatch, password=None)
 
     with get_session() as session:
-        count = session.query(UserModel).filter_by(role="admin").count()
+        count = session.query(UserModel).filter_by(is_system_admin=True).count()
     assert count == 0
     assert any("BOOTSTRAP_ADMIN_PASSWORD" in r.message for r in caplog.records)
 

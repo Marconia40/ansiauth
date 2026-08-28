@@ -251,7 +251,7 @@ def upgrade() -> None:
                    json_build_object(
                        'previous_groups', array_agg(DISTINCT dgm.group_id ORDER BY dgm.group_id),
                        'assigned_to', d.device_group_id
-                   )::text
+                   )
               FROM devices d
               JOIN device_group_members dgm ON dgm.device_name = d.name
               JOIN device_groups g ON g.id = dgm.group_id

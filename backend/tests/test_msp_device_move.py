@@ -50,7 +50,6 @@ def msp_move_scaffold():
             username="u",
             encrypted_password="x",
             device_group_id=extra_a.id,
-            site_id=site_a.id,
         )
         session.add(dev)
         session.flush()
@@ -168,7 +167,7 @@ def test_operator_can_do_same_site_move(msp_move_scaffold):
     username = f"op-{uuid.uuid4().hex[:6]}"
     with get_session() as session:
         user = UserModel(
-            username=username, hashed_password="x", role="operator", is_system_admin=False,
+            username=username, hashed_password="x", is_system_admin=False,
         )
         session.add(user)
         session.flush()
@@ -195,7 +194,7 @@ def test_operator_cross_site_move_forbidden(msp_move_scaffold):
     username = f"op-cross-{uuid.uuid4().hex[:6]}"
     with get_session() as session:
         user = UserModel(
-            username=username, hashed_password="x", role="operator", is_system_admin=False,
+            username=username, hashed_password="x", is_system_admin=False,
         )
         session.add(user)
         session.flush()

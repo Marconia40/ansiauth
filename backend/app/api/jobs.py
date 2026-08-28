@@ -4,11 +4,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core import authz
-from app.core.config import settings
-from app.core.dependencies import get_current_user
 from app.core.exceptions import NotFoundError
-from app.core.scope import require_authenticated, require_scope
+from app.core.scope import require_authenticated
 from app.services import audit_service, job_service
 
 logger = logging.getLogger(__name__)
@@ -88,17 +85,12 @@ def list_jobs(
     if from_date is not None and to_date is not None and from_date > to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
 
-    # ESC-1: scope-aware visible device set. Under MSP-strict we compute from
-    # role_assignments (system-admins see everything → None sentinel);
-    # otherwise fall back to legacy allowed_device_names_for for parity with
-    # the T3.5 snapshot-diff test.
-    if settings.MSP_STRICT_HIERARCHY:
-        from app.services.inventory_service import Inventory
-        allowed = Inventory()._visible_device_names(
-            current_user, site_id=site_id, device_group_id=None,
-        )
-    else:
-        allowed = authz.allowed_device_names_for(current_user)
+    # Scope-aware visible device set from role_assignments (system-admins see
+    # everything → None sentinel).
+    from app.services.inventory_service import Inventory
+    allowed = Inventory()._visible_device_names(
+        current_user, site_id=site_id, device_group_id=None,
+    )
 
     jobs, total = job_service.query_jobs(
         status=status,
@@ -133,25 +125,24 @@ def get_job(job_id: str, current_user: dict = Depends(require_authenticated)):
     return {"success": True, "data": _format_job(job)}
 
 
+_LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
+
+
 def _check_device_scope(user: dict, device_name: str, *, min_role: str) -> None:
-    """Shared authz for job endpoints — swaps ensure_device_allowed for
-    require_scope semantics under MSP-strict, keeps legacy behavior otherwise."""
-    if settings.MSP_STRICT_HIERARCHY:
-        from app.services.effective_role import effective_role
-        from app.db.session import get_session
-        _LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
-        with get_session() as session:
-            role = effective_role(session, user, "device", device_name)
-        if _LVL.get(role or "", 0) < _LVL[min_role]:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"Job operation on device '{device_name}' requires "
-                    f"role >= {min_role} (got {role or 'none'})"
-                ),
-            )
-    else:
-        authz.ensure_device_allowed(user, device_name)
+    """Shared authz for job endpoints — resolves the caller's effective role
+    on the target device and rejects with 403 if it is below ``min_role``."""
+    from app.services.effective_role import effective_role
+    from app.db.session import get_session
+    with get_session() as session:
+        role = effective_role(session, user, "device", device_name)
+    if _LVL.get(role or "", 0) < _LVL[min_role]:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Job operation on device '{device_name}' requires "
+                f"role >= {min_role} (got {role or 'none'})"
+            ),
+        )
 
 
 @router.post(

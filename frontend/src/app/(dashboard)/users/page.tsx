@@ -138,7 +138,7 @@ export default function UsersPage() {
       await createUser({
         username,
         password: newPassword.trim(),
-        role: newRole,
+        is_system_admin: newRole === 'admin' || newRole === 'super-admin',
       });
       setNewUsername('');
       setNewPassword('');
@@ -173,7 +173,11 @@ export default function UsersPage() {
     setSuccessMessage(null);
     setErrorMessage(null);
     try {
-      const body: UserUpdate = { role: editingRole };
+      // ``role`` is no longer editable on the user row post-Phase-5 — the
+      // system-admin toggle has its own action, and per-scope permissions
+      // live in role_assignments. The dropdown stays for UI parity but
+      // updates here only apply the password change.
+      const body: UserUpdate = {};
       if (editingPassword.trim()) {
         body.password = editingPassword.trim();
       }

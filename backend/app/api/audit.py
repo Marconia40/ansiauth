@@ -3,10 +3,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from app.core import authz
-from app.core.config import AUDIT_RETENTION_DAYS, settings
-from app.core.dependencies import require_role
-from app.core.scope import require_authenticated
+from app.core.config import AUDIT_RETENTION_DAYS
+from app.core.scope import require_authenticated, require_system_admin
 from app.services import audit_service
 
 router = APIRouter()
@@ -24,7 +22,7 @@ router = APIRouter()
 )
 def purge_audit_log(
     retention_days: Optional[int] = Query(default=None, ge=1),
-    current_user: dict = Depends(require_role("super-admin")),
+    current_user: dict = Depends(require_system_admin),
 ):
     days = retention_days if retention_days is not None else AUDIT_RETENTION_DAYS
     deleted = audit_service.purge_old_records(
@@ -61,14 +59,9 @@ def get_audit_log(
     page_size: Optional[int] = Query(default=None, ge=1, le=1000),
     current_user: dict = Depends(require_authenticated),
 ):
-    # MSP: Phase 4 — endpoint stays behind require_authenticated (not
-    # require_role("admin")): the D27 scoping filter *is* the authorization.
-    # Non-admins that happen to hit /audit see only rows their grants cover.
-    if not settings.MSP_STRICT_HIERARCHY:
-        # Flag-off retains the legacy admin-only gate to keep behavioral
-        # parity with pre-Phase-4 deployments.
-        if current_user.get("role") not in {"admin", "super-admin"}:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
+    # Endpoint stays behind require_authenticated: the D27 scoping filter
+    # *is* the authorization. Non-admins that hit /audit see only rows their
+    # grants cover.
     if from_date is not None and to_date is not None and from_date > to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
 
@@ -78,12 +71,8 @@ def get_audit_log(
         skip = (effective_page - 1) * effective_page_size
         limit = effective_page_size
 
-    if settings.MSP_STRICT_HIERARCHY:
-        viewer = current_user
-        allowed = None
-    else:
-        viewer = None
-        allowed = authz.allowed_device_names_for(current_user)
+    viewer = current_user
+    allowed = None
 
     total = audit_service.count_audit_log(
         user=user,

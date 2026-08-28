@@ -2,8 +2,6 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from app.core.config import settings
-from app.core.dependencies import require_role
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.scope import (
     require_authenticated,
@@ -25,27 +23,16 @@ router = APIRouter()
     "/",
     summary="Create user",
     description=(
-        "Create a new user account. Admin role is required; "
-        "only super-admins may create super-admin accounts. "
+        "Create a new user account. Requires system-admin. "
         "Passwords are hashed with PBKDF2-SHA256 and never returned in responses."
     ),
 )
 def create_user(data: UserCreate, current_user: dict = Depends(require_authenticated)):
-    if settings.MSP_STRICT_HIERARCHY:
-        # Under MSP-strict: only system-admins may create users.
-        if not current_user.get("is_system_admin"):
-            raise HTTPException(
-                status_code=403,
-                detail="create_user requires system-admin under MSP-strict",
-            )
-    else:
-        if current_user["role"] not in {"admin", "super-admin"}:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        if data.role == "super-admin" and current_user["role"] != "super-admin":
-            raise HTTPException(
-                status_code=403,
-                detail="Only super-admins can create super-admin accounts",
-            )
+    if not current_user.get("is_system_admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="create_user requires system-admin",
+        )
     try:
         user = user_service.create_user(data)
     except ValueError as e:
@@ -55,7 +42,7 @@ def create_user(data: UserCreate, current_user: dict = Depends(require_authentic
         action="create_user",
         resource="user",
         resource_id=str(user.id),
-        details={"username": user.username, "role": user.role},
+        details={"username": user.username},
     )
     return {"success": True, "data": user.model_dump()}
 
@@ -66,7 +53,7 @@ def create_user(data: UserCreate, current_user: dict = Depends(require_authentic
     description=(
         "Return all user accounts. Active users only by default; "
         "pass `include_inactive=true` to include deactivated accounts. "
-        "Paginated — defaults to 50 per page. Requires admin role or higher."
+        "Paginated — defaults to 50 per page. Requires system-admin."
     ),
 )
 def list_users(
@@ -75,15 +62,11 @@ def list_users(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
 ):
-    if settings.MSP_STRICT_HIERARCHY:
-        if not current_user.get("is_system_admin"):
-            raise HTTPException(
-                status_code=403,
-                detail="list_users requires system-admin under MSP-strict",
-            )
-    else:
-        if current_user["role"] not in {"admin", "super-admin"}:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not current_user.get("is_system_admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="list_users requires system-admin",
+        )
     all_users = user_service.list_users(include_inactive=include_inactive)
     total = len(all_users)
     start = (page - 1) * page_size
@@ -99,19 +82,14 @@ def list_users(
 @router.get(
     "/{user_id}",
     summary="Get user",
-    description="Return a single user by numeric ID. Requires admin role or higher.",
+    description="Return a single user by numeric ID. Requires system-admin or self.",
 )
 def get_user(user_id: int, current_user: dict = Depends(require_authenticated)):
-    if settings.MSP_STRICT_HIERARCHY:
-        # Callers may always fetch themselves; otherwise system-admin.
-        if not current_user.get("is_system_admin") and current_user.get("id") != user_id:
-            raise HTTPException(
-                status_code=403,
-                detail="get_user requires system-admin or self",
-            )
-    else:
-        if current_user["role"] not in {"admin", "super-admin"}:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not current_user.get("is_system_admin") and current_user.get("id") != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="get_user requires system-admin or self",
+        )
     user = user_service.get_by_id(user_id)
     if user is None:
         raise NotFoundError(f"User {user_id} not found")
@@ -122,9 +100,9 @@ def get_user(user_id: int, current_user: dict = Depends(require_authenticated)):
     "/{user_id}",
     summary="Update user",
     description=(
-        "Update user fields: email, role, password, or active status. "
-        "All fields are optional. The last active admin and last active super-admin "
-        "cannot be deactivated via this endpoint. Requires super-admin role."
+        "Update user fields: email, password, or active status. "
+        "All fields are optional. The last active system-admin cannot be "
+        "deactivated via this endpoint. Requires system-admin."
     ),
 )
 def update_user(
@@ -132,18 +110,11 @@ def update_user(
     data: UserUpdate,
     current_user: dict = Depends(require_authenticated),
 ):
-    # D26: split — activation/deactivation and password/email edits live at
-    # the system-admin gate; profile self-edit shipped later. Phase 3 keeps
-    # the endpoint at system-admin/super-admin only.
-    if settings.MSP_STRICT_HIERARCHY:
-        if not current_user.get("is_system_admin"):
-            raise HTTPException(
-                status_code=403,
-                detail="update_user requires system-admin under MSP-strict",
-            )
-    else:
-        if current_user["role"] != "super-admin":
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not current_user.get("is_system_admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="update_user requires system-admin",
+        )
     try:
         user = user_service.update_user(user_id, data)
     except ValueError as e:
@@ -165,20 +136,17 @@ def update_user(
     "/{user_id}",
     summary="Deactivate user",
     description=(
-        "Soft-delete a user account. The last active admin or super-admin cannot be deactivated. "
-        "The user record is retained for audit purposes. Requires super-admin role."
+        "Soft-delete a user account. The last active system-admin cannot be "
+        "deactivated. The user record is retained for audit purposes. Requires "
+        "system-admin."
     ),
 )
 def deactivate_user(user_id: int, current_user: dict = Depends(require_authenticated)):
-    if settings.MSP_STRICT_HIERARCHY:
-        if not current_user.get("is_system_admin"):
-            raise HTTPException(
-                status_code=403,
-                detail="deactivate_user requires system-admin under MSP-strict",
-            )
-    else:
-        if current_user["role"] != "super-admin":
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if not current_user.get("is_system_admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="deactivate_user requires system-admin",
+        )
     try:
         user = user_service.deactivate_user(user_id)
     except ValueError as e:
@@ -193,15 +161,15 @@ def deactivate_user(user_id: int, current_user: dict = Depends(require_authentic
     return {"success": True, "data": {"id": user_id, "is_active": False}}
 
 
-# ─── MSP: Phase 3 — grants / system-admin ───────────────────────────────────
+# ─── MSP: grants / system-admin ─────────────────────────────────────────────
+
 
 @router.post(
     "/{user_id}/grants",
     summary="Grant role assignment",
     description=(
-        "Grant a role at (site) or (site, group) scope. Under MSP-strict, only "
-        "system-admins or site-admins may issue grants (group-admins may not "
-        "delegate — D25)."
+        "Grant a role at (site) or (site, group) scope. Only system-admins or "
+        "site-admins may issue grants (group-admins may not delegate — D25)."
     ),
     status_code=201,
 )
@@ -273,93 +241,4 @@ def set_system_admin(
     return {
         "success": True,
         "data": {"id": user_id, "is_system_admin": body.is_system_admin},
-    }
-
-
-# ─── T3.3b — compat shim for legacy PUT /allowed-sites ─────────────────────
-
-class _AllowedSitesBody(dict):
-    """Minimal shim so callers using the legacy payload still validate."""
-
-
-from pydantic import BaseModel
-
-
-class AllowedSitesUpdate(BaseModel):
-    allowed_site_ids: list[int]
-
-
-@router.put(
-    "/{user_id}/allowed-sites",
-    summary="[Deprecated] Replace legacy allowed_sites",
-    description=(
-        "**Deprecated (T3.3b).** Rewrites the request as a batch of observer "
-        "site-wide grants: revokes every existing observer site-wide grant for "
-        "this user and creates one per site_id in the body. Non-observer grants "
-        "and group-scoped grants are untouched. Removed in Phase 5."
-    ),
-    deprecated=True,
-)
-def update_allowed_sites(
-    user_id: int,
-    body: AllowedSitesUpdate,
-    response: Response,
-    current_user: dict = Depends(require_authenticated),
-):
-    if settings.MSP_STRICT_HIERARCHY:
-        if not current_user.get("is_system_admin"):
-            raise HTTPException(
-                status_code=403,
-                detail="allowed-sites shim requires system-admin under MSP-strict",
-            )
-    else:
-        if current_user["role"] not in {"admin", "super-admin"}:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-    # Delegate to RoleAssignmentService so audit + invariants apply uniformly.
-    from app.db.models import RoleAssignmentModel
-    from app.db.session import get_session
-    svc = RoleAssignmentService()
-    with get_session() as session:
-        existing_observer = (
-            session.query(RoleAssignmentModel.id, RoleAssignmentModel.site_id)
-            .filter(
-                RoleAssignmentModel.user_id == user_id,
-                RoleAssignmentModel.device_group_id.is_(None),
-                RoleAssignmentModel.role == "observer",
-            )
-            .all()
-        )
-        to_revoke = [gid for (gid, _sid) in existing_observer]
-    for gid in to_revoke:
-        try:
-            svc.revoke(gid, actor=current_user)
-        except HTTPException:
-            # If the actor cannot revoke a stray grant (edge case: system-admin
-            # was demoted mid-request), surface a clean 403.
-            raise
-    created = []
-    for sid in sorted(set(body.allowed_site_ids)):
-        record = svc.grant(
-            target_user_id=user_id,
-            site_id=sid,
-            device_group_id=None,
-            role="observer",
-            actor=current_user,
-        )
-        created.append(record.model_dump())
-    response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = "Phase-5"
-    audit_service.log_action(
-        user=current_user["username"],
-        action="update_allowed_sites_shim",
-        resource="user",
-        resource_id=str(user_id),
-        details={
-            "revoked_observer_grants": len(to_revoke),
-            "granted_observer_sites": [g["site_id"] for g in created],
-        },
-    )
-    return {
-        "success": True,
-        "data": {"grants": created},
     }

@@ -12,8 +12,7 @@ import {
   createDeviceGroup,
   deleteDeviceGroup,
   getDeviceGroupDevices,
-  addDeviceToGroup,
-  removeDeviceFromGroup,
+  moveDevice,
   getSites,
 } from '@/services/api';
 import type { DeviceGroup } from '@/services/api';
@@ -178,7 +177,7 @@ export default function DeviceGroupsPage() {
     setSuccessMessage(null);
     setErrorMessage(null);
     try {
-      await addDeviceToGroup(group.id, deviceName);
+      await moveDevice(deviceName, group.id);
       setSelectedDevice((prev) => ({ ...prev, [group.id]: '' }));
       await refreshGroupMembers(group.id);
       await refetchGroups();
@@ -197,7 +196,9 @@ export default function DeviceGroupsPage() {
     setSuccessMessage(null);
     setErrorMessage(null);
     try {
-      await removeDeviceFromGroup(group.id, deviceName);
+      // Per D8, "remove from group" is a device-level move to the site's
+      // Default group — pass ``null`` and the backend resolves it.
+      await moveDevice(deviceName, null);
       await refreshGroupMembers(group.id);
       await refetchGroups();
       setSuccessMessage(`Device ${deviceName} removed from group`);

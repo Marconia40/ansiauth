@@ -46,7 +46,7 @@ def audit_scaffold():
             else:
                 site_b_id = s.id
         user = UserModel(
-            username=user_name, hashed_password="x", role="observer",
+            username=user_name, hashed_password="x",
             is_system_admin=False,
         )
         session.add(user)

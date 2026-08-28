@@ -169,8 +169,8 @@ def test_purge_endpoint_accepts_custom_retention_days(super_admin_client):
     assert resp.json()["data"]["retention_days"] == 7
 
 
-def test_admin_cannot_trigger_purge(admin_client):
-    resp = admin_client.post("/api/v1/audit/purge")
+def test_observer_cannot_trigger_purge(observer_client):
+    resp = observer_client.post("/api/v1/audit/purge")
     assert resp.status_code == 403
 
 

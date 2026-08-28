@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.core.config import COOKIE_SAMESITE, COOKIE_SECURE, REFRESH_TOKEN_EXPIRE_MINUTES
-from app.core.dependencies import require_role
 from app.core.scope import require_system_admin
 from app.core.security import create_access_token
 from app.schemas.auth import TokenResponse
@@ -81,7 +80,7 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
 
     login_attempt_service.record_attempt(username, ip, succeeded=True)
     login_attempt_service.reset_username_failures(username)
-    access_token = create_access_token({"sub": user.username, "role": user.role})
+    access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
     refresh_token = refresh_token_service.create(user.username)
     audit_service.log_action(
         user=user.username,
@@ -120,7 +119,7 @@ def refresh(request: Request, response: Response):
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    access_token = create_access_token({"sub": user.username, "role": user.role})
+    access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
     audit_service.log_action(
         user=user.username,
         action="token_refresh",

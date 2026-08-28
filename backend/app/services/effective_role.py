@@ -99,12 +99,7 @@ def _resolve_scope(
     resource_type: str,
     resource_id,
 ) -> Optional[Tuple[int, Optional[int]]]:
-    """Return ``(site_id, device_group_id | None)`` for the resource, or None.
-
-    For a Device with ``device_group_id`` not yet backfilled (legacy row from
-    before Phase 2), fall back to the row's ``site_id``. That fallback path
-    goes away in Phase 5 with the ``site_id`` column drop.
-    """
+    """Return ``(site_id, device_group_id | None)`` for the resource, or None."""
     if resource_type == "site":
         row = session.query(SiteModel.id).filter(SiteModel.id == int(resource_id)).first()
         if row is None:
@@ -117,21 +112,17 @@ def _resolve_scope(
             .filter(DeviceGroupModel.id == int(resource_id))
             .first()
         )
-        if row is None or row[1] is None:
-            # A group with site_id IS NULL cannot be scope-resolved — Phase 2
-            # backfills every group; anything still null is a Phase-5 casualty.
+        if row is None:
             return None
         return (row[1], row[0])
 
     # device — resource_id is a device name (str)
     row = (
         session.query(
-            DeviceModel.name,
             DeviceModel.device_group_id,
-            DeviceModel.site_id,
             DeviceGroupModel.site_id.label("group_site_id"),
         )
-        .outerjoin(
+        .join(
             DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id
         )
         .filter(DeviceModel.name == str(resource_id))
@@ -139,10 +130,5 @@ def _resolve_scope(
     )
     if row is None:
         return None
-    _, group_id, direct_site_id, group_site_id = row
-    if group_id is not None and group_site_id is not None:
-        return (group_site_id, group_id)
-    # Legacy fallback for devices not yet placed into a group.
-    if direct_site_id is not None:
-        return (direct_site_id, None)
-    return None
+    group_id, group_site_id = row
+    return (group_site_id, group_id)

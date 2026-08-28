@@ -72,12 +72,11 @@ _ROLE_LEVEL: dict[str, int] = {
 # ─── Authenticated dependency ───────────────────────────────────────────────
 
 def get_current_user(request: Request) -> dict:
-    """Decode the bearer JWT into ``{username, role}``. Raises 401 otherwise.
-
-    Duplicated from ``core.dependencies.get_current_user`` so that ``scope.py``
-    does not import ``dependencies.py`` (which would create a circular graph
-    once legacy code migrates onto scope-based deps).
-    """
+    """Decode the bearer JWT into ``{username, is_system_admin}``. Raises 401
+    otherwise. Falls back to the legacy ``role`` claim (``admin`` /
+    ``super-admin`` → is_system_admin=True) when the explicit
+    ``is_system_admin`` claim is absent — keeps synthetic-JWT test fixtures
+    working alongside real logins."""
     auth = request.headers.get("Authorization") or ""
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -87,27 +86,18 @@ def get_current_user(request: Request) -> dict:
     except PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     username = payload.get("sub")
-    role = payload.get("role")
-    if not username or not role:
+    if not username:
         raise HTTPException(status_code=401, detail="Invalid token payload")
-    return {"username": username, "role": role}
+    is_sys = payload.get("is_system_admin")
+    if is_sys is None:
+        is_sys = (payload.get("role") or "").lower() in {"admin", "super-admin"}
+    return {"username": username, "is_system_admin": bool(is_sys)}
 
 
 def require_authenticated(current: dict = Depends(get_current_user)) -> dict:
-    """Enrich the JWT-derived caller with ``id`` and ``is_system_admin``.
-
-    The JWT payload only carries username + legacy role. Scope decisions need
-    the DB-backed ``is_system_admin`` bit and the user's primary key. Runs one
-    small SELECT per request — acceptable for Phase 3; can be cached later if
-    profiling shows it matters.
-
-    **Legacy-compat fallback:** if the username in the JWT does not resolve to
-    a UserModel row, infer ``is_system_admin`` from the JWT's own ``role``
-    claim (``admin`` / ``super-admin`` → True). This keeps JWT-only test
-    fixtures and pre-DB-migration tokens working without silently opening
-    unauthenticated access — the caller's ``id`` stays None, which causes
-    ``effective_role`` to return ``None`` for every scoped resource.
-    """
+    """Enrich the JWT-derived caller with ``id`` and the DB-backed
+    ``is_system_admin`` bit — the JWT claim is trusted only when the row is
+    missing (test/JWT-only fixtures), otherwise the DB is authoritative."""
     username = (current.get("username") or "").lower()
     if not username:
         raise HTTPException(status_code=401, detail="Invalid token payload")
@@ -118,12 +108,9 @@ def require_authenticated(current: dict = Depends(get_current_user)) -> dict:
             .first()
         )
     if row is None:
-        legacy_role = (current.get("role") or "").lower()
-        return {
-            **current,
-            "id": None,
-            "is_system_admin": legacy_role in {"admin", "super-admin"},
-        }
+        # Fixture or pre-migration token — trust the JWT's claim but leave
+        # ``id`` unset so ``effective_role`` returns None on any scoped read.
+        return {**current, "id": None}
     if not row[1]:
         raise HTTPException(status_code=401, detail="User not found or inactive")
     return {**current, "id": int(row[0]), "is_system_admin": bool(row[2])}
@@ -352,25 +339,24 @@ async def _peek_json_body(request: Request) -> dict:
 
 
 def _lookup_device_scope(session, name: str) -> Optional[Tuple[int, Optional[int]]]:
-    """Return ``(site_id, device_group_id)`` for a device or None if missing."""
+    """Return ``(site_id, device_group_id)`` for a device or None if missing.
+
+    ``devices.device_group_id`` is NOT NULL and ``device_groups.site_id`` is
+    NOT NULL post-Phase-4, so the join is total for every device that exists.
+    """
     row = (
         session.query(
             DeviceModel.device_group_id,
-            DeviceModel.site_id,
             DeviceGroupModel.site_id.label("group_site_id"),
         )
-        .outerjoin(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
+        .join(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
         .filter(DeviceModel.name == name)
         .first()
     )
     if row is None:
         return None
-    group_id, direct_site_id, group_site_id = row
-    if group_id is not None and group_site_id is not None:
-        return (int(group_site_id), int(group_id))
-    if direct_site_id is not None:
-        return (int(direct_site_id), None)
-    return None
+    group_id, group_site_id = row
+    return (int(group_site_id), int(group_id))
 
 
 def _site_default_group_id(session, site_id: int) -> Optional[int]:

@@ -52,16 +52,16 @@ def isolated_msp_scaffold():
         dev_a = DeviceModel(
             name=dev_a_name, host="10.0.0.1", vendor="cisco", platform="ios",
             username="u", encrypted_password="x",
-            device_group_id=group_a.id, site_id=site_a.id,
+            device_group_id=group_a.id,
         )
         dev_b = DeviceModel(
             name=dev_b_name, host="10.0.0.2", vendor="cisco", platform="ios",
             username="u", encrypted_password="x",
-            device_group_id=group_b.id, site_id=site_b.id,
+            device_group_id=group_b.id,
         )
         session.add_all([dev_a, dev_b])
         user = UserModel(
-            username=user_name, hashed_password="x", role="observer",
+            username=user_name, hashed_password="x",
             is_system_admin=False,
         )
         session.add(user)

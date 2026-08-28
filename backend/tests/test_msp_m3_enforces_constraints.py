@@ -30,16 +30,19 @@ BASE_INFRA_KIND = "BASE_INFRASTRUCTURE"
 
 
 def _cleanup_site(site_id: int) -> None:
-    """Best-effort teardown: null the site's default_group_id, drop groups,
-    drop the site. Skipped rows that are already gone are fine."""
-    from app.db.models import DeviceGroupMemberModel, RoleAssignmentModel
+    """Best-effort teardown: drop devices in the site's groups, drop grants,
+    null the site's default_group_id, drop groups, then the site. Skipped
+    rows that are already gone are fine."""
+    from app.db.models import RoleAssignmentModel
     with get_session() as session:
-        session.query(DeviceModel).filter_by(site_id=site_id).delete(synchronize_session=False)
-        session.query(DeviceGroupMemberModel).filter(
-            DeviceGroupMemberModel.group_id.in_(
-                session.query(DeviceGroupModel.id).filter_by(site_id=site_id)
-            )
-        ).delete(synchronize_session=False)
+        group_ids = [
+            r[0]
+            for r in session.query(DeviceGroupModel.id).filter_by(site_id=site_id).all()
+        ]
+        if group_ids:
+            session.query(DeviceModel).filter(
+                DeviceModel.device_group_id.in_(group_ids)
+            ).delete(synchronize_session=False)
         session.query(RoleAssignmentModel).filter_by(site_id=site_id).delete(synchronize_session=False)
         row = session.query(SiteModel).filter_by(id=site_id).first()
         if row is not None:

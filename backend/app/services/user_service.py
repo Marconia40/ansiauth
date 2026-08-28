@@ -12,26 +12,19 @@ logger = logging.getLogger(__name__)
 
 _pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-VALID_ROLES = frozenset({"super-admin", "admin", "operator", "observer"})
-
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+
 def _to_user_read(row: UserModel) -> UserRead:
-    # Resolve allowed_sites while the session is still open. Admins are unrestricted
-    # by policy, but we still return whatever rows happen to exist so the UI can
-    # show their assignments without conditional rendering.
-    allowed = list(row.allowed_sites or [])
     return UserRead(
         id=row.id,
         username=row.username,
         email=row.email,
-        role=row.role,
         is_active=row.is_active,
+        is_system_admin=bool(row.is_system_admin),
         created_at=row.created_at,
         updated_at=row.updated_at,
-        allowed_site_ids=sorted(s.id for s in allowed),
-        allowed_site_names=sorted(s.name for s in allowed),
     )
 
 
@@ -43,50 +36,28 @@ def _get_row_by_username(username: str, session) -> Optional[UserModel]:
     return session.query(UserModel).filter_by(username=username.lower()).first()
 
 
-def _is_last_active_admin(user_id: int, session) -> bool:
-    """Return True if this user is the only remaining active admin."""
+def _is_last_active_system_admin(user_id: int, session) -> bool:
+    """Return True if this user is the only remaining active system-admin."""
     row = _get_row_by_id(user_id, session)
-    if row is None or row.role != "admin":
+    if row is None or not row.is_system_admin:
         return False
-    active_admin_count = (
+    count = (
         session.query(UserModel)
-        .filter_by(role="admin", is_active=True)
+        .filter_by(is_system_admin=True, is_active=True)
         .count()
     )
-    return active_admin_count <= 1
-
-
-def _is_last_active_super_admin(user_id: int, session) -> bool:
-    """Return True if this user is the only remaining active super-admin."""
-    row = _get_row_by_id(user_id, session)
-    if row is None or row.role != "super-admin":
-        return False
-    active_super_admin_count = (
-        session.query(UserModel)
-        .filter_by(role="super-admin", is_active=True)
-        .count()
-    )
-    return active_super_admin_count <= 1
+    return count <= 1
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def create_user(data: UserCreate) -> UserRead:
-    """Create a new user. Normalises username/email to lowercase and hashes the password."""
+    """Create a new user. Normalises username/email to lowercase and hashes
+    the password. Per-scope authorization is expressed through
+    ``/users/{id}/grants`` after creation, not on the create call."""
     username = data.username.lower()
     email = data.email.lower() if data.email else None
-
-    # Validate every requested allowed_site_id up front so we don't half-create the user.
-    site_ids = list(data.allowed_site_ids or [])
-    if site_ids:
-        from app.db.models import SiteModel
-        with get_session() as session:
-            existing = {
-                r[0] for r in session.query(SiteModel.id).filter(SiteModel.id.in_(site_ids)).all()
-            }
-            missing = set(site_ids) - existing
-            if missing:
-                raise ValueError(f"Unknown site IDs: {sorted(missing)}")
 
     with get_session() as session:
         if _get_row_by_username(username, session):
@@ -96,45 +67,23 @@ def create_user(data: UserCreate) -> UserRead:
             if existing:
                 raise ValueError(f"Email '{email}' is already registered")
 
-        # MSP: Phase 3 — mirror the Phase 2 backfill at user-creation time so
-        # fresh users get an ``is_system_admin`` bit + observer role_assignments
-        # matching their legacy role + allowed_sites. Keeps ``require_scope``
-        # decisions correct without waiting for the next migration.
-        is_system_admin = data.role in {"admin", "super-admin"}
         row = UserModel(
             username=username,
             email=email,
             hashed_password=_pwd_context.hash(data.password),
-            role=data.role,
             is_active=True,
-            is_system_admin=is_system_admin,
+            is_system_admin=bool(data.is_system_admin),
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
         session.add(row)
         session.flush()
-        if site_ids:
-            from app.db.models import (
-                RoleAssignmentModel,
-                UserAllowedSiteModel,
-            )
-            for sid in sorted(set(site_ids)):
-                session.add(UserAllowedSiteModel(user_id=row.id, site_id=sid))
-                # Observer site-wide grant mirrors the legacy allowed_sites
-                # entry. Additive: does not conflict with later admin/operator
-                # grants issued via /users/{id}/grants.
-                if data.role not in {"admin", "super-admin"}:
-                    session.add(RoleAssignmentModel(
-                        user_id=row.id,
-                        site_id=sid,
-                        device_group_id=None,
-                        role="observer",
-                    ))
-            session.flush()
-            session.refresh(row)
         result = _to_user_read(row)
 
-    logger.info("User created: username=%s role=%s allowed_sites=%s", username, data.role, sorted(set(site_ids)))
+    logger.info(
+        "User created: username=%s is_system_admin=%s",
+        username, bool(data.is_system_admin),
+    )
     return result
 
 
@@ -160,11 +109,9 @@ def list_users(include_inactive: bool = False) -> list[UserRead]:
 
 
 def update_user(user_id: int, data: UserUpdate) -> UserRead:
-    """Update mutable user fields. Deactivation goes through deactivate_user()."""
-    # Distinguish "not provided" vs "explicitly set to []" for allowed_site_ids.
-    explicit = data.model_dump(exclude_unset=True)
-    has_allowed_sites_patch = "allowed_site_ids" in explicit
-
+    """Update mutable user fields: email, password, or is_active. Deactivation
+    goes through :func:`deactivate_user`. System-admin toggling has its own
+    dedicated endpoint (``PUT /users/{id}/system-admin``)."""
     with get_session() as session:
         row = _get_row_by_id(user_id, session)
         if row is None:
@@ -177,37 +124,15 @@ def update_user(user_id: int, data: UserUpdate) -> UserRead:
                 raise ValueError(f"Email '{email}' is already registered")
             row.email = email
 
-        if data.role is not None:
-            row.role = data.role
-
         if data.password is not None:
             row.hashed_password = _pwd_context.hash(data.password)
 
         if data.is_active is False:
-            if _is_last_active_admin(user_id, session):
-                raise ValueError("Cannot deactivate the last active admin account")
-            if _is_last_active_super_admin(user_id, session):
-                raise ValueError("Cannot deactivate the last active super-admin account")
+            if _is_last_active_system_admin(user_id, session):
+                raise ValueError("Cannot deactivate the last active system-admin account")
             row.is_active = False
         elif data.is_active is True:
             row.is_active = True
-
-        if has_allowed_sites_patch:
-            from app.db.models import SiteModel, UserAllowedSiteModel
-            requested = set(data.allowed_site_ids or [])
-            if requested:
-                existing = {
-                    r[0]
-                    for r in session.query(SiteModel.id).filter(SiteModel.id.in_(requested)).all()
-                }
-                missing = requested - existing
-                if missing:
-                    raise ValueError(f"Unknown site IDs: {sorted(missing)}")
-            session.query(UserAllowedSiteModel).filter_by(user_id=user_id).delete(
-                synchronize_session=False
-            )
-            for sid in sorted(requested):
-                session.add(UserAllowedSiteModel(user_id=user_id, site_id=sid))
 
         row.updated_at = datetime.now(timezone.utc)
         session.flush()
@@ -219,12 +144,13 @@ def update_user(user_id: int, data: UserUpdate) -> UserRead:
 
 
 def deactivate_user(user_id: int) -> UserRead:
-    """Soft-delete a user. Raises ValueError if this is the last active admin."""
+    """Soft-delete a user. Raises ValueError if this is the last active
+    system-admin."""
     return update_user(user_id, UserUpdate(is_active=False))
 
 
 def verify_password(username: str, plain_password: str) -> bool:
-    """Return True if plain_password matches the stored bcrypt hash for the user."""
+    """Return True if plain_password matches the stored hash for the user."""
     with get_session() as session:
         row = _get_row_by_username(username, session)
         if row is None or not row.is_active:

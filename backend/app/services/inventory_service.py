@@ -22,9 +22,7 @@ from typing import Optional
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 
-from app.core.config import settings
 from app.db.models import (
-    DeviceGroupMemberModel,
     DeviceGroupModel,
     DeviceModel,
     JobModel,
@@ -63,29 +61,11 @@ class Inventory:
         site_id: Optional[int] = None,
         device_group_id: Optional[int] = None,
     ) -> list[Device]:
-        """Return devices visible to the caller, optionally filtered by site or group.
-
-        When ``settings.MSP_STRICT_HIERARCHY`` is on, visibility comes from
-        ``role_assignments`` (site-wide + group-specific grants unioned).
-        Otherwise this delegates to the legacy ``allowed_device_names_for``.
-        """
+        """Return devices visible to the caller, optionally filtered by site
+        or group. Visibility comes from ``role_assignments`` — site-wide and
+        group-specific grants unioned."""
         from app.services import device_service
 
-        if not settings.MSP_STRICT_HIERARCHY:
-            # Flag-off = legacy behavior. Preserves the pre-Phase-3 result set
-            # exactly so the T3.5 snapshot-diff test can prove equivalence.
-            from app.core import authz
-            all_devices = device_service.get_devices()
-            allowed = authz.allowed_device_names_for(user)
-            if allowed is not None:
-                all_devices = [d for d in all_devices if d.name in allowed]
-            if site_id is not None:
-                all_devices = [d for d in all_devices if d.site_id == site_id]
-            if device_group_id is not None:
-                all_devices = [d for d in all_devices if d.device_group_id == device_group_id]
-            return all_devices
-
-        # ── MSP-strict path ────────────────────────────────────────────
         visible = self._visible_device_names(user, site_id=site_id, device_group_id=device_group_id)
         if visible is None:
             # None → unrestricted (system-admin)
@@ -150,7 +130,6 @@ class Inventory:
                 platform=platform,
                 username=username,
                 encrypted_password=encrypted,
-                site_id=site_id,
                 device_group_id=target_group_id,
                 created_at=datetime.now(timezone.utc),
             )
@@ -216,17 +195,15 @@ class Inventory:
             if row is None:
                 raise HTTPException(status_code=404, detail=f"Device '{name}' not found")
 
-            source_group = row.device_group  # may be None on a legacy row
+            source_group = row.device_group
             source_group_id = source_group.id if source_group is not None else None
-            source_site_id = (
-                source_group.site_id if source_group is not None else row.site_id
-            )
+            source_site_id = source_group.site_id if source_group is not None else None
             if source_site_id is None:
                 raise HTTPException(
-                    status_code=400,
+                    status_code=500,
                     detail=(
-                        f"Device '{name}' has no site assignment; cannot move "
-                        "before Phase 2 backfill is applied"
+                        f"Device '{name}' is not attached to a group; refusing "
+                        "to move — data-integrity invariant violated"
                     ),
                 )
 
@@ -287,18 +264,12 @@ class Inventory:
                     ),
                 )
 
-            # Apply the move: authoritative FK first, then keep the legacy
-            # ``devices.site_id`` in sync so pre-flag-cutover code paths keep
-            # returning consistent results.
+            # Apply the move on the authoritative FK.
             row.device_group_id = resolved_group_id
-            row.site_id = target_site_id
-            # Legacy junction: leave any historical rows in place — Phase 5
-            # drops the table entirely; back-writing here would mask stale
-            # state that operators still need to audit.
             session.flush()
             # Refresh so ``row.device_group`` reflects the new FK — otherwise
             # ``_to_domain`` would report the pre-move group in the response.
-            session.expire(row, ["device_group", "site"])
+            session.expire(row, ["device_group"])
             _ = row.device_group  # trigger lazy reload while session is open
             domain = device_service._to_domain(row)
 
@@ -348,11 +319,6 @@ class Inventory:
                         f"currently {active[1]}."
                     ),
                 )
-            # Detach any legacy junction rows so the delete can proceed
-            # without a FK error on ``device_group_members.device_name``.
-            session.query(DeviceGroupMemberModel).filter_by(device_name=name).delete(
-                synchronize_session=False
-            )
             session.delete(row)
         audit_service.log_action(
             user=(actor.get("username") if actor else None) or "system",

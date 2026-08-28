@@ -4,32 +4,17 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core import authz
-from app.core.config import settings
 from app.core.scope import require_authenticated
 
 
-def _authz_device(user: dict, device_name: str, *, min_role: str) -> None:
-    """Enforce read/write access to *device_name*.
+_LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
 
-    MSP: Phase 3 (ESC-2) — under the strict-hierarchy flag uses per-scope
-    ``effective_role``; under flag-off delegates to legacy
-    ``ensure_device_allowed`` so pre-MSP fixtures (mock_device with
-    site_id=NULL) keep working. T3.5 snapshot-diff proves the two return
-    identical decisions on the same corpus once the flag flips on.
-    """
-    if not settings.MSP_STRICT_HIERARCHY:
-        _LVL_LEGACY = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 4}
-        if _LVL_LEGACY.get(user.get("role") or "", 0) < _LVL_LEGACY[min_role]:
-            raise HTTPException(
-                status_code=403,
-                detail="Insufficient permissions",
-            )
-        authz.ensure_device_allowed(user, device_name)
-        return
+
+def _authz_device(user: dict, device_name: str, *, min_role: str) -> None:
+    """Enforce read/write access to *device_name* via ``effective_role`` on
+    the per-scope grants."""
     from app.services.effective_role import effective_role
     from app.db.session import get_session
-    _LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
     with get_session() as session:
         role = effective_role(session, user, "device", device_name)
     if _LVL.get(role or "", 0) < _LVL[min_role]:
@@ -210,9 +195,8 @@ def list_ports(
     if device is None and port_service.EXECUTION_MODE != "mock":
         raise ValidationError("'device' query parameter is required")
 
-    # ESC-2: swap ensure_device_allowed for effective_role. Kept imperative
-    # here because ``device`` is a query parameter, not path or body — the
-    # require_scope resolver only reads path + body.
+    # Imperative authz because ``device`` is a query parameter, not path or
+    # body — the require_scope resolver only reads path + body.
     if device is not None:
         _authz_device(current_user, device, min_role="observer")
 
