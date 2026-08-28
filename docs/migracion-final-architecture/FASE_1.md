@@ -124,6 +124,17 @@ class Repository(Generic[T]):
     def add(self, entidad: T) -> T:
         with get_session() as session:
             row = self._to_orm(entidad)
+            pk_reales = [c.name for c in self._orm_model.__mapper__.primary_key]
+            if list(self._pk_field) != pk_reales:
+                valores_pk = tuple(getattr(entidad, campo) for campo in self._pk_field)
+                existente = (
+                    session.query(self._orm_model)
+                    .filter_by(**self._pk_filtro(valores_pk))
+                    .first()
+                )
+                if existente is not None:
+                    for campo in pk_reales:
+                        setattr(row, campo, getattr(existente, campo))
             merged = session.merge(row)
             session.flush()
             return self._to_domain(merged)
@@ -132,6 +143,26 @@ class Repository(Generic[T]):
         with get_session() as session:
             session.query(self._orm_model).filter_by(**self._pk_filtro(pk)).delete()
 ```
+
+**Corrección real sobre `add()` — encontrada en Fase 4 (`JobRepository`), no en el
+diseño original.** `session.merge()` identifica la fila existente por la **primary
+key real mapeada en SQLAlchemy**, no por `pk_field` — para `VLAN`/`Puerto` (Fase 2)
+funciona porque su PK real **es** la tupla compuesta de `pk_field` (sin `id`
+autoincrement separado, por diseño). Pero `JobModel` (y `DeviceModel`, cuando se
+instancie `Repository[Device]`) tiene `id` autoincrement como PK real, con
+`job_id`/`name` marcados solo `unique=True` — sobre una fila nueva con `id=None`,
+`session.merge()` siempre intenta INSERT, nunca reconoce la fila existente por
+`job_id`, y una segunda llamada a `add()` sobre el mismo `job_id` revienta con
+`UNIQUE constraint failed` en vez de actualizar. Reproducido real marcando un `Job`
+completado después de iniciado (2 llamadas a `add()` sobre el mismo `job_id`).
+Fix: cuando `pk_field` no coincide con la PK real de la tabla, `add()` busca
+primero la fila existente por `pk_field` y copia su PK real sobre la fila nueva
+antes de mergear — así `session.merge()` la reconoce como update. No cambia nada
+para `VLAN`/`Puerto` (la rama nueva no se activa, `pk_field` ya es la PK real) —
+reverificado con el mismo test de upsert de Fase 2 después del fix, mismo
+resultado. Este bug estuvo dormido desde que se escribió `Repository[T]` en esta
+misma fase porque hasta Fase 4 nunca se había instanciado un `Repository[X]`
+contra una tabla con PK autoincrement real + clave de negocio separada.
 
 **Por qué `pk_field` acepta tupla, no solo string — no es anticipación, es necesario
 ya en Fase 2.** `VLAN`/`Puerto` (Fase 2) no tienen una PK de una sola columna en la

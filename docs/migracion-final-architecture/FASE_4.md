@@ -192,7 +192,25 @@ pero la distinción importa).
 **Primera vez que se instancia `Repository[Job]`.** Igual que `Device` (Fase 1),
 `Job.job_id` (dataclass) y `JobModel.id` (DB, autoincrement) **no son la misma
 columna** — la clave real es `job_id` (`JobModel.job_id`, `unique=True, index=True`).
-Mismo `pk_field` que el resto de las entidades con este patrón:
+Mismo `pk_field` que el resto de las entidades con este patrón.
+
+**Esto expuso un bug real en `Repository[T].add()` — ver `FASE_1.md`, nota debajo
+del código de `Repository[T]`.** `session.merge()` identifica filas por la PK real
+de SQLAlchemy, no por `pk_field` — sin el fix (ya aplicado en `FASE_1.md`), un
+segundo `add()` sobre el mismo `job_id` (ej. `marcar_completado()` después de
+`marcar_iniciado()`) revienta con `UNIQUE constraint failed` en vez de actualizar.
+Corregir `app/core/repository.py` (Fase 1) **antes** de escribir/probar esta
+sección — si se llega acá con la versión vieja de `add()`, `JobRepository` va a
+fallar exactamente así apenas se pruebe un update real.
+
+Además falta una columna real: `app/db/models.py: JobModel` **no tiene**
+`operation` (ver campo nuevo arriba) — agregarla antes de escribir
+`_to_orm`/`_to_domain` de abajo, quedaron con `row.operation`/`j.operation` dando
+por hecho que ya existe.
+
+```python
+from app.core.repository import Repository
+from app.db.models import JobModel
 
 ```python
 from app.core.repository import Repository
@@ -443,7 +461,10 @@ el JWT). `api/jobs.py: list_jobs()` (Fase 5, A8) pasa a llamar
       `core.dependencies.get_current_user` (arrastrado de Fase 2, confirmar que no
       quedó sin corregir).
 - [ ] `JobRepository` (A3) existe con `pk_field="job_id"`, `activo_para()`,
-      `recuperar_huerfanos()`, `resumen_de_grupo()`.
+      `recuperar_huerfanos()`, `resumen_de_grupo()`. `JobModel.operation` existe
+      en `app/db/models.py`. `Repository[T].add()` (Fase 1) tiene el fix de
+      PK real vs `pk_field` — confirmar marcando un `Job` completado después de
+      iniciado (2 `add()` seguidos) sin `UNIQUE constraint failed`.
 - [ ] `JobRepository.query()` (B1) existe en el **mismo archivo**, agregado
       después de que A3 se dio por terminado — no en un archivo separado, no
       duplicando la clase. Recibe `device`/`site_id` como filtros propios,
@@ -465,3 +486,26 @@ el JWT). `api/jobs.py: list_jobs()` (Fase 5, A8) pasa a llamar
   git de verdad, a diferencia del resto de las fases donde eso es estructuralmente
   imposible. Vale la pena que quien ejecute esta fase avise explícitamente cuándo
   A3 está listo, en vez de asumir un tiempo fijo.
+- **`JobModel.operation` (columna nueva, A1/A3) rompe la suite de tests local
+  completa, no solo lo que toca Job — encontrado implementando A3, consecuencia
+  real de la decisión ya tomada de dejar Alembic fuera de alcance.** Distinto de
+  `DeviceVlanModel`/`DevicePortModel` (Fase 2): esas son tablas **nuevas**, nada
+  las consulta todavía, el mismatch contra un schema armado por Alembic
+  (`tests/conftest.py: alembic upgrade head`, no `Base.metadata.create_all()`)
+  queda dormido. `jobs` es una tabla **existente, activa** — `main.py:71`
+  (`job_service.mark_orphaned_jobs_failed()`, corre al arrancar) hace `SELECT
+  jobs.*`, y cualquier test que levante la app vía `TestClient` dispara esa
+  query — con la columna nueva en el modelo pero no en el schema real
+  (Alembic no la tiene, no hay migración), truena con `OperationalError: no
+  such column: jobs.operation` en **toda** la suite, no solo en tests de Job.
+  Verificado reproduciendo con `test.db` borrado y reconstruido de cero (mismo
+  error, no es un archivo viejo). No es un bug de este plan — es el precio ya
+  aceptado de "sin migraciones en esta fase" (`FASE_2.md`, mismo supuesto),
+  simplemente esta es la primera vez que una fase toca una columna nueva sobre
+  una tabla que el código viejo todavía usa de verdad. Corrección operativa,
+  no de código: quien vaya a correr la suite localmente necesita
+  `Base.metadata.create_all()` (no Alembic) o una migración aparte — fuera de
+  este plan, igual que ya estaba documentado para `DeviceVlanModel`/
+  `DevicePortModel`. `Repository[Job]` en sí, probado contra una DB armada con
+  `Base.metadata.create_all()` (no Alembic), funciona correctamente de punta a
+  punta — no hay ningún bug de diseño acá, es puramente el desfasaje de schema.
