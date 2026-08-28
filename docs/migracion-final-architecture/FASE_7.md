@@ -43,6 +43,17 @@ entre fases:
 | `app/validators/vlan_validator.py` | `VLAN` (funciones privadas de `models/vlan.py`, copiadas en Fase 2 A1) | Fase 5 (A6) — hasta entonces `api/vlans.py` lo llama directo, no borrar antes |
 | `app/validators/port_validator.py` | `Puerto` (funciones privadas de `models/port.py`, copiadas en Fase 2 A2) | Fase 5 (A7) — hasta entonces `api/ports.py` lo llama directo, no borrar antes |
 
+**No son archivos, son clases dentro de un archivo que sobrevive — no entran en
+la tabla de arriba, pero es el mismo tipo de limpieza pendiente.** `PortInfo` y
+`PortConfigRequest` (`app/models/port.py`) quedaron sin borrar en Fase 2 A2 por
+el mismo motivo que los 2 validadores de arriba — `port_service.py`/
+`port_config_service.py` las importaban a nivel de módulo. Una vez que Fase 5
+borre esos 2 archivos (fila de arriba), las 2 clases quedan sin ningún caller
+real — confirmar con `grep -rn "PortInfo\|PortConfigRequest" app/` y borrarlas
+de `models/port.py` en esta misma sección (no queda ningún archivo aparte que
+borrar, solo las 2 clases). `Puerto`/`PortConfigResult`/`PortListResponse` son
+las que se quedan.
+
 Si alguno de estos **todavía tiene un caller real** al llegar a esta fase (el
 grep lo va a mostrar), no borrarlo — es señal de que alguna fase anterior quedó
 incompleta, hay que volver y cerrarla antes de seguir acá.
@@ -251,6 +262,8 @@ documento de arquitectura:
       código final (sección 6) — no solo contra el documento.
 - [ ] Los 13 archivos de la tabla de la sección 1 confirmados sin caller real y
       borrados.
+- [ ] `PortInfo`/`PortConfigRequest` borradas de `models/port.py` (no son
+      archivo aparte, ver nota bajo la tabla de la sección 1).
 - [ ] `app/composition.py` completo, contra la lista del `README.md`.
 - [ ] Catálogo de `FINAL_ARCHITECTURE.md` §1 verificado contra el código real,
       diferencias de nombre/ubicación resueltas (documento actualizado o código

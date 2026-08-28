@@ -238,7 +238,7 @@ class Puerto:
     device: str = ""
     description: str | None = None
     admin_up: bool | None = None
-    mode: PortConfigMode | None = None
+    mode: PortMode | None = None  # NO PortConfigMode -- ver nota abajo, "unknown" es real
     access_vlan: int | None = None
     allowed_vlans: list[int] | None = None
     allowed_vlan_operation: str = "add"
@@ -249,11 +249,10 @@ class Puerto:
     duplex: str | None = None
 
     def __post_init__(self) -> None:
-        from app.validators.port_validator import validate_interface_name
-        validate_interface_name(self.interface)
-        # las 3 reglas cruzadas de PortConfigRequest.__post_init__ (mode required
-        # con access_vlan/allowed_vlans, etc.) se copian acá tal cual --
-        # ver models/port.py:222-245 real, mismo texto de error
+        _validate_interface_name(self.interface)
+        # Acá NO van las 4 reglas cruzadas de PortConfigRequest.__post_init__
+        # (mode required con access_vlan/allowed_vlans, etc.) -- ver nota
+        # abajo, corrección real sobre una versión anterior de esta fase.
 
     @property
     def mutation_fields(self) -> set[str]:
@@ -262,16 +261,34 @@ class Puerto:
         return {c for c in campos if getattr(self, c) is not None}
 
     def validar(self) -> None:
-        from app.validators.port_validator import (
-            validate_access_vlan_id, validate_trunk_vlan_id, validate_trunk_vlan_list,
-            validate_description,
+        """Reglas de escritura -- solo se llaman antes de aplicar(), nunca
+        durante reconciliar(). Las 4 reglas cruzadas que antes vivían en
+        PortConfigRequest.__post_init__ viven acá, no en __post_init__."""
+        _mutation_fields = (
+            self.description, self.admin_up, self.mode,
+            self.access_vlan, self.allowed_vlans,
         )
+        if all(v is None for v in _mutation_fields):
+            raise ValueError(
+                "at least one mutation field must be provided "
+                "(description, admin_up, mode, access_vlan, or allowed_vlans)"
+            )
+        if self.access_vlan is not None and self.mode not in ("access", "trunk"):
+            raise ValueError(
+                f"'access_vlan' (PVID) may only be set when mode='access' or mode='trunk' "
+                f"(got mode={self.mode!r})"
+            )
+        if self.allowed_vlans is not None and self.mode != "trunk":
+            raise ValueError(
+                f"'allowed_vlans' may only be set when mode='trunk' "
+                f"(got mode={self.mode!r})"
+            )
         if self.access_vlan is not None:
-            validate_access_vlan_id(self.access_vlan)
+            _validate_access_vlan_id(self.access_vlan)
         if self.allowed_vlans is not None:
-            validate_trunk_vlan_list(self.allowed_vlans)
+            _validate_trunk_vlan_list(self.allowed_vlans)
         if self.description is not None:
-            validate_description(self.description)
+            _validate_description(self.description)
 
     def reconciliar(self, device: "Device") -> dict:
         puertos = device.driver.list_ports(device, device.password)
@@ -309,18 +326,44 @@ class Puerto:
         return "puerto"
 ```
 
-**Nota sobre `validar()` vs `__post_init__`, mismo criterio que `VLAN`**: acá SÍ tiene
-sentido que `__post_init__` valide `interface` siempre (no hay equivalente al problema
-de "un parser construye esto con datos que no pasan validación estricta" — `interface`
-viene del propio device igual, formato ya vendor-neutral). Las validaciones de
-`access_vlan`/`allowed_vlans`/`description` sí quedan en `validar()` explícito (no en
-`__post_init__`) porque **sí** pueden llegar `None` en instancias construidas para
-lectura (`reconciliar()` arma un `Puerto` desde `PortInfo`-equivalente sin pasar por
-`validar()`).
+**`__post_init__` vs `validar()` — corrección real sobre una versión anterior de
+esta fase, encontrada implementando, no en el diseño original.** La versión
+anterior copiaba las 4 reglas cruzadas de `PortConfigRequest.__post_init__`
+(mode requerido con `access_vlan`/`allowed_vlans`, `access_vlan` solo válido en
+access/trunk, `allowed_vlans` solo válido en trunk, al menos un campo de
+mutación presente) directo dentro de `__post_init__` de `Puerto` — "tal cual",
+siempre activas. Problema real: **`__post_init__` corre también al leer**
+(`reconciliar()` construye un `Puerto` por cada entrada que el device reporta),
+y los 2 parsers reales (confirmado con grep en `port_parser.py:396`, Huawei)
+construyen puertos con `mode="unknown"` **y** `access_vlan` (PVID) seteado al
+mismo tiempo — un estado real del device (modo hybrid), no un caso raro. Con
+las 4 reglas en `__post_init__`, `reconciliar()`/`list_ports()` **truena al
+leer** cualquier puerto en ese estado, antes de acercarse a escribir nada.
+Mismo problema, mismo tipo de fix, que `VLAN.name` (A1): `__post_init__` queda
+solo con lo seguro para ambos caminos (acá, `_validate_interface_name`); las 4
+reglas cruzadas se mueven a `validar()`, que `Orquestador` solo llama antes de
+`aplicar()` — nunca durante `reconciliar()`. Por el mismo motivo, `mode` usa
+el tipo `PortMode` (`"access"|"trunk"|"unknown"`), no `PortConfigMode`
+(`"access"|"trunk"`) — el valor real que los parsers producen no entra en el
+tipo más angosto.
 
-**Borrar `PortInfo`, `PortConfigRequest`, `PortConfigResult`** una vez que `Puerto`
-las reemplace — pero **`PortConfigResult` merece una nota**: hoy es el tipo de
-**retorno** de `configure_port()` (`success`/`changed`/`interface`/`vendor`/
+**`PortInfo`, `PortConfigRequest` — NO se borran en esta fase, corrección real
+sobre el diseño original.** El texto original decía que se borran una vez que
+`Puerto` las reemplaza. Falso, mismo motivo que `validators/vlan_validator.py`/
+`validators/port_validator.py` (nota más abajo): `port_service.py` importa
+`PortInfo` a nivel de módulo, `port_config_service.py` importa
+`PortConfigRequest` a nivel de módulo, y `api/ports.py` importa **ambos**
+servicios a nivel de módulo (`from app.services import device_service,
+port_config_service, port_execution_service, port_service`). Borrar cualquiera
+de las 2 clases acá rompe `import app.api.ports` → `app.main` no arranca.
+Las 2 se mantienen **sin ningún cambio** respecto al código original, viven en
+`models/port.py` junto a `Puerto` (no lo reemplazan, coexisten), hasta que
+Fase 5 rewiree `api/ports.py`/borre `port_service.py`/`port_config_service.py`
+— agregadas a la tabla de limpieza de `FASE_7.md`.
+
+**`PortConfigResult` sí se mantiene sin tocar** — pero por un motivo distinto,
+de diseño, no de callers rotos: hoy es el tipo de **retorno** de
+`configure_port()` (`success`/`changed`/`interface`/`vendor`/
 `execution_time_ms`/`rollback_performed`/`warnings`, ver `models/port.py:269-306`),
 no una entidad de dominio — `Puerto.aplicar()` de arriba sigue devolviendo lo que el
 driver devuelva (hoy: un `dict` para los métodos puntuales, un `PortConfigResult`
@@ -359,6 +402,42 @@ duplicado temporal de esas 5 funciones — sigue siendo la fuente real para
 `api/ports.py` hasta que Fase 5 (A7) lo rewiree a construir `Puerto` en vez de
 llamar al validador directo. Recién ahí queda sin caller real y se borra —
 agregado a la tabla de `FASE_7.md` sección 1 (no estaba).
+
+**`compress_vlans_cisco`/`compress_vlans_huawei` — cada una se convierte en
+método de instancia** (`self._compress_vlans_cisco(...)`/
+`self._compress_vlans_huawei(...)`), no función suelta. Ambas dependen del
+helper `_compress_to_ranges()` (mismo archivo original, líneas 106-122) —
+se duplica como `@staticmethod` privado dentro de **cada** driver (Huawei y
+Cisco), no se comparte entre los 2 — mismo criterio que ya usa el resto de
+`huawei/driver.py`/`cisco/driver.py` (cada archivo de vendor autocontenido,
+sin importar del otro).
+
+**Callers reales de `PortInfo` fuera de `models/port.py` — no estaban en
+ningún grep anterior de este plan, encontrados implementando A2.** `PortInfo`
+no solo se lee, se **construye** en 3 lugares reales fuera de este archivo:
+`app/services/parsers/port_parser.py:391` (Huawei), `app/services/parsers/
+cisco_port_parser.py:582` (Cisco) — ambos con `from app.models.port import
+PortInfo, PortMode` **a nivel de módulo** — y `app/services/vendors/mock.py`
+(`_INITIAL_MOCK_PORTS`, `MockVendor.list_ports()`, fusionado en Fase 1 A2).
+Los 3 son importados a nivel de módulo por `huawei/driver.py`/`cisco/driver.py`
+(los parsers) o son el propio `mock.py` — y esos 3 archivos son justo los que
+`app/composition.py: build_plugin_registry()` importa para armar el
+`PluginRegistry`, en real y en mock respectivamente. Si estos 3 no se
+actualizan a `Puerto`/`interface=` **en esta misma fase**, los 3 vendors
+rompen su import top-level y `app.composition` no arma el registry en
+ningún modo — no es opcional, es parte necesaria de A2, no un caller que se
+pueda dejar roto hasta Fase 5 (a diferencia de `port_service.py`, que si
+puede). Mismo tratamiento para `app/services/vendors/base.py` (el `VendorDriver`
+abstracto): sus firmas (`list_ports() -> list[PortInfo]`, `configure_port(config:
+PortConfigRequest, ...)`, `get_port() -> PortInfo | None` — este último con un
+bug real preexistente, comparaba `p.name` que ya no existe) pasan a `Puerto`
+también.
+
+**`PortListResponse` — 4ta clase real en `models/port.py`, el plan no la
+menciona.** Envuelve `list[PortInfo]` con metadata de proveniencia
+(`device`/`vendor`), caller real en `port_service.py: list_ports()`. Como
+`PortInfo` deja de ser lo que los drivers devuelven, pasa a envolver
+`list[Puerto]` — cambio mecánico, sin impacto de diseño.
 
 **Mismo criterio para `validators/vlan_validator.py` — misma corrección,
 mismo motivo real.** `api/vlans.py` importa `vlan_validator` a nivel de módulo
@@ -670,13 +749,32 @@ en vez de `Depends(get_current_user)` en las rutas de ese archivo. Borrar
 - [ ] `VLAN` tiene `device`, `eliminar: bool = False`, `reconciliar()`, `aplicar()`
       (con la rama de `self.eliminar`), `repositorio()`. `RecursoGestionable` se
       queda en 4 métodos — no se agregó `eliminar()` al contrato.
-- [ ] `Puerto` (nueva, en `models/port.py`) reemplaza a `PortInfo`+`PortConfigRequest`.
-      `PortConfigResult` se mantiene sin tocar. `mutation_fields` funciona sobre los
-      6 campos mutables. `aplicar()` despacha correcto para 1 campo y para 2+
-      (composite).
+- [ ] `Puerto` (nueva, en `models/port.py`) satisface `RecursoGestionable` por forma
+      — `mode: PortMode | None` (no `PortConfigMode`), `__post_init__` **solo**
+      valida `interface`, las 4 reglas cruzadas (mode+access_vlan/allowed_vlans,
+      al menos un campo) viven en `validar()`, no en `__post_init__` — confirmar
+      construyendo un `Puerto(mode="unknown", access_vlan=10)` sin excepción.
+      `mutation_fields` funciona sobre los 6 campos mutables. `aplicar()` despacha
+      correcto para 1 campo y para 2+ (composite).
+- [ ] **`PortInfo`, `PortConfigRequest` NO se borraron** — corrección real sobre
+      el diseño original: siguen existiendo sin cambios en `models/port.py`,
+      junto a `Puerto` (no reemplazadas), porque `port_service.py`/
+      `port_config_service.py` las importan a nivel de módulo y `api/ports.py`
+      importa ambos servicios a nivel de módulo. Se borran en Fase 7, agregadas
+      a esa tabla. `PortConfigResult` se mantiene sin tocar (motivo distinto,
+      de diseño — ver nota en A2). `PortListResponse` actualizada a envolver
+      `list[Puerto]`.
+- [ ] `app/services/parsers/port_parser.py`, `cisco_port_parser.py`,
+      `app/services/vendors/mock.py` y `app/services/vendors/base.py`
+      (`VendorDriver` abstracto) construyen/tipan `Puerto`, no `PortInfo` —
+      confirmar con `grep -rn "PortInfo\|PortConfigRequest" app/services/vendors/`
+      que no queda ninguna referencia (los únicos callers reales de las clases
+      viejas deben ser `port_service.py`/`port_config_service.py`).
+      `compress_vlans_cisco`/`compress_vlans_huawei` son métodos privados de
+      `CiscoVendor`/`HuaweiVendor` (con su propio `_compress_to_ranges`
+      duplicado en cada uno, no compartido).
 - [ ] Sus funciones de validación son privadas de `models/port.py`/`models/vlan.py`
-      (`Puerto`/`VLAN` ya no importan de `validators/*`), `compress_vlans_*`
-      movidas a `HuaweiVendor`/`CiscoVendor`. **`validators/port_validator.py` y
+      (`Puerto`/`VLAN` ya no importan de `validators/*`). **`validators/port_validator.py` y
       `validators/vlan_validator.py` siguen existiendo** — corrección real:
       `api/ports.py`/`api/vlans.py` todavía los llaman directo, se borran recién
       en Fase 7 cuando Fase 5 deje de necesitarlos (ver nota en A2).
