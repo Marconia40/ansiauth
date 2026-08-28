@@ -1,0 +1,209 @@
+@startuml POST_vlans
+title POST /vlans — crear VLAN 100 en switch-A y switch-B
+autonumber
+
+actor Cliente
+participant "Middleware\n(JWT -> RBAC -> RateLimit)" as MW
+participant "RoleAssignmentRepository" as RAR
+participant "Router\n(api/vlans.py)" as Router
+participant "vlan: VLAN" as VLAN
+participant "GroupOperationRunner" as GOR
+participant "Repository[Job]" as RepoJob
+participant "JobQueue\n(Celery)" as Queue
+
+Cliente -> MW : POST /vlans\n{vlan_id, name, devices:[A,B]}
+activate MW
+MW -> MW : JWT valido?
+MW -> RAR : scope_de(user.id)\n[UNA sola query, no una por device]
+activate RAR
+RAR --> MW : scope: VisibilityScope
+deactivate RAR
+MW -> MW : RBAC -- scope.rol_para(site_A, group_A)\nscope.rol_para(site_B, group_B)\n[en memoria, sin query nueva]
+MW -> MW : RateLimit OK?
+MW -> Router : request autorizado
+deactivate MW
+activate Router
+
+Router -> VLAN : new(vlan_id=100, name="MGMT")\n[valida en __post_init__, no es un paso aparte]
+activate VLAN
+alt vlan_id invalido o reservado
+    VLAN --> Router : raise ValidationError
+    Router --> Cliente : 400 Bad Request
+end
+deactivate VLAN
+
+Router -> GOR : encolar(vlan, ["switch-A","switch-B"], actor)
+activate GOR
+
+GOR -> GOR : group_job_id = uuid4()\n[sin fila, sin GroupJob/Repository[GroupJob] -- S2.9]
+
+loop por cada device en [switch-A, switch-B]
+    GOR -> RepoJob : add(Job(device, vlan, group_job_id))
+    activate RepoJob
+    RepoJob --> GOR : job
+    deactivate RepoJob
+
+    GOR -> Queue : dispatch("orquestador.ejecutar",\nvlan, device, actor, job.id)
+    activate Queue
+    deactivate Queue
+end
+
+GOR --> Router : group_job_id
+deactivate GOR
+
+Router --> Cliente : 200 {"group_job_id": "..."}  [RF-JOB-02]
+deactivate Router
+
+== async -- un worker independiente por device (se muestra el de switch-A) ==
+
+participant "Orquestador" as Orq
+participant "Repository[Device]" as RepoDev
+participant "device: Device" as Dev
+participant "RedisCoordinator" as RC
+participant "PluginRegistry" as PR
+participant "HuaweiVendor\n(VendorDriver)" as Vendor
+participant "Repository[VLAN]" as RepoVlan
+participant "EventDispatcher" as ED
+participant "AuditListener" as AL
+
+Queue -> Orq : ejecutar(vlan, device_name="switch-A", actor, job)
+activate Orq
+
+alt job.esta_en_estado_terminal()
+    Orq --> Queue : return (no-op)
+    note right : reentrega de Celery ("al menos\nuna vez") sobre un Job ya\nterminal -- no repite nada real,\nno es TransicionInvalidaError (S2.4 nota 7)
+end
+
+note right of Orq
+  vlan llega serializado (dict) y se reconstruye
+  VLAN(**data) del lado del worker -- __post_init__
+  corre de nuevo naturalmente, no es Orquestador
+  "revalidando" un objeto ya existente.
+end note
+
+Orq -> RepoDev : get("switch-A")
+activate RepoDev
+RepoDev --> Orq : device
+deactivate RepoDev
+
+alt device no existe
+    Orq --> Queue : raise NotFoundError
+    note right : generica -- se usa igual para\nUser/Site/DeviceGroup/Job, no\nse angosta a "Device" (S1)
+end
+
+Orq -> Orq : job.marcar_iniciado()\n[_transicionar() -- S2.8]
+Orq -> RepoJob : add(job)\n[upsert por PK -- S2.2. Sin esto el Job\nreal nunca sale de "pending" (S2.4 nota 10)]
+activate RepoJob
+deactivate RepoJob
+
+Orq -> VLAN : vlan.device = "switch-A"
+note right of VLAN
+  FK para persistir -- identidad real de una
+  VLAN guardada es (vlan_id, device), no
+  vlan_id solo (switch-A y switch-B pueden
+  tener las dos una VLAN 100 propia)
+end note
+
+Orq -> RC : bloquear("switch-A")
+activate RC
+note right : reconciliar()/aplicar() son llamadas reales de\nvarios segundos -- el lock protege el device\nfisico contra otra ejecucion concurrente sobre\nel mismo device (S2.4 nota 12)
+
+Orq -> VLAN : reconciliar(device)
+activate VLAN
+VLAN -> Dev : driver, password\n[propiedades, no metodos por operacion --\nDevice ya no reexpone create_vlan/list_vlans]
+activate Dev
+Dev -> PR : obtener(device.vendor)\n[solo la 1ra vez, despues queda cacheado]
+activate PR
+PR --> Dev : vendor driver
+deactivate PR
+Dev --> VLAN : driver (cacheado), password (desencriptada, cacheada)
+deactivate Dev
+VLAN -> Vendor : get_vlans(device, password)\n[VLAN habla con el driver directo]
+activate Vendor
+Vendor --> VLAN : estado actual (Ansible, en vivo)
+deactivate Vendor
+VLAN --> Orq : pre_state (Memento -- S2.10) -- la propia, filtrada de la lista
+deactivate VLAN
+
+Orq -> VLAN : aplicar(device)\n[envuelto en _ejecutar_con_retry() -- S2.4 nota 11,\nreintenta transitorios, nunca lanza, no diagramado\naca para no saturar -- devuelve (resultado, retries)]
+activate VLAN
+note right of VLAN
+  Adentro decide sola (S2.4 nota 6): si ya existe
+  con OTRO nombre, falla; si ya existe con el
+  MISMO nombre, no toca el device (idempotencia).
+  No son fases separadas del contrato -- son
+  parte de "como se aplica una VLAN".
+end note
+VLAN -> Dev : driver, password
+activate Dev
+note right of Dev : ya resueltos y cacheados desde reconciliar() --\nno vuelven a pasar por PluginRegistry/SecretVault
+Dev --> VLAN : driver, password
+deactivate Dev
+VLAN -> Vendor : create_vlan(100, "MGMT", device, password)
+activate Vendor
+Vendor -> Vendor : ansible_runner -> playbook -> switch real
+Vendor --> VLAN : resultado {rc:0, success:true}
+deactivate Vendor
+VLAN --> Orq : resultado
+deactivate VLAN
+
+Orq -> RC : (fin del with) libera lock
+deactivate RC
+
+alt resultado.rc != 0
+    Orq -> Orq : _clasificar_error(resultado)\n[rc Ansible -> RetryDecision, si no matchea\npatrones de texto -- todo adentro de Orquestador,\nsin archivo retry_policy.py aparte]
+
+    Orq -> RC : bloquear("switch-A")\n[se re-adquiere para el rollback -- S2.4 nota 12]
+    activate RC
+    Orq -> Orq : rb_performed, rb_success = _rollback(vlan, pre_state, device)
+    note right : compensacion de la Saga (S2.9) para este paso puntual --\nnunca propaga excepcion, siempre devuelve el tri-estado\nreal (S2.4 nota 9), no se descarta
+    Orq -> RC : libera lock
+    deactivate RC
+
+    Orq -> Orq : job.marcar_fallido(error, rb_performed, rb_success)\n[_transicionar() -- S2.8]
+    Orq -> RepoJob : add(job)\n[persiste la transicion -- Job es dataclass\nplano, sin esto se pierde en memoria (S2.4 nota 10)]
+    activate RepoJob
+    deactivate RepoJob
+
+    Orq -> ED : despachar([DomainEvent("recurso_fallido", vlan, device, actor, {"error":..., "rollback_performed":rb_performed, "rollback_success":rb_success}, exitoso=False)])
+    activate ED
+    ED -> AL : on_event(evento)
+    activate AL
+    AL -> AL : repo_audit.append(...)  [RF-AUD-01 -- la falla\ntambien deja rastro, no solo el exito]
+    deactivate AL
+    deactivate ED
+
+    Orq --> Queue : raise (se propaga)
+else resultado.rc == 0
+    Orq -> RepoVlan : add(vlan)\n[vlan ya trae su propio .device seteado]
+    activate RepoVlan
+    deactivate RepoVlan
+
+    Orq -> Orq : job.marcar_completado(resultado)\n[_transicionar() -- S2.8]
+    Orq -> RepoJob : add(job)\n[persiste la transicion (S2.4 nota 10)]
+    activate RepoJob
+    deactivate RepoJob
+
+    Orq -> ED : despachar([DomainEvent("recurso_aplicado", vlan, device, actor, resultado)])
+    activate ED
+    ED -> AL : on_event(evento)
+    activate AL
+    AL -> AL : repo_audit.append(...)  [RF-AUD-01]
+    deactivate AL
+    deactivate ED
+end
+
+deactivate Orq
+
+note over Queue, AL
+  switch-B corre este mismo bloque en paralelo, en otro worker,
+  totalmente aislado -- si switch-B falla, el rollback de switch-B
+  no afecta lo ya aplicado en switch-A (RNF-RES-02).
+
+  No hay GroupJobListener ni fila de GroupJob que actualizar (S2.9):
+  GET /group-jobs/{id} llama a JobRepository.resumen_de_grupo(id),
+  que agrega los Job reales (WHERE group_job_id = ...) al vuelo --
+  el resumen siempre esta fresco, nunca puede desincronizarse.
+end note
+
+@enduml
