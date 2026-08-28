@@ -25,5 +25,9 @@ celery_app.conf.update(
 
 @worker_process_init.connect
 def _init_db_for_worker(**kwargs):
+    from app.core.rls_context import install_worker_system_context
     from app.db.session import init_db
     init_db(settings.DATABASE_URL)
+    # MSP: Phase 6 — Celery tasks have no JWT; pin the worker process to
+    # system context so its DB access satisfies the RLS deny-default.
+    install_worker_system_context()

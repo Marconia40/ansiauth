@@ -37,6 +37,12 @@ def init_db(database_url: str) -> None:
     # session module's import-time dependency set.
     from app.db.audit_guard import install as _install_audit_guard
     _install_audit_guard()
+    # MSP: Phase 6 — install the RLS session hook so every Postgres
+    # transaction opens with app.user_id / app.is_system_admin populated
+    # from the request context (or the process-wide system context for
+    # bootstrap and Celery workers). No-op on SQLite.
+    from app.core.rls_context import install_session_rls_hook
+    install_session_rls_hook(_SessionLocal)
 
 
 def get_engine():

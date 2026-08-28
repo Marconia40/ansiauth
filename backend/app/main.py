@@ -63,10 +63,12 @@ init_db(DATABASE_URL)
 logger.info("Database ready: %s", DATABASE_URL)
 
 from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
+from app.core.rls_context import system_context  # noqa: E402
 from app.services import audit_service, job_service, site_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
-job_service.mark_orphaned_jobs_failed()
+with system_context():
+    job_service.mark_orphaned_jobs_failed()
 
 
 def _bootstrap_admin() -> None:
@@ -117,10 +119,13 @@ def _bootstrap_admin() -> None:
     logger.info("Bootstrap: created system-admin user '%s' (id=%d)", user.username, user.id)
 
 
-_bootstrap_admin()
-# MSP: Phase 1 — idempotent bootstrap of the mandatory Base-Infrastructure
-# Site + its Default DeviceGroup. Safe to call every boot.
-site_service.ensure_base_infrastructure()
+# MSP: Phase 6 — bootstrap runs without a JWT, so its DB access is treated
+# as trusted internal via ``system_context`` to bypass the RLS deny-default.
+with system_context():
+    _bootstrap_admin()
+    # MSP: Phase 1 — idempotent bootstrap of the mandatory Base-Infrastructure
+    # Site + its Default DeviceGroup. Safe to call every boot.
+    site_service.ensure_base_infrastructure()
 
 
 def _make_scheduler():
@@ -128,19 +133,29 @@ def _make_scheduler():
     from app.services import audit_service as _audit
     from app.services import cleanup_service as _cleanup
 
+    def _purge_with_system_ctx():
+        with system_context():
+            _audit.purge_old_records(AUDIT_RETENTION_DAYS, triggered_by="scheduler")
+
+    def _cleanup_with_system_ctx():
+        with system_context():
+            _cleanup.run_all(
+                artifact_retention_days=ARTIFACT_RETENTION_DAYS,
+                login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
+            )
+
     scheduler = BackgroundScheduler(timezone="UTC")
+    # MSP: Phase 6 — background jobs run without a JWT, so their DB access
+    # is treated as trusted internal via ``system_context``.
     scheduler.add_job(
-        lambda: _audit.purge_old_records(AUDIT_RETENTION_DAYS, triggered_by="scheduler"),
+        _purge_with_system_ctx,
         trigger="cron",
         hour=2,
         minute=0,
         id="audit_purge_daily",
     )
     scheduler.add_job(
-        lambda: _cleanup.run_all(
-            artifact_retention_days=ARTIFACT_RETENTION_DAYS,
-            login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
-        ),
+        _cleanup_with_system_ctx,
         trigger="interval",
         hours=CLEANUP_INTERVAL_HOURS,
         id="cleanup_sweep_interval",
@@ -154,10 +169,11 @@ async def _lifespan(app: FastAPI):
 
     # Single startup pass so a long-running deployment doesn't have to wait a
     # full interval before unbounded tables are pruned for the first time.
-    _cleanup.run_all(
-        artifact_retention_days=ARTIFACT_RETENTION_DAYS,
-        login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
-    )
+    with system_context():
+        _cleanup.run_all(
+            artifact_retention_days=ARTIFACT_RETENTION_DAYS,
+            login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
+        )
 
     scheduler = _make_scheduler()
     scheduler.start()
@@ -232,8 +248,15 @@ def _custom_openapi():
 app.openapi = _custom_openapi
 
 from app.core.rate_limit_middleware import RateLimitMiddleware  # noqa: E402
+from app.core.rls_middleware import RLSSessionMiddleware  # noqa: E402
 from app.core.tls_middleware import HSTSMiddleware, HTTPSRedirectMiddleware  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+# MSP: Phase 6 — populate the request-scoped RLS user context before any
+# handler opens a DB session. Added *before* the rate limiter so a 429
+# response path still runs under a well-defined context (rate limiting
+# doesn't hit the DB, but adding audit logging later would).
+app.add_middleware(RLSSessionMiddleware)
 
 app.add_middleware(RateLimitMiddleware)
 
