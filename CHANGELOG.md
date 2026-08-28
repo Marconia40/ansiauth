@@ -64,6 +64,71 @@ Per-phase implementation notes: [`docs/upgrades/phases/`](docs/upgrades/phases/)
   only to `is_system_admin`); preserves pre-MSP fixture semantics for
   every existing test.
 
+### Phase 2 — Data backfill (M2)
+#### Added
+- Alembic revision `e2msp2_backfill` — data-only backfill that populates
+  every column Phase 1 added, on every existing row. Idempotent: every
+  statement is either `INSERT ... WHERE NOT EXISTS` or `UPDATE ... WHERE
+  <target> IS NULL`, so re-running the migration is a no-op. Six steps
+  (mirror `docs/upgrades/phases/phase-2-backfill.md §2`):
+  1. Base-Infrastructure site + its Default group (idempotent with the
+     Phase 1 `ensure_base_infrastructure()` runtime call).
+  2. A Default group for every REGULAR site that lacks one. Existing
+     user-created groups already named `Default` are *promoted* (D6
+     collision handling) rather than duplicated.
+  3. Every device is assigned to a `device_groups` row: site-less
+     devices → Base Infra's Default; devices with exactly one group in
+     their site → that group; ambiguous multi-group or zero-group
+     devices → the site's Default.
+  4. One `audit_logs` row per ambiguous multi-group device (R1
+     mitigation), action `msp_migration_ambiguous_group_assignment`,
+     recording the pre-migration group set and the assigned target.
+  5. Legacy `device_groups` rows with `site_id IS NULL` (and their
+     `device_group_members` associations) are deleted (D21a). Runs after
+     Step 3 so no live device still references them.
+  6. `UPDATE users SET is_system_admin=TRUE` for every `admin` /
+     `super-admin` (D24); one site-scoped `role_assignments` row per
+     `operator` / `observer` × `allowed_sites` pair. **Deliberately
+     skipped:** the plan's Step 6c auto-grant of Base-Infra observer
+     (D14 override — Base Infra is `is_system_admin`-only). Users on
+     the legacy `site_id IS NULL` fallback are captured by the
+     post-migration report for operator review.
+- Terminal verification block — five `_assert_zero()` calls that fail
+  the migration transaction if any invariant is violated (no
+  `device_group_id IS NULL`, no `device_groups.site_id IS NULL`, no
+  `sites.default_group_id IS NULL`, no admin/super-admin without
+  `is_system_admin`, exactly one Base Infrastructure site).
+- `backend/scripts/msp_post_backfill_report.py` — one-shot script that
+  emits `docs/upgrades/phases/artifacts/msp_backfill_report_<date>.md`.
+  Three tables: promoted-to-system-admin users (D24), users who lost
+  Base-Infra visibility under D14, and devices assigned via ambiguous
+  multi-group backfill (R1).
+- Eight new migration tests under `backend/tests/migrations/`:
+  `test_msp_m2_backfills_default_groups.py` (2 tests),
+  `test_msp_m2_backfills_device_groups.py` (1),
+  `test_msp_m2_handles_ambiguous_devices.py` (1),
+  `test_msp_m2_deletes_null_site_groups.py` (1),
+  `test_msp_m2_user_migration.py` (2),
+  `test_msp_m2_idempotent.py` (1),
+  `test_msp_m2_verification_fails_on_orphan.py` (1),
+  `test_msp_m2_snapshot_diff.py` (2 — T2.2 R3 mitigation: legacy
+  `allowed_device_names` vs post-migration JOIN through
+  `role_assignments` are byte-identical for users with at least one
+  allowed site).
+- `backend/tests/migrations/conftest.py` — shared alembic-subprocess
+  harness and seed helpers reused by every M2 test.
+
+#### Changed
+- `device_groups.name` no longer carries a global `UNIQUE` constraint.
+  The `msp_backfill` migration drops both `uq_device_group_name` and
+  the unique `ix_device_groups_name` index at Step 0 (see the module
+  docstring for the rationale); Phase 4 (`msp_enforce`) replaces the
+  guarantee with per-site `UNIQUE(site_id, name)`. A non-unique
+  `ix_device_groups_name_nonunique` lookup index is added in the
+  meantime so `WHERE name = ?` / `ORDER BY name` queries stay fast.
+  Acknowledged deviation from the plan's "data-only" phase framing —
+  documented in the migration docstring.
+
 <!--
 Each subsequent phase appends its own section below when it lands. Template:
 
