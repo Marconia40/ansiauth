@@ -88,6 +88,23 @@ class DeviceModel(Base):
     __table_args__ = (UniqueConstraint("name", name="uq_device_name"),)
 
 
+class DeviceVlanModel(Base):
+    """MSP: Fase 2 de la migración a FINAL_ARCHITECTURE.md — Repository[VLAN].
+
+    PK compuesta real (``vlan_id``, ``device``), sin ``id`` autoincrement
+    separado: la identidad real de una VLAN persistida es (vlan_id, device),
+    no vlan_id solo (switch-A y switch-B pueden tener cada uno su propia VLAN
+    100). Necesario para que ``session.merge()`` reconozca la fila existente
+    de forma nativa en ``Repository[T].add()`` — ver FASE_1.md, Repository[T].
+    """
+
+    __tablename__ = "device_vlans"
+
+    vlan_id = Column(Integer, primary_key=True)
+    device = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+
+
 class JobModel(Base):
     __tablename__ = "jobs"
 

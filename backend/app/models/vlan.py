@@ -1,14 +1,45 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+_VLAN_NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+_VLAN_NAME_ERROR = 'Invalid VLAN name. Only letters, numbers, ".", "_" and "-" are allowed.'
+
+
+def _validate_vlan_id_range(vlan_id: int) -> None:
+    if vlan_id < 1 or vlan_id > 4094:
+        raise ValueError(f"VLAN ID {vlan_id} is out of range (1-4094)")
+
+
+def _validate_vlan_not_reserved(vlan_id: int) -> None:
+    reserved = [1, 1002, 1003, 1004, 1005]
+    if vlan_id in reserved:
+        raise ValueError(f"VLAN {vlan_id} is reserved")
+
+
+def _validate_vlan_name(name: str) -> None:
+    if len(name) > 32:
+        raise ValueError("VLAN name must not exceed 32 characters")
+    if not _VLAN_NAME_RE.match(name):
+        raise ValueError(_VLAN_NAME_ERROR)
+
+
+def _validate_description(description: str) -> None:
+    if len(description) > 64:
+        raise ValueError("Description must not exceed 64 characters")
+    if not _VLAN_NAME_RE.match(description):
+        raise ValueError(_VLAN_NAME_ERROR)
 
 
 @dataclass
 class VLAN:
     """Domain representation of a VLAN — both the read-side data a driver
-    returns and the write-side input ``Device`` accepts to create/delete/
-    update one. One class, not a DTO/request pair: see
-    ``docs/DEVICE_IMPLEMENTATION_PLAN.md`` D7.
+    returns and the write-side input used to create/delete/update one. One
+    class, not a DTO/request pair: see ``docs/DEVICE_IMPLEMENTATION_PLAN.md``
+    D7. Implementa el contrato ``RecursoGestionable`` (``validar``/
+    ``reconciliar``/``aplicar``/``repositorio`` — formalizado en Fase 5,
+    pero ya satisfecho por forma desde esta fase).
 
     Attributes
     ----------
@@ -22,6 +53,19 @@ class VLAN:
         Optional platform-reported VLAN state (e.g. ``"active"``,
         ``"suspend"``). Populated only by parsers that surface this field;
         ``None`` when the platform does not expose it.
+    device:
+        Nombre del device al que pertenece esta VLAN — la identidad real de
+        una VLAN persistida es (vlan_id, device), no vlan_id solo (switch-A
+        y switch-B pueden tener cada uno su propia VLAN 100). Default ``""``
+        porque ``VLAN`` se construye antes de saber a qué device va a
+        aplicarse — quien la reparte se lo asigna (Fase 5,
+        ``GroupOperationRunner``/``Orquestador``).
+    eliminar:
+        Marca intención de borrado — seteado por quien construye la ``VLAN``
+        con esa intención (el router, en ``DELETE /vlans/{id}``). No es parte
+        del contrato ``RecursoGestionable`` (la necesidad de delete es
+        asimétrica entre recursos — ``Puerto`` no tiene delete real), es un
+        campo propio que ``aplicar()`` mira internamente.
 
     Validation
     ----------
@@ -33,21 +77,19 @@ class VLAN:
     ``VLAN`` objects from whatever a real device reports, which can include
     characters (e.g. spaces in a VRP description) that the stricter
     user-input rules reject. Callers that need the name to satisfy those
-    rules (``Device.create_vlan``/``update_vlan_description``) call
-    ``validate_name()`` explicitly before using it.
+    rules (``aplicar()`` en creación/rename) llaman ``validate_name()``
+    explícito antes de usarlo.
     """
 
     vlan_id: int
     name: str = ""
     status: str | None = None
+    device: str = ""
+    eliminar: bool = False
 
     def __post_init__(self) -> None:
-        from app.validators.vlan_validator import (
-            validate_vlan_id_range,
-            validate_vlan_not_reserved,
-        )
-        validate_vlan_id_range(self.vlan_id)
-        validate_vlan_not_reserved(self.vlan_id)
+        _validate_vlan_id_range(self.vlan_id)
+        _validate_vlan_not_reserved(self.vlan_id)
 
     def validate_name(self) -> None:
         """Validate ``name`` against the user-input format rules.
@@ -56,8 +98,48 @@ class VLAN:
         docstring. Call this explicitly before using ``name`` in a write
         operation (create / rename).
         """
-        from app.validators.vlan_validator import validate_vlan_name
-        validate_vlan_name(self.name)
+        _validate_vlan_name(self.name)
+
+    def reconciliar(self, device: "Device") -> dict:
+        """Estado actual de esta VLAN en *device*, leído en vivo.
+        Reemplaza vlan_execution_service.py: _capture_pre_state_vlan()."""
+        vlans_actuales = device.driver.get_vlans(device, device.password)
+        existente = next((v for v in vlans_actuales if v.vlan_id == self.vlan_id), None)
+        return {
+            "existed": existente is not None,
+            "name": existente.name if existente is not None else None,
+        }
+
+    def aplicar(self, device: "Device") -> dict:
+        """Aplica esta VLAN contra *device* — decide sola si es create, update,
+        delete o no-op. Reemplaza vlan_execution_service.py: create_vlan_on_device()/
+        delete_vlan()/update_vlan_description() (fusionadas: qué hacer lo decide
+        el estado de ``self``, no 3 funciones separadas — save_config_on_device()
+        no entra acá, es una operación a nivel device, no de una VLAN puntual).
+
+        El dict devuelto siempre incluye "accion" — no lo pone el driver (que
+        solo sabe de rc/stdout/stderr), lo agrega este método antes de retornar.
+        Fase 3 (AuditListener) lo necesita para no perder la granularidad real
+        de RF-AUD-02 detrás del evento genérico "recurso_aplicado" que despacha
+        Orquestador."""
+        pre_state = self.reconciliar(device)
+        if self.eliminar:
+            if not pre_state["existed"]:
+                return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": "eliminar_vlan"}
+            resultado = device.driver.delete_vlan(self.vlan_id, device, device.password)
+            return {**resultado, "accion": "eliminar_vlan"}
+        if pre_state["existed"] and pre_state["name"] == self.name:
+            return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": "crear_vlan"}
+        if pre_state["existed"] and pre_state["name"] != self.name:
+            self.validate_name()
+            resultado = device.driver.update_vlan(self.vlan_id, self.name, device, device.password)
+            return {**resultado, "accion": "actualizar_vlan"}
+        self.validate_name()
+        resultado = device.driver.create_vlan(self.vlan_id, self.name, device, device.password)
+        return {**resultado, "accion": "crear_vlan"}
+
+    def repositorio(self) -> str:
+        return "vlan"
 
     def to_dict(self) -> dict:
         """Serialize to the ``{"vlan_id": int, "name": str}`` wire format.

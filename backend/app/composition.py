@@ -9,6 +9,8 @@ etc.) — no hace falta anticipar esas partes acá, cada fase agrega lo suyo.
 
 from __future__ import annotations
 
+from app.core.repository import Repository
+from app.db.models import DeviceVlanModel
 from app.services.plugin_registry import PluginRegistry
 
 
@@ -31,3 +33,17 @@ def build_plugin_registry() -> PluginRegistry:
 plugin_registry = build_plugin_registry()
 
 # TODO: secret_vault, redis_coordinator — Línea B (FASE_1.md B1/B2)
+
+
+def _vlan_to_orm(v: "VLAN"):
+    return DeviceVlanModel(vlan_id=v.vlan_id, name=v.name, device=v.device)
+
+
+def _vlan_to_domain(row) -> "VLAN":
+    from app.models.vlan import VLAN
+    return VLAN(vlan_id=row.vlan_id, name=row.name, device=row.device)
+
+
+vlan_repository = Repository(
+    DeviceVlanModel, _vlan_to_domain, _vlan_to_orm, pk_field=("vlan_id", "device"),
+)
