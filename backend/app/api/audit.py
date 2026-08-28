@@ -4,8 +4,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.core import authz
-from app.core.config import AUDIT_RETENTION_DAYS
+from app.core.config import AUDIT_RETENTION_DAYS, settings
 from app.core.dependencies import require_role
+from app.core.scope import require_authenticated
 from app.services import audit_service
 
 router = APIRouter()
@@ -58,8 +59,16 @@ def get_audit_log(
     limit: int = Query(default=100, ge=1, le=1000),
     page: Optional[int] = Query(default=None, ge=1),
     page_size: Optional[int] = Query(default=None, ge=1, le=1000),
-    current_user: dict = Depends(require_role("admin")),
+    current_user: dict = Depends(require_authenticated),
 ):
+    # MSP: Phase 4 — endpoint stays behind require_authenticated (not
+    # require_role("admin")): the D27 scoping filter *is* the authorization.
+    # Non-admins that happen to hit /audit see only rows their grants cover.
+    if not settings.MSP_STRICT_HIERARCHY:
+        # Flag-off retains the legacy admin-only gate to keep behavioral
+        # parity with pre-Phase-4 deployments.
+        if current_user.get("role") not in {"admin", "super-admin"}:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
     if from_date is not None and to_date is not None and from_date > to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
 
@@ -69,7 +78,12 @@ def get_audit_log(
         skip = (effective_page - 1) * effective_page_size
         limit = effective_page_size
 
-    allowed = authz.allowed_device_names_for(current_user)
+    if settings.MSP_STRICT_HIERARCHY:
+        viewer = current_user
+        allowed = None
+    else:
+        viewer = None
+        allowed = authz.allowed_device_names_for(current_user)
 
     total = audit_service.count_audit_log(
         user=user,
@@ -81,6 +95,7 @@ def get_audit_log(
         device_id=device_id,
         site_id=site_id,
         allowed_devices=allowed,
+        viewer=viewer,
     )
     response.headers["X-Total-Count"] = str(total)
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
@@ -95,6 +110,7 @@ def get_audit_log(
         device_id=device_id,
         site_id=site_id,
         allowed_devices=allowed,
+        viewer=viewer,
         skip=skip,
         limit=limit,
     )

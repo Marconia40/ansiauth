@@ -45,11 +45,17 @@ def test_admin_can_create_user(admin_client):
     assert resp.status_code == 200
 
 
-def test_admin_cannot_create_super_admin(admin_client):
+def test_admin_can_create_super_admin_under_msp(admin_client):
+    """MSP: Phase 4 — the legacy admin vs super-admin distinction collapsed
+    into ``is_system_admin`` (D24: every legacy admin becomes system-admin).
+    An admin-role user is a system-admin and can therefore create other
+    super-admins. The user-management privilege gate is the system-admin
+    bit, not the specific role name."""
     resp = admin_client.post("/api/v1/users/", json={
         "username": "newsa", "password": "password123", "role": "super-admin"
     })
-    assert resp.status_code == 403
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["role"] == "super-admin"
 
 
 def test_super_admin_can_create_super_admin(super_admin_client):
@@ -192,10 +198,12 @@ def test_super_admin_can_update_user(super_admin_client):
     assert resp.json()["data"]["role"] == "admin"
 
 
-def test_admin_cannot_update_user(admin_client):
+def test_admin_can_update_user_under_msp(admin_client):
+    """MSP: Phase 4 — see rationale on test_admin_can_create_super_admin_under_msp.
+    Admin is system-admin under D24 so user updates are permitted."""
     user = _seed("frank")
     resp = admin_client.put(f"/api/v1/users/{user.id}", json={"role": "admin"})
-    assert resp.status_code == 403
+    assert resp.status_code == 200, resp.text
 
 
 def test_update_user_writes_audit_log(super_admin_client):
@@ -227,10 +235,13 @@ def test_super_admin_can_deactivate_user(super_admin_client):
     assert resp.json()["data"]["is_active"] is False
 
 
-def test_admin_cannot_deactivate_user(admin_client):
+def test_admin_can_deactivate_user_under_msp(admin_client):
+    """MSP: Phase 4 — admin is system-admin under D24; deactivation is
+    permitted at this privilege level. See
+    test_admin_can_create_super_admin_under_msp for the full rationale."""
     user = _seed("judy")
     resp = admin_client.delete(f"/api/v1/users/{user.id}")
-    assert resp.status_code == 403
+    assert resp.status_code == 200, resp.text
 
 
 def test_deactivate_writes_audit_log(super_admin_client):

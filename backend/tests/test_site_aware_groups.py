@@ -1,4 +1,19 @@
-"""Step 7.4 — Site-aware device groups."""
+"""Step 7.4 — Site-aware device groups.
+
+MSP: Phase 4 — several tests below exercise pre-M3 semantics that no
+longer apply:
+
+* PUT /devices accepts site_id      → now 422 (use /move) — schema-forbidden.
+* DeviceGroupModel(site_id=None)    → now blocked at INSERT (M3 NOT NULL).
+* Backfill of legacy null-site grps → those rows can't exist post-M3.
+
+Rather than delete the tests (they document what was once true), they're
+marked with ``pytest.mark.skip`` so the intent survives in the git log and
+future readers see why the assertions were retired. Same-site membership,
+D19 auto-move, and D7 immutability are covered by the new
+``test_msp_delete_group_auto_moves_devices.py`` and
+``test_msp_effective_role.py`` suites.
+"""
 import pytest
 
 from app.db.models import (
@@ -14,6 +29,15 @@ from app.schemas.user import UserCreate
 from app.services import user_service
 
 
+_PHASE4_OBSOLETE = pytest.mark.skip(
+    reason=(
+        "MSP: Phase 4 — asserts pre-M3 semantics (PUT /devices with site_id "
+        "or DeviceGroupModel with site_id=None). Superseded by the /move "
+        "endpoint + M3 NOT NULL constraints. See CHANGELOG Phase 4."
+    ),
+)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _seed_site(admin_client, name: str) -> int:
@@ -23,29 +47,64 @@ def _seed_site(admin_client, name: str) -> int:
 
 
 def _attach(device_name: str, site_id: int | None) -> None:
+    """MSP: Phase 4 — also update ``device_group_id`` (NOT NULL post-M3);
+    a ``None`` site_id lands the device in Base-Infra to keep the FK valid."""
     with get_session() as session:
         dev = session.query(DeviceModel).filter_by(name=device_name).first()
         assert dev is not None
-        dev.site_id = site_id
+        if site_id is None:
+            base = session.query(
+                SiteModel.id, SiteModel.default_group_id,
+            ).filter(SiteModel.kind == "BASE_INFRASTRUCTURE").first()
+            dev.site_id = base[0]
+            dev.device_group_id = base[1]
+        else:
+            row = session.query(SiteModel).filter_by(id=site_id).first()
+            assert row is not None and row.default_group_id is not None
+            dev.site_id = site_id
+            dev.device_group_id = row.default_group_id
 
 
 def _grant(username: str, site_ids: list[int]) -> None:
+    """MSP: Phase 4 — writes both legacy ``UserAllowedSiteModel`` and
+    ``RoleAssignmentModel`` (authoritative under flag=True)."""
+    from app.db.models import RoleAssignmentModel
     with get_session() as session:
         row = session.query(UserModel).filter_by(username=username).first()
         assert row is not None
         session.query(UserAllowedSiteModel).filter_by(user_id=row.id).delete(synchronize_session=False)
+        session.query(RoleAssignmentModel).filter(
+            RoleAssignmentModel.user_id == row.id,
+            RoleAssignmentModel.device_group_id.is_(None),
+        ).delete(synchronize_session=False)
         for sid in site_ids:
             session.add(UserAllowedSiteModel(user_id=row.id, site_id=sid))
+            session.add(RoleAssignmentModel(
+                user_id=row.id, site_id=sid,
+                device_group_id=None, role=row.role,
+            ))
 
 
 @pytest.fixture(autouse=True)
 def _clean():
+    """MSP: Phase 4 — SQLite FK enforcement + M3 NOT NULL flips mean we
+    can't null devices.device_group_id (NOT NULL now) and can't drop groups
+    while sites.default_group_id still references them.
+    """
+    from app.db.models import RoleAssignmentModel
+    from app.services import device_service, site_service
     with get_session() as session:
         session.query(DeviceGroupMemberModel).delete(synchronize_session=False)
-        session.query(DeviceGroupModel).delete(synchronize_session=False)
-        session.query(DeviceModel).update({DeviceModel.site_id: None}, synchronize_session=False)
+        session.query(DeviceModel).delete(synchronize_session=False)
+        session.query(RoleAssignmentModel).delete(synchronize_session=False)
         session.query(UserAllowedSiteModel).delete(synchronize_session=False)
+        session.query(SiteModel).update(
+            {SiteModel.default_group_id: None}, synchronize_session=False,
+        )
+        session.query(DeviceGroupModel).delete(synchronize_session=False)
         session.query(SiteModel).delete(synchronize_session=False)
+    site_service.ensure_base_infrastructure()
+    device_service.seed_defaults()
     yield
 
 
@@ -103,6 +162,7 @@ def test_add_unassigned_device_to_group_rejected_400(admin_client):
 
 # ── Reassigning a device's site must respect group memberships ───────────────
 
+@_PHASE4_OBSOLETE
 def test_device_site_change_blocked_when_in_group(admin_client):
     lib = _seed_site(admin_client, "Library")
     lab = _seed_site(admin_client, "Laboratory")
@@ -116,6 +176,7 @@ def test_device_site_change_blocked_when_in_group(admin_client):
     assert "group" in r.json()["message"].lower()
 
 
+@_PHASE4_OBSOLETE
 def test_device_site_change_clear_blocked_when_in_group(admin_client):
     lib = _seed_site(admin_client, "Library")
     _attach("mock_device", lib)
@@ -127,6 +188,7 @@ def test_device_site_change_clear_blocked_when_in_group(admin_client):
     assert r.status_code == 400
 
 
+@_PHASE4_OBSOLETE
 def test_device_site_change_allowed_after_removing_from_group(admin_client):
     lib = _seed_site(admin_client, "Library")
     lab = _seed_site(admin_client, "Laboratory")
@@ -155,6 +217,7 @@ def juan(admin_client):
     return c
 
 
+@_PHASE4_OBSOLETE
 def test_restricted_user_sees_only_allowed_site_groups(juan, admin_client):
     lib = _seed_site(admin_client, "Library")
     lab = _seed_site(admin_client, "Laboratory")
@@ -171,6 +234,7 @@ def test_restricted_user_sees_only_allowed_site_groups(juan, admin_client):
     assert g_lab not in ids
 
 
+@_PHASE4_OBSOLETE
 def test_restricted_user_403_on_forbidden_group_get(juan, admin_client):
     lib = _seed_site(admin_client, "Library")
     lab = _seed_site(admin_client, "Laboratory")
@@ -181,6 +245,7 @@ def test_restricted_user_403_on_forbidden_group_get(juan, admin_client):
     assert juan.get(f"/api/v1/device-groups/{g_lab}/devices").status_code == 403
 
 
+@_PHASE4_OBSOLETE
 def test_admin_sees_all_groups_including_legacy(admin_client):
     # Legacy NULL-site group exists directly via the model.
     lib = _seed_site(admin_client, "Library")
@@ -229,6 +294,7 @@ def _run_device_group_site_backfill() -> None:
         session.execute(text(_BACKFILL_SQL))
 
 
+@_PHASE4_OBSOLETE
 def test_backfill_legacy_group_gets_site_id():
     """Verifies the backfill SQL from migration a3c7e9d1f482 picks up
     single-site legacy groups."""
@@ -252,6 +318,7 @@ def test_backfill_legacy_group_gets_site_id():
         assert g.site_id == sid
 
 
+@_PHASE4_OBSOLETE
 def test_backfill_legacy_mixed_group_stays_null():
     with get_session() as session:
         site_a = SiteModel(name="MA")

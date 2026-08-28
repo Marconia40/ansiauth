@@ -38,8 +38,9 @@ def test_device_group_model_has_is_default_column():
 def test_device_model_has_device_group_id_column():
     col = models.DeviceModel.__table__.columns["device_group_id"]
     assert isinstance(col.type, Integer)
-    # Nullable through Phase 2; NOT NULL after Phase 4.
-    assert col.nullable is True
+    # MSP: Phase 4 (M3) — flipped NOT NULL. Every device row carries a
+    # valid device_group_id (Phase 2 backfilled every pre-existing row).
+    assert col.nullable is False
 
 
 def test_device_model_device_group_relationship_present():

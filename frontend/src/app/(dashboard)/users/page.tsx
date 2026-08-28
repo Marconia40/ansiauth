@@ -7,9 +7,25 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { RequireRole } from '@/components/RequireRole';
-import { getUsers, createUser, updateUser, deleteUser, getSites } from '@/services/api';
-import type { User, UserUpdate } from '@/types/user';
+import {
+  getUsers,
+  createUser,
+  updateUser,
+  deleteUser,
+  getSites,
+  listSiteGroups,
+  listGrants,
+  grant as grantApi,
+  revoke as revokeApi,
+  setSystemAdmin,
+} from '@/services/api';
+import type { DeviceGroup } from '@/services/api';
+import type {
+  AssignmentRole,
+  RoleAssignment,
+  User,
+  UserUpdate,
+} from '@/types/user';
 import type { Role } from '@/types/auth';
 import type { Site } from '@/types/site';
 
@@ -24,7 +40,6 @@ function normalizeUsers(data: unknown): User[] {
 }
 
 const ROLES: Role[] = ['observer', 'operator', 'admin', 'super-admin'];
-
 const ROLE_LABELS: Record<Role, string> = {
   observer: 'Observer (read-only)',
   operator: 'Operator',
@@ -32,8 +47,10 @@ const ROLE_LABELS: Record<Role, string> = {
   'super-admin': 'Super Admin',
 };
 
+const ASSIGNMENT_ROLES: AssignmentRole[] = ['observer', 'operator', 'admin'];
+
 export default function UsersPage() {
-  const { user } = useAuth();
+  const { user: currentUser } = useAuth();
   const router = useRouter();
 
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -41,19 +58,23 @@ export default function UsersPage() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // ── Create form ──────────────────────────────────────────────────────────
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newRole, setNewRole] = useState<Role>('observer');
-  const [newAllowedSites, setNewAllowedSites] = useState<number[]>([]);
 
+  // ── Edit form (in-row) ───────────────────────────────────────────────────
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
-  const [editingUsername, setEditingUsername] = useState('');
   const [editingRole, setEditingRole] = useState<Role>('observer');
   const [editingPassword, setEditingPassword] = useState('');
-  const [editingAllowedSites, setEditingAllowedSites] = useState<number[]>([]);
+
+  // ── Grants modal ─────────────────────────────────────────────────────────
+  const [grantsUser, setGrantsUser] = useState<User | null>(null);
+  const [newGrantSiteId, setNewGrantSiteId] = useState<string>('');
+  const [newGrantGroupId, setNewGrantGroupId] = useState<string>('');
+  const [newGrantRole, setNewGrantRole] = useState<AssignmentRole>('observer');
 
   const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   useEffect(() => {
     if (msgTimerRef.current !== null) {
       clearTimeout(msgTimerRef.current);
@@ -76,31 +97,34 @@ export default function UsersPage() {
     error: usersError,
     refetch,
     isFetching,
-  } = useQuery({
-    queryKey: ['users'],
-    queryFn: getUsers,
-  });
-
+  } = useQuery({ queryKey: ['users'], queryFn: getUsers });
   const users = normalizeUsers(usersRaw);
 
   const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
   const siteList = sites ?? [];
 
-  function toggleSite(setter: (next: number[]) => void, current: number[], siteId: number) {
-    if (current.includes(siteId)) {
-      setter(current.filter((s) => s !== siteId));
-    } else {
-      setter([...current, siteId].sort((a, b) => a - b));
-    }
-  }
+  // ── Grants sub-queries for the currently-open user ───────────────────────
+  const { data: grants, refetch: refetchGrants } = useQuery<RoleAssignment[]>({
+    queryKey: ['grants', grantsUser?.id],
+    queryFn: () => listGrants(grantsUser!.id),
+    enabled: grantsUser != null,
+  });
+
+  const { data: grantGroups } = useQuery<DeviceGroup[]>({
+    queryKey: ['site-groups', newGrantSiteId],
+    queryFn: () => listSiteGroups(Number(newGrantSiteId)),
+    enabled: !!newGrantSiteId,
+  });
 
   useEffect(() => {
-    if (user && user.role !== 'admin' && user.role !== 'super-admin') {
+    if (currentUser && currentUser.role !== 'admin' && currentUser.role !== 'super-admin') {
       router.push('/');
     }
-  }, [user, router]);
+  }, [currentUser, router]);
 
-  if (!user || (user.role !== 'admin' && user.role !== 'super-admin')) return null;
+  if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'super-admin')) {
+    return null;
+  }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -115,14 +139,14 @@ export default function UsersPage() {
         username,
         password: newPassword.trim(),
         role: newRole,
-        allowed_site_ids: newAllowedSites.length > 0 ? newAllowedSites : undefined,
       });
       setNewUsername('');
       setNewPassword('');
       setNewRole('observer');
-      setNewAllowedSites([]);
       await refetch();
-      setSuccessMessage(`User ${username} created successfully`);
+      setSuccessMessage(
+        `User ${username} created. Manage per-scope grants via the "Grants…" row action.`,
+      );
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Create failed'));
     } finally {
@@ -130,46 +154,33 @@ export default function UsersPage() {
     }
   }
 
-  function handleEditStart(user: User) {
-    setEditingUserId(user.id);
-    setEditingUsername(user.username);
-    setEditingRole(user.role as Role);
+  function handleEditStart(u: User) {
+    setEditingUserId(u.id);
+    setEditingRole(u.role as Role);
     setEditingPassword('');
-    setEditingAllowedSites(user.allowed_site_ids ?? []);
     setSuccessMessage(null);
     setErrorMessage(null);
   }
 
   function handleEditCancel() {
     setEditingUserId(null);
-    setEditingUsername('');
     setEditingRole('observer');
     setEditingPassword('');
-    setEditingAllowedSites([]);
   }
 
   async function handleUpdate() {
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
-    const username = editingUsername;
     try {
-      const body: UserUpdate = {
-        role: editingRole,
-        // Always send the current selection — `[]` clears, a list replaces.
-        allowed_site_ids: editingAllowedSites,
-      };
+      const body: UserUpdate = { role: editingRole };
       if (editingPassword.trim()) {
         body.password = editingPassword.trim();
       }
       await updateUser(editingUserId!, body);
-      setEditingUserId(null);
-      setEditingUsername('');
-      setEditingRole('observer');
-      setEditingPassword('');
-      setEditingAllowedSites([]);
+      handleEditCancel();
       await refetch();
-      setSuccessMessage(`User ${username} updated successfully`);
+      setSuccessMessage('User updated successfully');
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Operation failed'));
     } finally {
@@ -177,16 +188,16 @@ export default function UsersPage() {
     }
   }
 
-  async function handleDelete(user: User) {
-    if (!window.confirm(`Delete user ${user.username}?`)) return;
-    setDeletingUserId(user.id);
+  async function handleDelete(u: User) {
+    if (!window.confirm(`Delete user ${u.username}?`)) return;
+    setDeletingUserId(u.id);
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
     try {
-      await deleteUser(user.id);
+      await deleteUser(u.id);
       await refetch();
-      setSuccessMessage(`User ${user.username} deleted successfully`);
+      setSuccessMessage(`User ${u.username} deleted successfully`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Delete failed'));
     } finally {
@@ -194,6 +205,74 @@ export default function UsersPage() {
       setDeletingUserId(null);
     }
   }
+
+  async function handleToggleSystemAdmin(u: User) {
+    const next = !u.is_system_admin;
+    if (!window.confirm(
+      next
+        ? `Promote ${u.username} to system-admin? System-admins bypass every per-scope grant.`
+        : `Demote ${u.username} from system-admin?`,
+    )) return;
+    setIsSubmitting(true);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    try {
+      await setSystemAdmin(u.id, next);
+      await refetch();
+      setSuccessMessage(`${u.username}: is_system_admin=${next}`);
+    } catch (err) {
+      setErrorMessage(extractMessage(err, 'System-admin toggle failed'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleAddGrant() {
+    if (!grantsUser) return;
+    if (!newGrantSiteId) { setErrorMessage('Pick a site'); return; }
+    setIsSubmitting(true);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    try {
+      await grantApi(grantsUser.id, {
+        site_id: Number(newGrantSiteId),
+        device_group_id: newGrantGroupId ? Number(newGrantGroupId) : null,
+        role: newGrantRole,
+      });
+      setNewGrantSiteId('');
+      setNewGrantGroupId('');
+      setNewGrantRole('observer');
+      await refetchGrants();
+      setSuccessMessage('Grant issued');
+    } catch (err) {
+      setErrorMessage(extractMessage(err, 'Grant failed'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleRevoke(g: RoleAssignment) {
+    if (!grantsUser) return;
+    if (!window.confirm(`Revoke ${g.role} on ${g.site_name}${g.device_group_name ? ` / ${g.device_group_name}` : ''}?`)) return;
+    setIsSubmitting(true);
+    setSuccessMessage(null);
+    setErrorMessage(null);
+    try {
+      await revokeApi(grantsUser.id, g.id);
+      await refetchGrants();
+      setSuccessMessage('Grant revoked');
+    } catch (err) {
+      setErrorMessage(extractMessage(err, 'Revoke failed'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  // The JWT payload only carries `role`; every admin/super-admin becomes
+  // is_system_admin=True via Phase 3's create_user hook, so role is a safe
+  // proxy for UI-level "should the system-admin toggle appear" checks.
+  const viewerIsSystemAdmin =
+    currentUser.role === 'admin' || currentUser.role === 'super-admin';
 
   return (
     <div>
@@ -209,70 +288,60 @@ export default function UsersPage() {
           </button>
         }
       />
-      <p className="text-sm text-gray-500 mb-6">Manage platform users and permissions</p>
+      <p className="text-sm text-gray-500 mb-6">
+        Manage platform users. Per-scope permissions are granted per user via
+        the “Grants…” row action.
+      </p>
 
-      <RequireRole roles={['operator', 'admin', 'super-admin']}>
-        <form onSubmit={handleCreate} className="mb-6 space-y-2">
-          <div className="flex flex-wrap gap-2 items-center">
-            <input
-              type="text"
-              placeholder="Username"
-              value={newUsername}
-              onChange={(e) => setNewUsername(e.target.value)}
-              disabled={isSubmitting}
-              required
-              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            />
-            <input
-              type="password"
-              placeholder="Password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              disabled={isSubmitting}
-              required
-              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            />
-            <select
-              value={newRole}
-              onChange={(e) => setNewRole(e.target.value as Role)}
-              disabled={isSubmitting}
-              className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            >
-              {ROLES.map((r) => (
-                <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-              ))}
-            </select>
-            <button
-              type="submit"
-              disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
-              className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isSubmitting && deletingUserId === null && editingUserId === null ? 'Creating...' : 'Create User'}
-            </button>
-          </div>
-          {siteList.length > 0 && (
-            <div className="flex flex-wrap gap-3 text-sm">
-              <span className="text-gray-600">Allowed sites:</span>
-              {siteList.map((s) => (
-                <label key={s.id} className="flex items-center gap-1.5 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={newAllowedSites.includes(s.id)}
-                    onChange={() => toggleSite(setNewAllowedSites, newAllowedSites, s.id)}
-                    disabled={isSubmitting}
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  <span className="text-gray-700">{s.name}</span>
-                </label>
-              ))}
-              <span className="text-xs text-gray-400">(admins bypass scoping)</span>
-            </div>
-          )}
-        </form>
-      </RequireRole>
+      <form onSubmit={handleCreate} className="mb-6 space-y-2">
+        <div className="flex flex-wrap gap-2 items-center">
+          <input
+            type="text"
+            placeholder="Username"
+            value={newUsername}
+            onChange={(e) => setNewUsername(e.target.value)}
+            disabled={isSubmitting}
+            required
+            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            disabled={isSubmitting}
+            required
+            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+          />
+          <select
+            value={newRole}
+            onChange={(e) => setNewRole(e.target.value as Role)}
+            disabled={isSubmitting}
+            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+          >
+            {ROLES.map((r) => (
+              <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+            ))}
+          </select>
+          <button
+            type="submit"
+            disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
+            className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isSubmitting && deletingUserId === null && editingUserId === null && !grantsUser
+              ? 'Creating...'
+              : 'Create User'}
+          </button>
+        </div>
+        <p className="text-xs text-gray-500">
+          Legacy allowed-sites checkboxes are removed — after creating the
+          user, use the “Grants…” row action to grant observer/operator/admin
+          per site or per group.
+        </p>
+      </form>
 
       {successMessage && (
-        <div className="mb-4 text-sm text-green-700">&#10003; {successMessage}</div>
+        <div className="mb-4 text-sm text-green-700">✓ {successMessage}</div>
       )}
       {errorMessage && (
         <div className="mb-4">
@@ -302,27 +371,16 @@ export default function UsersPage() {
             <tr className="border-b border-gray-200 bg-gray-50">
               <th className="text-left px-4 py-2 font-medium text-gray-700">Username</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Role</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Allowed Sites</th>
+              <th className="text-left px-4 py-2 font-medium text-gray-700">System-admin</th>
               <th className="text-left px-4 py-2 font-medium text-gray-700">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {users.map((user) => {
-              const isEditing = editingUserId === user.id;
+            {users.map((u) => {
+              const isEditing = editingUserId === u.id;
               return (
-                <tr key={user.id} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="px-4 py-2 text-gray-900">
-                    {isEditing ? (
-                      <input
-                        type="text"
-                        value={editingUsername}
-                        disabled
-                        className="border border-gray-200 rounded-md px-2 py-1 text-sm w-40 bg-gray-50 text-gray-500 cursor-not-allowed"
-                      />
-                    ) : (
-                      <span className="font-mono text-xs">{user.username}</span>
-                    )}
-                  </td>
+                <tr key={u.id} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="px-4 py-2 text-gray-900 font-mono text-xs">{u.username}</td>
                   <td className="px-4 py-2 text-gray-900">
                     {isEditing ? (
                       <select
@@ -336,37 +394,26 @@ export default function UsersPage() {
                         ))}
                       </select>
                     ) : (
-                      ROLE_LABELS[user.role as Role] ?? user.role
+                      ROLE_LABELS[u.role as Role] ?? u.role
                     )}
                   </td>
-                  <td className="px-4 py-2 text-gray-900 align-top">
-                    {isEditing ? (
-                      siteList.length === 0 ? (
-                        <span className="text-xs text-gray-400">No sites defined</span>
-                      ) : (
-                        <div className="flex flex-wrap gap-2">
-                          {siteList.map((s) => (
-                            <label key={s.id} className="flex items-center gap-1 text-xs cursor-pointer select-none">
-                              <input
-                                type="checkbox"
-                                checked={editingAllowedSites.includes(s.id)}
-                                onChange={() => toggleSite(setEditingAllowedSites, editingAllowedSites, s.id)}
-                                disabled={isSubmitting}
-                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                              />
-                              <span className="text-gray-700">{s.name}</span>
-                            </label>
-                          ))}
-                        </div>
-                      )
+                  <td className="px-4 py-2">
+                    {viewerIsSystemAdmin ? (
+                      <button
+                        onClick={() => handleToggleSystemAdmin(u)}
+                        disabled={isSubmitting}
+                        className={
+                          u.is_system_admin
+                            ? 'px-2 py-1 text-xs text-white bg-amber-600 rounded hover:bg-amber-700 disabled:opacity-50'
+                            : 'px-2 py-1 text-xs text-gray-700 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50'
+                        }
+                      >
+                        {u.is_system_admin ? 'Yes (revoke)' : 'No (promote)'}
+                      </button>
                     ) : (
-                      (user.role === 'admin' || user.role === 'super-admin') ? (
-                        <span className="text-xs text-gray-400">All (admin)</span>
-                      ) : user.allowed_site_names && user.allowed_site_names.length > 0 ? (
-                        <span className="text-xs text-gray-700">{user.allowed_site_names.join(', ')}</span>
-                      ) : (
-                        <span className="text-xs text-gray-400">— (unassigned)</span>
-                      )
+                      <span className="text-xs text-gray-500">
+                        {u.is_system_admin ? 'Yes' : 'No'}
+                      </span>
                     )}
                   </td>
                   <td className="px-4 py-2">
@@ -397,24 +444,32 @@ export default function UsersPage() {
                       </div>
                     ) : (
                       <div className="flex gap-2">
-                        <RequireRole roles={['operator', 'admin', 'super-admin']}>
-                          <button
-                            onClick={() => handleEditStart(user)}
-                            disabled={isSubmitting || editingUserId !== null}
-                            className="px-2 py-1 text-xs text-blue-600 border border-blue-300 rounded hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            Edit
-                          </button>
-                        </RequireRole>
-                        <RequireRole roles={['admin', 'super-admin']}>
-                          <button
-                            onClick={() => handleDelete(user)}
-                            disabled={isSubmitting}
-                            className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {deletingUserId === user.id ? 'Deleting...' : 'Delete'}
-                          </button>
-                        </RequireRole>
+                        <button
+                          onClick={() => {
+                            setGrantsUser(u);
+                            setNewGrantSiteId('');
+                            setNewGrantGroupId('');
+                            setNewGrantRole('observer');
+                          }}
+                          disabled={isSubmitting}
+                          className="px-2 py-1 text-xs text-indigo-600 border border-indigo-300 rounded hover:bg-indigo-50 disabled:opacity-50"
+                        >
+                          Grants…
+                        </button>
+                        <button
+                          onClick={() => handleEditStart(u)}
+                          disabled={isSubmitting || editingUserId !== null}
+                          className="px-2 py-1 text-xs text-blue-600 border border-blue-300 rounded hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDelete(u)}
+                          disabled={isSubmitting}
+                          className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {deletingUserId === u.id ? 'Deleting...' : 'Delete'}
+                        </button>
                       </div>
                     )}
                   </td>
@@ -423,6 +478,128 @@ export default function UsersPage() {
             })}
           </tbody>
         </table>
+      )}
+
+      {/* ── Grants modal ───────────────────────────────────────────────── */}
+      {grantsUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 overflow-y-auto py-8">
+          <div className="w-full max-w-2xl bg-white rounded-lg shadow-xl p-6">
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Grants for {grantsUser.username}
+                </h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  A grant is one role at one scope (site or site + group). The
+                  most-specific matching grant wins per resource.
+                </p>
+              </div>
+              <button
+                onClick={() => setGrantsUser(null)}
+                disabled={isSubmitting}
+                className="text-sm text-gray-500 hover:text-gray-800 disabled:opacity-50"
+              >
+                Close
+              </button>
+            </div>
+
+            {/* Existing grants */}
+            <section className="mb-6">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase mb-2">
+                Current grants
+              </h3>
+              {grants && grants.length > 0 ? (
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 bg-gray-50">
+                      <th className="text-left px-3 py-1.5 font-medium text-gray-700">Site</th>
+                      <th className="text-left px-3 py-1.5 font-medium text-gray-700">Group</th>
+                      <th className="text-left px-3 py-1.5 font-medium text-gray-700">Role</th>
+                      <th className="text-left px-3 py-1.5 font-medium text-gray-700">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {grants.map((g) => (
+                      <tr key={g.id} className="border-b border-gray-100">
+                        <td className="px-3 py-1.5">{g.site_name ?? `#${g.site_id}`}</td>
+                        <td className="px-3 py-1.5">
+                          {g.device_group_name ?? (
+                            <span className="text-gray-400 italic">whole site</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-1.5">{g.role}</td>
+                        <td className="px-3 py-1.5">
+                          <button
+                            onClick={() => handleRevoke(g)}
+                            disabled={isSubmitting}
+                            className="px-2 py-0.5 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50"
+                          >
+                            Revoke
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="text-sm text-gray-400">No grants yet.</p>
+              )}
+            </section>
+
+            {/* Add grant */}
+            <section>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase mb-2">
+                Add grant
+              </h3>
+              <div className="flex flex-wrap gap-2 items-center">
+                <select
+                  value={newGrantSiteId}
+                  onChange={(e) => {
+                    setNewGrantSiteId(e.target.value);
+                    setNewGrantGroupId('');
+                  }}
+                  disabled={isSubmitting}
+                  className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                >
+                  <option value="">Select site…</option>
+                  {siteList
+                    .filter((s) => s.kind === 'REGULAR' || viewerIsSystemAdmin)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                </select>
+                <select
+                  value={newGrantGroupId}
+                  onChange={(e) => setNewGrantGroupId(e.target.value)}
+                  disabled={isSubmitting || !newGrantSiteId}
+                  className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                >
+                  <option value="">Whole site (any group)</option>
+                  {(grantGroups ?? []).map((g) => (
+                    <option key={g.id} value={g.id}>{g.name}</option>
+                  ))}
+                </select>
+                <select
+                  value={newGrantRole}
+                  onChange={(e) => setNewGrantRole(e.target.value as AssignmentRole)}
+                  disabled={isSubmitting}
+                  className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                >
+                  {ASSIGNMENT_ROLES.map((r) => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={handleAddGrant}
+                  disabled={isSubmitting || !newGrantSiteId}
+                  className="px-3 py-1.5 text-sm text-white bg-blue-600 rounded hover:bg-blue-700 disabled:opacity-50"
+                >
+                  Add
+                </button>
+              </div>
+            </section>
+          </div>
+        </div>
       )}
     </div>
   );

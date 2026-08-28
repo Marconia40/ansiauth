@@ -144,7 +144,12 @@ def _seed_test_role_users_with_full_visibility():
     explicitly. Admins/super-admins bypass scoping by policy and don't need
     allowed_sites rows.
     """
-    from app.db.models import SiteModel, UserAllowedSiteModel, UserModel
+    from app.db.models import (
+        RoleAssignmentModel,
+        SiteModel,
+        UserAllowedSiteModel,
+        UserModel,
+    )
     from app.db.session import get_session
     from app.services import user_service
     from app.schemas.user import UserCreate
@@ -183,8 +188,23 @@ def _seed_test_role_users_with_full_visibility():
             session.query(UserAllowedSiteModel).filter_by(user_id=user_row.id).delete(
                 synchronize_session=False
             )
+            # MSP: Phase 4 — role_assignments is now the authoritative source.
+            # Wipe stray site-wide grants for this user on regular sites and
+            # re-seed one observer/operator grant per site so ``require_scope``
+            # decisions match the legacy allowed_sites view.
+            session.query(RoleAssignmentModel).filter(
+                RoleAssignmentModel.user_id == user_row.id,
+                RoleAssignmentModel.device_group_id.is_(None),
+                RoleAssignmentModel.site_id.in_(all_site_ids) if all_site_ids else False,
+            ).delete(synchronize_session=False)
             for sid in all_site_ids:
                 session.add(UserAllowedSiteModel(user_id=user_row.id, site_id=sid))
+                session.add(RoleAssignmentModel(
+                    user_id=user_row.id,
+                    site_id=sid,
+                    device_group_id=None,
+                    role=role,
+                ))
     yield
 
 

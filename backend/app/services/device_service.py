@@ -59,31 +59,86 @@ def create_device(
     password: str,
     platform: str = "ios",
     site_id: int | None = None,
+    device_group_id: int | None = None,
 ) -> Device:
+    """Legacy service-level device create. Kept for internal callers (tests,
+    seed scripts, `Inventory.register`). Under M3, ``devices.device_group_id``
+    is NOT NULL — when neither ``site_id`` nor ``device_group_id`` is
+    supplied the row lands in the auto-provisioned ``Mock Site``'s Default
+    group. API-layer callers should prefer ``Inventory.register`` which
+    surfaces explicit errors on missing scope.
+    """
     if vendor not in _VALID_VENDORS:
         raise ValueError(f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}")
     encrypted = secret_service.encrypt_password(password)
-    row = DeviceModel(
-        name=name,
-        host=host,
-        vendor=vendor,
-        platform=platform,
-        username=username,
-        encrypted_password=encrypted,
-        site_id=site_id,
-        created_at=datetime.now(timezone.utc),
-    )
-    try:
-        with get_session() as session:
-            if site_id is not None:
-                _validate_site_or_raise(session, site_id)
+    with get_session() as session:
+        # Resolve the site + group up front so we can enforce the M3 NOT NULL
+        # invariant at the app layer with a friendly error instead of an
+        # IntegrityError (which would then be re-raised as a misleading
+        # "already exists" message).
+        if site_id is not None:
+            _validate_site_or_raise(session, site_id)
+        resolved_site_id, resolved_group_id = _resolve_default_scope(
+            session, site_id=site_id, device_group_id=device_group_id,
+        )
+        row = DeviceModel(
+            name=name,
+            host=host,
+            vendor=vendor,
+            platform=platform,
+            username=username,
+            encrypted_password=encrypted,
+            site_id=resolved_site_id,
+            device_group_id=resolved_group_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        try:
             session.add(row)
             session.flush()  # get auto-assigned id before commit
             domain = _to_domain(row)
-    except IntegrityError:
-        raise ValueError(f"Device '{name}' already exists")
+        except IntegrityError:
+            raise ValueError(f"Device '{name}' already exists")
     logger.info("Device %s created at %s", name, host)
     return domain
+
+
+def _resolve_default_scope(session, *, site_id: int | None, device_group_id: int | None):
+    """Return ``(site_id, device_group_id)`` for a new device.
+
+    Preference order:
+      1. Both provided → use both (caller has full control).
+      2. Only ``device_group_id`` → derive site from the group.
+      3. Only ``site_id`` → use that site's Default group.
+      4. Neither → fall through to Mock Site's Default group (legacy tests).
+    """
+    from app.db.models import DeviceGroupModel, SiteModel
+
+    if device_group_id is not None:
+        row = session.query(
+            DeviceGroupModel.id, DeviceGroupModel.site_id,
+        ).filter_by(id=device_group_id).first()
+        if row is None:
+            raise ValueError(f"Device group {device_group_id} not found")
+        return (site_id if site_id is not None else row[1], row[0])
+
+    if site_id is not None:
+        default_gid = session.query(SiteModel.default_group_id).filter_by(
+            id=site_id,
+        ).scalar()
+        if default_gid is None:
+            raise ValueError(f"Site {site_id} has no Default group")
+        return (site_id, default_gid)
+
+    # Neither — fall back to Mock Site (created by seed_defaults).
+    row = session.query(SiteModel.id, SiteModel.default_group_id).filter_by(
+        name="Mock Site",
+    ).first()
+    if row is None or row[1] is None:
+        raise ValueError(
+            "No site_id/device_group_id provided and Mock Site is missing. "
+            "Provide a site_id or device_group_id, or run seed_defaults."
+        )
+    return (row[0], row[1])
 
 
 def get_device(name: str) -> Device | None:
@@ -173,7 +228,47 @@ def delete_device(name: str) -> Device | None:
 
 
 def seed_defaults() -> None:
-    """Insert mock_device and fail_device if they don't already exist."""
+    """Insert mock_device and fail_device if they don't already exist.
+
+    MSP: Phase 4 — the mock devices live in a **REGULAR** site (auto-created
+    on first call) so operator/observer users granted "every REGULAR site"
+    (see conftest's ``_seed_test_role_users_with_full_visibility``) can see
+    them. Placing them in Base-Infrastructure would hide them from every
+    non system-admin (D14). The site is idempotently created here; it is
+    fine to leave in place for demo/dev environments.
+    """
+    from app.services.site_service import (
+        BASE_INFRA_SITE_KIND,
+        DEFAULT_GROUP_NAME,
+        REGULAR_SITE_KIND,
+        ensure_base_infrastructure,
+    )
+    from app.db.models import DeviceGroupModel, SiteModel
+    # Idempotent — the Base-Infra site+group are created lazily on first boot.
+    ensure_base_infrastructure()
+    mock_site_name = "Mock Site"
+    with get_session() as session:
+        row = session.query(SiteModel).filter_by(name=mock_site_name).first()
+        if row is None:
+            row = SiteModel(name=mock_site_name, kind=REGULAR_SITE_KIND,
+                            description="Auto-created site for seed_defaults mock devices.")
+            session.add(row)
+            session.flush()
+            group = DeviceGroupModel(
+                name=DEFAULT_GROUP_NAME, site_id=row.id, is_default=True,
+                description=f"Default group for site '{mock_site_name}'.",
+            )
+            session.add(group)
+            session.flush()
+            row.default_group_id = group.id
+            session.flush()
+            logger.info("Seeded mock REGULAR site (id=%s) + default group (id=%s)",
+                        row.id, group.id)
+        mock_site_id = row.id
+        mock_default_group_id = row.default_group_id
+    if mock_site_id is None or mock_default_group_id is None:
+        logger.warning("seed_defaults: Mock Site missing its default group; skipping devices.")
+        return
     defaults = [
         ("mock_device", "192.168.1.1"),
         ("fail_device", "192.168.1.2"),
@@ -182,15 +277,14 @@ def seed_defaults() -> None:
         with get_session() as session:
             if not session.query(DeviceModel).filter_by(name=name).first():
                 session.add(DeviceModel(
-                    name=name,
-                    host=host,
-                    vendor="cisco_ios",
-                    platform="ios",
+                    name=name, host=host, vendor="cisco_ios", platform="ios",
                     username="admin",
                     encrypted_password=secret_service.encrypt_password("admin"),
+                    site_id=mock_site_id,
+                    device_group_id=mock_default_group_id,
                     created_at=datetime.now(timezone.utc),
                 ))
-                logger.info("Seeded default device: %s", name)
+                logger.info("Seeded default device: %s (site=%s)", name, mock_site_id)
 
 
 def clear_devices() -> None:

@@ -197,21 +197,15 @@ def delete_group(group_id: int, *, actor: Optional[dict] = None) -> Optional[dic
             raise ValueError(
                 f"Site {site_id} has no Default group; cannot auto-move members"
             )
-        # Names of every device currently in this group via either the M2M
-        # junction OR the direct FK — both populated post-Phase-2.
-        members: set[str] = set()
-        members.update(
-            r[0]
-            for r in session.query(DeviceGroupMemberModel.device_name)
-            .filter_by(group_id=group_id)
-            .all()
-        )
-        members.update(
+        # MSP: Phase 4 (M3) — ``devices.device_group_id`` is NOT NULL and the
+        # authoritative source of group membership; the legacy M2M junction
+        # is scheduled for removal in Phase 5. Read only the direct FK.
+        members: set[str] = {
             r[0]
             for r in session.query(DeviceModel.name)
             .filter_by(device_group_id=group_id)
             .all()
-        )
+        }
     # Move each device via Inventory outside the session context to keep the
     # audit rows independent transactions; the group deletion happens last.
     moved: list[str] = []

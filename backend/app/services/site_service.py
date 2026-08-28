@@ -58,7 +58,11 @@ def create_site(name: str, description: Optional[str] = None) -> SiteRead:
         session.add(row)
         session.flush()  # populate row.id before referencing it below
         # A regular site's Default group is created here and cannot be renamed
-        # or deleted (see device_group_service enforcement of D7).
+        # or deleted (see device_group_service enforcement of D7). Under M3
+        # ``UNIQUE(site_id, name)`` allows every site to have a plain
+        # ``Default``; the per-site-suffix fallback in
+        # ``_default_group_name_for_site`` remains for edge cases where a
+        # user pre-created a "Default" and never named the site's own default.
         default_group = DeviceGroupModel(
             name=_default_group_name_for_site(session, row.id),
             site_id=row.id,
@@ -78,11 +82,22 @@ def create_site(name: str, description: Optional[str] = None) -> SiteRead:
 
 
 def _default_group_name_for_site(session, site_id: int) -> str:
-    """Return a per-site Default name; falls back to ``Default (site N)`` if
-    another site already owns the plain ``Default`` name (still globally UQ
-    in Phase 3 — the per-site UQ swap ships in Phase 4)."""
+    """Return the per-site Default group name.
+
+    MSP: Phase 4 (M3) — the global ``UNIQUE(device_groups.name)`` is gone;
+    ``UNIQUE(site_id, name)`` takes its place, so every site can carry a
+    plain ``Default`` group without colliding. The per-site-suffix fallback
+    is retained for the edge case where an operator hand-created a group
+    literally named ``Default`` in *this* site before the auto-provisioning
+    ran (which would collide with the new insert).
+    """
     base = DEFAULT_GROUP_NAME
-    if not session.query(DeviceGroupModel).filter_by(name=base).first():
+    existing = (
+        session.query(DeviceGroupModel)
+        .filter_by(name=base, site_id=site_id)
+        .first()
+    )
+    if existing is None:
         return base
     return f"{DEFAULT_GROUP_NAME} (site {site_id})"
 
@@ -190,12 +205,15 @@ def delete_site(site_id: int) -> bool:
         device_count = max(legacy_count, msp_count)
         if device_count > 0:
             raise SiteHasDevicesError(site_id, device_count)
-        # Cascade-delete any empty groups still tied to the site so the FK
-        # from sites.default_group_id can drop cleanly.
+        # Order matters under M3's RESTRICT FK: null the site's back-reference
+        # to its Default group *first*, then delete groups (the group's site
+        # FK is RESTRICT too, but sites.default_group_id → group RESTRICT is
+        # what would fire otherwise). Finally drop the site itself.
+        row.default_group_id = None
+        session.flush()
         session.query(DeviceGroupModel).filter_by(site_id=site_id).delete(
             synchronize_session=False
         )
-        row.default_group_id = None
         session.flush()
         session.delete(row)
     logger.info("Site deleted: id=%s", site_id)

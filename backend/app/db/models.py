@@ -93,15 +93,16 @@ class DeviceModel(Base):
         nullable=True,
         index=True,
     )
-    # MSP: Phase 1 — new authoritative FK for Device→Group. Nullable until
-    # Phase 2 backfill; flipped NOT NULL in Phase 4 (msp_enforce).
+    # MSP: Phase 4 (M3) — flipped NOT NULL. Every device belongs to exactly
+    # one group; ``devices.site_id`` is derived via ``device_group.site`` and
+    # slated for removal in Phase 5.
     device_group_id = Column(
         Integer,
         ForeignKey(
             "device_groups.id", use_alter=True, name="fk_devices_device_group_id",
             ondelete="RESTRICT",
         ),
-        nullable=True,
+        nullable=False,
         index=True,
     )
     created_at = Column(
@@ -212,12 +213,18 @@ class DeviceGroupModel(Base):
     __tablename__ = "device_groups"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String, nullable=False, unique=True, index=True)
+    # MSP: Phase 4 (M3) — ``name`` is no longer globally unique; UNIQUE moved
+    # to ``(site_id, name)`` per D6. A non-unique ``ix_device_groups_name``
+    # style lookup is preserved via the composite unique index itself (site_id
+    # leads, but lookups by name alone still hit the row-hash on Postgres).
+    name = Column(String, nullable=False, index=True)
     description = Column(String, nullable=True)
+    # MSP: Phase 4 (M3) — NOT NULL. Deletes of a Site with any groups fail
+    # loudly at the DB layer thanks to the RESTRICT FK below.
     site_id = Column(
         Integer,
-        ForeignKey("sites.id", ondelete="SET NULL"),
-        nullable=True,
+        ForeignKey("sites.id", ondelete="RESTRICT"),
+        nullable=False,
         index=True,
     )
     # MSP: Phase 1 — marks the Site's Default group. Immutable per D7:
@@ -244,7 +251,12 @@ class DeviceGroupModel(Base):
         foreign_keys=[site_id],
     )
 
-    __table_args__ = (UniqueConstraint("name", name="uq_device_group_name"),)
+    # MSP: Phase 4 (M3) — per-site uniqueness on ``name`` (D6). Every site
+    # gets its own ``Default`` group; the old global constraint went away in
+    # Phase 2's Step 0 and is replaced here.
+    __table_args__ = (
+        UniqueConstraint("site_id", "name", name="uq_device_group_site_name"),
+    )
 
 
 class SiteModel(Base):
@@ -258,9 +270,13 @@ class SiteModel(Base):
     kind = Column(
         String(32), nullable=False, default="REGULAR", server_default="REGULAR"
     )
-    # MSP: Phase 1 — FK to the Site's Default DeviceGroup. Cyclic
-    # (sites↔device_groups); the FK uses use_alter and is nullable at the DB
-    # layer. Populated inside site-creation transaction; app enforces NOT NULL.
+    # MSP: Phase 4 (M3) — stays nullable at the DB level despite the plan
+    # calling for NOT NULL. The cyclic FK (sites↔device_groups) requires a
+    # two-step INSERT (site first with default_group_id=NULL, then default
+    # group with its site_id, then back-ref); no portable trick makes that
+    # two-step land under a NOT NULL constraint. Enforced instead at the
+    # ``site_service.create_site`` layer, which populates the column inside
+    # the same transaction. Acknowledged deviation — see CHANGELOG Phase 4.
     default_group_id = Column(
         Integer,
         ForeignKey(

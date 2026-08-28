@@ -2,7 +2,7 @@ import ipaddress
 import re
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$")
 _IPV4_LIKE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
@@ -32,6 +32,7 @@ class DeviceCreate(BaseModel):
             "username": "admin",
             "password": "s3cr3tpass",
             "site_id": 1,
+            "device_group_id": 3,
         }
     })
 
@@ -41,22 +42,31 @@ class DeviceCreate(BaseModel):
     platform: str = "ios"
     username: str
     password: str  # plain text — encrypted before storing
-    site_id: Optional[int] = None
+    # MSP: Phase 4 — Site is required. Group is optional; when omitted, the
+    # device lands in the Site's Default group. When set, the service
+    # rejects (400) if the group's site_id != site_id.
+    site_id: int = Field(..., ge=1)
+    device_group_id: Optional[int] = Field(default=None, ge=1)
 
 
 class DeviceUpdate(BaseModel):
-    model_config = ConfigDict(json_schema_extra={
-        "example": {"host": "192.168.1.20", "username": "netops", "site_id": 2}
-    })
+    """MSP: Phase 4 — ``site_id`` and ``device_group_id`` are no longer
+    accepted here. Callers must use ``POST /devices/{name}/move`` to change a
+    device's group (which also changes its site when the target is in a
+    different site). Sending either key raises a 422 with a message pointing
+    at ``/move``; ``extra='forbid'`` also rejects any other unknown key.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"example": {"host": "192.168.1.20", "username": "netops"}},
+    )
 
     host: Optional[str] = None
     vendor: Optional[str] = None
     platform: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
-    # site_id is also Optional[int], but we distinguish "not provided" from "set to null"
-    # via model_dump(exclude_unset=True) in the router — clients pass null to clear.
-    site_id: Optional[int] = None
 
     @field_validator("host")
     @classmethod
@@ -64,6 +74,20 @@ class DeviceUpdate(BaseModel):
         if v is None:
             return v
         return _validate_host(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_scope_keys(cls, values):
+        # Surface a friendlier error than Pydantic's generic "extra_forbidden"
+        # for the two keys operators are most likely to try.
+        if isinstance(values, dict):
+            forbidden = {k for k in ("site_id", "device_group_id") if k in values}
+            if forbidden:
+                raise ValueError(
+                    f"{sorted(forbidden)} cannot be set via PUT /devices/{{name}}; "
+                    "use POST /devices/{name}/move to change a device's group or site"
+                )
+        return values
 
 
 class DevicePublic(BaseModel):
@@ -73,12 +97,13 @@ class DevicePublic(BaseModel):
     vendor: str
     platform: str
     username: str
-    site_id: Optional[int] = None
-    site_name: Optional[str] = None
-    # MSP: Phase 3 — surfaced so UIs can render the owning group without a
-    # follow-up call. Populated by ``_to_public`` in ``api/devices.py``.
-    device_group_id: Optional[int] = None
-    device_group_name: Optional[str] = None
+    # MSP: Phase 4 — site + group are guaranteed to be populated (M3 flipped
+    # ``devices.device_group_id`` NOT NULL; site is derived via
+    # ``device.device_group.site``).
+    site_id: int
+    site_name: str
+    device_group_id: int
+    device_group_name: str
     # encrypted_password intentionally excluded from responses
 
 
