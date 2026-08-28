@@ -10,7 +10,7 @@ from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortConfigRequest, PortConfigResult, PortInfo
+    from app.models.port import PortConfigResult, Puerto
     from app.models.vlan import VLAN
 
 logger = logging.getLogger(__name__)
@@ -279,8 +279,8 @@ class CiscoVendor(VendorDriver):
 
     # ── Port query operation ──────────────────────────────────────────────────
 
-    def list_ports(self, device: Device, password: str) -> list[PortInfo]:
-        """Return all physical switchports on *device* as ``PortInfo`` objects.
+    def list_ports(self, device: Device, password: str) -> list[Puerto]:
+        """Return all physical switchports on *device* as ``Puerto`` objects.
 
         Filters out routed L3 interfaces, SVIs, loopbacks, tunnels, and
         management ports.  Fields the chosen read commands do not expose
@@ -296,7 +296,7 @@ class CiscoVendor(VendorDriver):
 
         Returns
         -------
-        list[PortInfo]
+        list[Puerto]
             Normalized port inventory, sorted by interface name.
 
         Raises
@@ -574,7 +574,7 @@ class CiscoVendor(VendorDriver):
 
     def configure_port(
         self,
-        config: PortConfigRequest,
+        config: Puerto,
         device: Device,
         password: str,
     ) -> PortConfigResult:
@@ -626,8 +626,7 @@ class CiscoVendor(VendorDriver):
         dict
             ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
         """
-        from app.validators.port_validator import compress_vlans_cisco
-        vlan_str = compress_vlans_cisco(sorted(set(vlan_list)))
+        vlan_str = self._compress_vlans_cisco(sorted(set(vlan_list)))
         logger.info(
             "Cisco: set trunk VLANs on interface=%s device=%s vlans=%s",
             interface, device.name, vlan_str,
@@ -661,3 +660,35 @@ class CiscoVendor(VendorDriver):
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise
+
+    # ── VLAN list compression (Fase 2, A2 — movida desde validators/port_validator.py,
+    # no es validación, es formato de CLI, específico de este vendor) ────────────
+
+    @staticmethod
+    def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:
+        """Collapse *vlans* into (start, end) range tuples."""
+        if not vlans:
+            return []
+        sv = sorted(set(vlans))
+        ranges: list[tuple[int, int]] = []
+        start = sv[0]
+        prev = sv[0]
+        for v in sv[1:]:
+            if v == prev + 1:
+                prev = v
+            else:
+                ranges.append((start, prev))
+                start = v
+                prev = v
+        ranges.append((start, prev))
+        return ranges
+
+    def _compress_vlans_cisco(self, vlans: list[int]) -> str:
+        """Format a VLAN list into the Cisco IOS trunk-allowed syntax.
+
+        Example: [10, 11, 12, 20] → ``"10-12,20"``
+        """
+        parts = []
+        for s, e in self._compress_to_ranges(vlans):
+            parts.append(f"{s}-{e}" if s != e else str(s))
+        return ",".join(parts)

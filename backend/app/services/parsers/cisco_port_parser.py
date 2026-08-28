@@ -4,7 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from app.models.port import PortInfo, PortMode
+from app.models.port import Puerto, PortMode
 
 logger = logging.getLogger(__name__)
 
@@ -524,7 +524,7 @@ def parse_ios_ports(
     status_output: str,
     description_output: str,
     switchport_output: str,
-) -> list[PortInfo]:
+) -> list[Puerto]:
     """Combine three IOS read commands into a normalized port inventory.
 
     Source-of-truth strategy
@@ -551,14 +551,14 @@ def parse_ios_ports(
 
     Returns
     -------
-    list[PortInfo]
+    list[Puerto]
         Normalized port inventory, sorted by interface name.
     """
     status_rows = parse_ios_interface_status(status_output) if status_output else {}
     desc_rows = parse_ios_interface_description(description_output) if description_output else {}
     sw_rows = parse_ios_switchport(switchport_output) if switchport_output else {}
 
-    ports: list[PortInfo] = []
+    ports: list[Puerto] = []
     # Source of truth for the port set: switchport_output (real L2 ports).
     for name in sorted(sw_rows.keys()):
         sw = sw_rows[name]
@@ -579,8 +579,8 @@ def parse_ios_ports(
             description = None
 
         ports.append(
-            PortInfo(
-                name=name,
+            Puerto(
+                interface=name,
                 description=description,
                 admin_up=admin_up,
                 operational_up=operational_up,

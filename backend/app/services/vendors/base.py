@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortConfigRequest, PortConfigResult, PortInfo
+    from app.models.port import PortConfigResult, Puerto
     from app.models.vlan import VLAN
 
 
@@ -34,7 +34,7 @@ class VendorDriver(ABC):
     Port query-operation contract
     ------------------------------
     ``list_ports(device, password)`` must return a normalized
-    ``list[PortInfo]``.  Implementations must:
+    ``list[Puerto]``.  Implementations must:
 
     * filter out pseudo-interfaces (SVIs, loopbacks, NULL, ...);
     * never invent values — missing fields become ``None``;
@@ -214,8 +214,8 @@ class VendorDriver(ABC):
     # ── Port query operation (must be implemented by every driver) ───────────
 
     @abstractmethod
-    def list_ports(self, device: Device, password: str) -> list[PortInfo]:
-        """Return the physical-port inventory of *device* as ``PortInfo`` objects.
+    def list_ports(self, device: Device, password: str) -> list[Puerto]:
+        """Return the physical-port inventory of *device* as ``Puerto`` objects.
 
         Parameters
         ----------
@@ -227,7 +227,7 @@ class VendorDriver(ABC):
 
         Returns
         -------
-        list[PortInfo]
+        list[Puerto]
             Normalized port entries, sorted by interface name.  Empty list
             when the device reports no physical interfaces.
 
@@ -440,7 +440,7 @@ class VendorDriver(ABC):
 
     def configure_port(
         self,
-        config: PortConfigRequest,
+        config: Puerto,
         device: Device,
         password: str,
     ) -> PortConfigResult:
@@ -461,8 +461,9 @@ class VendorDriver(ABC):
         Parameters
         ----------
         config:
-            Validated ``PortConfigRequest`` — callers must pass an already-
-            validated instance; the driver may trust its invariants.
+            Validated ``Puerto`` — callers must pass an already-validated
+            instance (``validar()`` already called); the driver may trust
+            its invariants.
         device:
             Domain device object exposing ``.name``, ``.host``, ``.username``.
         password:
@@ -555,8 +556,8 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement enable_port yet"
         )
 
-    def get_port(self, name: str, device: Device, password: str) -> PortInfo | None:
-        """Return the ``PortInfo`` for *name* on *device*, or ``None`` if absent.
+    def get_port(self, name: str, device: Device, password: str) -> Puerto | None:
+        """Return the ``Puerto`` for *name* on *device*, or ``None`` if absent.
 
         Default implementation performs a full ``list_ports()`` scan.
         Drivers that support a more efficient single-port fetch may override.
@@ -572,9 +573,9 @@ class VendorDriver(ABC):
 
         Returns
         -------
-        PortInfo | None
+        Puerto | None
         """
         return next(
-            (p for p in self.list_ports(device, password) if p.name == name),
+            (p for p in self.list_ports(device, password) if p.interface == name),
             None,
         )

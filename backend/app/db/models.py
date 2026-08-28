@@ -105,6 +105,28 @@ class DeviceVlanModel(Base):
     name = Column(String, nullable=False)
 
 
+class DevicePortModel(Base):
+    """MSP: Fase 2 de la migración a FINAL_ARCHITECTURE.md — Repository[Puerto].
+
+    PK compuesta real (``interface``, ``device``), mismo criterio que
+    ``DeviceVlanModel``. Guarda el estado deseado/aplicado — no
+    ``operational_up``/``speed``/``duplex`` (solo lectura, vienen del device
+    en cada ``reconciliar()``) ni ``allowed_vlan_operation`` (instrucción de
+    la llamada, no atributo persistente del puerto).
+    """
+
+    __tablename__ = "device_ports"
+
+    interface = Column(String, primary_key=True)
+    device = Column(String, primary_key=True)
+    description = Column(String, nullable=True)
+    admin_up = Column(Boolean, nullable=True)
+    mode = Column(String, nullable=True)
+    access_vlan = Column(Integer, nullable=True)
+    allowed_vlans = Column(JSON, nullable=True)  # lista de int
+    poe_enabled = Column(Boolean, nullable=True)
+
+
 class JobModel(Base):
     __tablename__ = "jobs"
 

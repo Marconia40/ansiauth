@@ -10,7 +10,7 @@ from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortConfigRequest, PortConfigResult, PortInfo
+    from app.models.port import PortConfigResult, Puerto
     from app.models.vlan import VLAN
 
 logger = logging.getLogger(__name__)
@@ -330,8 +330,8 @@ class HuaweiVendor(VendorDriver):
 
     # ── Port query operation ──────────────────────────────────────────────────
 
-    def list_ports(self, device: Device, password: str) -> list[PortInfo]:
-        """Return all physical switchports on *device* as ``PortInfo`` objects.
+    def list_ports(self, device: Device, password: str) -> list[Puerto]:
+        """Return all physical switchports on *device* as ``Puerto`` objects.
 
         Filters out pseudo-interfaces (SVIs, NULL0, loopbacks, eth-trunks).
         Fields the chosen read commands do not expose (PoE, speed, duplex
@@ -347,7 +347,7 @@ class HuaweiVendor(VendorDriver):
 
         Returns
         -------
-        list[PortInfo]
+        list[Puerto]
             Normalized port inventory, sorted by interface name.
 
         Raises
@@ -637,7 +637,7 @@ class HuaweiVendor(VendorDriver):
 
     def configure_port(
         self,
-        config: PortConfigRequest,
+        config: Puerto,
         device: Device,
         password: str,
     ) -> PortConfigResult:
@@ -665,7 +665,6 @@ class HuaweiVendor(VendorDriver):
         """
         import time
         from app.models.port import PortConfigResult as _PCR
-        from app.validators.port_validator import compress_vlans_huawei
 
         start = time.time()
 
@@ -685,7 +684,7 @@ class HuaweiVendor(VendorDriver):
 
         configure_trunk_vlans = config.allowed_vlans is not None
         vlan_list = (
-            compress_vlans_huawei(sorted(set(config.allowed_vlans)))
+            self._compress_vlans_huawei(sorted(set(config.allowed_vlans)))
             if config.allowed_vlans
             else ""
         )
@@ -857,8 +856,7 @@ class HuaweiVendor(VendorDriver):
         dict
             ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
         """
-        from app.validators.port_validator import compress_vlans_huawei
-        vlan_str = compress_vlans_huawei(sorted(set(vlan_list)))
+        vlan_str = self._compress_vlans_huawei(sorted(set(vlan_list)))
         logger.info(
             "Huawei: set trunk VLANs on interface=%s device=%s vlans=%s",
             interface, device.name, vlan_str,
@@ -892,3 +890,35 @@ class HuaweiVendor(VendorDriver):
                 interface, device.name, str(exc), traceback.format_exc(),
             )
             raise
+
+    # ── VLAN list compression (Fase 2, A2 — movida desde validators/port_validator.py,
+    # no es validación, es formato de CLI, específico de este vendor) ────────────
+
+    @staticmethod
+    def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:
+        """Collapse *vlans* into (start, end) range tuples."""
+        if not vlans:
+            return []
+        sv = sorted(set(vlans))
+        ranges: list[tuple[int, int]] = []
+        start = sv[0]
+        prev = sv[0]
+        for v in sv[1:]:
+            if v == prev + 1:
+                prev = v
+            else:
+                ranges.append((start, prev))
+                start = v
+                prev = v
+        ranges.append((start, prev))
+        return ranges
+
+    def _compress_vlans_huawei(self, vlans: list[int]) -> str:
+        """Format a VLAN list into the Huawei VRP trunk-allowed syntax.
+
+        Example: [10, 11, 12, 20] → ``"10 to 12 20"``
+        """
+        parts = []
+        for s, e in self._compress_to_ranges(vlans):
+            parts.append(f"{s} to {e}" if s != e else str(s))
+        return " ".join(parts)

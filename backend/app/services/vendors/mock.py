@@ -3,13 +3,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from app.models.port import PortConfigResult, PortInfo
+from app.models.port import PortConfigResult, Puerto
 from app.models.vlan import VLAN
 from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortConfigRequest
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +36,9 @@ def reset_mock_vlans() -> None:
     )
 
 
-_INITIAL_MOCK_PORTS: list[PortInfo] = [
-    PortInfo(
-        name="GigabitEthernet0/0/1",
+_INITIAL_MOCK_PORTS: list[Puerto] = [
+    Puerto(
+        interface="GigabitEthernet0/0/1",
         description="Workstation-01",
         admin_up=True,
         operational_up=True,
@@ -47,8 +46,8 @@ _INITIAL_MOCK_PORTS: list[PortInfo] = [
         access_vlan=10,
         allowed_vlans=None,
     ),
-    PortInfo(
-        name="GigabitEthernet0/0/2",
+    Puerto(
+        interface="GigabitEthernet0/0/2",
         description="Workstation-02",
         admin_up=True,
         operational_up=False,
@@ -56,8 +55,8 @@ _INITIAL_MOCK_PORTS: list[PortInfo] = [
         access_vlan=20,
         allowed_vlans=None,
     ),
-    PortInfo(
-        name="GigabitEthernet0/0/24",
+    Puerto(
+        interface="GigabitEthernet0/0/24",
         description="Uplink to core",
         admin_up=True,
         operational_up=True,
@@ -119,13 +118,13 @@ class MockVendor(VendorDriver):
         logger.info("Mock: returning hardcoded VLAN list")
         return list(_mock_vlans)
 
-    def list_ports(self, device: "Device", password: str) -> list["PortInfo"]:
+    def list_ports(self, device: "Device", password: str) -> list["Puerto"]:
         if device.name == "fail_device":
             raise RuntimeError(f"Simulated port listing failure on device '{device.name}'")
         logger.info(
             "Mock: returning %d ports for device=%s", len(_INITIAL_MOCK_PORTS), device.name
         )
-        return [PortInfo.from_dict(p.to_dict()) for p in _INITIAL_MOCK_PORTS]
+        return [Puerto.from_dict(p.to_dict()) for p in _INITIAL_MOCK_PORTS]
 
     def update_port_description(
         self, interface: str, description: str, device: "Device", password: str
@@ -172,7 +171,7 @@ class MockVendor(VendorDriver):
         return {"rc": 0, "stdout": "Simulated trunk VLANs applied", "stderr": "", "success": True}
 
     def configure_port(
-        self, config: "PortConfigRequest", device: "Device", password: str
+        self, config: "Puerto", device: "Device", password: str
     ) -> PortConfigResult:
         if device.name == "fail_device":
             logger.info(

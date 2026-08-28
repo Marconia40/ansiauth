@@ -10,7 +10,7 @@ etc.) — no hace falta anticipar esas partes acá, cada fase agrega lo suyo.
 from __future__ import annotations
 
 from app.core.repository import Repository
-from app.db.models import DeviceVlanModel
+from app.db.models import DeviceVlanModel, DevicePortModel
 from app.services.plugin_registry import PluginRegistry
 
 
@@ -46,4 +46,26 @@ def _vlan_to_domain(row) -> "VLAN":
 
 vlan_repository = Repository(
     DeviceVlanModel, _vlan_to_domain, _vlan_to_orm, pk_field=("vlan_id", "device"),
+)
+
+
+def _puerto_to_orm(p: "Puerto"):
+    return DevicePortModel(
+        interface=p.interface, device=p.device, description=p.description,
+        admin_up=p.admin_up, mode=p.mode, access_vlan=p.access_vlan,
+        allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
+    )
+
+
+def _puerto_to_domain(row) -> "Puerto":
+    from app.models.port import Puerto
+    return Puerto(
+        interface=row.interface, device=row.device, description=row.description,
+        admin_up=row.admin_up, mode=row.mode, access_vlan=row.access_vlan,
+        allowed_vlans=row.allowed_vlans, poe_enabled=row.poe_enabled,
+    )
+
+
+puerto_repository = Repository(
+    DevicePortModel, _puerto_to_domain, _puerto_to_orm, pk_field=("interface", "device"),
 )
