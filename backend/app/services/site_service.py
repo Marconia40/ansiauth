@@ -1,7 +1,13 @@
 import logging
 from typing import Optional
 
-from app.db.models import DeviceGroupModel, DeviceModel, SiteModel
+from app.core.config import settings
+from app.db.models import (
+    DeviceGroupModel,
+    DeviceModel,
+    RoleAssignmentModel,
+    SiteModel,
+)
 from app.db.session import get_session
 from app.schemas.site import SiteRead
 
@@ -39,15 +45,46 @@ def _to_read(row: SiteModel, session) -> SiteRead:
 
 
 def create_site(name: str, description: Optional[str] = None) -> SiteRead:
+    """Create a new site plus its Default DeviceGroup, atomically.
+
+    Per phase-3 §8 (steps 2-4 of MSP §15): INSERT site → INSERT default group
+    → UPDATE ``sites.default_group_id`` all happen inside one transaction so
+    a site can never be visible without its Default group.
+    """
     with get_session() as session:
         if session.query(SiteModel).filter_by(name=name).first():
             raise ValueError(f"Site '{name}' already exists")
         row = SiteModel(name=name, description=description)
         session.add(row)
+        session.flush()  # populate row.id before referencing it below
+        # A regular site's Default group is created here and cannot be renamed
+        # or deleted (see device_group_service enforcement of D7).
+        default_group = DeviceGroupModel(
+            name=_default_group_name_for_site(session, row.id),
+            site_id=row.id,
+            is_default=True,
+            description=f"Default group for site '{name}'.",
+        )
+        session.add(default_group)
         session.flush()
+        row.default_group_id = default_group.id
+        session.flush()
+        default_group_id_snapshot = default_group.id
         result = _to_read(row, session)
-    logger.info("Site created: name=%s", name)
+    logger.info(
+        "Site created: name=%s default_group_id=%s", name, default_group_id_snapshot,
+    )
     return result
+
+
+def _default_group_name_for_site(session, site_id: int) -> str:
+    """Return a per-site Default name; falls back to ``Default (site N)`` if
+    another site already owns the plain ``Default`` name (still globally UQ
+    in Phase 3 — the per-site UQ swap ships in Phase 4)."""
+    base = DEFAULT_GROUP_NAME
+    if not session.query(DeviceGroupModel).filter_by(name=base).first():
+        return base
+    return f"{DEFAULT_GROUP_NAME} (site {site_id})"
 
 
 def get_site(site_id: int) -> Optional[SiteRead]:
@@ -59,6 +96,40 @@ def get_site(site_id: int) -> Optional[SiteRead]:
 def list_sites() -> list[SiteRead]:
     with get_session() as session:
         rows = session.query(SiteModel).order_by(SiteModel.name).all()
+        return [_to_read(r, session) for r in rows]
+
+
+def list_sites_for_user(user: dict) -> list[SiteRead]:
+    """MSP: Phase 3 — return sites visible to the caller via role_assignments.
+
+    Rules:
+      * ``is_system_admin=True`` → every site (including Base-Infrastructure).
+      * Otherwise: every site the caller has at least one grant on. The
+        Base-Infrastructure site is hidden from non system-admins (D14) unless
+        they were explicitly granted a role on it (never happens by default —
+        only the migration Phase 2 grants system-admins into it).
+    """
+    with get_session() as session:
+        q = session.query(SiteModel)
+        if not user.get("is_system_admin"):
+            user_id = user.get("id")
+            if user_id is None:
+                return []
+            granted_site_ids = {
+                sid for (sid,) in (
+                    session.query(RoleAssignmentModel.site_id)
+                    .filter(RoleAssignmentModel.user_id == user_id)
+                    .distinct()
+                    .all()
+                )
+            }
+            if not granted_site_ids:
+                return []
+            q = q.filter(SiteModel.id.in_(granted_site_ids))
+            # D14: hide Base-Infrastructure from anyone who is not a
+            # system-admin — even if a stray grant landed on it.
+            q = q.filter(SiteModel.kind != BASE_INFRA_SITE_KIND)
+        rows = q.order_by(SiteModel.name).all()
         return [_to_read(r, session) for r in rows]
 
 
@@ -100,9 +171,32 @@ def delete_site(site_id: int) -> bool:
         row = session.query(SiteModel).filter_by(id=site_id).first()
         if not row:
             return False
-        device_count = session.query(DeviceModel).filter_by(site_id=site_id).count()
+        # MSP: Phase 3 — the Base-Infrastructure site is system-managed and
+        # can never be deleted; the API layer surfaces this as HTTP 400.
+        if row.kind == BASE_INFRA_SITE_KIND:
+            raise ValueError(
+                "The Base-Infrastructure site is system-managed and cannot be deleted"
+            )
+        # Legacy devices FK on sites.id (SET NULL) and the MSP-authoritative
+        # path via device_groups.site_id both count as "devices in this site"
+        # for the purposes of the delete guard.
+        legacy_count = session.query(DeviceModel).filter_by(site_id=site_id).count()
+        msp_count = (
+            session.query(DeviceModel)
+            .join(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
+            .filter(DeviceGroupModel.site_id == site_id)
+            .count()
+        )
+        device_count = max(legacy_count, msp_count)
         if device_count > 0:
             raise SiteHasDevicesError(site_id, device_count)
+        # Cascade-delete any empty groups still tied to the site so the FK
+        # from sites.default_group_id can drop cleanly.
+        session.query(DeviceGroupModel).filter_by(site_id=site_id).delete(
+            synchronize_session=False
+        )
+        row.default_group_id = None
+        session.flush()
         session.delete(row)
     logger.info("Site deleted: id=%s", site_id)
     return True

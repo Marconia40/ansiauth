@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import settings
 from app.db.models import DeviceModel, SiteModel
 from app.db.session import get_session
 from app.models.device import Device
@@ -17,8 +18,18 @@ _UNSET = object()
 
 
 def _to_domain(row: DeviceModel) -> Device:
-    # row.site is eager-loadable via the relationship; access here while the session is open.
-    site_name = row.site.name if row.site is not None else None
+    # Prefer the group-derived site when the MSP hierarchy is authoritative;
+    # fall back to the row's own ``site_id`` (legacy path or a not-yet-placed
+    # device that predates Phase 2 backfill).
+    group = getattr(row, "device_group", None)
+    group_id = group.id if group is not None else None
+    group_name = group.name if group is not None else None
+    if settings.MSP_STRICT_HIERARCHY and group is not None:
+        site_id = group.site_id
+        site_name = group.site.name if group.site is not None else None
+    else:
+        site_id = row.site_id
+        site_name = row.site.name if row.site is not None else None
     return Device(
         name=row.name,
         host=row.host,
@@ -28,8 +39,10 @@ def _to_domain(row: DeviceModel) -> Device:
         encrypted_password=row.encrypted_password,
         id=str(row.id),
         created_at=row.created_at or datetime.now(timezone.utc),
-        site_id=row.site_id,
+        site_id=site_id,
         site_name=site_name,
+        device_group_id=group_id,
+        device_group_name=group_name,
     )
 
 
@@ -111,6 +124,17 @@ def update_device(
         if password is not None:
             row.encrypted_password = secret_service.encrypt_password(password)
         if site_id is not _UNSET:
+            # MSP: Phase 3 — with the strict-hierarchy flag on, ``site_id`` is
+            # derived from ``device_group_id`` and must not be set directly.
+            # Callers wanting to change a device's site must use the move
+            # endpoint (``POST /devices/{name}/move``), which handles both
+            # same-site and cross-site transitions atomically.
+            if settings.MSP_STRICT_HIERARCHY:
+                raise ValueError(
+                    "site_id is derived from device_group_id when MSP hierarchy "
+                    "is enforced; use POST /devices/{name}/move to change a "
+                    "device's group or site"
+                )
             if site_id is not None:
                 _validate_site_or_raise(session, site_id)
             # Step 7.4 invariant: a device may only belong to groups whose site

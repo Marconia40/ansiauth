@@ -5,8 +5,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core import authz
+from app.core.config import settings
 from app.core.dependencies import get_current_user
 from app.core.exceptions import NotFoundError
+from app.core.scope import require_authenticated, require_scope
 from app.services import audit_service, job_service
 
 logger = logging.getLogger(__name__)
@@ -67,7 +69,7 @@ def _ensure_aware(dt: Optional[datetime]) -> Optional[datetime]:
     ),
 )
 def list_jobs(
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_authenticated),
     status: Optional[str] = Query(default=None),
     device_id: Optional[str] = Query(default=None),
     site_id: Optional[int] = Query(default=None, ge=1),
@@ -86,13 +88,25 @@ def list_jobs(
     if from_date is not None and to_date is not None and from_date > to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
 
+    # ESC-1: scope-aware visible device set. Under MSP-strict we compute from
+    # role_assignments (system-admins see everything → None sentinel);
+    # otherwise fall back to legacy allowed_device_names_for for parity with
+    # the T3.5 snapshot-diff test.
+    if settings.MSP_STRICT_HIERARCHY:
+        from app.services.inventory_service import Inventory
+        allowed = Inventory()._visible_device_names(
+            current_user, site_id=site_id, device_group_id=None,
+        )
+    else:
+        allowed = authz.allowed_device_names_for(current_user)
+
     jobs, total = job_service.query_jobs(
         status=status,
         device=device_id,
         from_date=from_date,
         to_date=to_date,
         site_id=site_id,
-        allowed_devices=authz.allowed_device_names_for(current_user),
+        allowed_devices=allowed,
         page=page,
         page_size=page_size,
     )
@@ -110,13 +124,34 @@ def list_jobs(
     summary="Get job",
     description="Return the full status and result of a single background job by its UUID. Accessible to all authenticated users.",
 )
-def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
+def get_job(job_id: str, current_user: dict = Depends(require_authenticated)):
     job = job_service.get_job(job_id)
     if not job:
         raise NotFoundError(f"Job '{job_id}' not found")
     if job.device:
-        authz.ensure_device_allowed(current_user, job.device)
+        _check_device_scope(current_user, job.device, min_role="observer")
     return {"success": True, "data": _format_job(job)}
+
+
+def _check_device_scope(user: dict, device_name: str, *, min_role: str) -> None:
+    """Shared authz for job endpoints — swaps ensure_device_allowed for
+    require_scope semantics under MSP-strict, keeps legacy behavior otherwise."""
+    if settings.MSP_STRICT_HIERARCHY:
+        from app.services.effective_role import effective_role
+        from app.db.session import get_session
+        _LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
+        with get_session() as session:
+            role = effective_role(session, user, "device", device_name)
+        if _LVL.get(role or "", 0) < _LVL[min_role]:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Job operation on device '{device_name}' requires "
+                    f"role >= {min_role} (got {role or 'none'})"
+                ),
+            )
+    else:
+        authz.ensure_device_allowed(user, device_name)
 
 
 @router.post(
@@ -128,13 +163,13 @@ def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
         "Accessible to all authenticated users."
     ),
 )
-def cancel_job(job_id: str, current_user: dict = Depends(get_current_user)):
+def cancel_job(job_id: str, current_user: dict = Depends(require_authenticated)):
     # Look up first so we can authz before mutating state.
     existing = job_service.get_job(job_id)
     if not existing:
         raise NotFoundError(f"Job '{job_id}' not found")
     if existing.device:
-        authz.ensure_device_allowed(current_user, existing.device)
+        _check_device_scope(current_user, existing.device, min_role="operator")
     job = job_service.cancel_job(job_id)
     if not job:
         raise NotFoundError(f"Job '{job_id}' not found")

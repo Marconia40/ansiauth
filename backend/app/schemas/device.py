@@ -2,7 +2,7 @@ import ipaddress
 import re
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$")
 _IPV4_LIKE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
@@ -75,4 +75,35 @@ class DevicePublic(BaseModel):
     username: str
     site_id: Optional[int] = None
     site_name: Optional[str] = None
+    # MSP: Phase 3 — surfaced so UIs can render the owning group without a
+    # follow-up call. Populated by ``_to_public`` in ``api/devices.py``.
+    device_group_id: Optional[int] = None
+    device_group_name: Optional[str] = None
     # encrypted_password intentionally excluded from responses
+
+
+class DeviceMove(BaseModel):
+    """Body for ``POST /devices/{name}/move``.
+
+    Per D8, "remove from group" is a device-level action: passing
+    ``device_group_id: null`` moves the device to its current site's Default
+    group instead of orphaning it. Passing an integer group id moves the
+    device to that group (same-site or cross-site — the dependency picks the
+    right ``move_device_*`` op).
+    """
+
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [
+            {"device_group_id": 5},
+            {"device_group_id": None},
+        ]
+    })
+
+    device_group_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Target group ID. Pass null to move the device to its current "
+            "site's Default group."
+        ),
+    )
