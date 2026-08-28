@@ -14,6 +14,14 @@ class ConflictError(Exception):
     pass
 
 
+class TransicionInvalidaError(Exception):
+    """Transición de estado de Job rechazada por _TRANSICIONES_VALIDAS
+    (models/job.py) — mapea a 409, mismo criterio que ConflictError. El
+    handler HTTP se cablea en Fase 5 (api/jobs.py: cancel_job() la atrapa
+    y traduce al mismo 409 que ya devuelve hoy)."""
+    pass
+
+
 class UnsupportedVendorError(Exception):
     """Raised when an operation is invoked against a device whose vendor has
     no driver registered for that operation.
