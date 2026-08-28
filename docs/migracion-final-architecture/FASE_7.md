@@ -34,6 +34,8 @@ entre fases:
 | `app/services/vlan_execution_service.py` | `GroupOperationRunner` + `app/tasks.py` | Fase 5 (A4/A5) |
 | `app/services/port_execution_service.py` | ídem | Fase 5 |
 | `app/services/port_config_service.py` | ídem | Fase 5 |
+| `app/services/group_job_service.py` | `JobRepository.resumen_de_grupo()` (Fase 4 A3) | Fase 5 (A4/A5) — hasta entonces `vlan_execution_service.py`/`port_execution_service.py`/`port_config_service.py` lo importan a nivel de módulo, no borrar antes |
+| `app/models/group_job.py` (`GroupJob`, `DeviceExecution`) | ídem — su único caller real es `group_job_service.py` | Fase 5 (A4/A5), misma fila que arriba |
 | `app/services/job_service.py` | `Job` + `JobRepository` | Fase 5 (A8/A9) |
 | `app/services/audit_service.py` | `AuditListener` + `AuditRepository` | Fase 5 (A3, vía `EventDispatcher`) |
 | `app/services/device_service.py` | `Device` + `DeviceRepository` + `Inventory` | Fase 6 |
@@ -260,7 +262,7 @@ documento de arquitectura:
       corren sin error (sección 5).
 - [ ] Trazabilidad RF/RNF de `FINAL_ARCHITECTURE.md` §6 confirmada contra el
       código final (sección 6) — no solo contra el documento.
-- [ ] Los 13 archivos de la tabla de la sección 1 confirmados sin caller real y
+- [ ] Los 15 archivos de la tabla de la sección 1 confirmados sin caller real y
       borrados.
 - [ ] `PortInfo`/`PortConfigRequest` borradas de `models/port.py` (no son
       archivo aparte, ver nota bajo la tabla de la sección 1).

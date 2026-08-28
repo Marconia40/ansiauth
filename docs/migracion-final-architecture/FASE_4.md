@@ -156,13 +156,35 @@ lanza `TransicionInvalidaError` en vez de no-op silencioso") — el caller
 mismo 409 que ya devuelve hoy (`"Cannot cancel job with status '{status}'"`) — no
 dejar que se propague como 500.
 
-### A2 — Eliminar `GroupJob`/`DeviceExecution`/`group_job_service.py`/`api/group_jobs.py`
+### A2 — Rewirear `api/group_jobs.py` — NO se borran `GroupJob`/`group_job_service.py` todavía
 
-Borrar `app/models/group_job.py` completo (`GroupJob`, `DeviceExecution`) y
-`app/services/group_job_service.py` completo. `app/db/models.py: GroupJobModel`
-**se deja** — es schema de DB, fuera de alcance de este plan (decisión ya tomada,
-sin migraciones). La tabla real queda huérfana, sin código que la escriba ni la lea
-— aceptado, no se dropea acá.
+**Corrección real sobre el diseño original, encontrada implementando esta
+sección — mismo patrón que `validators/*.py`/`PortInfo`/`PortConfigRequest`
+en fases anteriores.** El texto original decía borrar `app/models/group_job.py`
+(`GroupJob`, `DeviceExecution`) y `app/services/group_job_service.py` completos
+en esta fase. Falso: `group_job_service` tiene imports **a nivel de módulo**
+en `vlan_execution_service.py` (línea 6, `from app.services import
+audit_service, group_job_service, job_service, vlan_service`),
+`port_execution_service.py` y `port_config_service.py` (ambos con
+`group_job_service` dentro de su `from app.services import (...)` top-level) —
+y esos 3 archivos son importados a nivel de módulo por `api/vlans.py`/
+`api/ports.py`. Borrar `group_job_service.py` acá rompe esos imports →
+`api/vlans.py`/`api/ports.py` truenan → `app.main` no arranca — mismo tipo de
+problema ya encontrado 2 veces antes en este plan. `app/models/group_job.py`
+tiene un solo caller real, el propio `group_job_service.py` — como ese no se
+borra, tampoco `models/group_job.py`.
+
+**Los 2 se mantienen sin ningún cambio** hasta que Fase 5 (A4/A5) rewiree
+`vlan_execution_service.py`/`port_execution_service.py`/`port_config_service.py`
+para que dejen de necesitar `group_job_service` — recién ahí quedan sin caller
+real y se borran. Agregados a la tabla de limpieza de `FASE_7.md` (no
+estaban — la tabla ya tenía a los 3 archivos de ejecución que los importan,
+pero no a `group_job_service.py`/`models/group_job.py` en sí).
+
+`app/db/models.py: GroupJobModel` **se deja** — es schema de DB, fuera de
+alcance de este plan (decisión ya tomada, sin migraciones). La tabla real
+queda huérfana, sin código que la escriba ni la lea — aceptado, no se dropea
+acá.
 
 `app/api/group_jobs.py` — el único endpoint (`GET /group-jobs/{group_job_id}`)
 cambia de `group_job_service.get_group_job(id)` a `job_repository.resumen_de_grupo(id)`
@@ -453,7 +475,10 @@ el JWT). `api/jobs.py: list_jobs()` (Fase 5, A8) pasa a llamar
       `registrar_reintento`/`asegurar_estado_final`. `_TRANSICIONES_VALIDAS`
       coincide con las reglas reales (`cancel_job()`'s guard, especialmente).
 - [ ] `TransicionInvalidaError` existe en `app/core/exceptions.py`, mapea a 409.
-- [ ] `app/models/group_job.py`, `app/services/group_job_service.py` no existen.
+- [ ] **`app/models/group_job.py`, `app/services/group_job_service.py` siguen
+      existiendo, sin cambios** — corrección real: `vlan_execution_service.py`/
+      `port_execution_service.py`/`port_config_service.py` los importan a nivel
+      de módulo, se borran en Fase 7 recién cuando Fase 5 los deje sin caller.
       `app/db/models.py: GroupJobModel` sigue existiendo (no se toca, fuera de
       alcance).
 - [ ] `app/api/group_jobs.py` usa `job_repository.resumen_de_grupo()`, no
