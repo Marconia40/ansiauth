@@ -62,7 +62,7 @@ def create_device(
     """
     if vendor not in _VALID_VENDORS:
         raise ValueError(f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}")
-    encrypted = secret_service.encrypt_password(password)
+    encrypted = secret_service.vault.encrypt(password)
     with get_session() as session:
         if site_id is not None:
             _validate_site_or_raise(session, site_id)
@@ -167,7 +167,7 @@ def update_device(
         if username is not None:
             row.username = username
         if password is not None:
-            row.encrypted_password = secret_service.encrypt_password(password)
+            row.encrypted_password = secret_service.vault.encrypt(password)
         session.flush()
         domain = _to_domain(row)
     logger.info("Device %s updated", name)
@@ -235,7 +235,7 @@ def seed_defaults() -> None:
                 session.add(DeviceModel(
                     name=name, host=host, vendor="cisco_ios", platform="ios",
                     username="admin",
-                    encrypted_password=secret_service.encrypt_password("admin"),
+                    encrypted_password=secret_service.vault.encrypt("admin"),
                     device_group_id=mock_default_group_id,
                     created_at=datetime.now(timezone.utc),
                 ))

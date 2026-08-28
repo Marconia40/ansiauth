@@ -12,9 +12,7 @@ if not FERNET_KEY:
 
 class SecretVault:
     """Encrypts/decrypts device passwords with a Fernet key held as real
-    instance state — see docs/DEVICE_IMPLEMENTATION_PLAN.md D6. Replaces the
-    module-level ``_fernet`` singleton that ``encrypt_password``/
-    ``decrypt_password`` used to close over directly.
+    instance state — see docs/DEVICE_IMPLEMENTATION_PLAN.md D6.
     """
 
     def __init__(self, key: str | bytes | None = None):
@@ -28,15 +26,4 @@ class SecretVault:
         return self._fernet.decrypt(encrypted.encode()).decode()
 
 
-# Module-level singleton — every existing caller keeps importing these two
-# functions unchanged; they now delegate to the class instead of holding
-# their own module-global Fernet instance directly.
 vault = SecretVault()
-
-
-def encrypt_password(plain: str) -> str:
-    return vault.encrypt(plain)
-
-
-def decrypt_password(encrypted: str) -> str:
-    return vault.decrypt(encrypted)

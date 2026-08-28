@@ -119,7 +119,7 @@ def list_ports(device_id: str) -> PortListResponse:
         return PortListResponse(device=device_id, vendor="mock", ports=ports)
 
     device = _resolve_device(device_id)
-    password = secret_service.decrypt_password(device.encrypted_password)
+    password = secret_service.vault.decrypt(device.encrypted_password)
     driver = _get_driver(device)
 
     # Locking is the API layer's responsibility (mirrors the VLAN read path
@@ -182,7 +182,7 @@ def update_port_description_on_device(
         return {"rc": 0, "stdout": "Simulated description updated", "stderr": "", "success": True}
 
     dev = _resolve_device(device_id)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
+    pw = secret_service.vault.decrypt(dev.encrypted_password)
     driver = _get_driver(dev)
     logger.info(
         "Real mode: update description on interface=%s device=%s",
@@ -232,7 +232,7 @@ def set_port_admin_state_on_device(
         return {"rc": 0, "stdout": "Simulated admin state applied", "stderr": "", "success": True}
 
     dev = _resolve_device(device_id)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
+    pw = secret_service.vault.decrypt(dev.encrypted_password)
     driver = _get_driver(dev)
     logger.info(
         "Real mode: set admin state on interface=%s device=%s enabled=%s",
@@ -281,7 +281,7 @@ def set_port_access_vlan_on_device(
         return {"rc": 0, "stdout": "Simulated access VLAN applied", "stderr": "", "success": True}
 
     dev = _resolve_device(device_id)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
+    pw = secret_service.vault.decrypt(dev.encrypted_password)
     driver = _get_driver(dev)
     logger.info(
         "Real mode: set access VLAN on interface=%s device=%s vlan_id=%d",
@@ -325,7 +325,7 @@ def set_trunk_pvid_vlan_on_device(
         return {"rc": 0, "stdout": "Simulated trunk PVID applied", "stderr": "", "success": True}
 
     dev = _resolve_device(device_id)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
+    pw = secret_service.vault.decrypt(dev.encrypted_password)
     driver = _get_driver(dev)
     logger.info(
         "Real mode: set trunk PVID on interface=%s device=%s vlan_id=%d",
@@ -360,7 +360,7 @@ def set_trunk_allowed_vlans_on_device(
         return {"rc": 0, "stdout": "Simulated trunk VLANs applied", "stderr": "", "success": True}
 
     dev = _resolve_device(device_id)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
+    pw = secret_service.vault.decrypt(dev.encrypted_password)
     driver = _get_driver(dev)
     logger.info(
         "Real mode: set trunk VLANs on interface=%s device=%s vlans=%s",
@@ -386,7 +386,7 @@ def shutdown_port_on_device(interface: str, device_id: str) -> dict:
         logger.info("Mock: shutdown_port on interface=%s device=%s", interface, device_id)
         return {"rc": 0, "stdout": "Simulated port shutdown", "stderr": "", "success": True}
     dev = _resolve_device(device_id)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
+    pw = secret_service.vault.decrypt(dev.encrypted_password)
     driver = _get_driver(dev)
     logger.info("Real mode: shutdown_port on interface=%s device=%s", interface, dev.name)
     return driver.shutdown_port(interface, dev, pw)
@@ -409,7 +409,7 @@ def enable_port_on_device(interface: str, device_id: str) -> dict:
         logger.info("Mock: enable_port on interface=%s device=%s", interface, device_id)
         return {"rc": 0, "stdout": "Simulated port enabled", "stderr": "", "success": True}
     dev = _resolve_device(device_id)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
+    pw = secret_service.vault.decrypt(dev.encrypted_password)
     driver = _get_driver(dev)
     logger.info("Real mode: enable_port on interface=%s device=%s", interface, dev.name)
     return driver.enable_port(interface, dev, pw)
@@ -444,7 +444,7 @@ def configure_port_on_device(config: "PortConfigRequest", device_id: str) -> "Po
             vendor="mock", execution_time_ms=1.0,
         )
     dev = _resolve_device(device_id)
-    pw = secret_service.decrypt_password(dev.encrypted_password)
+    pw = secret_service.vault.decrypt(dev.encrypted_password)
     driver = _get_driver(dev)
     logger.info("Real mode: configure_port on interface=%s device=%s", config.interface, dev.name)
     return driver.configure_port(config, dev, pw)

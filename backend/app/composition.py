@@ -13,6 +13,8 @@ from app.core.repository import Repository
 from app.db.models import DeviceVlanModel, DevicePortModel
 from app.repositories.job_repository import JobRepository
 from app.services.plugin_registry import PluginRegistry
+from app.services.redis_coordinator import RedisCoordinator
+from app.services.secret_service import vault as secret_vault  # noqa: F401
 
 
 def build_plugin_registry() -> PluginRegistry:
@@ -33,7 +35,7 @@ def build_plugin_registry() -> PluginRegistry:
 
 plugin_registry = build_plugin_registry()
 
-# TODO: secret_vault, redis_coordinator — Línea B (FASE_1.md B1/B2)
+redis_coordinator = RedisCoordinator()
 
 
 def _vlan_to_orm(v: "VLAN"):

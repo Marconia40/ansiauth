@@ -103,7 +103,7 @@ class Inventory:
             raise ValueError(
                 f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}"
             )
-        encrypted = secret_service.encrypt_password(password)
+        encrypted = secret_service.vault.encrypt(password)
         with get_session() as session:
             site = session.query(SiteModel).filter_by(id=site_id).first()
             if site is None:
