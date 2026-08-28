@@ -6,16 +6,22 @@ from typing import TYPE_CHECKING
 
 from app.services import ansible_service
 from app.services.parsers.cisco_port_parser import parse_ios_ports
-from app.services.vendors.port_driver_base import BasePortDriver
+from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
     from app.models.port import PortConfigRequest, PortConfigResult, PortInfo
+    from app.models.vlan import VLAN
 
 logger = logging.getLogger(__name__)
 
 _NETWORK_OS = "ios"
 _CONNECTION = "network_cli"
+
+_PLAYBOOK_CREATE = "vendors/cisco/create_vlan.yml"
+_PLAYBOOK_DELETE = "vendors/cisco/delete_vlan.yml"
+_PLAYBOOK_GET = "vendors/cisco/get_vlans.yml"
+_PLAYBOOK_UPDATE = "vendors/cisco/update_vlan.yml"
 
 _PLAYBOOK_GET_PORTS = "vendors/cisco/get_ports.yml"
 _PLAYBOOK_UPDATE_DESCRIPTION = "vendors/cisco/update_port_description.yml"
@@ -37,32 +43,241 @@ _DESCRIPTION_INDEX = 1
 _SWITCHPORT_INDEX = 2
 
 
-def _build_inventory(device: Device, password: str) -> str:
+def _normalize_result(raw: dict) -> dict:
+    """Attach a ``success`` boolean to an Ansible result dict.
+
+    Callers that already read ``rc`` / ``stdout`` / ``stderr`` are unaffected;
+    the new key is purely additive and satisfies the ``VendorDriver``
+    mutation-result contract.
+    """
+    return {**raw, "success": raw.get("rc", 1) == 0}
+
+
+def _build_inventory(device: Device, password: str) -> dict:
     return ansible_service.build_inventory(
         device.name, device.host, device.username, password,
         network_os=_NETWORK_OS, connection=_CONNECTION,
     )
 
 
-class CiscoPortDriver(BasePortDriver):
-    """Read-only Cisco IOS port driver (Step 1.3).
+class CiscoVendor(VendorDriver):
+    """Vendor driver for Cisco IOS / IOS-XE devices — VLAN + port operations
+    fused into one class (FINAL_ARCHITECTURE.md §1.6; ``Device.driver`` is a
+    single property, ver `docs/migracion-final-architecture/FASE_1.md` A2).
 
-    Issues three ``show`` commands in a single ``ios_command`` task and
-    merges their outputs into normalized ``PortInfo`` objects via
-    ``parse_ios_ports``.
+    Selects Cisco-specific Ansible playbooks, executes them via
+    ``ansible_service``, and normalizes all outputs to the ``VendorDriver``
+    contract.
 
-    Why three commands rather than one
-    ----------------------------------
-    No single Cisco IOS read command exposes all of: admin/operational
-    state, untruncated description, and the L2 switchport profile.  Issuing
-    them as one ``ios_command`` task is cheap (single SSH session, single
-    runner invocation) and keeps the parser modular and tolerant of partial
-    output — a missing description response degrades to ``description=None``
-    for every port rather than failing the whole call.
+    Normalized API
+    --------------
+    Mutation methods return:
+        ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
 
-    Mutation operations (enable/disable, description change, VLAN
-    assignment, ...) are intentionally absent — they belong to later steps.
+    Query methods return:
+        ``list_vlans`` → ``list[VLAN]``
+        ``get_vlan``   → ``VLAN | None``  (inherited default via list_vlans)
+        ``get_vlans``  → same as ``list_vlans`` (backward-compat alias)
+
+    Notes
+    -----
+    ``save_config`` is not applicable to IOS — the running config is written
+    immediately.  Calling it raises ``NotImplementedError``.
+
+    Port mutation coverage is partial (Step 3.1): ``configure_port``,
+    ``shutdown_port`` and ``enable_port`` are not yet implemented for Cisco —
+    calling them raises ``NotImplementedError`` with a Cisco-specific message
+    pointing at the individual ``set_port_*`` methods to use instead.
     """
+
+    # ── VLAN mutation operations ──────────────────────────────────────────────
+
+    def create_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
+        """Provision *vlan_id* with label *name* on *device*.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
+        """
+        logger.info("CiscoVendor: create VLAN %s on device=%s", vlan_id, device.name)
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_CREATE,
+                extravars={"vlan_id": vlan_id, "vlan_name": name, "device": device.name},
+                inventory=_build_inventory(device, password),
+            )
+            normalized = _normalize_result(result)
+            if normalized["success"]:
+                logger.info(
+                    "CiscoVendor: create VLAN %s on device=%s — OK",
+                    vlan_id, device.name,
+                )
+            else:
+                logger.error(
+                    "CiscoVendor: create VLAN %s on device=%s — FAILED: %s",
+                    vlan_id, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [create_vlan vlan_id=%s device=%s]: %s\n%s",
+                vlan_id, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def delete_vlan(self, vlan_id: int, device: Device, password: str) -> dict:
+        """Remove *vlan_id* from *device*.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
+        """
+        logger.info("CiscoVendor: delete VLAN %s on device=%s", vlan_id, device.name)
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_DELETE,
+                extravars={"vlan_id": vlan_id, "device": device.name},
+                inventory=_build_inventory(device, password),
+            )
+            normalized = _normalize_result(result)
+            if normalized["success"]:
+                logger.info(
+                    "CiscoVendor: delete VLAN %s on device=%s — OK",
+                    vlan_id, device.name,
+                )
+            else:
+                logger.error(
+                    "CiscoVendor: delete VLAN %s on device=%s — FAILED: %s",
+                    vlan_id, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [delete_vlan vlan_id=%s device=%s]: %s\n%s",
+                vlan_id, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def update_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
+        """Rename / update the description of *vlan_id* on *device*.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
+        """
+        logger.info("CiscoVendor: update VLAN %s on device=%s", vlan_id, device.name)
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_UPDATE,
+                extravars={"vlan_id": vlan_id, "description": name, "device": device.name},
+                inventory=_build_inventory(device, password),
+            )
+            normalized = _normalize_result(result)
+            if normalized["success"]:
+                logger.info(
+                    "CiscoVendor: update VLAN %s on device=%s — OK",
+                    vlan_id, device.name,
+                )
+            else:
+                logger.error(
+                    "CiscoVendor: update VLAN %s on device=%s — FAILED: %s",
+                    vlan_id, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [update_vlan vlan_id=%s device=%s]: %s\n%s",
+                vlan_id, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def save_config(self, device: Device, password: str) -> dict:
+        """Not supported — Cisco IOS commits changes to the running config immediately.
+
+        Raises
+        ------
+        NotImplementedError
+            Always.  Use ``write memory`` explicitly if non-volatile persistence
+            is required, or implement a subclass that calls the appropriate
+            playbook.
+        """
+        raise NotImplementedError(
+            f"save_config is not supported for Cisco IOS device '{device.name}'. "
+            "Cisco IOS writes changes to the running config automatically."
+        )
+
+    # ── VLAN query operations ─────────────────────────────────────────────────
+
+    def list_vlans(self, device: Device, password: str) -> list[VLAN]:
+        """Return all user VLANs configured on *device*.
+
+        Runs the ``get_vlans`` playbook, strips ANSI escape codes from the
+        IOS ``show vlan brief`` output, and delegates parsing to
+        ``parse_vlan_brief``.
+
+        Parameters
+        ----------
+        device:
+            Domain device object exposing .name, .host, .username.
+        password:
+            Plaintext device password (decrypted by caller before passing in).
+
+        Returns
+        -------
+        list[VLAN]
+            Normalized VLAN entries, excluding IOS-internal VLANs 1 and
+            1002–1005.
+
+        Raises
+        ------
+        RuntimeError
+            If the playbook returns a non-zero exit code.
+        """
+        logger.info("CiscoVendor: list VLANs on device=%s", device.name)
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_GET,
+                extravars={"device": device.name},
+                inventory=_build_inventory(device, password),
+            )
+            if result["rc"] != 0:
+                error = result.get("stderr") or result.get("stdout") or "get_vlans playbook failed"
+                logger.error(
+                    "CiscoVendor: list VLANs on device=%s — FAILED: %s",
+                    device.name, error,
+                )
+                raise RuntimeError(error)
+            from app.services.parsers.vlan_parser import parse_vlan_brief
+            vlans = parse_vlan_brief(result["stdout"])
+            logger.info(
+                "CiscoVendor: list VLANs on device=%s — returned %d VLANs",
+                device.name, len(vlans),
+            )
+            return vlans
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [list_vlans device=%s]: %s\n%s",
+                device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def get_vlans(self, device: Device, password: str) -> list[VLAN]:
+        """Backward-compatible alias for ``list_vlans()``.
+
+        All existing callers continue to work without modification.
+        New code should call ``list_vlans()`` directly.
+        """
+        return self.list_vlans(device, password)
+
+    # ── Port query operation ──────────────────────────────────────────────────
 
     def list_ports(self, device: Device, password: str) -> list[PortInfo]:
         """Return all physical switchports on *device* as ``PortInfo`` objects.
@@ -150,7 +365,7 @@ class CiscoPortDriver(BasePortDriver):
         )
         return ports
 
-    # ── Mutation operations ──────────────────────────────────────────────────
+    # ── Port mutation operations ──────────────────────────────────────────────
 
     def update_port_description(
         self,
@@ -355,7 +570,7 @@ class CiscoPortDriver(BasePortDriver):
             )
             raise
 
-    # ── Step 3.1 composite / semantic stubs ─────────────────────────────────────
+    # ── Step 3.1 composite / semantic stubs ───────────────────────────────────
 
     def configure_port(
         self,
@@ -365,7 +580,7 @@ class CiscoPortDriver(BasePortDriver):
     ) -> PortConfigResult:
         """Composite port configuration — Step 3.1 stub (not yet implemented)."""
         raise NotImplementedError(
-            "CiscoPortDriver.configure_port is not yet implemented — "
+            "CiscoVendor.configure_port is not yet implemented — "
             "use the individual set_port_* methods for now"
         )
 
@@ -377,7 +592,7 @@ class CiscoPortDriver(BasePortDriver):
     ) -> dict:
         """Shut down *interface* — Step 3.1 stub (not yet implemented)."""
         raise NotImplementedError(
-            "CiscoPortDriver.shutdown_port is not yet implemented — "
+            "CiscoVendor.shutdown_port is not yet implemented — "
             "use set_port_admin_state(enabled=False) for now"
         )
 
@@ -389,7 +604,7 @@ class CiscoPortDriver(BasePortDriver):
     ) -> dict:
         """Enable *interface* — Step 3.1 stub (not yet implemented)."""
         raise NotImplementedError(
-            "CiscoPortDriver.enable_port is not yet implemented — "
+            "CiscoVendor.enable_port is not yet implemented — "
             "use set_port_admin_state(enabled=True) for now"
         )
 

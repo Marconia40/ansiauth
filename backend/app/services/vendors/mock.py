@@ -5,8 +5,7 @@ from typing import TYPE_CHECKING
 
 from app.models.port import PortConfigResult, PortInfo
 from app.models.vlan import VLAN
-from app.services.vendors.base import BaseVendorDriver
-from app.services.vendors.port_driver_base import BasePortDriver
+from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
@@ -38,13 +37,53 @@ def reset_mock_vlans() -> None:
     )
 
 
-class MockVlanDriver(BaseVendorDriver):
-    """Mock VLAN driver used when ``EXECUTION_MODE == "mock"``.
+_INITIAL_MOCK_PORTS: list[PortInfo] = [
+    PortInfo(
+        name="GigabitEthernet0/0/1",
+        description="Workstation-01",
+        admin_up=True,
+        operational_up=True,
+        mode="access",
+        access_vlan=10,
+        allowed_vlans=None,
+    ),
+    PortInfo(
+        name="GigabitEthernet0/0/2",
+        description="Workstation-02",
+        admin_up=True,
+        operational_up=False,
+        mode="access",
+        access_vlan=20,
+        allowed_vlans=None,
+    ),
+    PortInfo(
+        name="GigabitEthernet0/0/24",
+        description="Uplink to core",
+        admin_up=True,
+        operational_up=True,
+        mode="trunk",
+        access_vlan=1,
+        allowed_vlans=[10, 20, 30],
+    ),
+]
 
-    Mirrors vlan_service.py's ``_mock_create_vlan``/``_mock_delete_vlan``/
-    ``_mock_update_vlan`` module-level functions. A device named
-    ``"fail_device"`` simulates an Ansible failure, matching the legacy
-    free-function behavior exactly.
+
+class MockVendor(VendorDriver):
+    """Mock driver used when ``EXECUTION_MODE == "mock"`` — VLAN + port
+    operations fused into one class (FINAL_ARCHITECTURE.md §1.6;
+    ``Device.driver`` is a single property, ver
+    `docs/migracion-final-architecture/FASE_1.md` A2).
+
+    VLAN methods mirror vlan_service.py's ``_mock_create_vlan``/
+    ``_mock_delete_vlan``/``_mock_update_vlan`` module-level functions. A
+    device named ``"fail_device"`` simulates an Ansible failure, matching
+    the legacy free-function behavior exactly.
+
+    Port methods mirror port_service.py's ``_mock_list_ports`` and the
+    mock-mode branches of its mutation functions. Only the 6 operations
+    ``Device`` exposes (§6.1 of docs/DEVICE_IMPLEMENTATION_PLAN.md) are
+    overridden; the rest keep ``VendorDriver``'s ``NotImplementedError``
+    defaults since ``Device`` never calls them.
     """
 
     def create_vlan(self, vlan_id: int, name: str, device: "Device", password: str) -> dict:
@@ -79,48 +118,6 @@ class MockVlanDriver(BaseVendorDriver):
     def get_vlans(self, device: "Device", password: str) -> list[VLAN]:
         logger.info("Mock: returning hardcoded VLAN list")
         return list(_mock_vlans)
-
-
-_INITIAL_MOCK_PORTS: list[PortInfo] = [
-    PortInfo(
-        name="GigabitEthernet0/0/1",
-        description="Workstation-01",
-        admin_up=True,
-        operational_up=True,
-        mode="access",
-        access_vlan=10,
-        allowed_vlans=None,
-    ),
-    PortInfo(
-        name="GigabitEthernet0/0/2",
-        description="Workstation-02",
-        admin_up=True,
-        operational_up=False,
-        mode="access",
-        access_vlan=20,
-        allowed_vlans=None,
-    ),
-    PortInfo(
-        name="GigabitEthernet0/0/24",
-        description="Uplink to core",
-        admin_up=True,
-        operational_up=True,
-        mode="trunk",
-        access_vlan=1,
-        allowed_vlans=[10, 20, 30],
-    ),
-]
-
-
-class MockPortDriver(BasePortDriver):
-    """Mock port driver used when ``EXECUTION_MODE == "mock"``.
-
-    Mirrors port_service.py's ``_mock_list_ports`` and the mock-mode branches
-    of its mutation functions. Only the 6 operations ``Device`` exposes
-    (§6.1 of docs/DEVICE_IMPLEMENTATION_PLAN.md) are overridden; the rest
-    keep ``BasePortDriver``'s ``NotImplementedError`` defaults since
-    ``Device`` never calls them.
-    """
 
     def list_ports(self, device: "Device", password: str) -> list["PortInfo"]:
         if device.name == "fail_device":
