@@ -178,12 +178,16 @@ strings):
 ```python
     @classmethod
     def desde(cls, evento: "DomainEvent") -> "AuditRecord":
-        import uuid
         from datetime import datetime, timezone
 
         accion = evento.payload.get("accion", evento.tipo)
         return cls(
-            id=str(uuid.uuid4()),  # provisorio -- AuditRepository.append() lo reemplaza al persistir, ver B1
+            # id -- NO se pasa acá, usa el default_factory del propio campo
+            # (arriba). Mismo resultado que pasar id=str(uuid.uuid4()) a mano
+            # -- provisorio, AuditRepository.append() lo reemplaza al
+            # persistir, ver B1 -- sin repetir el uuid.uuid4() que el campo
+            # ya hace solo. Corrección real sobre una versión anterior de esta
+            # fase, que sí lo pasaba explícito.
             timestamp=datetime.now(timezone.utc),
             user=evento.actor,
             action=accion,
