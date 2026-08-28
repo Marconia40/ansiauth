@@ -167,7 +167,15 @@ def _seed_test_role_users_with_full_visibility():
             ))
 
     with get_session() as session:
-        all_site_ids = [r[0] for r in session.query(SiteModel.id).all()]
+        # MSP: Phase 1 — exclude BASE_INFRASTRUCTURE from the "all sites"
+        # grant. Per D14, Base Infra is only visible to system-admins.
+        # Preserves the pre-MSP semantics: this fixture grants "every regular
+        # site" to operator/observer, which historically meant "every site".
+        all_site_ids = [
+            r[0] for r in session.query(SiteModel.id).filter(
+                SiteModel.kind == "REGULAR"
+            ).all()
+        ]
         for role in ("observer", "operator"):
             user_row = session.query(UserModel).filter_by(username=role).first()
             if user_row is None:

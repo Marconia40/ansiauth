@@ -46,6 +46,7 @@ Thumbs.db
 # =========================
 logs/
 *.log
+diff.txt
 
 # =========================
 # Secrets / Keys
@@ -77,9 +78,11 @@ docs/pull-req/
 docs/project-management/
 docs/script-trello/
 docs/refactor-steps/
-
+docs/upgrades/old/
 
 # =========================
 # Database files
 # =========================
 backend/app/db/*.db
+snapshots/
+scripts/db-snapshot.sh

@@ -1,6 +1,20 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    func,
+)
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -15,6 +29,12 @@ class UserModel(Base):
     hashed_password = Column(String, nullable=False)
     role = Column(String, nullable=False, default="observer")
     is_active = Column(Boolean, nullable=False, default=True)
+    # MSP: Phase 1 — replaces `role` for system-wide privilege. Populated by
+    # Phase 2 backfill (role IN ('admin','super-admin') → TRUE). Read starting
+    # Phase 3.
+    is_system_admin = Column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -73,6 +93,17 @@ class DeviceModel(Base):
         nullable=True,
         index=True,
     )
+    # MSP: Phase 1 — new authoritative FK for Device→Group. Nullable until
+    # Phase 2 backfill; flipped NOT NULL in Phase 4 (msp_enforce).
+    device_group_id = Column(
+        Integer,
+        ForeignKey(
+            "device_groups.id", use_alter=True, name="fk_devices_device_group_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -85,6 +116,13 @@ class DeviceModel(Base):
         cascade="all, delete-orphan",
     )
     site = relationship("SiteModel", back_populates="devices")
+    # MSP: Phase 1 — direct relationship to the owning group. foreign_keys
+    # disambiguates from the M2M (device_group_members) that goes away in Phase 5.
+    device_group = relationship(
+        "DeviceGroupModel",
+        foreign_keys=[device_group_id],
+        uselist=False,
+    )
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_name"),)
 
@@ -182,6 +220,11 @@ class DeviceGroupModel(Base):
         nullable=True,
         index=True,
     )
+    # MSP: Phase 1 — marks the Site's Default group. Immutable per D7:
+    # cannot be renamed, deleted, or demoted while the Site exists.
+    is_default = Column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -193,7 +236,13 @@ class DeviceGroupModel(Base):
         back_populates="group",
         cascade="all, delete-orphan",
     )
-    site = relationship("SiteModel", back_populates="device_groups")
+    # foreign_keys disambiguates from the reverse SiteModel.default_group_id
+    # FK that MSP Phase 1 introduced (two FK paths connect the tables now).
+    site = relationship(
+        "SiteModel",
+        back_populates="device_groups",
+        foreign_keys=[site_id],
+    )
 
     __table_args__ = (UniqueConstraint("name", name="uq_device_group_name"),)
 
@@ -204,6 +253,22 @@ class SiteModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True, index=True)
     description = Column(String, nullable=True)
+    # MSP: Phase 1 — 'REGULAR' | 'BASE_INFRASTRUCTURE'. Phase 4 adds a partial
+    # unique index enforcing exactly one BASE_INFRASTRUCTURE row.
+    kind = Column(
+        String(32), nullable=False, default="REGULAR", server_default="REGULAR"
+    )
+    # MSP: Phase 1 — FK to the Site's Default DeviceGroup. Cyclic
+    # (sites↔device_groups); the FK uses use_alter and is nullable at the DB
+    # layer. Populated inside site-creation transaction; app enforces NOT NULL.
+    default_group_id = Column(
+        Integer,
+        ForeignKey(
+            "device_groups.id", use_alter=True, name="fk_sites_default_group_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -217,11 +282,23 @@ class SiteModel(Base):
     )
 
     devices = relationship("DeviceModel", back_populates="site")
-    device_groups = relationship("DeviceGroupModel", back_populates="site")
+    device_groups = relationship(
+        "DeviceGroupModel",
+        back_populates="site",
+        foreign_keys="DeviceGroupModel.site_id",
+    )
     allowed_users = relationship(
         "UserModel",
         secondary="user_allowed_sites",
         back_populates="allowed_sites",
+    )
+    # MSP: Phase 1 — direct relationship to the Default group. post_update=True
+    # breaks the cyclic FK at flush time.
+    default_group = relationship(
+        "DeviceGroupModel",
+        foreign_keys=[default_group_id],
+        post_update=True,
+        uselist=False,
     )
 
     __table_args__ = (UniqueConstraint("name", name="uq_site_name"),)
@@ -244,4 +321,69 @@ class DeviceGroupMemberModel(Base):
 
     __table_args__ = (
         UniqueConstraint("group_id", "device_name", name="uq_group_member"),
+    )
+
+
+class RoleAssignmentModel(Base):
+    """MSP: Phase 1 — per-scope grant.
+
+    Replaces the single global ``UserModel.role`` + ``user_allowed_sites`` M2M.
+    A user may hold multiple grants; ``effective_role(user, resource)`` picks
+    the most specific one at request time (see Phase 3 services/effective_role).
+
+    ``device_group_id IS NULL`` → site-wide grant covering every current and
+    future group in the site. ``device_group_id`` set → group-specific grant;
+    most-specific wins per resource.
+    """
+
+    __tablename__ = "role_assignments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    site_id = Column(
+        Integer,
+        ForeignKey("sites.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    device_group_id = Column(
+        Integer,
+        ForeignKey("device_groups.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    role = Column(String(32), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
+    created_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    user = relationship("UserModel", foreign_keys=[user_id])
+    created_by = relationship("UserModel", foreign_keys=[created_by_user_id])
+    site = relationship("SiteModel")
+    device_group = relationship("DeviceGroupModel")
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('observer', 'operator', 'admin')",
+            name="ck_role_assignments_role",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "site_id",
+            "device_group_id",
+            name="uq_role_assignments_scope",
+        ),
     )
