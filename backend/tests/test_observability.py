@@ -55,6 +55,7 @@ def test_execution_summary_attempts_after_retries(client, monkeypatch):
 
     monkeypatch.setattr(ansible_service, "run_playbook", _transient_then_succeed)
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
+    monkeypatch.setattr("app.core.config.EXECUTION_MODE", "real")
     monkeypatch.setattr(vlans_module, "_RETRY_BASE_DELAY", 0.01)
 
     resp = client.post(

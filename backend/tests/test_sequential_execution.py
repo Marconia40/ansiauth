@@ -241,8 +241,8 @@ def test_delete_failure_isolation(client, monkeypatch):
     _seed_devices(("del_a", "10.50.10.1"), ("del_b", "10.50.10.2"))
 
     # Patch get_vlans so all devices "see" the VLAN as present (pre-existence check).
-    from app.models.vlan import VLANInfo
-    mock_with_vlan = [VLANInfo(vlan_id=555, name="DELTEST")]
+    from app.models.vlan import VLAN
+    mock_with_vlan = [VLAN(vlan_id=555, name="DELTEST")]
 
     executed_delete: list[str] = []
     executed_get: list[str] = []
@@ -281,7 +281,7 @@ def test_delete_all_succeed(client, monkeypatch):
     """Delete: all devices succeed → completed."""
     _seed_devices(("del_c", "10.50.11.1"), ("del_d", "10.50.11.2"))
 
-    from app.models.vlan import VLANInfo
+    from app.models.vlan import VLAN
 
     call_counts: dict[str, int] = {}
 
@@ -291,7 +291,7 @@ def test_delete_all_succeed(client, monkeypatch):
             # First call: VLAN present (existence check and pre_state)
             # Second call: VLAN absent (post-delete verification)
             if call_counts[device_id] <= 2:
-                return [VLANInfo(vlan_id=556, name="DTEST")]
+                return [VLAN(vlan_id=556, name="DTEST")]
         return []
 
     def succeed_delete(vlan_id, device_id):

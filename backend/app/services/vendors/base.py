@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.vlan import VLANInfo
+    from app.models.vlan import VLAN
 
 
 class BaseVendorDriver(ABC):
@@ -24,8 +24,8 @@ class BaseVendorDriver(ABC):
             success – bool : True iff rc == 0  (normalized convenience field)
 
     Query operations (list_vlans / get_vlans / get_vlan):
-        list_vlans / get_vlans → list[VLANInfo]
-        get_vlan               → VLANInfo | None
+        list_vlans / get_vlans → list[VLAN]
+        get_vlan               → VLAN | None
     """
 
     # ── Mutation operations (must be implemented by every driver) ────────────
@@ -115,14 +115,14 @@ class BaseVendorDriver(ABC):
     # ── Query operations (abstract core + concrete normalized surface) ────────
 
     @abstractmethod
-    def get_vlans(self, device: Device, password: str) -> list[VLANInfo]:
+    def get_vlans(self, device: Device, password: str) -> list[VLAN]:
         """Return VLANs configured on *device*.
 
         Backward-compatible entry point.  New code should call
         ``list_vlans()`` instead.
 
         Implementations must parse vendor-specific CLI output and normalize
-        each entry into a ``VLANInfo`` object, excluding reserved / internal
+        each entry into a ``VLAN`` object, excluding reserved / internal
         VLANs.
 
         Parameters
@@ -134,7 +134,7 @@ class BaseVendorDriver(ABC):
 
         Returns
         -------
-        list[VLANInfo]
+        list[VLAN]
             Normalized VLAN entries.
 
         Raises
@@ -143,7 +143,7 @@ class BaseVendorDriver(ABC):
             If the playbook fails or returns unparseable output.
         """
 
-    def list_vlans(self, device: Device, password: str) -> list[VLANInfo]:
+    def list_vlans(self, device: Device, password: str) -> list[VLAN]:
         """Normalized entry point for listing VLANs on *device*.
 
         Preferred over ``get_vlans()`` in new code.  The default
@@ -161,13 +161,13 @@ class BaseVendorDriver(ABC):
 
         Returns
         -------
-        list[VLANInfo]
+        list[VLAN]
             Normalized VLAN entries.
         """
         return self.get_vlans(device, password)
 
-    def get_vlan(self, vlan_id: int, device: Device, password: str) -> VLANInfo | None:
-        """Return the ``VLANInfo`` for *vlan_id* on *device*, or ``None`` if absent.
+    def get_vlan(self, vlan_id: int, device: Device, password: str) -> VLAN | None:
+        """Return the ``VLAN`` for *vlan_id* on *device*, or ``None`` if absent.
 
         Default implementation performs a full ``list_vlans()`` scan.
         Drivers that support a more efficient single-item fetch may override
@@ -184,7 +184,7 @@ class BaseVendorDriver(ABC):
 
         Returns
         -------
-        VLANInfo | None
+        VLAN | None
             Matching VLAN entry, or ``None`` if not configured on the device.
         """
         return next(

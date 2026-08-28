@@ -50,6 +50,7 @@ def test_multi_device_inventory_matching(admin_client, monkeypatch):
 
     monkeypatch.setattr(ansible_service, "run_playbook", _capture)
     monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
+    monkeypatch.setattr("app.core.config.EXECUTION_MODE", "real")
 
     payload = {"vlan_id": 110, "name": "INVTEST", "devices": ["cisco1", "cisco2"]}
     response = admin_client.post("/api/v1/vlans/", json=payload)

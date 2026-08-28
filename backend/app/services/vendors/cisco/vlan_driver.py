@@ -9,7 +9,7 @@ from app.services.vendors.base import BaseVendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.vlan import VLANInfo
+    from app.models.vlan import VLAN
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +52,8 @@ class CiscoVlanDriver(BaseVendorDriver):
         ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
 
     Query methods return:
-        ``list_vlans`` → ``list[VLANInfo]``
-        ``get_vlan``   → ``VLANInfo | None``  (inherited default via list_vlans)
+        ``list_vlans`` → ``list[VLAN]``
+        ``get_vlan``   → ``VLAN | None``  (inherited default via list_vlans)
         ``get_vlans``  → same as ``list_vlans`` (backward-compat alias)
 
     Notes
@@ -186,7 +186,7 @@ class CiscoVlanDriver(BaseVendorDriver):
 
     # ── Query operations ──────────────────────────────────────────────────────
 
-    def list_vlans(self, device: Device, password: str) -> list[VLANInfo]:
+    def list_vlans(self, device: Device, password: str) -> list[VLAN]:
         """Return all user VLANs configured on *device*.
 
         Runs the ``get_vlans`` playbook, strips ANSI escape codes from the
@@ -202,7 +202,7 @@ class CiscoVlanDriver(BaseVendorDriver):
 
         Returns
         -------
-        list[VLANInfo]
+        list[VLAN]
             Normalized VLAN entries, excluding IOS-internal VLANs 1 and
             1002–1005.
 
@@ -241,7 +241,7 @@ class CiscoVlanDriver(BaseVendorDriver):
             )
             raise
 
-    def get_vlans(self, device: Device, password: str) -> list[VLANInfo]:
+    def get_vlans(self, device: Device, password: str) -> list[VLAN]:
         """Backward-compatible alias for ``list_vlans()``.
 
         All existing callers continue to work without modification.

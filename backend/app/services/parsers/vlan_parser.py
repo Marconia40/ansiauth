@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.models.vlan import VLANInfo
+from app.models.vlan import VLAN
 
 # IOS-internal VLANs that are not user-managed
 _IOS_INTERNAL = {1, 1002, 1003, 1004, 1005}
@@ -20,8 +20,8 @@ _VRP_VLAN_BLOCK = re.compile(r"(?:The information of )?VLAN\s+(\d+)\s*:", re.IGN
 _VRP_NAME_LINE = re.compile(r"VLAN\s+Name\s*:\s*(.+)", re.IGNORECASE)
 
 
-def parse_vrp_vlan_display(output: str) -> list[VLANInfo]:
-    """Parse 'display vlan' output from Huawei VRP devices into ``VLANInfo`` objects.
+def parse_vrp_vlan_display(output: str) -> list[VLAN]:
+    """Parse 'display vlan' output from Huawei VRP devices into ``VLAN`` objects.
 
     Supports two formats emitted by different VRP versions:
 
@@ -39,7 +39,7 @@ def parse_vrp_vlan_display(output: str) -> list[VLANInfo]:
 
     Returns
     -------
-    list[VLANInfo]
+    list[VLAN]
         Normalized VLAN entries, one per configured user VLAN.
     """
     clean_lines = [_ANSI_ESCAPE.sub("", line) for line in output.splitlines()]
@@ -55,13 +55,13 @@ def parse_vrp_vlan_display(output: str) -> list[VLANInfo]:
     return _parse_vrp_block(clean_lines)
 
 
-def _parse_vrp_tabular(lines: list[str]) -> list[VLANInfo]:
+def _parse_vrp_tabular(lines: list[str]) -> list[VLAN]:
     """Parse the detail table section of 'display vlan' output.
 
     Expected columns (9 fixed fields before optional description):
       ``VID  Type  Status  Property  MAC-LRN  STAT  BC  MC  UC  [Description…]``
     """
-    vlans: list[VLANInfo] = []
+    vlans: list[VLAN] = []
     for line in lines:
         line = line.strip()
         if not line or line.startswith("-"):
@@ -74,16 +74,16 @@ def _parse_vrp_tabular(lines: list[str]) -> list[VLANInfo]:
             continue
         # columns 1-8 are Type/Status/Property/MAC-LRN/STAT/BC/MC/UC; rest is description
         description = " ".join(parts[9:]).strip() if len(parts) > 9 else ""
-        vlans.append(VLANInfo(
+        vlans.append(VLAN(
             vlan_id=vlan_id,
             name=description or f"VLAN{vlan_id:04d}",
         ))
     return vlans
 
 
-def _parse_vrp_block(lines: list[str]) -> list[VLANInfo]:
+def _parse_vrp_block(lines: list[str]) -> list[VLAN]:
     """Parse block-style 'display vlan' output (older VRP devices)."""
-    vlans: list[VLANInfo] = []
+    vlans: list[VLAN] = []
     current_id: int | None = None
     current_name: str | None = None
 
@@ -92,7 +92,7 @@ def _parse_vrp_block(lines: list[str]) -> list[VLANInfo]:
         block_match = _VRP_VLAN_BLOCK.match(line)
         if block_match:
             if current_id is not None and current_id not in _VRP_INTERNAL:
-                vlans.append(VLANInfo(
+                vlans.append(VLAN(
                     vlan_id=current_id,
                     name=current_name or f"VLAN{current_id:04d}",
                 ))
@@ -105,7 +105,7 @@ def _parse_vrp_block(lines: list[str]) -> list[VLANInfo]:
                 current_name = name_match.group(1).strip().rstrip(".")
 
     if current_id is not None and current_id not in _VRP_INTERNAL:
-        vlans.append(VLANInfo(
+        vlans.append(VLAN(
             vlan_id=current_id,
             name=current_name or f"VLAN{current_id:04d}",
         ))
@@ -113,8 +113,8 @@ def _parse_vrp_block(lines: list[str]) -> list[VLANInfo]:
     return vlans
 
 
-def parse_vlan_brief(output: str) -> list[VLANInfo]:
-    """Parse 'show vlan brief' output from Cisco IOS into ``VLANInfo`` objects.
+def parse_vlan_brief(output: str) -> list[VLAN]:
+    """Parse 'show vlan brief' output from Cisco IOS into ``VLAN`` objects.
 
     Handles real newlines (from events API) and strips any residual ANSI codes.
     Skips IOS-internal VLANs (1, 1002-1005) and non-VLAN lines (headers, ports).
@@ -126,15 +126,15 @@ def parse_vlan_brief(output: str) -> list[VLANInfo]:
 
     Returns
     -------
-    list[VLANInfo]
+    list[VLAN]
         Normalized VLAN entries, one per user-accessible VLAN.
     """
-    vlans: list[VLANInfo] = []
+    vlans: list[VLAN] = []
     for line in output.splitlines():
         line = _ANSI_ESCAPE.sub("", line)
         parts = line.split()
         if len(parts) >= 2 and parts[0].isdigit():
             vlan_id = int(parts[0])
             if vlan_id not in _IOS_INTERNAL:
-                vlans.append(VLANInfo(vlan_id=vlan_id, name=parts[1]))
+                vlans.append(VLAN(vlan_id=vlan_id, name=parts[1]))
     return vlans
