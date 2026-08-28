@@ -65,6 +65,27 @@ class Repository(Generic[T]):
     def add(self, entidad: T) -> T:
         with get_session() as session:
             row = self._to_orm(entidad)
+            pk_reales = [c.name for c in self._orm_model.__mapper__.primary_key]
+            if list(self._pk_field) != pk_reales:
+                # pk_field (identidad de negocio) no coincide con la PK real
+                # mapeada en SQLAlchemy (ej. Job: pk_field="job_id", PK real
+                # autoincrement "id") -- session.merge() identifica filas por
+                # la PK real, no por pk_field, así que sobre una fila nueva
+                # con "id"=None siempre haría INSERT, nunca encontraría la
+                # fila existente por job_id/name. Buscarla primero por
+                # pk_field y copiar su PK real antes de mergear, para que
+                # merge() sí la reconozca como update. No hace falta para
+                # entidades cuya PK real YA es pk_field (VLAN, Puerto -- PK
+                # compuesta sin id separado, ver FASE_1.md/FASE_2.md).
+                valores_pk = tuple(getattr(entidad, campo) for campo in self._pk_field)
+                existente = (
+                    session.query(self._orm_model)
+                    .filter_by(**self._pk_filtro(valores_pk))
+                    .first()
+                )
+                if existente is not None:
+                    for campo in pk_reales:
+                        setattr(row, campo, getattr(existente, campo))
             merged = session.merge(row)
             session.flush()
             return self._to_domain(merged)

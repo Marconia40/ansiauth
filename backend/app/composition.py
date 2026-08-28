@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from app.core.repository import Repository
 from app.db.models import DeviceVlanModel, DevicePortModel
+from app.repositories.job_repository import JobRepository
 from app.services.plugin_registry import PluginRegistry
 
 
@@ -69,3 +70,5 @@ def _puerto_to_domain(row) -> "Puerto":
 puerto_repository = Repository(
     DevicePortModel, _puerto_to_domain, _puerto_to_orm, pk_field=("interface", "device"),
 )
+
+job_repository = JobRepository()

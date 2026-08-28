@@ -133,6 +133,11 @@ class JobModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     job_id = Column(String, nullable=False, unique=True, index=True)
     status = Column(String, nullable=False, default="pending", index=True)
+    # MSP: Fase 4 de la migración a FINAL_ARCHITECTURE.md -- GroupJob.operation
+    # (ej. "create_vlan") es un dato real que GET /group-jobs/{id} expone hoy;
+    # sin esta columna, JobRepository.resumen_de_grupo() (Fase 4 A3) no tiene
+    # de dónde sacarlo al eliminar GroupJob (A2).
+    operation = Column(String, nullable=True)
     playbook = Column(String, nullable=True)
     device = Column(String, nullable=True)
     parameters = Column(JSON, nullable=True)
