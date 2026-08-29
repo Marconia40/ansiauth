@@ -21,7 +21,8 @@ from jwt import PyJWTError
 from app.core.security import verify_token
 from app.db.models import DeviceGroupModel, DeviceModel, SiteModel, UserModel
 from app.db.session import get_session
-from app.services.effective_role import effective_role
+from app.models.visibility_scope import VisibilityScope
+from app.repositories.role_assignment_repository import RoleAssignmentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,25 @@ def require_system_admin(current: dict = Depends(require_authenticated)) -> dict
 
 # ─── Scope dependency ───────────────────────────────────────────────────────
 
+def obtener_scope(
+    current: dict = Depends(require_authenticated),
+) -> VisibilityScope:
+    """Resolve the caller's full VisibilityScope once per request.
+
+    FastAPI caches dependency results within a single request, so every
+    ``require_scope``-guarded endpoint shares the one scope built here —
+    no matter how many per-resource checks the handler runs.
+
+    The repository is fetched via the composition-layer factory so tests
+    can inject a fake through ``app.dependency_overrides`` without
+    reaching for module-level singletons.
+    """
+    from app.composition import get_role_assignment_repo
+
+    repo: RoleAssignmentRepository = get_role_assignment_repo()
+    return repo.scope_de(current)
+
+
 def require_scope(op: str):
     """FastAPI dependency factory for per-scope authorization.
 
@@ -145,9 +165,10 @@ def require_scope(op: str):
     async def dep(
         request: Request,
         current: dict = Depends(require_authenticated),
+        scope: VisibilityScope = Depends(obtener_scope),
     ) -> dict:
         if op == "move_device":
-            await _authorize_move_device(request, current)
+            await _authorize_move_device(request, current, scope)
             return current
 
         cfg = OP_MIN_ROLE.get(op)
@@ -166,9 +187,8 @@ def require_scope(op: str):
                 ),
             )
 
-        with get_session() as session:
-            role = effective_role(session, current, scope_kind, target)
-
+        resolved = _resolver_site_group(target, scope_kind)
+        role = scope.rol_para(*resolved) if resolved is not None else None
         _enforce(role, min_role, op, scope_kind, target)
         return current
 
@@ -177,7 +197,9 @@ def require_scope(op: str):
 
 # ─── Move-device dispatcher ─────────────────────────────────────────────────
 
-async def _authorize_move_device(request: Request, current: dict) -> None:
+async def _authorize_move_device(
+    request: Request, current: dict, scope: VisibilityScope,
+) -> None:
     """Dispatch ``move_device`` to same-site vs cross-site and enforce.
 
     Called only for ``POST /devices/{name}/move``. Semantics:
@@ -200,7 +222,7 @@ async def _authorize_move_device(request: Request, current: dict) -> None:
             # Device not found or not placed in a valid group yet. Let the
             # handler surface 404; deny here so we don't leak existence.
             raise HTTPException(status_code=404, detail=f"Device '{name}' not found")
-        src_site_id, _src_group_id = source
+        src_site_id, src_group_id = source
 
         if body_group_id is None:
             # D8: null → current site's Default group. Guaranteed to exist
@@ -227,23 +249,23 @@ async def _authorize_move_device(request: Request, current: dict) -> None:
                 )
             target_site_id = row[0]
 
-        same_site = target_site_id == src_site_id
+    same_site = target_site_id == src_site_id
 
-        if same_site:
-            role = effective_role(session, current, "device", name)
+    if same_site:
+        role = scope.rol_para(src_site_id, src_group_id)
+        _enforce(
+            role, "operator", "move_device_same_site", "device", name,
+        )
+    else:
+        # Cross-site: caller must be admin on BOTH source group's site and
+        # target site (D16 — take the min of the two effective roles).
+        src_role = scope.rol_para(src_site_id, src_group_id)
+        dst_role = scope.rol_para(target_site_id, None)
+        for label, role in (("source", src_role), ("target", dst_role)):
             _enforce(
-                role, "operator", "move_device_same_site", "device", name,
+                role, "admin", "move_device_cross_site",
+                "site", target_site_id if label == "target" else src_site_id,
             )
-        else:
-            # Cross-site: caller must be admin on BOTH source group's site and
-            # target site (D16 — take the min of the two effective roles).
-            src_role = effective_role(session, current, "device", name)
-            dst_role = effective_role(session, current, "site", target_site_id)
-            for label, role in (("source", src_role), ("target", dst_role)):
-                _enforce(
-                    role, "admin", "move_device_cross_site",
-                    "site", target_site_id if label == "target" else src_site_id,
-                )
 
 
 # ─── Resource-resolution helpers ────────────────────────────────────────────
@@ -336,6 +358,46 @@ async def _peek_json_body(request: Request) -> dict:
     except (ValueError, TypeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _resolver_site_group(
+    target, scope_kind: str,
+) -> Optional[Tuple[int, Optional[int]]]:
+    """Resolve a target into ``(site_id, device_group_id | None)`` — the
+    coordinates ``VisibilityScope.rol_para()`` needs to answer in memory.
+
+    Absorbs the SQL side of the old ``effective_role`` path: site targets
+    need no query, device_group targets need one JOIN-less lookup, and
+    device targets defer to ``_lookup_device_scope`` (which stays put
+    because ``_authorize_move_device`` also needs it directly for the
+    move dispatcher).
+
+    Returns ``None`` when the target does not exist — the caller turns
+    that into a 403 via ``_enforce(role=None, ...)``.
+    """
+    if scope_kind == "site":
+        try:
+            return (int(target), None)
+        except (TypeError, ValueError):
+            return None
+    if scope_kind == "device_group":
+        try:
+            group_id = int(target)
+        except (TypeError, ValueError):
+            return None
+        with get_session() as session:
+            row = (
+                session.query(DeviceGroupModel.site_id)
+                .filter(DeviceGroupModel.id == group_id)
+                .first()
+            )
+        if row is None or row[0] is None:
+            return None
+        return (int(row[0]), group_id)
+    if scope_kind == "device":
+        with get_session() as session:
+            return _lookup_device_scope(session, str(target))
+    raise ValueError(f"unknown scope_kind: {scope_kind!r}")
 
 
 def _lookup_device_scope(session, name: str) -> Optional[Tuple[int, Optional[int]]]:
