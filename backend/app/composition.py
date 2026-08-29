@@ -12,6 +12,7 @@ from __future__ import annotations
 from app.core.repository import Repository
 from app.db.models import DeviceVlanModel, DevicePortModel
 from app.repositories.job_repository import JobRepository
+from app.repositories.role_assignment_repository import RoleAssignmentRepository
 from app.services.plugin_registry import PluginRegistry
 from app.services.redis_coordinator import RedisCoordinator
 from app.services.secret_service import vault as secret_vault  # noqa: F401
@@ -74,3 +75,13 @@ puerto_repository = Repository(
 )
 
 job_repository = JobRepository()
+
+role_assignment_repository = RoleAssignmentRepository()
+
+
+def get_role_assignment_repo() -> RoleAssignmentRepository:
+    """FastAPI dependency shim over the module-level singleton — lets
+    tests override authorization via ``app.dependency_overrides`` without
+    reaching for EXECUTION_MODE or a fresh DB.
+    """
+    return role_assignment_repository
