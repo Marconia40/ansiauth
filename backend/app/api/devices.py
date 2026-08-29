@@ -3,11 +3,10 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.core.scope import require_authenticated, require_scope
-from app.db.session import get_session
+from app.core.scope import obtener_scope, require_authenticated, require_scope, resolver_site_group
+from app.models.visibility_scope import VisibilityScope
 from app.schemas.device import DeviceCreate, DeviceMove, DevicePublic, DeviceUpdate
 from app.services import audit_service, device_service
-from app.services.effective_role import effective_role
 from app.services.inventory_service import Inventory
 
 logger = logging.getLogger(__name__)
@@ -51,12 +50,16 @@ def list_devices(
     summary="Get device",
     description="Return a single device by its unique name. Requires observer role or higher.",
 )
-def get_device(name: str, current_user: dict = Depends(require_authenticated)):
+def get_device(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
     device = device_service.get_device(name)
     if not device:
         raise NotFoundError(f"Device '{name}' not found")
-    with get_session() as session:
-        role = effective_role(session, current_user, "device", name)
+    resolved = resolver_site_group(name, "device")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if role is None:
         raise NotFoundError(f"Device '{name}' not found")
     return {"success": True, "data": _to_public(device)}
@@ -74,11 +77,11 @@ def get_device(name: str, current_user: dict = Depends(require_authenticated)):
 def create_device(
     data: DeviceCreate,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
-    # The scope dep can't be swapped at runtime, and `site_id` lives in the
-    # body — run effective_role inline for the auth check.
-    with get_session() as session:
-        role = effective_role(session, current_user, "site", data.site_id) if data.site_id else None
+    # site_id lives in the body, not the path — the require_scope dep
+    # can't pre-resolve it, so this stays imperative.
+    role = scope.rol_para(data.site_id, None) if data.site_id else None
     if not current_user.get("is_system_admin") and role != "admin":
         raise HTTPException(
             status_code=403,
@@ -117,12 +120,13 @@ def update_device(
     name: str,
     data: DeviceUpdate,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     provided = data.model_dump(exclude_unset=True)
     if not provided:
         raise ValidationError("No fields provided for update")
-    with get_session() as session:
-        role = effective_role(session, current_user, "device", name)
+    resolved = resolver_site_group(name, "device")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if not current_user.get("is_system_admin") and role != "admin":
         raise HTTPException(
             status_code=403,
@@ -185,12 +189,13 @@ def move_device(
 def save_device_config(
     name: str,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     device = device_service.get_device(name)
     if not device:
         raise NotFoundError(f"Device '{name}' not found")
-    with get_session() as session:
-        role = effective_role(session, current_user, "device", name)
+    resolved = resolver_site_group(name, "device")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if _ROLE_LEVEL.get(role or "", 0) < _ROLE_LEVEL["operator"]:
         raise HTTPException(
             status_code=403,
@@ -209,9 +214,13 @@ def save_device_config(
     summary="Delete device",
     description="Permanently remove a device from the inventory. Requires admin on the device.",
 )
-def delete_device(name: str, current_user: dict = Depends(require_authenticated)):
-    with get_session() as session:
-        role = effective_role(session, current_user, "device", name)
+def delete_device(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    resolved = resolver_site_group(name, "device")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if not current_user.get("is_system_admin") and role != "admin":
         raise HTTPException(
             status_code=403,

@@ -3,13 +3,13 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.core.scope import require_authenticated
+from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
 from app.db.models import DeviceGroupModel, DeviceModel
 from app.db.session import get_session
+from app.models.visibility_scope import VisibilityScope
 from app.schemas.device_group import DeviceGroupCreate
 from app.services import audit_service, device_group_service
 from app.services.device_group_service import DefaultGroupImmutableError
-from app.services.effective_role import effective_role
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,9 +40,9 @@ def _reject_if_default(group_id: int) -> None:
 def create_group(
     data: DeviceGroupCreate,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
-    with get_session() as session:
-        role = effective_role(session, current_user, "site", data.site_id)
+    role = scope.rol_para(data.site_id, None)
     if not current_user.get("is_system_admin") and role != "admin":
         raise ValidationError(
             f"create_group requires admin on site {data.site_id} (got {role or 'none'})"
@@ -83,12 +83,16 @@ def list_groups(current_user: dict = Depends(require_authenticated)):
     summary="Get device group",
     description="Return a single device group by ID, including its member count.",
 )
-def get_group(group_id: int, current_user: dict = Depends(require_authenticated)):
+def get_group(
+    group_id: int,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
     group = device_group_service.get_group(group_id)
     if not group:
         raise NotFoundError(f"Device group {group_id} not found")
-    with get_session() as session:
-        role = effective_role(session, current_user, "device_group", group_id)
+    resolved = resolver_site_group(group_id, "device_group")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if role is None:
         # Hide existence to non-authorized callers.
         raise NotFoundError(f"Device group {group_id} not found")
@@ -103,10 +107,14 @@ def get_group(group_id: int, current_user: dict = Depends(require_authenticated)
         "the Site's Default group (D19). Default groups cannot be deleted (D7)."
     ),
 )
-def delete_group(group_id: int, current_user: dict = Depends(require_authenticated)):
+def delete_group(
+    group_id: int,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
     _reject_if_default(group_id)
-    with get_session() as session:
-        role = effective_role(session, current_user, "device_group", group_id)
+    resolved = resolver_site_group(group_id, "device_group")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if not current_user.get("is_system_admin") and role != "admin":
         raise HTTPException(
             status_code=403,
@@ -141,12 +149,13 @@ def delete_group(group_id: int, current_user: dict = Depends(require_authenticat
 def list_group_devices(
     group_id: int,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     group = device_group_service.get_group(group_id)
     if group is None:
         raise NotFoundError(f"Device group {group_id} not found")
-    with get_session() as session:
-        role = effective_role(session, current_user, "device_group", group_id)
+    resolved = resolver_site_group(group_id, "device_group")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if role is None:
         raise NotFoundError(f"Device group {group_id} not found")
     with get_session() as session:

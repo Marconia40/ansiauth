@@ -4,19 +4,20 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.scope import require_authenticated
+from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
+from app.models.visibility_scope import VisibilityScope
 
 
 _LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
 
 
-def _authz_device(user: dict, device_name: str, *, min_role: str) -> None:
-    """Enforce read/write access to *device_name* via ``effective_role`` on
-    the per-scope grants."""
-    from app.services.effective_role import effective_role
-    from app.db.session import get_session
-    with get_session() as session:
-        role = effective_role(session, user, "device", device_name)
+def _authz_device(scope: VisibilityScope, device_name: str, *, min_role: str) -> None:
+    """Enforce read/write access to *device_name* against the caller's
+    VisibilityScope. ``device`` is a query/body parameter here — the
+    require_scope() resolver only reads path + body targets, so this
+    imperative check stays."""
+    resolved = resolver_site_group(device_name, "device")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if _LVL.get(role or "", 0) < _LVL[min_role]:
         raise HTTPException(
             status_code=403,
@@ -181,6 +182,7 @@ def _require_port_driver_with(method_name: str, device_name: str, current_user: 
 def list_ports(
     device: str | None = None,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     """Return the port inventory of *device*.
 
@@ -198,7 +200,7 @@ def list_ports(
     # Imperative authz because ``device`` is a query parameter, not path or
     # body — the require_scope resolver only reads path + body.
     if device is not None:
-        _authz_device(current_user, device, min_role="observer")
+        _authz_device(scope, device, min_role="observer")
 
     target = device if device is not None else "mock_device"
     try:
@@ -271,6 +273,7 @@ def list_ports(
 def update_port_description(
     data: PortDescriptionUpdateRequest,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     """Schedule a port-description update on a single device."""
     try:
@@ -281,7 +284,7 @@ def update_port_description(
 
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(current_user, data.device, min_role="operator")
+    _authz_device(scope, data.device, min_role="operator")
 
     # Resolve the driver and verify the operation is supported for this
     # vendor.  Returns 501 with a controlled message when not — see
@@ -317,6 +320,7 @@ def update_port_description(
 def set_port_admin_state(
     data: PortAdminStateUpdateRequest,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     """Schedule an admin-state change on a single port."""
     try:
@@ -326,7 +330,7 @@ def set_port_admin_state(
 
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(current_user, data.device, min_role="operator")
+    _authz_device(scope, data.device, min_role="operator")
 
     _require_port_driver_with("set_port_admin_state", data.device, current_user)
 
@@ -358,6 +362,7 @@ def set_port_admin_state(
 def set_port_access_vlan(
     data: PortAccessVlanUpdateRequest,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     """Schedule an access-VLAN assignment on a single port."""
     try:
@@ -368,7 +373,7 @@ def set_port_access_vlan(
 
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(current_user, data.device, min_role="operator")
+    _authz_device(scope, data.device, min_role="operator")
 
     _require_port_driver_with("set_port_access_vlan", data.device, current_user)
 
@@ -402,6 +407,7 @@ def set_port_access_vlan(
 def set_trunk_allowed_vlans(
     data: PortTrunkVlansUpdateRequest,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     """Schedule a trunk allowed-VLAN update on a single port."""
     try:
@@ -412,7 +418,7 @@ def set_trunk_allowed_vlans(
 
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(current_user, data.device, min_role="operator")
+    _authz_device(scope, data.device, min_role="operator")
 
     _require_port_driver_with("set_trunk_allowed_vlans", data.device, current_user)
 
@@ -447,6 +453,7 @@ def set_trunk_allowed_vlans(
 def configure_port(
     data: PortConfigureRequest,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     """Schedule a composite port configuration on a single port."""
     from app.models.port import PortConfigRequest
@@ -462,7 +469,7 @@ def configure_port(
 
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(current_user, data.device, min_role="operator")
+    _authz_device(scope, data.device, min_role="operator")
     _check_device_not_locked(data.device)
 
     _require_port_driver_with("configure_port", data.device, current_user)
@@ -507,6 +514,7 @@ def configure_port(
 def shutdown_port(
     data: PortShutdownRequest,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     """Schedule an administrative shutdown on a single port."""
     try:
@@ -516,7 +524,7 @@ def shutdown_port(
 
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(current_user, data.device, min_role="operator")
+    _authz_device(scope, data.device, min_role="operator")
     _check_device_not_locked(data.device)
 
     _require_port_driver_with("shutdown_port", data.device, current_user)
@@ -549,6 +557,7 @@ def shutdown_port(
 def enable_port(
     data: PortEnableRequest,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     """Schedule an administrative enable on a single port."""
     try:
@@ -558,7 +567,7 @@ def enable_port(
 
     if not device_service.get_device(data.device):
         raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(current_user, data.device, min_role="operator")
+    _authz_device(scope, data.device, min_role="operator")
     _check_device_not_locked(data.device)
 
     _require_port_driver_with("enable_port", data.device, current_user)

@@ -3,7 +3,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
-from app.core.scope import require_authenticated
+from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
+from app.models.visibility_scope import VisibilityScope
 from app.schemas.vlan import VLANCreate, VLANDelete, VLANUpdate
 from app.services import device_service, vlan_execution_service, vlan_service
 from app.services.vlan_execution_service import _capture_pre_state_vlan  # noqa: F401 — re-exported for test monkeypatching
@@ -20,23 +21,23 @@ _RETRY_BASE_DELAY: float = 1.0
 _LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
 
 
-def _authz_devices(user: dict, device_names, *, min_role: str) -> None:
-    """Enforce read/write access to every device in *device_names* via the
-    caller's ``effective_role`` (per-scope grants)."""
-    from app.services.effective_role import effective_role
-    from app.db.session import get_session
+def _authz_devices(scope: VisibilityScope, device_names, *, min_role: str) -> None:
+    """Enforce read/write access to every device in *device_names* against
+    the caller's VisibilityScope. The device→(site, group) lookup still
+    runs once per device, but the role check itself is in memory — the
+    loop no longer fires N SQL queries for authorization."""
     threshold = _LVL[min_role]
-    with get_session() as session:
-        for name in device_names:
-            role = effective_role(session, user, "device", name)
-            if _LVL.get(role or "", 0) < threshold:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        f"VLAN op on device '{name}' requires role >= {min_role} "
-                        f"(got {role or 'none'})"
-                    ),
-                )
+    for name in device_names:
+        resolved = resolver_site_group(name, "device")
+        role = scope.rol_para(*resolved) if resolved is not None else None
+        if _LVL.get(role or "", 0) < threshold:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"VLAN op on device '{name}' requires role >= {min_role} "
+                    f"(got {role or 'none'})"
+                ),
+            )
 
 
 @router.get(
@@ -52,11 +53,12 @@ def get_vlans(
     device: str | None = None,
     devices: list[str] | None = Query(default=None),
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.services import device_locks
 
     if devices:
-        _authz_devices(current_user, devices, min_role="observer")
+        _authz_devices(scope, devices, min_role="observer")
         result = {}
         for dev in devices:
             try:
@@ -77,7 +79,7 @@ def get_vlans(
         raise ValidationError("'device' query parameter is required")
 
     if device is not None:
-        _authz_devices(current_user, [device], min_role="observer")
+        _authz_devices(scope, [device], min_role="observer")
 
     try:
         if device is not None:
@@ -110,6 +112,7 @@ def get_vlans(
 def create_vlan(
     vlan: VLANCreate,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     try:
         vlan_validator.validate_vlan_id_range(vlan.vlan_id)
@@ -122,7 +125,7 @@ def create_vlan(
             raise NotFoundError(f"Device '{dev_name}' not found")
     # require_scope above authorized the first device; check every remaining
     # target so no half-successful batch slips through.
-    _authz_devices(current_user, vlan.devices, min_role="operator")
+    _authz_devices(scope, vlan.devices, min_role="operator")
     jobs, group_job_id = vlan_execution_service.enqueue_create_jobs(vlan, current_user["username"], _RETRY_BASE_DELAY)
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
@@ -140,6 +143,7 @@ def delete_vlan(
     vlan_id: int,
     data: VLANDelete,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     try:
         vlan_validator.validate_vlan_id_range(vlan_id)
@@ -152,7 +156,7 @@ def delete_vlan(
     # Legacy delete_vlan required admin; ESC-3 keeps that gate — DELETE is
     # coarser-grained than create/update (harder to reverse) so it stays
     # admin-only per device.
-    _authz_devices(current_user, data.devices, min_role="admin")
+    _authz_devices(scope, data.devices, min_role="admin")
     jobs, group_job_id = vlan_execution_service.enqueue_delete_jobs(vlan_id, data.devices, current_user["username"], _RETRY_BASE_DELAY)
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
@@ -169,6 +173,7 @@ def update_vlan(
     vlan_id: int,
     data: VLANUpdate,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     try:
         vlan_validator.validate_vlan_id_range(vlan_id)
@@ -179,6 +184,6 @@ def update_vlan(
     for dev_name in data.devices:
         if not device_service.get_device(dev_name):
             raise NotFoundError(f"Device '{dev_name}' not found")
-    _authz_devices(current_user, data.devices, min_role="operator")
+    _authz_devices(scope, data.devices, min_role="operator")
     jobs, group_job_id = vlan_execution_service.enqueue_update_jobs(vlan_id, data, current_user["username"], _RETRY_BASE_DELAY)
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}

@@ -187,7 +187,7 @@ def require_scope(op: str):
                 ),
             )
 
-        resolved = _resolver_site_group(target, scope_kind)
+        resolved = resolver_site_group(target, scope_kind)
         role = scope.rol_para(*resolved) if resolved is not None else None
         _enforce(role, min_role, op, scope_kind, target)
         return current
@@ -360,7 +360,7 @@ async def _peek_json_body(request: Request) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _resolver_site_group(
+def resolver_site_group(
     target, scope_kind: str,
 ) -> Optional[Tuple[int, Optional[int]]]:
     """Resolve a target into ``(site_id, device_group_id | None)`` — the

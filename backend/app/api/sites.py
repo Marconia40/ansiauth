@@ -3,12 +3,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
-from app.core.scope import require_authenticated, require_scope
+from app.core.scope import obtener_scope, require_authenticated, require_scope
 from app.db.models import SiteModel
 from app.db.session import get_session
+from app.models.visibility_scope import VisibilityScope
 from app.schemas.site import SiteCreate, SiteRead, SiteUpdate
 from app.services import audit_service, site_service
-from app.services.effective_role import effective_role
 from app.services.site_service import (
     BASE_INFRA_SITE_KIND,
     DEFAULT_GROUP_NAME,
@@ -83,12 +83,16 @@ def list_sites(current_user: dict = Depends(require_authenticated)):
     summary="Get site",
     description="Return a single site by ID.",
 )
-def get_site(site_id: int, current_user: dict = Depends(require_authenticated)):
+def get_site(
+    site_id: int,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
     site = site_service.get_site(site_id)
     if not site:
         raise NotFoundError(f"Site {site_id} not found")
+    role = scope.rol_para(site_id, None)
     with get_session() as session:
-        role = effective_role(session, current_user, "site", site_id)
         kind = (
             session.query(SiteModel.kind).filter(SiteModel.id == site_id).scalar()
         )
@@ -126,12 +130,12 @@ def update_site(
     site_id: int,
     data: SiteUpdate,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     changed = data.model_dump(exclude_none=True)
     if not changed:
         raise ValidationError("No fields provided for update")
-    with get_session() as session:
-        role = effective_role(session, current_user, "site", site_id)
+    role = scope.rol_para(site_id, None)
     if not current_user.get("is_system_admin") and role != "admin":
         raise HTTPException(
             status_code=403,

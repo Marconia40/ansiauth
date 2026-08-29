@@ -5,7 +5,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.exceptions import NotFoundError
-from app.core.scope import require_authenticated
+from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
+from app.models.visibility_scope import VisibilityScope
 from app.services import audit_service, job_service
 
 logger = logging.getLogger(__name__)
@@ -116,25 +117,29 @@ def list_jobs(
     summary="Get job",
     description="Return the full status and result of a single background job by its UUID. Accessible to all authenticated users.",
 )
-def get_job(job_id: str, current_user: dict = Depends(require_authenticated)):
+def get_job(
+    job_id: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
     job = job_service.get_job(job_id)
     if not job:
         raise NotFoundError(f"Job '{job_id}' not found")
     if job.device:
-        _check_device_scope(current_user, job.device, min_role="observer")
+        _check_device_scope(scope, job.device, min_role="observer")
     return {"success": True, "data": _format_job(job)}
 
 
 _LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
 
 
-def _check_device_scope(user: dict, device_name: str, *, min_role: str) -> None:
-    """Shared authz for job endpoints — resolves the caller's effective role
-    on the target device and rejects with 403 if it is below ``min_role``."""
-    from app.services.effective_role import effective_role
-    from app.db.session import get_session
-    with get_session() as session:
-        role = effective_role(session, user, "device", device_name)
+def _check_device_scope(
+    scope: VisibilityScope, device_name: str, *, min_role: str,
+) -> None:
+    """Shared authz for job endpoints — reads the caller's role on the
+    device from the pre-resolved VisibilityScope."""
+    resolved = resolver_site_group(device_name, "device")
+    role = scope.rol_para(*resolved) if resolved is not None else None
     if _LVL.get(role or "", 0) < _LVL[min_role]:
         raise HTTPException(
             status_code=403,
@@ -154,13 +159,17 @@ def _check_device_scope(user: dict, device_name: str, *, min_role: str) -> None:
         "Accessible to all authenticated users."
     ),
 )
-def cancel_job(job_id: str, current_user: dict = Depends(require_authenticated)):
+def cancel_job(
+    job_id: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
     # Look up first so we can authz before mutating state.
     existing = job_service.get_job(job_id)
     if not existing:
         raise NotFoundError(f"Job '{job_id}' not found")
     if existing.device:
-        _check_device_scope(current_user, existing.device, min_role="operator")
+        _check_device_scope(scope, existing.device, min_role="operator")
     job = job_service.cancel_job(job_id)
     if not job:
         raise NotFoundError(f"Job '{job_id}' not found")
