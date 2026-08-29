@@ -5,6 +5,7 @@ from app.core.repository import Repository
 from app.db.models import JobModel
 from app.db.session import get_session
 from app.models.job import Job
+from app.models.visibility_scope import VisibilityScope
 
 
 def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -147,3 +148,70 @@ class JobRepository(Repository):
                 for j in jobs
             ],
         }
+
+    def query(
+        self,
+        *,
+        status: Optional[str] = None,
+        device: Optional[str] = None,
+        site_id: Optional[int] = None,
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
+        scope: VisibilityScope,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[Job], int]:
+        """Paginated read of jobs, with authorization applied.
+
+        ``device`` and ``site_id`` are explicit user filters ("of what I
+        can see, show me only site X") — NOT authorization. Authorization
+        runs against ``scope`` via DeviceRepository.nombres_visibles():
+        rows whose device is outside the caller's visible set are
+        dropped. system-admin skips the visibility filter entirely.
+
+        Frontend contract: frontend/src/services/api.ts:getJobs sends
+        ``status``/``device``/``site_id`` as query params separate from
+        the JWT — this shape mirrors that.
+        """
+        # Lazy imports: composition.py imports this module at load time
+        # (job_repository singleton), so a top-level `from app.composition
+        # import device_repository` would be circular. Same trick as
+        # AuditRepository._aplicar_scope.
+        from app.composition import device_repository
+
+        with get_session() as session:
+            q = session.query(JobModel)
+            if status is not None:
+                q = q.filter(JobModel.status == status)
+            if device is not None:
+                q = q.filter(JobModel.device == device)
+            if from_date is not None:
+                q = q.filter(JobModel.created_at >= from_date)
+            if to_date is not None:
+                q = q.filter(JobModel.created_at <= to_date)
+            if site_id is not None:
+                from app.db.models import DeviceGroupModel, DeviceModel
+                nombres_site = [
+                    r[0]
+                    for r in session.query(DeviceModel.name)
+                    .join(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
+                    .filter(DeviceGroupModel.site_id == site_id)
+                    .all()
+                ]
+                if not nombres_site:
+                    return [], 0
+                q = q.filter(JobModel.device.in_(nombres_site))
+            if not scope.es_system_admin:
+                nombres = device_repository.nombres_visibles(scope)
+                if nombres is not None:
+                    if not nombres:
+                        return [], 0
+                    q = q.filter(JobModel.device.in_(nombres))
+            total = q.count()
+            rows = (
+                q.order_by(JobModel.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+                .all()
+            )
+            return [_to_domain(r) for r in rows], total
