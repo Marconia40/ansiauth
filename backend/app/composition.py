@@ -15,6 +15,7 @@ from app.repositories.audit_repository import AuditRepository
 from app.repositories.device_group_repository import DeviceGroupRepository
 from app.repositories.device_repository import DeviceRepository
 from app.repositories.job_repository import JobRepository
+from app.repositories.login_attempt_repository import LoginAttemptRepository
 from app.repositories.role_assignment_repository import RoleAssignmentRepository
 from app.services.plugin_registry import PluginRegistry
 from app.services.redis_coordinator import RedisCoordinator
@@ -86,6 +87,8 @@ device_repository = DeviceRepository()
 device_group_repository = DeviceGroupRepository()
 
 audit_repository = AuditRepository()
+
+login_attempt_repository = LoginAttemptRepository()
 
 
 def get_role_assignment_repo() -> RoleAssignmentRepository:
