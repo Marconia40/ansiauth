@@ -79,8 +79,9 @@ class MockVendor(VendorDriver):
     the legacy free-function behavior exactly.
 
     Port methods mirror port_service.py's ``_mock_list_ports`` and the
-    mock-mode branches of its mutation functions. Only the 6 operations
-    ``Device`` exposes (§6.1 of docs/DEVICE_IMPLEMENTATION_PLAN.md) are
+    mock-mode branches of its mutation functions. Only the 7 operations
+    ``Device`` exposes (§6.1 of docs/DEVICE_IMPLEMENTATION_PLAN.md, plus
+    ``set_trunk_pvid_vlan`` — added in Fase 5/A7, ver nota abajo) are
     overridden; the rest keep ``VendorDriver``'s ``NotImplementedError``
     defaults since ``Device`` never calls them.
     """
@@ -158,6 +159,25 @@ class MockVendor(VendorDriver):
             interface, device.name, vlan_id,
         )
         return {"rc": 0, "stdout": "Simulated access VLAN applied", "stderr": "", "success": True}
+
+    def set_trunk_pvid_vlan(
+        self, interface: str, vlan_id: int, device: "Device", password: str
+    ) -> dict:
+        """Agregado en Fase 5/A7 — corrección real: ``Puerto._aplicar_access_vlan()``
+        despacha acá para puertos en modo trunk (GigabitEthernet0/0/24 en
+        ``_INITIAL_MOCK_PORTS`` es trunk), pero ``MockVendor`` nunca lo
+        implementaba — heredaba el ``NotImplementedError`` default de
+        ``VendorDriver`` porque, antes de esta fase, ese camino era
+        inalcanzable (docstring de la clase decía "``Device`` never calls
+        them", cierto en ese momento). Confirmado con
+        ``test_puerto_trunk.py``/``test_api_ports.py``."""
+        if device.name == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: set trunk PVID on interface=%s device=%s vlan_id=%d",
+            interface, device.name, vlan_id,
+        )
+        return {"rc": 0, "stdout": "Simulated trunk PVID applied", "stderr": "", "success": True}
 
     def set_trunk_allowed_vlans(
         self, interface: str, vlan_list: list[int], device: "Device", password: str

@@ -4,18 +4,32 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
 from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
+from app.models.port import Puerto
 from app.models.visibility_scope import VisibilityScope
+from app.schemas.port import (
+    PortAccessVlanUpdateRequest,
+    PortAdminStateUpdateRequest,
+    PortConfigureRequest,
+    PortDescriptionUpdateRequest,
+    PortEnableRequest,
+    PortRead,
+    PortShutdownRequest,
+    PortTrunkVlansUpdateRequest,
+)
 
+logger = logging.getLogger(__name__)
+router = APIRouter()
 
 _LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
 
 
 def _authz_device(scope: VisibilityScope, device_name: str, *, min_role: str) -> None:
     """Enforce read/write access to *device_name* against the caller's
-    VisibilityScope. ``device`` is a query/body parameter here — the
+    VisibilityScope. ``device`` is a body parameter here — the
     require_scope() resolver only reads path + body targets, so this
-    imperative check stays."""
+    imperative check stays (mismo criterio que Fase 5/A6, api/vlans.py)."""
     resolved = resolver_site_group(device_name, "device")
     role = scope.rol_para(*resolved) if resolved is not None else None
     if _LVL.get(role or "", 0) < _LVL[min_role]:
@@ -26,90 +40,42 @@ def _authz_device(scope: VisibilityScope, device_name: str, *, min_role: str) ->
                 f"(got {role or 'none'})"
             ),
         )
-from app.core.exceptions import (
-    DeviceExecutionError,
-    NotFoundError,
-    UnsupportedVendorError,
-    ValidationError,
-)
-from app.schemas.port import (
-    PortAccessVlanUpdateRequest,
-    PortAdminStateUpdateRequest,
-    PortConfigureRequest,
-    PortDescriptionUpdateRequest,
-    PortEnableRequest,
-    PortShutdownRequest,
-    PortTrunkVlansUpdateRequest,
-    PortRead,  # noqa: F401 — exported via OpenAPI components
-)
-from app.services import device_service, port_config_service, port_execution_service, port_service
-from app.validators import port_validator
-
-logger = logging.getLogger(__name__)
-router = APIRouter()
-
-# Controls the base wait between retries (1s × 2^attempt). Kept module-local
-# so tests can monkeypatch it via app.api.ports._RETRY_BASE_DELAY (mirrors the
-# VLAN endpoint's monkeypatch surface).
-_RETRY_BASE_DELAY: float = 1.0
 
 
-def _capture_pre_state_port_description(interface: str, device: str) -> dict:
-    """Re-export the execution-layer pre-state capture so tests can
-    monkeypatch a single attachment point.  Mirrors the VLAN module's
-    ``_capture_pre_state_vlan`` indirection."""
-    return port_execution_service._capture_pre_state_description(interface, device)
+def _require_port_driver_with(device: "Device", method_name: str):
+    """Verifica que el driver del *device* sobreescriba *method_name* antes
+    de encolar el job -- corrección de Fase 1/A2 aplicada acá (FASE_5.md
+    A7): la real comparaba contra ``BasePortDriver``, que ya no existe
+    desde que Fase 1 lo fusionó en ``VendorDriver``. Devuelve 501 con el
+    mismo envelope ``VENDOR_NOT_SUPPORTED`` que la real."""
+    from app.services.vendors.base import VendorDriver
 
-
-def _capture_pre_state_port_admin(interface: str, device: str) -> dict:
-    """Re-export the admin-state pre-state capture (Step 2.2) so tests can
-    monkeypatch a single attachment point."""
-    return port_execution_service._capture_pre_state_admin(interface, device)
-
-
-def _capture_pre_state_port_access_vlan(interface: str, device: str) -> dict:
-    """Re-export the access-VLAN pre-state capture (Step 2.3) so tests can
-    monkeypatch a single attachment point."""
-    return port_execution_service._capture_pre_state_access_vlan(interface, device)
-
-
-def _capture_pre_state_port_trunk_vlans(interface: str, device: str) -> dict:
-    """Re-export the trunk-VLAN pre-state capture (Step 2.4) so tests can
-    monkeypatch a single attachment point."""
-    return port_execution_service._capture_pre_state_trunk_vlans(interface, device)
-
-
-def _capture_pre_state_port_configure(interface: str, device: str) -> dict:
-    """Re-export the configure pre-state capture (Step 3.3) so tests can
-    monkeypatch a single attachment point."""
-    return port_config_service._capture_pre_state_configure(interface, device)
-
-
-def _capture_pre_state_port_shutdown(interface: str, device: str) -> dict:
-    """Re-export the shutdown pre-state capture (Step 3.3) so tests can
-    monkeypatch a single attachment point."""
-    return port_config_service._capture_pre_state_shutdown(interface, device)
-
-
-def _capture_pre_state_port_enable(interface: str, device: str) -> dict:
-    """Re-export the enable pre-state capture (Step 3.3) so tests can
-    monkeypatch a single attachment point."""
-    return port_config_service._capture_pre_state_enable(interface, device)
+    driver = device.driver
+    if getattr(type(driver), method_name) is getattr(VendorDriver, method_name):
+        logger.info(
+            "Port %s unimplemented on driver=%s for device=%s",
+            method_name, type(driver).__name__, device.name,
+        )
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error_code": "VENDOR_NOT_SUPPORTED",
+                "message": "This port operation is not yet supported for this vendor.",
+            },
+        )
+    return driver
 
 
 def _check_device_not_locked(device_name: str) -> None:
-    """Raise 409 immediately when the device is already held by another operation.
+    """Raise 409 immediately when the device is already held by another
+    operation. Non-blocking probe via RedisCoordinator -- reemplaza
+    device_locks.is_device_busy() (FASE_1.md, RedisCoordinator fusiona
+    device_locks.py + rate_limiter.py). Misma ventana TOCTOU que la real:
+    el chequeo es best-effort, Orquestador adquiere su propio lock al
+    ejecutar el job."""
+    from app.composition import redis_coordinator
 
-    Uses a non-blocking lock probe so the check itself has no side-effects.
-    The caller proceeds to enqueue only when the device is currently free.
-    A small TOCTOU window exists — if the device becomes busy between this
-    check and the lock acquisition inside the service, the enqueue still
-    succeeds (the service has its own 30-second acquisition window and will
-    degrade gracefully on an extremely rare second collision).
-    """
-    from app.services import device_locks
-
-    if device_locks.is_device_busy(device_name):
+    if redis_coordinator.esta_ocupado(device_name):
         raise HTTPException(
             status_code=409,
             detail={
@@ -120,50 +86,6 @@ def _check_device_not_locked(device_name: str) -> None:
                 ),
             },
         )
-
-
-def _require_port_driver_with(method_name: str, device_name: str, current_user: dict):
-    """Resolve the port driver for *device_name* and assert that the driver
-    actually overrides *method_name*.  Returns the driver if everything is
-    in order; raises ``HTTPException(501)`` with the friendly
-    VENDOR_NOT_SUPPORTED envelope when the vendor is unknown or has only
-    inherited the base default stub.
-
-    Shared by the description and admin-state endpoints so both surface the
-    same controlled error for unsupported vendors.
-    """
-    from app.services.vendors.dispatcher import get_port_driver
-    from app.services.vendors.port_driver_base import BasePortDriver
-
-    device_obj = device_service.get_device(device_name)
-    # caller already verified existence + RBAC; we re-read for the dispatcher
-    try:
-        driver = get_port_driver(device_obj)
-    except UnsupportedVendorError as exc:
-        logger.info(
-            "Port %s requested on unsupported vendor: device=%s vendor=%s platform=%s",
-            method_name, device_name, exc.vendor, exc.platform,
-        )
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "error_code": "VENDOR_NOT_SUPPORTED",
-                "message": "Port management is not yet supported for this vendor.",
-            },
-        )
-    if getattr(type(driver), method_name) is getattr(BasePortDriver, method_name):
-        logger.info(
-            "Port %s unimplemented on driver=%s for device=%s",
-            method_name, type(driver).__name__, device_name,
-        )
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "error_code": "VENDOR_NOT_SUPPORTED",
-                "message": "This port operation is not yet supported for this vendor.",
-            },
-        )
-    return driver
 
 
 @router.get(
@@ -186,70 +108,67 @@ def list_ports(
 ):
     """Return the port inventory of *device*.
 
-    Read-only endpoint.  Errors are mapped to standard project codes:
-
-    * ``400`` — ``device`` query parameter missing in non-mock mode.
-    * ``403`` — caller's allowed sites do not include this device.
-    * ``404`` — device unknown.
-    * ``500`` — device-side execution / parser failure.
-    * ``503`` — device is busy with another in-flight operation.
+    Read-only. Lee en vivo (``device.driver.list_ports``), no de
+    ``Repository[Puerto]`` — mismo criterio que ``GET /vlans``
+    (FASE_5.md A6/A7). ``PortRead`` usa ``name``, ``Puerto`` usa
+    ``interface`` — la traducción es explícita acá (FASE_5.md A7).
     """
-    if device is None and port_service.EXECUTION_MODE != "mock":
-        raise ValidationError("'device' query parameter is required")
+    from app.composition import device_repository, redis_coordinator
 
-    # Imperative authz because ``device`` is a query parameter, not path or
-    # body — the require_scope resolver only reads path + body.
-    if device is not None:
-        _authz_device(scope, device, min_role="observer")
+    if device is None:
+        from app.core.config import EXECUTION_MODE
+        if EXECUTION_MODE != "mock":
+            raise ValidationError("'device' query parameter is required")
+        from app.services.vendors.mock import _INITIAL_MOCK_PORTS
+        puertos = list(_INITIAL_MOCK_PORTS)
+        payload = {
+            "device": "mock_device",
+            "vendor": "mock",
+            "count": len(puertos),
+            "ports": [
+                PortRead(
+                    name=p.interface, description=p.description, admin_up=p.admin_up,
+                    operational_up=p.operational_up, mode=p.mode, access_vlan=p.access_vlan,
+                    allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
+                    speed=p.speed, duplex=p.duplex,
+                ).model_dump()
+                for p in puertos
+            ],
+        }
+        return {"success": True, "data": payload}
 
-    target = device if device is not None else "mock_device"
+    _authz_device(scope, device, min_role="observer")
+    dev = device_repository.get(device)
+    if dev is None:
+        raise NotFoundError(f"Device '{device}' not found")
     try:
-        # Match the VLAN read path: API layer acquires the lock with a short
-        # timeout so concurrent reads can fail fast when a write is in flight.
-        from app.services import device_locks
-
-        with device_locks.acquire(target, timeout=10):
-            response = port_service.list_ports(target)
-    except UnsupportedVendorError as exc:
-        # Detailed (vendor / platform) details stay in the server log via the
-        # dispatcher's WARNING entry; clients receive a controlled message
-        # that does not leak backend internals.
-        logger.info(
-            "Port management requested on unsupported vendor: device=%s vendor=%s platform=%s",
-            target, exc.vendor, exc.platform,
-        )
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "error_code": "VENDOR_NOT_SUPPORTED",
-                "message": "Port management is not yet supported for this vendor.",
-            },
-        )
+        with redis_coordinator.bloquear(device, timeout=10):
+            puertos = dev.driver.list_ports(dev, dev.password)
     except TimeoutError:
-        # Surfaced when the per-device lock cannot be acquired — somebody else
-        # is mid-operation against the same device.  Mirror the VLAN endpoint's
-        # 503 + payload so the frontend can show a consistent message.
         raise HTTPException(
             status_code=503,
             detail={
                 "status": "device_busy",
-                "device": target,
+                "device": device,
                 "message": "Device is busy with another operation, retry shortly",
             },
         )
-    except ValueError as exc:
-        # ``port_service`` raises ValueError for unknown device IDs.
-        raise NotFoundError(str(exc))
     except RuntimeError as exc:
-        # Playbook failure or parser failure — caller can retry but the root
-        # cause is on the device side.
         raise DeviceExecutionError(str(exc))
 
     payload = {
-        "device": response.device,
-        "vendor": response.vendor,
-        "count": len(response.ports),
-        "ports": [PortRead(**p.to_dict()) for p in response.ports],
+        "device": dev.name,
+        "vendor": dev.vendor,
+        "count": len(puertos),
+        "ports": [
+            PortRead(
+                name=p.interface, description=p.description, admin_up=p.admin_up,
+                operational_up=p.operational_up, mode=p.mode, access_vlan=p.access_vlan,
+                allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
+                speed=p.speed, duplex=p.duplex,
+            ).model_dump()
+            for p in puertos
+        ],
     }
     return {"success": True, "data": payload}
 
@@ -275,29 +194,21 @@ def update_port_description(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Schedule a port-description update on a single device."""
+    from app.composition import device_repository, group_operation_runner
+
     try:
-        port_validator.validate_interface_name(data.interface)
-        port_validator.validate_description(data.description)
+        entidad = Puerto(interface=data.interface, description=data.description)
+        entidad.validar()
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    if not device_service.get_device(data.device):
+    dev = device_repository.get(data.device)
+    if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
+    _require_port_driver_with(dev, "update_port_description")
 
-    # Resolve the driver and verify the operation is supported for this
-    # vendor.  Returns 501 with a controlled message when not — see
-    # ``_require_port_driver_with`` for the exact gating.
-    _require_port_driver_with("update_port_description", data.device, current_user)
-
-    jobs, group_job_id = port_execution_service.enqueue_update_description_job(
-        interface=data.interface,
-        description=data.description,
-        device=data.device,
-        username=current_user["username"],
-        retry_base_delay=_RETRY_BASE_DELAY,
-    )
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
@@ -322,25 +233,21 @@ def set_port_admin_state(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Schedule an admin-state change on a single port."""
+    from app.composition import device_repository, group_operation_runner
+
     try:
-        port_validator.validate_interface_name(data.interface)
+        entidad = Puerto(interface=data.interface, admin_up=data.enabled)
+        entidad.validar()
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    if not device_service.get_device(data.device):
+    dev = device_repository.get(data.device)
+    if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
+    _require_port_driver_with(dev, "set_port_admin_state")
 
-    _require_port_driver_with("set_port_admin_state", data.device, current_user)
-
-    jobs, group_job_id = port_execution_service.enqueue_set_admin_state_job(
-        interface=data.interface,
-        enabled=data.enabled,
-        device=data.device,
-        username=current_user["username"],
-        retry_base_delay=_RETRY_BASE_DELAY,
-    )
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
@@ -348,13 +255,14 @@ def set_port_admin_state(
     "/access-vlan",
     summary="Set port access VLAN",
     description=(
-        "Assign an access VLAN to a single interface.  The port must already "
-        "be in access mode; the orchestration layer verifies this via pre-state "
-        "before calling the vendor driver.  Executed asynchronously: the "
-        "response carries a ``group_job_id`` and per-device job entry the "
-        "frontend can poll via ``GET /api/v1/jobs/{job_id}`` and "
-        "``GET /api/v1/group-jobs/{id}``.  Pre-state is captured for rollback "
-        "— if the device-side change fails, the original access VLAN is "
+        "Assign an access VLAN to a single interface — or the native VLAN "
+        "(PVID) if the port is currently in trunk mode.  The orchestration "
+        "layer reads the port's live mode and dispatches accordingly; "
+        "other modes are rejected.  Executed asynchronously: the response "
+        "carries a ``group_job_id`` and per-device job entry the frontend "
+        "can poll via ``GET /api/v1/jobs/{job_id}`` and "
+        "``GET /api/v1/group-jobs/{id}``.  Pre-state is captured for "
+        "rollback — if the device-side change fails, the original VLAN is "
         "restored automatically.  Requires operator role or higher; "
         "site-scoped users may only target devices in their allowed sites."
     ),
@@ -364,26 +272,24 @@ def set_port_access_vlan(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Schedule an access-VLAN assignment on a single port."""
+    """No setea ``mode`` en el ``Puerto`` a propósito -- ``Puerto.aplicar()``
+    lee el modo en vivo del device (FASE_5.md A7, corrección
+    ``_aplicar_access_vlan``/``Puerto.validar()``)."""
+    from app.composition import device_repository, group_operation_runner
+
     try:
-        port_validator.validate_interface_name(data.interface)
-        port_validator.validate_access_vlan_id(data.vlan_id)
+        entidad = Puerto(interface=data.interface, access_vlan=data.vlan_id)
+        entidad.validar()
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    if not device_service.get_device(data.device):
+    dev = device_repository.get(data.device)
+    if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
+    _require_port_driver_with(dev, "set_port_access_vlan")
 
-    _require_port_driver_with("set_port_access_vlan", data.device, current_user)
-
-    jobs, group_job_id = port_execution_service.enqueue_set_access_vlan_job(
-        interface=data.interface,
-        vlan_id=data.vlan_id,
-        device=data.device,
-        username=current_user["username"],
-        retry_base_delay=_RETRY_BASE_DELAY,
-    )
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
@@ -395,13 +301,15 @@ def set_port_access_vlan(
         "``mode='replace'`` sets the list to exactly ``vlans``; "
         "``mode='add'`` unions ``vlans`` with the current list; "
         "``mode='remove'`` subtracts ``vlans`` from the current list.  "
-        "The port must already be in trunk mode.  Executed asynchronously: "
-        "the response carries a ``group_job_id`` and per-device job entry "
-        "the frontend can poll via ``GET /api/v1/jobs/{job_id}`` and "
-        "``GET /api/v1/group-jobs/{id}``.  Pre-state is captured for rollback "
-        "— if the device-side change fails, the original VLAN list is restored "
-        "automatically.  Requires operator role or higher; site-scoped users "
-        "may only target devices in their allowed sites."
+        "The port must already be in trunk mode; a ``remove`` that would "
+        "leave the trunk with no allowed VLANs is rejected.  Executed "
+        "asynchronously: the response carries a ``group_job_id`` and per-"
+        "device job entry the frontend can poll via "
+        "``GET /api/v1/jobs/{job_id}`` and ``GET /api/v1/group-jobs/{id}``.  "
+        "Pre-state is captured for rollback — if the device-side change "
+        "fails, the original VLAN list is restored automatically.  "
+        "Requires operator role or higher; site-scoped users may only "
+        "target devices in their allowed sites."
     ),
 )
 def set_trunk_allowed_vlans(
@@ -409,27 +317,28 @@ def set_trunk_allowed_vlans(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Schedule a trunk allowed-VLAN update on a single port."""
+    """``data.mode`` ("replace"/"add"/"remove") es
+    ``Puerto.allowed_vlan_operation``, no ``Puerto.mode`` (switchport
+    mode) -- mismo nombre, dos conceptos distintos (FASE_5.md A7)."""
+    from app.composition import device_repository, group_operation_runner
+
     try:
-        port_validator.validate_interface_name(data.interface)
-        port_validator.validate_trunk_vlan_list(list(data.vlans))
+        entidad = Puerto(
+            interface=data.interface,
+            allowed_vlans=list(data.vlans),
+            allowed_vlan_operation=data.mode,
+        )
+        entidad.validar()
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    if not device_service.get_device(data.device):
+    dev = device_repository.get(data.device)
+    if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
+    _require_port_driver_with(dev, "set_trunk_allowed_vlans")
 
-    _require_port_driver_with("set_trunk_allowed_vlans", data.device, current_user)
-
-    jobs, group_job_id = port_execution_service.enqueue_set_trunk_allowed_vlans_job(
-        interface=data.interface,
-        vlans=list(data.vlans),
-        mode=data.mode,
-        device=data.device,
-        username=current_user["username"],
-        retry_base_delay=_RETRY_BASE_DELAY,
-    )
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
@@ -439,7 +348,6 @@ def set_trunk_allowed_vlans(
     description=(
         "Apply one or more port configuration fields in a single driver call.  "
         "All non-``None`` fields are applied atomically on the device.  "
-        "Field application order on Huawei VRP: mode → VLAN → description → admin state.  "
         "Pre-state is captured for rollback — on failure the orchestration layer "
         "reconstructs a rollback request covering the changed fields and attempts "
         "to restore their pre-state values.  "
@@ -455,44 +363,35 @@ def configure_port(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Schedule a composite port configuration on a single port."""
-    from app.models.port import PortConfigRequest
+    """``Puerto`` es también el modelo de la escritura compuesta (no hay una
+    ``PortConfigRequest`` separada del lado nuevo) -- ``Puerto.aplicar()``
+    despacha a ``configure_port()`` del driver cuando hay más de un campo
+    seteado, o cuando ``mode`` es uno de ellos (FASE_5.md A7, corrección
+    ``_es_composite``)."""
+    from app.composition import device_repository, group_operation_runner
 
     try:
-        port_validator.validate_interface_name(data.interface)
-        if data.access_vlan is not None:
-            port_validator.validate_access_vlan_id(data.access_vlan)
-        if data.allowed_vlans is not None:
-            port_validator.validate_trunk_vlan_list(list(data.allowed_vlans))
-    except ValueError as exc:
-        raise ValidationError(str(exc))
-
-    if not device_service.get_device(data.device):
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
-    _check_device_not_locked(data.device)
-
-    _require_port_driver_with("configure_port", data.device, current_user)
-
-    try:
-        config = PortConfigRequest(
-            device=data.device,
+        entidad = Puerto(
             interface=data.interface,
             description=data.description,
-            admin_enabled=data.admin_enabled,
+            admin_up=data.admin_enabled,
             mode=data.mode,
             access_vlan=data.access_vlan,
             allowed_vlans=list(data.allowed_vlans) if data.allowed_vlans else None,
             allowed_vlan_operation=data.allowed_vlan_operation,
         )
+        entidad.validar()
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    jobs, group_job_id = port_config_service.configure_port(
-        config=config,
-        username=current_user["username"],
-        retry_base_delay=_RETRY_BASE_DELAY,
-    )
+    dev = device_repository.get(data.device)
+    if dev is None:
+        raise NotFoundError(f"Device '{data.device}' not found")
+    _authz_device(scope, data.device, min_role="operator")
+    _check_device_not_locked(data.device)
+    _require_port_driver_with(dev, "configure_port")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
@@ -503,8 +402,8 @@ def configure_port(
         "Administratively disable a single interface (``shutdown`` command).  "
         "No-op when the port is already administratively down.  "
         "Pre-state is captured for rollback — if the device-side command fails "
-        "and the port was previously up, the orchestration layer calls "
-        "``enable_port`` to restore its state.  "
+        "and the port was previously up, the original admin state is restored "
+        "automatically.  "
         "Executed asynchronously: the response carries a ``group_job_id`` and "
         "per-device job entry.  "
         "Requires operator role or higher; site-scoped users may only target "
@@ -516,25 +415,30 @@ def shutdown_port(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Schedule an administrative shutdown on a single port."""
+    """Wrapper semántico de ``admin_up=False`` -- no existe
+    ``driver.shutdown_port()`` en el camino nuevo (``VendorDriver`` lo
+    declara pero ningún caller real lo invoca, confirmado: ``Puerto``
+    siempre despacha a ``set_port_admin_state``). El gate de driver
+    soportado chequea ``"set_port_admin_state"``, no ``"shutdown_port"``
+    -- corrección real encontrada acá: chequear el nombre del endpoint
+    viejo hubiera devuelto 501 siempre, ya que ningún driver sobreescribe
+    ese stub (FASE_5.md A7)."""
+    from app.composition import device_repository, group_operation_runner
+
     try:
-        port_validator.validate_interface_name(data.interface)
+        entidad = Puerto(interface=data.interface, admin_up=False)
+        entidad.validar()
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    if not device_service.get_device(data.device):
+    dev = device_repository.get(data.device)
+    if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
     _check_device_not_locked(data.device)
+    _require_port_driver_with(dev, "set_port_admin_state")
 
-    _require_port_driver_with("shutdown_port", data.device, current_user)
-
-    jobs, group_job_id = port_config_service.shutdown_port(
-        interface=data.interface,
-        device=data.device,
-        username=current_user["username"],
-        retry_base_delay=_RETRY_BASE_DELAY,
-    )
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
 
 
@@ -546,8 +450,8 @@ def shutdown_port(
         "``undo shutdown`` command).  "
         "No-op when the port is already administratively up.  "
         "Pre-state is captured for rollback — if the device-side command fails "
-        "and the port was previously down, the orchestration layer calls "
-        "``shutdown_port`` to restore its state.  "
+        "and the port was previously down, the original admin state is restored "
+        "automatically.  "
         "Executed asynchronously: the response carries a ``group_job_id`` and "
         "per-device job entry.  "
         "Requires operator role or higher; site-scoped users may only target "
@@ -559,23 +463,22 @@ def enable_port(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Schedule an administrative enable on a single port."""
+    """Wrapper semántico de ``admin_up=True`` -- ver nota en
+    ``shutdown_port()``."""
+    from app.composition import device_repository, group_operation_runner
+
     try:
-        port_validator.validate_interface_name(data.interface)
+        entidad = Puerto(interface=data.interface, admin_up=True)
+        entidad.validar()
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    if not device_service.get_device(data.device):
+    dev = device_repository.get(data.device)
+    if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
     _check_device_not_locked(data.device)
+    _require_port_driver_with(dev, "set_port_admin_state")
 
-    _require_port_driver_with("enable_port", data.device, current_user)
-
-    jobs, group_job_id = port_config_service.enable_port(
-        interface=data.interface,
-        device=data.device,
-        username=current_user["username"],
-        retry_base_delay=_RETRY_BASE_DELAY,
-    )
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}

@@ -184,9 +184,35 @@ class Puerto:
                   "allowed_vlans", "poe_enabled")
         return {c for c in campos if getattr(self, c) is not None}
 
+    @property
+    def _es_composite(self) -> bool:
+        """True cuando ``aplicar()`` necesita pasar por ``configure_port()``
+        en vez de un método puntual del driver — corrección real encontrada
+        en Fase 5, A7: no es solo "más de un campo". ``mode`` no tiene un
+        método de driver propio (no existe ``set_port_mode()`` en
+        ``VendorDriver`` — cambiar de modo solo se puede vía
+        ``configure_port()``), así que un `Puerto(mode="trunk")` solo
+        (1 campo) también necesita el camino compuesto. Sin esto,
+        ``aplicar()`` caía en el dispatch de campo único, no encontraba caso
+        para ``"mode"`` y lanzaba ``ValueError``."""
+        campos = self.mutation_fields
+        return len(campos) > 1 or "mode" in campos
+
     def validar(self) -> None:
         """Reglas de escritura — solo se llaman antes de ``aplicar()``, nunca
-        durante ``reconciliar()``. Mismo criterio que ``VLAN.validar()``."""
+        durante ``reconciliar()``. Mismo criterio que ``VLAN.validar()``.
+
+        Las 2 reglas cruzadas (access_vlan/allowed_vlans requieren `mode`)
+        solo corren cuando ``_es_composite`` -- corrección real encontrada
+        en Fase 5, A7: los endpoints de campo único (`/access-vlan`,
+        `/trunk-vlans`) no setean `mode` a propósito -- `_aplicar_access_vlan()`/
+        `_aplicar_allowed_vlans()` leen el modo en vivo del device, no lo
+        reciben del caller. Exigir `mode` seteado acá rompía todo job de
+        esos 2 endpoints: `Orquestador.ejecutar()` llama `validar()` sin
+        condicionales antes de `aplicar()`, así que un `Puerto(access_vlan=X)`
+        con `mode=None` fallaba siempre, confirmado con un test end-to-end
+        (`Orquestador.ejecutar()` sobre un `Puerto(access_vlan=...)` sin
+        `mode` lanzaba antes de esta corrección)."""
         _mutation_fields = (
             self.description, self.admin_up, self.mode,
             self.access_vlan, self.allowed_vlans,
@@ -196,16 +222,17 @@ class Puerto:
                 "at least one mutation field must be provided "
                 "(description, admin_up, mode, access_vlan, or allowed_vlans)"
             )
-        if self.access_vlan is not None and self.mode not in ("access", "trunk"):
-            raise ValueError(
-                f"'access_vlan' (PVID) may only be set when mode='access' or mode='trunk' "
-                f"(got mode={self.mode!r})"
-            )
-        if self.allowed_vlans is not None and self.mode != "trunk":
-            raise ValueError(
-                f"'allowed_vlans' may only be set when mode='trunk' "
-                f"(got mode={self.mode!r})"
-            )
+        if self._es_composite:
+            if self.access_vlan is not None and self.mode not in ("access", "trunk"):
+                raise ValueError(
+                    f"'access_vlan' (PVID) may only be set when mode='access' or mode='trunk' "
+                    f"(got mode={self.mode!r})"
+                )
+            if self.allowed_vlans is not None and self.mode != "trunk":
+                raise ValueError(
+                    f"'allowed_vlans' may only be set when mode='trunk' "
+                    f"(got mode={self.mode!r})"
+                )
         if self.access_vlan is not None:
             _validate_access_vlan_id(self.access_vlan)
         if self.allowed_vlans is not None:
@@ -236,7 +263,7 @@ class Puerto:
         `0` = "éxito"), confirmado con un test end-to-end (`configure_port`
         devolviendo `success=False` no disparaba ni excepción ni rollback)."""
         campos = self.mutation_fields
-        if len(campos) > 1:
+        if self._es_composite:
             resultado = device.driver.configure_port(self, device, device.password)
             return {
                 **resultado.to_dict(),
@@ -251,12 +278,82 @@ class Puerto:
             resultado = device.driver.set_port_admin_state(self.interface, self.admin_up, device, device.password)
             return {**resultado, "accion": "activar_puerto" if self.admin_up else "desactivar_puerto"}
         if campo == "access_vlan":
-            resultado = device.driver.set_port_access_vlan(self.interface, self.access_vlan, device, device.password)
-            return {**resultado, "accion": "asignar_vlan_acceso"}
+            return self._aplicar_access_vlan(device)
         if campo == "allowed_vlans":
-            resultado = device.driver.set_trunk_allowed_vlans(self.interface, self.allowed_vlans, device, device.password)
-            return {**resultado, "accion": "configurar_trunk_vlans"}
+            return self._aplicar_allowed_vlans(device)
         raise ValueError(f"Puerto.aplicar(): no hay driver call para el campo {campo!r}")
+
+    def _aplicar_access_vlan(self, device: "Device") -> dict:
+        """`access_vlan` en un puerto trunk es el PVID, no el access VLAN --
+        corrección real encontrada en Fase 5 (armando `Orquestador._rollback`
+        contra `port_execution_service.py: _rollback_access_vlan()`, que sí
+        distingue esto): despachar siempre a `set_port_access_vlan` es
+        incorrecto sobre un puerto en modo trunk, donde el driver correcto
+        es `set_trunk_pvid_vlan`. Necesita una lectura en vivo del modo
+        actual -- `RecursoGestionable.aplicar()` no recibe el `pre_state`
+        que `Orquestador` ya capturó por separado.
+
+        El gate de modo ("access"/"trunk" solamente, rechaza "unknown") es
+        otra corrección real encontrada comparando contra el `_validate()`
+        real de `run_set_access_vlan_job()` -- sin esto, un puerto en modo
+        no reconocido caía silenciosamente en la rama access."""
+        estado = self.reconciliar(device)
+        actual = estado.get("actual")
+        if actual is not None and actual.mode not in ("access", "trunk"):
+            raise ValueError(
+                f"el puerto {self.interface} no está en modo access ni trunk "
+                f"(modo actual: {actual.mode!r}) — no se puede asignar VLAN de acceso"
+            )
+        if actual is not None and actual.mode == "trunk":
+            resultado = device.driver.set_trunk_pvid_vlan(self.interface, self.access_vlan, device, device.password)
+        else:
+            resultado = device.driver.set_port_access_vlan(self.interface, self.access_vlan, device, device.password)
+        return {**resultado, "accion": "asignar_vlan_acceso"}
+
+    def _aplicar_allowed_vlans(self, device: "Device") -> dict:
+        """`allowed_vlan_operation` ("replace"/"add"/"remove") necesita la
+        lista actual del trunk para calcular la lista final -- el driver
+        siempre reemplaza completo (`FASE_1.md`: "el driver siempre
+        realiza un reemplazo completo, no un delta"). Corrección real
+        encontrada en Fase 5, comparando contra
+        `port_execution_service.py: _compute_desired_vlans()`/
+        `run_set_trunk_allowed_vlans_job()`: `aplicar()` ignoraba
+        `allowed_vlan_operation` por completo y mandaba `self.allowed_vlans`
+        tal cual al driver, sin importar "replace"/"add"/"remove" — y sin
+        el guard real "remove no puede vaciar el trunk".
+
+        El gate "el puerto debe estar en modo trunk" es otra corrección
+        real encontrada comparando contra el mismo `_validate()` real --
+        sin esto, `allowed_vlans` se podía "aplicar" sobre un puerto en
+        modo access, mandando `set_trunk_allowed_vlans` a un puerto que
+        nunca va a exponer esa config."""
+        estado = self.reconciliar(device)
+        actual = estado.get("actual")
+        if actual is not None and actual.mode != "trunk":
+            raise ValueError(
+                f"el puerto {self.interface} no está en modo trunk "
+                f"(modo actual: {actual.mode!r}) — no se puede modificar su lista "
+                "de VLANs permitidas"
+            )
+        actuales = actual.allowed_vlans if actual is not None else None
+
+        if self.allowed_vlan_operation == "replace" or actuales is None:
+            deseados = sorted(set(self.allowed_vlans))
+        elif self.allowed_vlan_operation == "add":
+            deseados = sorted(set(actuales) | set(self.allowed_vlans))
+        elif self.allowed_vlan_operation == "remove":
+            deseados = sorted(set(actuales) - set(self.allowed_vlans))
+        else:
+            raise ValueError(f"allowed_vlan_operation desconocido: {self.allowed_vlan_operation!r}")
+
+        if not deseados:
+            raise ValueError(
+                f"la operación '{self.allowed_vlan_operation}' dejaría el puerto "
+                f"{self.interface} sin VLANs permitidas en el trunk — rechazada"
+            )
+
+        resultado = device.driver.set_trunk_allowed_vlans(self.interface, deseados, device, device.password)
+        return {**resultado, "accion": "configurar_trunk_vlans"}
 
     def repositorio(self) -> str:
         return "puerto"
