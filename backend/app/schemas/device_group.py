@@ -24,11 +24,3 @@ class DeviceGroupRead(BaseModel):
     member_count: int = 0
     site_id: Optional[int] = None
     site_name: Optional[str] = None
-
-
-class DeviceGroupMemberCreate(BaseModel):
-    model_config = ConfigDict(json_schema_extra={
-        "example": {"device_name": "switch-01"}
-    })
-
-    device_name: str

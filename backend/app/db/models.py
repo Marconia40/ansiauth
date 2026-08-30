@@ -160,21 +160,6 @@ class JobModel(Base):
     )
 
 
-class GroupJobModel(Base):
-    __tablename__ = "group_jobs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    group_job_id = Column(String, nullable=False, unique=True, index=True)
-    status = Column(String, nullable=False, default="pending", index=True)
-    operation = Column(String, nullable=True)
-    playbook = Column(String, nullable=True)
-    parameters = Column(JSON, nullable=True)
-    device_results = Column(JSON, nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False)
-    started_at = Column(DateTime(timezone=True), nullable=True)
-    finished_at = Column(DateTime(timezone=True), nullable=True)
-
-
 class RefreshTokenModel(Base):
     __tablename__ = "refresh_tokens"
 

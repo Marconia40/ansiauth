@@ -280,23 +280,3 @@ class PortEnableRequest(BaseModel):
         max_length=64,
         description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
     )
-
-
-class PortListResponseBody(BaseModel):
-    """Envelope returned by ``GET /api/v1/ports/?device=...``.
-
-    Wraps the port list so consumers receive provenance (device + vendor)
-    alongside the data, matching the shape produced by
-    ``port_service.list_ports``.
-    """
-
-    device: str = Field(..., description="Device name the ports belong to.")
-    vendor: Optional[str] = Field(
-        None,
-        description=(
-            "Vendor identifier the driver belongs to (e.g. 'huawei_vrp'). "
-            "'mock' when the backend is running in EXECUTION_MODE=mock."
-        ),
-    )
-    count: int = Field(..., description="Number of physical ports returned.")
-    ports: list[PortRead] = Field(default_factory=list, description="Normalized port entries.")
