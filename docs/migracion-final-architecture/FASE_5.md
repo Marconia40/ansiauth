@@ -607,6 +607,31 @@ tampoco molestan con estar (TS estructural, extra keys se ignoran) — se
 mantienen igual que hoy por continuidad con el resto de los endpoints, no
 porque el frontend los necesite.
 
+### A8 — Rewirear `api/jobs.py`
+
+Implementado tal cual el snippet canónico de esta sección (`list_jobs()` →
+`job_repository.query(scope=...)`, `get_job()` → `job_repository.get()`,
+`cancel_job()` → `job.cancelar()` atrapando `TransicionInvalidaError` → 409).
+
+**`audit_service.log_action()` de `cancel_job()` (real, línea ~178) — no
+está en el snippet canónico, que lo omite sin más.** Dropearlo sin
+reemplazo pierde el rastro de auditoría de toda cancelación de job — real
+hoy, cubierto por `RF-AUD-02`. Se mantiene, pero contra `AuditRepository.append()`
+directo (Fase 3/B1), **no** `AuditRecord.desde()` — esa fábrica arma el
+record a partir de un `DomainEvent` de `Orquestador` (`evento.recurso`/
+`evento.device`), y cancelar un job no pasa por ahí (no hay VLAN/Puerto ni
+`device.driver` involucrado).
+
+**`device=job.device` en el `AuditRecord` de `cancel_job()` — corrección
+real encontrada probando el filtro de scope de punta a punta.**
+`AuditRepository._aplicar_scope()` (Fase 3) solo deja pasar filas con
+`device=None` cuando `resource == "auth"` — con `resource="job"` y
+`device` sin setear, el record no matchea ninguna de sus condiciones OR y
+queda invisible para cualquier scope no-system-admin, incluido el operador
+dueño del device que acaba de cancelar su propio job. Confirmado con un
+test end-to-end (`audit_repository.query(scope=...)` no devolvía el record
+hasta este fix).
+
 ### A9 — `main.py`/composición final
 
 - `job_service.mark_orphaned_jobs_failed()` (línea 71 real) → `job_repository.recuperar_huerfanos()`.
@@ -620,14 +645,32 @@ porque el frontend los necesite.
   `group_operation_runner = GroupOperationRunner(orquestador, JobQueue(), job_repository)`
   — `redis_coordinator` va a `Orquestador`, no a `GroupOperationRunner` (ver A3/A4).
 
+**2 callers reales de `audit_service.log_action()` en `main.py` que el plan
+original de A9 no mencionaba, encontrados al tocar el archivo para el fix
+de arriba — `_bootstrap_admin()` (línea ~111) y
+`request_validation_error_handler()` (línea ~319).** Ninguno de los dos es
+parte de `_make_scheduler()`/B1 (ese sigue con `audit_service`/
+`cleanup_service` sin tocar, ver Línea B abajo) — son escrituras de audit
+sueltas, independientes de VLAN/Puerto/Job. Mismo criterio que A8: migradas
+a `AuditRepository.append()` directo, sin pasar por `AuditRecord.desde()`
+(ninguna tiene un `DomainEvent` real detrás). Con esto, el `import
+audit_service`/`job_service` a nivel de módulo de `main.py` (línea 67 real)
+se puede sacar entero — el único uso de `audit_service` que queda en el
+archivo es el local de `_make_scheduler()` (`_audit.purge_old_records`,
+Línea B).
+
 ### Callers reales que quedan rotos/muertos al terminar esta fase (Línea A)
 
 `vlan_service.py`, `port_service.py`, `vlan_execution_service.py`,
-`port_execution_service.py`, `port_config_service.py`, `job_service.py`,
-`audit_service.py` (la parte de escritura, `log_action`/`append_audit_event` —
-`get_audit_log`/`count_audit_log` los reemplaza `AuditRepository.query()`/`count()`
-de Fase 3) quedan **sin ningún caller real** después de A6-A9 — no se borran en
-esta fase (eso es Fase 6), pero ya no los ejecuta ningún camino real del sistema.
+`port_execution_service.py`, `port_config_service.py`, `job_service.py`
+quedan **sin ningún caller real** después de A6-A9 — no se borran en esta
+fase (eso es Fase 6), pero ya no los ejecuta ningún camino real del
+sistema. `audit_service.py` (la parte de escritura, `log_action`/
+`append_audit_event` — `get_audit_log`/`count_audit_log` los reemplaza
+`AuditRepository.query()`/`count()` de Fase 3) queda **casi** sin caller
+real después de A6-A9 — la única excepción es `_make_scheduler()` en
+`main.py` (`audit_service.purge_old_records`), que es Línea B (B1,
+`CleanupScheduler`), no A6-A9.
 
 ---
 
