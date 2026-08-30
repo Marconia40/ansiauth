@@ -37,7 +37,10 @@ entre fases:
 | `app/services/group_job_service.py` | `JobRepository.resumen_de_grupo()` (Fase 4 A3) | Fase 5 (A4/A5) — hasta entonces `vlan_execution_service.py`/`port_execution_service.py`/`port_config_service.py` lo importan a nivel de módulo, no borrar antes |
 | `app/models/group_job.py` (`GroupJob`, `DeviceExecution`) | ídem — su único caller real es `group_job_service.py` | Fase 5 (A4/A5), misma fila que arriba |
 | `app/services/job_service.py` | `Job` + `JobRepository` | Fase 5 (A8/A9) |
-| `app/services/audit_service.py` | `AuditListener` + `AuditRepository` | Fase 5 (A3, vía `EventDispatcher`) |
+| `app/services/retry_policy.py` | `Orquestador._clasificar_error()`/`_ejecutar_con_retry()` | Fase 5 (A3) |
+| `app/services/orchestration_runner.py` | `Orquestador.ejecutar()` | Fase 5 (A3) |
+| `app/services/cleanup_service.py` | `CleanupScheduler` + `LoginAttemptRepository.purgar_antiguos()` | Fase 5 (B1) |
+| `app/services/audit_service.py` — **solo parcial, ver §1.5/1.6 abajo, no entra en el sweep mecánico de esta sección** | `AuditListener` + `AuditRepository` para el camino que Fase 5 migra (`Orquestador`, `api/jobs.py`, `main.py`) | Fase 5 (A3/A8/A9/B1) para esas 3 rutas — `role_assignment_service.py`/`api/users.py`/`api/auth.py`/`api/audit.py` siguen con caller real, quedan para esta fase (§1.5/1.6) |
 | `app/services/device_service.py` | `Device` + `DeviceRepository` + `Inventory` | Fase 6 |
 | `app/services/inventory_service.py` | `Inventory` (nueva ubicación, Fase 6) | Fase 6 |
 | `app/services/site_service.py` | `Site` + `SiteRepository` + `Inventory` | Fase 6 |
@@ -124,7 +127,7 @@ directo:
 
 | Archivo | Llamadas reales | Qué hacer |
 |---|---|---|
-| `app/main.py` | 2 (`_bootstrap_admin()` línea 111, `request_validation_error_handler()` línea 319) | `audit_service.log_action(...)` → `audit_repository.append(AuditRecord(...))`, ver ejemplo abajo |
+| `app/main.py` | ~~2 (`_bootstrap_admin()` línea 111, `request_validation_error_handler()` línea 319)~~ **Ya hecho en Fase 5, A9** (`FASE_5.md`) — no queda ninguna llamada a `audit_service`/`job_service`/`cleanup_service` en `main.py`, confirmar con `grep` antes de tocar de nuevo | ~~`audit_service.log_action(...)` → `audit_repository.append(AuditRecord(...))`~~ |
 | `app/api/users.py` | 3 (líneas 40, 125, 154) | ídem — `user_service.py` (el resto del archivo) sigue fuera de alcance, **solo** estas 3 llamadas cambian |
 | `app/api/auth.py` | 6 (líneas 48, 59, 72, 85, 123, 163 — login éxito/fallo, logout, etc.) | ídem — `auth_service.py`/`refresh_token_service.py` (el resto) siguen fuera de alcance, **solo** estas 6 llamadas cambian |
 | `app/api/audit.py` | 3, pero **distintas** — no son `log_action()`, son las funciones de lectura/purga del router de auditoría mismo | Ver abajo, no es un swap mecánico |

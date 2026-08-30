@@ -649,28 +649,52 @@ hasta este fix).
 original de A9 no mencionaba, encontrados al tocar el archivo para el fix
 de arriba — `_bootstrap_admin()` (línea ~111) y
 `request_validation_error_handler()` (línea ~319).** Ninguno de los dos es
-parte de `_make_scheduler()`/B1 (ese sigue con `audit_service`/
-`cleanup_service` sin tocar, ver Línea B abajo) — son escrituras de audit
-sueltas, independientes de VLAN/Puerto/Job. Mismo criterio que A8: migradas
-a `AuditRepository.append()` directo, sin pasar por `AuditRecord.desde()`
-(ninguna tiene un `DomainEvent` real detrás). Con esto, el `import
-audit_service`/`job_service` a nivel de módulo de `main.py` (línea 67 real)
-se puede sacar entero — el único uso de `audit_service` que queda en el
-archivo es el local de `_make_scheduler()` (`_audit.purge_old_records`,
-Línea B).
+parte de `_make_scheduler()`/B1 — son escrituras de audit sueltas,
+independientes de VLAN/Puerto/Job. Mismo criterio que A8: migradas a
+`AuditRepository.append()` directo, sin pasar por `AuditRecord.desde()`
+(ninguna tiene un `DomainEvent` real detrás). Con B1 completo (ver abajo,
+`_make_scheduler()`/`_lifespan()` migrados a `CleanupScheduler`/
+`AuditRepository.purge_old()`), el `import audit_service`/`job_service`/
+`cleanup_service` a nivel de módulo de `main.py` (línea 67 real) se puede
+sacar entero — no queda ningún uso de esos 3 módulos en todo el archivo.
 
-### Callers reales que quedan rotos/muertos al terminar esta fase (Línea A)
+**Corrección sobre la sección "Callers reales..." de abajo, encontrada
+recién al cruzar contra `FASE_7.md` (que sí lo tenía bien anticipado —
+secciones 1.5/1.6 ahí): `audit_service.py` NO queda "casi sin caller
+real" al terminar Fase 5.** `role_assignment_service.py` (4 llamadas),
+`api/users.py` (3), `api/auth.py` (6) y `api/audit.py` (lectura/purga,
+no `log_action`) siguen llamándolo directo — ninguno de esos 4 archivos
+está en el alcance de Fase 5 (Línea A ni B), son trabajo explícito de
+`FASE_7.md` §1.5/1.6. La claim original de esta sección solo vale para lo
+que Fase 5 efectivamente toca (`main.py`, `api/jobs.py`) — corregida
+abajo.
+
+### Callers reales que quedan rotos/muertos al terminar esta fase (Línea A + B)
 
 `vlan_service.py`, `port_service.py`, `vlan_execution_service.py`,
-`port_execution_service.py`, `port_config_service.py`, `job_service.py`
-quedan **sin ningún caller real** después de A6-A9 — no se borran en esta
-fase (eso es Fase 6), pero ya no los ejecuta ningún camino real del
-sistema. `audit_service.py` (la parte de escritura, `log_action`/
-`append_audit_event` — `get_audit_log`/`count_audit_log` los reemplaza
-`AuditRepository.query()`/`count()` de Fase 3) queda **casi** sin caller
-real después de A6-A9 — la única excepción es `_make_scheduler()` en
-`main.py` (`audit_service.purge_old_records`), que es Línea B (B1,
-`CleanupScheduler`), no A6-A9.
+`port_execution_service.py`, `port_config_service.py`, `job_service.py`,
+`cleanup_service.py` (B1), `retry_policy.py`/`orchestration_runner.py`
+(A3) quedan **sin ningún caller real** al terminar esta fase (Línea A +
+B completas) — no se borran acá (eso es Fase 7, `FASE_7.md` §1, ya los
+tiene listados salvo los últimos 3, agregados ahí en esta misma revisión),
+pero ya no los ejecuta ningún camino real del sistema. Confirmado con
+`grep -rn` contra `app/` para cada uno.
+
+**`audit_service.py` — corregido: NO queda sin caller real al terminar
+Fase 5, ni siquiera "casi".** La parte de escritura (`log_action`) sigue
+con 4 callers reales fuera del alcance de esta fase —
+`role_assignment_service.py` (4 llamadas), `api/users.py` (3),
+`api/auth.py` (6) — y la de lectura/purga (`get_audit_log`/
+`count_audit_log`/`purge_old_records`) tiene un 5to en `api/audit.py`,
+que ni siquiera usa `log_action` (son funciones de listado/purga propias,
+sin equivalente wireado a `AuditRepository` todavía). Los 4 archivos y
+sus 16 llamadas están correctamente anticipados en `FASE_7.md` §1.5/1.6
+(que ya traía el fix exacto para cada uno) — Fase 5 no los toca. La única
+parte de `audit_service.py` que Fase 5 sí deja sin caller es lo que A3/A9/B1
+efectivamente migran: el camino de escritura desde `Orquestador`
+(`AuditListener`, ya en Fase 3), `api/jobs.py` (A8), `main.py`
+(`_bootstrap_admin()`/`request_validation_error_handler()`/
+`_make_scheduler()`, A9/B1).
 
 ---
 
@@ -740,35 +764,39 @@ en vez de las funciones sueltas.
 
 ## Criterio de finalización
 
-- [ ] `RecursoGestionable` (Protocol) existe. `VLAN`/`Puerto` lo satisfacen sin
+- [x] `RecursoGestionable` (Protocol) existe. `VLAN`/`Puerto` lo satisfacen sin
       cambios de código (confirmar con el linter de tipos si el proyecto usa uno).
-- [ ] `Orquestador` existe con la forma exacta del código canónico de
+- [x] `Orquestador` existe con la forma exacta del código canónico de
       `FINAL_ARCHITECTURE.md` §2.4 (try/except/else/finally completo, no solo
       try/except alrededor de `aplicar()`).
-- [ ] `_ejecutar_con_retry()`/`_clasificar_error()` absorben `retry_policy.py`
-      completo — el archivo no existe más.
-- [ ] `GroupOperationRunner.encolar()` despacha **un Celery task por device**
+- [x] `_ejecutar_con_retry()`/`_clasificar_error()` absorben `retry_policy.py`
+      completo — **corrección de redacción**: el archivo sigue existiendo en
+      disco (mismo criterio que el resto de esta fase — no se borra hasta
+      Fase 7, `FASE_7.md` §1, ya lo tiene listado), pero confirmado **sin
+      ningún caller real** (`grep -rn "retry_policy" app/` solo devuelve el
+      propio archivo y comentarios/docstrings que lo mencionan).
+- [x] `GroupOperationRunner.encolar()` despacha **un Celery task por device**
       (confirmado — no uno por grupo, ver el aviso de esta fase).
-- [ ] `app/tasks.py` tiene un único task genérico (`ansiauth.orquestador.ejecutar`),
+- [x] `app/tasks.py` tiene un único task genérico (`ansiauth.orquestador.ejecutar`),
       no los 11 anteriores. `worker.py: include=["app.tasks"]`.
-- [ ] `api/vlans.py`/`api/ports.py` construyen `VLAN`/`Puerto` y llaman
+- [x] `api/vlans.py`/`api/ports.py` construyen `VLAN`/`Puerto` y llaman
       `GroupOperationRunner.encolar()` — no importan `vlan_service`/`port_service`.
-- [ ] `GroupOperationRunner.encolar()` devuelve `(group_job_id, jobs)` — los
+- [x] `GroupOperationRunner.encolar()` devuelve `(group_job_id, jobs)` — los
       endpoints de escritura de VLAN/Puerto responden con `"jobs"` en el body,
       confirmado contra `frontend/src/types/vlan.ts`/`port.ts`.
-- [ ] Cada `Job` que crea `encolar()` tiene `parameters=asdict(recurso)` — no
+- [x] Cada `Job` que crea `encolar()` tiene `parameters=asdict(recurso)` — no
       queda en `None`, confirmado contra `JobDetailModal.tsx` real
       (`groupJob.parameters?.vlan_id` para el título del modal de grupo).
-- [ ] `GET /ports` traduce `Puerto.interface` → `PortRead.name` explícito en el
+- [x] `GET /ports` traduce `Puerto.interface` → `PortRead.name` explícito en el
       router — confirmado contra `app/schemas/port.py: PortRead` real.
-- [ ] `api/jobs.py: cancel_job()` atrapa `TransicionInvalidaError` → 409.
+- [x] `api/jobs.py: cancel_job()` atrapa `TransicionInvalidaError` → 409.
       `list_jobs()` usa `JobRepository.query(scope)`.
-- [ ] `main.py` usa `job_repository.recuperar_huerfanos()`, no
+- [x] `main.py` usa `job_repository.recuperar_huerfanos()`, no
       `job_service.mark_orphaned_jobs_failed()`.
-- [ ] `CleanupScheduler` existe, `LoginAttemptRepository.purgar_antiguos()`
+- [x] `CleanupScheduler` existe, `LoginAttemptRepository.purgar_antiguos()`
       agregado. `cleanup_service.py` sin caller real.
 
-- [ ] `python -c "import app.composition"` y `python -c "import app.main"` corren sin error (ver `FASE_7.md` sección 5).
+- [x] `python -c "import app.composition"` y `python -c "import app.main"` corren sin error (ver `FASE_7.md` sección 5).
 
 ## Riesgos / cosas a validar
 
