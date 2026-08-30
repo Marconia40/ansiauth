@@ -129,7 +129,7 @@ def update_device(
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import audit_repository, device_repository
-    from app.services.secret_service import vault
+    from app.services.secret_vault import vault
 
     provided = data.model_dump(exclude_unset=True)
     if not provided:

@@ -116,8 +116,8 @@ def refresh(request: Request, response: Response):
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail=str(exc))
 
-    from app.services import user_service
-    user = user_service.get_by_username(username)
+    from app.composition import user_repository
+    user = user_repository.obtener_por_username(username)
     if user is None or not user.is_active:
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail="Invalid credentials")

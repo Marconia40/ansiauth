@@ -1,8 +1,12 @@
 from typing import Optional
 
-from app.schemas.user import UserRead
-from app.services import user_service
+from app.models.user import User
 
 
-def authenticate_user(username: str, password: str) -> Optional[UserRead]:
-    return user_service.authenticate(username, password)
+def authenticate_user(username: str, password: str) -> Optional[User]:
+    from app.composition import user_repository
+
+    user = user_repository.obtener_por_username(username)
+    if user is None or not user.verificar_password(password):
+        return None
+    return user

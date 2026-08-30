@@ -12,12 +12,20 @@ from app.schemas.role_assignment import (
     SystemAdminUpdate,
 )
 from app.models.audit import AuditRecord
-from app.schemas.user import UserCreate, UserUpdate
-from app.services import user_service
+from app.models.user import User
+from app.schemas.user import UserCreate, UserRead, UserUpdate
 from app.services.role_assignment_service import RoleAssignmentService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _to_read(user: User) -> dict:
+    return UserRead(
+        id=user.id, username=user.username, email=user.email,
+        is_active=user.is_active, is_system_admin=user.is_system_admin,
+        created_at=user.created_at, updated_at=user.updated_at,
+    ).model_dump()
 
 
 @router.post(
@@ -34,11 +42,15 @@ def create_user(data: UserCreate, current_user: dict = Depends(require_authentic
             status_code=403,
             detail="create_user requires system-admin",
         )
+    from app.composition import audit_repository, user_repository
+
     try:
-        user = user_service.create_user(data)
+        user = user_repository.crear(
+            username=data.username, password=data.password,
+            email=data.email, is_system_admin=data.is_system_admin,
+        )
     except ValueError as e:
         raise ValidationError(str(e))
-    from app.composition import audit_repository
     audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="create_user",
@@ -46,7 +58,7 @@ def create_user(data: UserCreate, current_user: dict = Depends(require_authentic
         resource_id=str(user.id),
         details={"username": user.username},
     ))
-    return {"success": True, "data": user.model_dump()}
+    return {"success": True, "data": _to_read(user)}
 
 
 @router.get(
@@ -69,12 +81,14 @@ def list_users(
             status_code=403,
             detail="list_users requires system-admin",
         )
-    all_users = user_service.list_users(include_inactive=include_inactive)
+    from app.composition import user_repository
+
+    all_users = user_repository.listar(incluir_inactivos=include_inactive)
     total = len(all_users)
     start = (page - 1) * page_size
     return {
         "success": True,
-        "data": [u.model_dump() for u in all_users[start : start + page_size]],
+        "data": [_to_read(u) for u in all_users[start : start + page_size]],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -92,10 +106,12 @@ def get_user(user_id: int, current_user: dict = Depends(require_authenticated)):
             status_code=403,
             detail="get_user requires system-admin or self",
         )
-    user = user_service.get_by_id(user_id)
+    from app.composition import user_repository
+
+    user = user_repository.get(user_id)
     if user is None:
         raise NotFoundError(f"User {user_id} not found")
-    return {"success": True, "data": user.model_dump()}
+    return {"success": True, "data": _to_read(user)}
 
 
 @router.put(
@@ -117,14 +133,32 @@ def update_user(
             status_code=403,
             detail="update_user requires system-admin",
         )
+    from app.composition import audit_repository, user_repository
+
+    user = user_repository.get(user_id)
+    if user is None:
+        raise NotFoundError(f"User {user_id} not found")
     try:
-        user = user_service.update_user(user_id, data)
+        if data.email is not None:
+            email_norm = data.email.lower()
+            clash = [u for u in user_repository.listar(incluir_inactivos=True) if u.email == email_norm]
+            if clash and clash[0].id != user_id:
+                raise ValidationError(f"Email '{email_norm}' is already registered")
+            user.actualizar(email=data.email)
+        if data.password is not None:
+            user.actualizar(password=data.password)
+        if data.is_active is False:
+            if user_repository.es_ultimo_admin_activo(user_id):
+                raise ValidationError("Cannot deactivate the last active system-admin account")
+            user.desactivar()
+        elif data.is_active is True:
+            user.activar()
     except ValueError as e:
         raise ValidationError(str(e))
+    user = user_repository.add(user)
     audit_fields = {k: v for k, v in data.model_dump(exclude_none=True).items() if k != "password"}
     if data.password is not None:
         audit_fields["password_changed"] = True
-    from app.composition import audit_repository
     audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="update_user",
@@ -132,7 +166,7 @@ def update_user(
         resource_id=str(user_id),
         details={"updated_fields": audit_fields},
     ))
-    return {"success": True, "data": user.model_dump()}
+    return {"success": True, "data": _to_read(user)}
 
 
 @router.delete(
@@ -150,11 +184,15 @@ def deactivate_user(user_id: int, current_user: dict = Depends(require_authentic
             status_code=403,
             detail="deactivate_user requires system-admin",
         )
-    try:
-        user = user_service.deactivate_user(user_id)
-    except ValueError as e:
-        raise ValidationError(str(e))
-    from app.composition import audit_repository
+    from app.composition import audit_repository, user_repository
+
+    user = user_repository.get(user_id)
+    if user is None:
+        raise NotFoundError(f"User {user_id} not found")
+    if user_repository.es_ultimo_admin_activo(user_id):
+        raise ValidationError("Cannot deactivate the last active system-admin account")
+    user.desactivar()
+    user_repository.add(user)
     audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="deactivate_user",

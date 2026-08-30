@@ -18,16 +18,17 @@ from app.repositories.job_repository import JobRepository
 from app.repositories.login_attempt_repository import LoginAttemptRepository
 from app.repositories.role_assignment_repository import RoleAssignmentRepository
 from app.repositories.site_repository import SiteRepository
+from app.repositories.user_repository import UserRepository
 from app.services.audit_listener import AuditListener
 from app.services.cleanup_scheduler import CleanupScheduler
 from app.services.event_dispatcher import EventDispatcher
 from app.services.group_operation_runner import GroupOperationRunner
-from app.services.inventory_service import Inventory
+from app.services.inventory import Inventory
 from app.services.job_queue import JobQueue
 from app.services.orquestador import Orquestador
 from app.services.plugin_registry import PluginRegistry
 from app.services.redis_coordinator import RedisCoordinator
-from app.services.secret_service import vault as secret_vault  # noqa: F401
+from app.services.secret_vault import vault as secret_vault  # noqa: F401
 
 
 def build_plugin_registry() -> PluginRegistry:
@@ -95,6 +96,8 @@ device_repository = DeviceRepository()
 device_group_repository = DeviceGroupRepository()
 
 site_repository = SiteRepository()
+
+user_repository = UserRepository()
 
 audit_repository = AuditRepository()
 

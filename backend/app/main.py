@@ -65,8 +65,6 @@ logger.info("Database ready: %s", DATABASE_URL)
 from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.core.rls_context import system_context  # noqa: E402
 from app.models.audit import AuditRecord  # noqa: E402
-from app.services import user_service  # noqa: E402
-from app.schemas.user import UserCreate  # noqa: E402
 
 with system_context():
     from app.composition import job_repository
@@ -103,14 +101,13 @@ def _bootstrap_admin() -> None:
             "BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters"
         )
 
-    user = user_service.create_user(
-        UserCreate(
-            username=BOOTSTRAP_ADMIN_USER,
-            password=BOOTSTRAP_ADMIN_PASSWORD,
-            is_system_admin=True,
-        )
+    from app.composition import audit_repository, user_repository
+
+    user = user_repository.crear(
+        username=BOOTSTRAP_ADMIN_USER,
+        password=BOOTSTRAP_ADMIN_PASSWORD,
+        is_system_admin=True,
     )
-    from app.composition import audit_repository
     audit_repository.append(AuditRecord(
         user="system",
         action="bootstrap_admin",
