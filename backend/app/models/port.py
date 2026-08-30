@@ -225,11 +225,24 @@ class Puerto:
         devuelve un `PortConfigResult` (dataclass), no un dict como los
         métodos puntuales — se normaliza acá con `.to_dict()` para que el
         caller de `aplicar()` siempre reciba la misma forma (dict), sin
-        importar cuántos campos cambiaron."""
+        importar cuántos campos cambiaron.
+
+        `"rc"` se agrega también acá — corrección real encontrada en Fase 5
+        armando `Orquestador`: `PortConfigResult.to_dict()` no tiene clave
+        `"rc"` (usa `success`/`changed`), pero `Orquestador.ejecutar()`
+        chequea `resultado.get("rc", 0) != 0` de forma uniforme para
+        cualquier `RecursoGestionable` — sin esta clave, una falla real de
+        `configure_port()` quedaba invisible para `Orquestador` (default
+        `0` = "éxito"), confirmado con un test end-to-end (`configure_port`
+        devolviendo `success=False` no disparaba ni excepción ni rollback)."""
         campos = self.mutation_fields
         if len(campos) > 1:
             resultado = device.driver.configure_port(self, device, device.password)
-            return {**resultado.to_dict(), "accion": "configurar_puerto"}
+            return {
+                **resultado.to_dict(),
+                "rc": 0 if resultado.success else 1,
+                "accion": "configurar_puerto",
+            }
         campo = next(iter(campos))
         if campo == "description":
             resultado = device.driver.update_port_description(self.interface, self.description, device, device.password)

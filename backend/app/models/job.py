@@ -70,9 +70,17 @@ class Job:
         self._transicionar("cancelled")
         self.finished_at = datetime.now(timezone.utc)
 
-    def registrar_reintento(self, delay: float) -> None:
+    def registrar_reintento(self, error: str) -> None:
+        """Reemplaza job_service.py: update_job(job_id, retry_count=...,
+        last_error=..., current_step="retrying") -- llamada dentro del loop
+        de reintentos, no al final. *error* es el texto del intento que
+        acaba de fallar (stderr+stdout combinados), no ``self.error``
+        (ese campo recién existe si el Job termina en failed -- durante un
+        reintento en curso todavía no está seteado; usarlo acá copiaría
+        ``None``, corrección real encontrada en Fase 5 armando
+        `Orquestador._ejecutar_con_retry()`)."""
         self.retry_count += 1
-        self.last_error = self.error
+        self.last_error = error.strip()[:500]
         self.current_step = "retrying"
 
     def asegurar_estado_final(self) -> None:
