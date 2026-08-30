@@ -395,6 +395,49 @@ cubren (mismo tipo de hueco que ya aparecieron en Fases 2 y 3), documentarlo con
 el mismo nivel de detalle que esas 2 fases — no asumir que como "ya está
 construido" no puede haber nada nuevo.
 
+**Revisión hecha, 5 puntos verificados — 1 hallazgo real, el resto confirma
+que la integración ya está bien:**
+
+1. **El ask explícito de B1 — confirmado.** `api/devices.py: list_devices()`
+   recibe `scope: VisibilityScope = Depends(obtener_scope)` (A7) y se lo pasa
+   a `Inventory.list(scope, ...)` — no un `user: dict` crudo. `Inventory.list()`
+   usa `DeviceRepository.nombres_visibles(scope)` (Fase 3), no su propio JOIN
+   (ver corrección de forma en A5, arriba).
+2. **Hallazgo real: `Inventory.__init__` recibe `role_assignments`
+   (`RoleAssignmentRepository`) pero ningún método de la clase lo usa.**
+   Confirmado con `grep -n "self._role_assignments" app/services/
+   inventory_service.py` → 0 resultados fuera del `__init__`. No es un bug —
+   la autorización de escritura (`register`/`move`/`deregister`) corre
+   siempre en el router (`scope.rol_para()`/`require_scope`), nunca dentro
+   de `Inventory` — mismo criterio de separación que el resto del catálogo
+   desde Fase 2. El parámetro está en la firma canónica de
+   `FINAL_ARCHITECTURE.md`/`FASE_6.md` A5 tal cual, así que se mantiene por
+   fidelidad al plan, pero queda documentado acá que es vestigial: ningún
+   caller real necesita pasarle un `RoleAssignmentRepository` distinto del
+   singleton, y ninguna versión futura de `Inventory` debería asumir que
+   `self._role_assignments` hace algo hoy.
+3. **Los `DomainEvent` que `Inventory` despacha (`device_registrado`/
+   `device_movido`/`device_dado_de_baja`) llegan correctamente a
+   `AuditRepository._aplicar_scope()` para un viewer no-admin.** Verificado
+   leyendo el código: `AuditRecord.desde()` setea `device=evento.device.name`,
+   y `_aplicar_scope()` incluye `AuditLogModel.device.in_(nombres)` con
+   `nombres = device_repository.nombres_visibles(scope)` — el mismo
+   `DeviceRepository` que `Inventory` ya usa. Un operador con acceso al
+   device ve su propio evento de auditoría; no hace falta ningún cambio en
+   `AuditRepository` para esto.
+4. **Los 2 audit rows armados a mano en `api/sites.py: create_site()`**
+   (`resource="site"`/`resource="device_group"`, sin `device=`) **también
+   matchean correcto contra `_aplicar_scope()`** — vía sus condiciones
+   `resource == "site"`/`resource == "device_group"` + `resource_id`. Solo
+   relevante en la práctica para system-admins (`create_site` exige
+   `is_system_admin`), pero confirmado igual, no asumido.
+5. **`require_scope("move_device")`/`_authorize_move_device()`
+   (`core/scope.py`, Fase 2) siguen intactos — no dependían de
+   `device_service`/`site_service`/`device_group_service`.** Confirmado con
+   `grep`: `_lookup_device_scope()` ya usaba `get_session()` directo, no los
+   3 servicios que esta fase deja sin caller real. Cero riesgo de import
+   roto ahí.
+
 ---
 
 ## Correcciones reales encontradas implementando esta fase de punta a punta
