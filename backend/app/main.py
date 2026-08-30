@@ -133,16 +133,15 @@ with system_context():
 
 def _make_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
-    from app.services import audit_service as _audit
-    from app.services import cleanup_service as _cleanup
+    from app.composition import audit_repository, cleanup_scheduler
 
     def _purge_with_system_ctx():
         with system_context():
-            _audit.purge_old_records(AUDIT_RETENTION_DAYS, triggered_by="scheduler")
+            audit_repository.purge_old(AUDIT_RETENTION_DAYS, triggered_by="scheduler")
 
     def _cleanup_with_system_ctx():
         with system_context():
-            _cleanup.run_all(
+            cleanup_scheduler.ejecutar_todo(
                 artifact_retention_days=ARTIFACT_RETENTION_DAYS,
                 login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
             )
@@ -168,12 +167,12 @@ def _make_scheduler():
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    from app.services import cleanup_service as _cleanup
+    from app.composition import cleanup_scheduler
 
     # Single startup pass so a long-running deployment doesn't have to wait a
     # full interval before unbounded tables are pruned for the first time.
     with system_context():
-        _cleanup.run_all(
+        cleanup_scheduler.ejecutar_todo(
             artifact_retention_days=ARTIFACT_RETENTION_DAYS,
             login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
         )

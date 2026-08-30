@@ -18,6 +18,7 @@ from app.repositories.job_repository import JobRepository
 from app.repositories.login_attempt_repository import LoginAttemptRepository
 from app.repositories.role_assignment_repository import RoleAssignmentRepository
 from app.services.audit_listener import AuditListener
+from app.services.cleanup_scheduler import CleanupScheduler
 from app.services.event_dispatcher import EventDispatcher
 from app.services.group_operation_runner import GroupOperationRunner
 from app.services.job_queue import JobQueue
@@ -113,3 +114,5 @@ orquestador = Orquestador(
 )
 
 group_operation_runner = GroupOperationRunner(orquestador, JobQueue(), job_repository)
+
+cleanup_scheduler = CleanupScheduler(login_attempt_repository)

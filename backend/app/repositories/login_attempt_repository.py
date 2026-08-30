@@ -67,6 +67,22 @@ class LoginAttemptRepository:
                 )
             )
 
+    def purgar_antiguos(self, dias: int = 7) -> int:
+        """Copia cleanup_service.py: sweep_old_login_attempts() tal cual --
+        FASE_5.md B1, CleanupScheduler.limpiar_intentos_login() delega acá
+        en vez de tocar LoginAttemptModel directo. La ventana de bloqueo
+        real (USERNAME_LOCKOUT_MINUTES/IP_LOCKOUT_HOURS arriba) es mucho
+        más corta que *dias* -- este purge solo afecta filas históricas que
+        ya no influyen en ninguna decisión de lockout."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=dias)
+        with get_session() as session:
+            deleted = (
+                session.query(LoginAttemptModel)
+                .filter(LoginAttemptModel.attempted_at < cutoff)
+                .delete(synchronize_session=False)
+            )
+        return deleted
+
     def resetear(self, username: str) -> int:
         """Delete every failed attempt for *username*. Returns the number
         of rows deleted — same shape as the old unlock_username, which
