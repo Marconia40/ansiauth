@@ -4,10 +4,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, TransicionInvalidaError
 from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
+from app.models.audit import AuditRecord
 from app.models.visibility_scope import VisibilityScope
-from app.services import audit_service, job_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -68,6 +68,7 @@ def _ensure_aware(dt: Optional[datetime]) -> Optional[datetime]:
 )
 def list_jobs(
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
     status: Optional[str] = Query(default=None),
     device_id: Optional[str] = Query(default=None),
     site_id: Optional[int] = Query(default=None, ge=1),
@@ -86,20 +87,15 @@ def list_jobs(
     if from_date is not None and to_date is not None and from_date > to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
 
-    # Scope-aware visible device set from role_assignments (system-admins see
-    # everything → None sentinel).
-    from app.services.inventory_service import Inventory
-    allowed = Inventory()._visible_device_names(
-        current_user, site_id=site_id, device_group_id=None,
-    )
+    from app.composition import job_repository
 
-    jobs, total = job_service.query_jobs(
+    jobs, total = job_repository.query(
         status=status,
         device=device_id,
+        site_id=site_id,
         from_date=from_date,
         to_date=to_date,
-        site_id=site_id,
-        allowed_devices=allowed,
+        scope=scope,
         page=page,
         page_size=page_size,
     )
@@ -122,7 +118,9 @@ def get_job(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    job = job_service.get_job(job_id)
+    from app.composition import job_repository
+
+    job = job_repository.get(job_id)
     if not job:
         raise NotFoundError(f"Job '{job_id}' not found")
     if job.device:
@@ -164,25 +162,42 @@ def cancel_job(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import audit_repository, job_repository
+
     # Look up first so we can authz before mutating state.
-    existing = job_service.get_job(job_id)
-    if not existing:
+    job = job_repository.get(job_id)
+    if job is None:
         raise NotFoundError(f"Job '{job_id}' not found")
-    if existing.device:
-        _check_device_scope(scope, existing.device, min_role="operator")
-    job = job_service.cancel_job(job_id)
-    if not job:
-        raise NotFoundError(f"Job '{job_id}' not found")
-    if job.status != "cancelled":
+    if job.device:
+        _check_device_scope(scope, job.device, min_role="operator")
+    try:
+        job.cancelar()
+    except TransicionInvalidaError:
         raise HTTPException(
             status_code=409,
             detail=f"Cannot cancel job with status '{job.status}'"
         )
-    audit_service.log_action(
+    job_repository.add(job)
+    # audit_service.log_action() escrito acá antes -- reemplazado por
+    # AuditRepository.append() directo (Fase 3/B1), no AuditRecord.desde()
+    # (esa fábrica arma el record a partir de un DomainEvent de
+    # Orquestador; cancelar un job no pasa por ahí, no hay VLAN/Puerto
+    # ni device.driver involucrado).
+    #
+    # ``device=job.device`` -- corrección real encontrada probando el
+    # filtro de scope de punta a punta (`AuditRepository._aplicar_scope()`,
+    # Fase 3): sin `device`, el record queda invisible para cualquier
+    # scope no-system-admin -- `_aplicar_scope()` solo deja pasar filas con
+    # `device=None` cuando `resource == "auth"`; con `resource="job"` y
+    # `device=None` no matchea ninguna de sus condiciones OR, el operador
+    # dueño del device nunca veía su propio cancel_job en el audit log.
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="cancel_job",
         resource="job",
+        resource_id=job_id,
         details={"job_id": job_id},
         job_id=job_id,
-    )
+        device=job.device,
+    ))
     return {"success": True, "data": {"job_id": job.job_id, "status": job.status}}

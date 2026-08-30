@@ -64,11 +64,13 @@ logger.info("Database ready: %s", DATABASE_URL)
 
 from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.core.rls_context import system_context  # noqa: E402
-from app.services import audit_service, job_service, site_service, user_service  # noqa: E402
+from app.models.audit import AuditRecord  # noqa: E402
+from app.services import site_service, user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
 with system_context():
-    job_service.mark_orphaned_jobs_failed()
+    from app.composition import job_repository
+    job_repository.recuperar_huerfanos()
 
 
 def _bootstrap_admin() -> None:
@@ -108,14 +110,15 @@ def _bootstrap_admin() -> None:
             is_system_admin=True,
         )
     )
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user="system",
         action="bootstrap_admin",
         resource="user",
         resource_id=str(user.id),
         details={"username": user.username},
         status="success",
-    )
+    ))
     logger.info("Bootstrap: created system-admin user '%s' (id=%d)", user.username, user.id)
 
 
@@ -316,13 +319,14 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
     except Exception:
         body_data = None
 
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user="anonymous",
         action="validation_error",
         resource="request",
         status="failure",
         details={"errors": errors_data, "body": body_data},
-    )
+    ))
     return JSONResponse(
         status_code=422,
         content=make_error(422, "Request validation failed", "VALIDATION_ERROR", {"errors": errors_data}),
