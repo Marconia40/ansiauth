@@ -232,6 +232,30 @@ ya usa el documento para no mezclar "aplicar" con "compensar".
 **Borrar `orchestration_runner.py` y `retry_policy.py`** una vez que `Orquestador`
 los reemplace y ningún caller real los importe más.
 
+**2 correcciones reales encontradas implementando y probando `Orquestador`
+end-to-end (`test_orquestador.py`, `FakeDriver`), ninguna estaba en el
+snippet canónico de arriba:**
+
+1. **`job.registrar_reintento()` no se llamaba ni se persistía.** El snippet
+   canónico de `_ejecutar_con_retry()` (arriba) calcula `retry_count` pero
+   nunca toca `job` — `Job.registrar_reintento()` (Fase 4) existía pero no
+   tenía ningún caller real, y su firma original (`registrar_reintento(self,
+   delay: float)`) ni siquiera guardaba el texto del error (copiaba
+   `self.error`, que es `None` hasta `marcar_fallido()`). `api/jobs.py` sí
+   expone `retry_count`/`last_error` en la respuesta real — sin este fix
+   quedaban siempre en su default. Fix: `_ejecutar_con_retry()` ahora recibe
+   `job` (no solo `job_id`) y llama `job.registrar_reintento(error_texto)` +
+   `self._jobs.add(job)` en cada reintento; `Job.registrar_reintento()` pasa
+   a `registrar_reintento(self, error: str)`.
+2. **`resultado.get("rc", 0) != 0` (línea `if resultado.get("rc", 0) != 0:`)
+   asume que todo resultado de `aplicar()` trae `"rc"` — falso para
+   `Puerto.aplicar()`'s rama compuesta**, que devuelve `PortConfigResult.to_dict()`
+   (usa `success`/`changed`, no `rc`). Una falla real de `configure_port()`
+   quedaba invisible para `Orquestador` (default `0` = "éxito", ni excepción
+   ni rollback). Confirmado con un test end-to-end. Fix documentado en A2/Fase
+   2 — `Puerto.aplicar()` agrega `"rc": 0 if resultado.success else 1` a la
+   rama compuesta antes de devolver.
+
 ### A4 — `app/services/group_operation_runner.py` (archivo nuevo): `GroupOperationRunner`
 
 **Dispatch paralelo real (decisión de esta fase, ver el aviso al principio del
@@ -380,6 +404,16 @@ device.password)` directo (`FINAL_ARCHITECTURE.md` §4, ya documentado), inyecta
 `RedisCoordinator` en vez de `device_locks.acquire()` directo (4 lugares reales
 documentados: `api/vlans.py:63,84`, `api/ports.py:99-111,209`).
 
+**`VLAN.validar()` corta si `self.eliminar` — corrección real encontrada
+probando `DELETE /vlans/{id}` de punta a punta (`test_api_vlans.py`).**
+`Orquestador.ejecutar()` llama `recurso.validar()` sin condicionales, sin
+importar la operación (A3). `VLAN(vlan_id=..., eliminar=True)` deja
+`name=""` a propósito (irrelevante para borrar) — sin el corte, **todo**
+`DELETE` fallaba con "Invalid VLAN name" antes de tocar el device. Mismo
+criterio que ya usa `aplicar()` para no mirar `name` en la rama de
+`eliminar`. Ver también A7 — `Puerto.validar()` tuvo el mismo tipo de gap
+(ahí con `mode`, no con una intención de borrado).
+
 ### A7 — Rewirear `api/ports.py`, mismo patrón que A6
 
 `Puerto(interface=..., device=X, <campos según el endpoint>)` — cada uno de los 7
@@ -413,10 +447,16 @@ El router arma la respuesta explícito, no delega en un `to_dict()` genérico:
 
 ```python
 @router.get("/", ...)
-def get_ports(device: str, current_user=Depends(require_authenticated)):
-    puertos = device.driver.list_ports(device, device.password)  # list[Puerto], Fase 2
+def list_ports(device: str | None = None, current_user=Depends(require_authenticated), scope=Depends(obtener_scope)):
+    from app.composition import device_repository, redis_coordinator
+    _authz_device(scope, device, min_role="observer")
+    dev = device_repository.get(device)
+    if dev is None:
+        raise NotFoundError(f"Device '{device}' not found")
+    with redis_coordinator.bloquear(device, timeout=10):
+        puertos = dev.driver.list_ports(dev, dev.password)  # list[Puerto], Fase 2
     return {"success": True, "data": {
-        "device": device.name, "vendor": device.vendor, "count": len(puertos),
+        "device": dev.name, "vendor": dev.vendor, "count": len(puertos),
         "ports": [
             PortRead(
                 name=p.interface, description=p.description, admin_up=p.admin_up,
@@ -429,6 +469,97 @@ def get_ports(device: str, current_user=Depends(require_authenticated)):
     }}
 ```
 
+**Corrección de forma sobre el snippet arriba** (el original de este plan
+conflaba el `str` del query param con el objeto `Device` — `device.driver`
+solo existe sobre el segundo): hay que resolver `device_repository.get(device)`
+primero, igual que `_leer_vlans_en_vivo()` de A6. El `device=None` + modo mock
+(sin device) se resuelve igual que `GET /vlans` — devuelve
+`vendors.mock._INITIAL_MOCK_PORTS` directo, sin pasar por `device_repository`.
+
+**5 correcciones reales encontradas implementando y probando `api/ports.py`
+de punta a punta (`test_puerto_gates.py`, `test_api_ports.py`, `MockVendor`
+real con `EXECUTION_MODE=mock`) — ninguna estaba prevista en el plan
+original de A7, todas nacen de la misma causa: los endpoints de campo único
+(`/access-vlan`, `/trunk-vlans`) no le pasan `mode` al `Puerto` que
+construyen — el modo vive en el device, no en el request — y ni
+`Puerto.validar()` ni `Puerto.aplicar()` (Fase 2/A2) estaban preparados para
+eso cuando se escribieron, porque en ese momento el único caller real era el
+endpoint compuesto `/configure`, que sí manda `mode` siempre:**
+
+1. **`Puerto.validar()` exigía `mode` seteado para `access_vlan`/`allowed_vlans`
+   incondicionalmente — bloqueaba `/access-vlan` y `/trunk-vlans` enteros.**
+   `Orquestador.ejecutar()` llama `recurso.validar()` sin condicionales antes
+   de tocar el device (A3) — un `Puerto(access_vlan=88)` sin `mode` (lo que
+   construye `/access-vlan`, a propósito: el modo real se lee en vivo dentro
+   de `aplicar()`) fallaba siempre con "`access_vlan` may only be set when
+   mode='access' or mode='trunk' (got mode=None)" antes de llegar al device.
+   Confirmado con `Orquestador.ejecutar()` real sobre un `FakeDriver`. Fix:
+   la regla cruzada (`access_vlan`/`allowed_vlans` requieren `mode`) solo
+   corre cuando `Puerto._es_composite` es `True` (ver punto 2) — en el
+   camino de campo único el modo se valida en vivo, no contra el request.
+2. **`Puerto.aplicar()`'s regla "compuesto si `len(campos) > 1`" no cubre
+   `mode` solo.** No existe `driver.set_port_mode()` — cambiar de modo
+   **siempre** pasa por `configure_port()` (única forma real, confirmado en
+   `VendorDriver`/Huawei/Cisco). Un `Puerto(mode="trunk")` (1 campo) caía en
+   el dispatch de campo único, no encontraba caso para `"mode"` y lanzaba
+   `ValueError` — `POST /configure` con solo `mode=` (sin VLAN, sin admin
+   state; ej. "pasar el puerto a trunk antes de asignarle VLANs en una
+   llamada aparte") estaba roto. Fix: `Puerto._es_composite` (property nueva)
+   = `len(campos) > 1 or "mode" in campos` — usado tanto en `aplicar()` como
+   en la regla cruzada de `validar()` (punto 1), mismo predicado en los dos
+   lugares.
+3. **`_aplicar_allowed_vlans()` no rechazaba un puerto que no está en modo
+   trunk.** El `_validate()` real de `run_set_trunk_allowed_vlans_job()`
+   (`port_execution_service.py`) sí lo hace antes de llamar al driver —
+   sin el gate, `set_trunk_allowed_vlans` se podía despachar contra un
+   puerto access. Fix: `_aplicar_allowed_vlans()` lee el modo en vivo
+   (ya lo hacía, para calcular `deseados`) y rechaza con `ValueError` si
+   `actual.mode != "trunk"`, antes de tocar el driver.
+4. **`_aplicar_access_vlan()` no rechazaba un puerto en modo `"unknown"`.**
+   Mismo `_validate()` real: exige access-o-trunk, no "cualquier cosa que
+   no sea trunk" (que es lo que hacía el código antes de este fix — un
+   puerto unknown caía silenciosamente en la rama access). Fix: mismo
+   patrón que el punto 3, gate explícito antes del dispatch trunk/access.
+5. **`MockVendor` no implementaba `set_trunk_pvid_vlan` — `NotImplementedError`
+   real, no hipotético.** Antes de esta fase ese método era inalcanzable
+   (`Puerto.aplicar()` no lo llamaba desde ningún lado real — docstring de
+   `MockVendor` decía "`Device` never calls them", cierto en su momento);
+   la corrección de trunk/access-vlan mode-awareness de A2 (`Puerto.
+   _aplicar_access_vlan()`) lo vuelve alcanzable de verdad — `PATCH
+   /ports/access-vlan` sobre el puerto trunk seed (`GigabitEthernet0/0/24`
+   en `_INITIAL_MOCK_PORTS`) fallaba con `NotImplementedError` en
+   `EXECUTION_MODE=mock`, rompiendo tanto el test suite como cualquier
+   demo/desarrollo local contra el mock. Fix: `MockVendor.set_trunk_pvid_vlan()`
+   agregado, mismo patrón que `set_port_access_vlan`.
+
+**`shutdown_port()`/`enable_port()` no llaman `driver.shutdown_port()`/
+`enable_port()` — son wrappers semánticos de `admin_up=False`/`True`, mismo
+camino que `/admin-state`.** `VendorDriver` declara `shutdown_port`/
+`enable_port` como métodos abstractos-con-default (`NotImplementedError`),
+pero **ningún** driver real (mock/Huawei/Cisco) los sobreescribe — `Puerto`
+siempre despacha admin-state a través de `set_port_admin_state` sin importar
+qué endpoint lo llamó (confirmado leyendo los 3 drivers). Corrección real
+sobre el propio A7: el gate de driver soportado (`_require_port_driver_with`)
+para estos 2 endpoints tiene que chequear `"set_port_admin_state"`, no
+`"shutdown_port"`/`"enable_port"` — chequear el nombre del endpoint viejo
+hubiera devuelto 501 siempre, porque ningún driver sobreescribe ese stub.
+
+**`_check_device_not_locked()` — mismo problema que `device_locks.acquire()`
+en A6/A3: `device_locks.py` ya no existe (Fase 1, absorbido por
+`RedisCoordinator`).** El código real de este check (`api/ports.py:100-122`)
+importaba `from app.services import device_locks` **dentro** de la función —
+no rompía `import app.api.ports`, pero sí cualquier llamada real a
+`configure_port`/`shutdown_port`/`enable_port` (los 3 únicos que lo usan).
+Fix: `redis_coordinator.esta_ocupado(device_name)` (no-blocking, mismo
+contrato que `device_locks.is_device_busy()`).
+
+**Las 7 funciones `_capture_pre_state_port_*`/`_capture_pre_state_port_configure/
+shutdown/enable` (líneas 57-97 reales) no se migran.** Eran seams de test para
+monkeypatchear la captura de pre-state de la arquitectura vieja
+(`port_execution_service.py`/`port_config_service.py`) — `Orquestador.ejecutar()`
+(A3) ya captura `pre_state` internamente vía `recurso.reconciliar(device)`,
+sin exponer un punto de monkeypatch por endpoint. Mismo criterio que A6
+(`api/vlans.py` tampoco los re-exporta).
 ### A8 — Rewirear `api/jobs.py`
 
 `cancel_job()` — el real no lanza si el job ya terminó (no-op silencioso). Con
