@@ -158,7 +158,7 @@ class Puerto:
     (confirmado en los parsers reales, Huawei) puede reportar ``access_vlan``
     seteado igual, y `__post_init__` corre también al leer. Esas 4 reglas
     viven en ``validar()``, que ``Orquestador`` solo llama antes de
-    ``aplicar()`` — mismo criterio que ``VLAN.validate_name()`` (Fase 2, A1).
+    ``aplicar()`` — mismo criterio que ``VLAN.validar()`` (Fase 2, A1).
     """
 
     interface: str
@@ -186,7 +186,7 @@ class Puerto:
 
     def validar(self) -> None:
         """Reglas de escritura — solo se llaman antes de ``aplicar()``, nunca
-        durante ``reconciliar()``. Mismo criterio que ``VLAN.validate_name()``."""
+        durante ``reconciliar()``. Mismo criterio que ``VLAN.validar()``."""
         _mutation_fields = (
             self.description, self.admin_up, self.mode,
             self.access_vlan, self.allowed_vlans,

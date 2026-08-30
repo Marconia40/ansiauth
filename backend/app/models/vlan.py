@@ -47,7 +47,7 @@ class VLAN:
         Numeric VLAN identifier (1–4094, excluding the reserved range).
     name:
         Human-readable label. Required for ``create_vlan``/
-        ``update_vlan_description`` (see ``validate_name()``); left empty
+        ``update_vlan_description`` (see ``validar()``); left empty
         (``""``) when only ``vlan_id`` is needed, e.g. ``delete_vlan``.
     status:
         Optional platform-reported VLAN state (e.g. ``"active"``,
@@ -77,7 +77,7 @@ class VLAN:
     ``VLAN`` objects from whatever a real device reports, which can include
     characters (e.g. spaces in a VRP description) that the stricter
     user-input rules reject. Callers that need the name to satisfy those
-    rules (``aplicar()`` en creación/rename) llaman ``validate_name()``
+    rules (``aplicar()`` en creación/rename) llaman ``validar()``
     explícito antes de usarlo.
     """
 
@@ -91,8 +91,12 @@ class VLAN:
         _validate_vlan_id_range(self.vlan_id)
         _validate_vlan_not_reserved(self.vlan_id)
 
-    def validate_name(self) -> None:
-        """Validate ``name`` against the user-input format rules.
+    def validar(self) -> None:
+        """Validate ``name`` against the user-input format rules — satisface
+        el contrato ``RecursoGestionable`` (Fase 5). Renombrado desde
+        ``validate_name()`` (Fase 2) según lo ya previsto ahí: "el renombre
+        es cosmético, se hace en Fase 5 al mismo tiempo que se cablea
+        Orquestador".
 
         Not run automatically by ``__post_init__`` — see the class
         docstring. Call this explicitly before using ``name`` in a write
@@ -131,10 +135,10 @@ class VLAN:
         if pre_state["existed"] and pre_state["name"] == self.name:
             return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": "crear_vlan"}
         if pre_state["existed"] and pre_state["name"] != self.name:
-            self.validate_name()
+            self.validar()
             resultado = device.driver.update_vlan(self.vlan_id, self.name, device, device.password)
             return {**resultado, "accion": "actualizar_vlan"}
-        self.validate_name()
+        self.validar()
         resultado = device.driver.create_vlan(self.vlan_id, self.name, device, device.password)
         return {**resultado, "accion": "crear_vlan"}
 
