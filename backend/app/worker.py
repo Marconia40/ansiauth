@@ -15,11 +15,7 @@ celery_app.conf.update(
     result_serializer="json",
     task_track_started=True,
     task_always_eager=os.getenv("CELERY_TASK_ALWAYS_EAGER", "false").lower() in ("true", "1"),
-    include=[
-        "app.services.vlan_execution_service",
-        "app.services.port_execution_service",
-        "app.services.port_config_service",
-    ],
+    include=["app.tasks"],
 )
 
 
