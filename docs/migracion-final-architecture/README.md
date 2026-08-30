@@ -72,9 +72,16 @@ backend/app/
 ├── models/                       # entidades + Value Objects + protocolos — SIN comportamiento de persistencia
 │   ├── device.py                  # existente, reescrito (Fase 1: driver/password; Fase 6: actualizar())
 │   ├── vlan.py                    # existente, reescrito (Fase 2)
-│   ├── port.py                    # existente, reescrito (Fase 2) — PortConfigResult se mantiene
+│   ├── port.py                    # existente, reescrito (Fase 2); PortInfo/PortConfigRequest
+│   │                                  removidas (Fase 5, sin caller tras A6/A7) — PortConfigResult/
+│   │                                  PortListResponse removidas recién en Fase 7 (bloqueadas hasta
+│   │                                  entonces, y PortConfigResult resultó ser pura ceremonia —
+│   │                                  ningún caller real leía sus atributos como objeto, se
+│   │                                  destructuraba a dict una línea después de recibirla). `Puerto`
+│   │                                  es la única clase que queda en el archivo
 │   ├── job.py                     # existente, reescrito (Fase 4)
-│   ├── group_job.py               # BORRADO (Fase 4)
+│   ├── group_job.py               # BORRADO (Fase 7, no Fase 4 — bloqueado hasta entonces por
+│   │                                  save_device_config(), ver FASE_7.md sección 1)
 │   ├── audit.py                   # existente, +AuditRecord.desde() (Fase 3)
 │   ├── site.py                    # nuevo (Fase 6)
 │   ├── device_group.py            # nuevo (Fase 6)
@@ -113,17 +120,49 @@ backend/app/
 │   │
 │   ├── device_locks.py, rate_limiter.py            # BORRADOS (Fase 1)
 │   ├── effective_role.py                            # BORRADO (Fase 2)
-│   ├── group_job_service.py                         # BORRADO (Fase 4)
-│   ├── orchestration_runner.py, retry_policy.py     # BORRADOS (Fase 5)
+│   │
+│   │   Todo lo de acá abajo se borró físicamente recién en Fase 7 (su §1 es el
+│   │   único sweep de borrado real de todo el plan) — pero cada archivo quedó SIN
+│   │   CALLER real en un momento distinto; la fase entre paréntesis es cuándo
+│   │   quedó sin caller, no cuándo se borró el archivo del disco:
+│   │
+│   ├── orchestration_runner.py                      # sin caller (Fase 5) — sus imports en
+│   │                                                   vlan_execution_service.py eran locales/
+│   │                                                   lazy, dentro de funciones ya muertas
 │   ├── vlan_service.py, port_service.py,
-│   │   vlan_execution_service.py, port_execution_service.py,
-│   │   port_config_service.py, job_service.py, audit_service.py,
-│   │   device_service.py, site_service.py, device_group_service.py  # BORRADOS (Fase 7)
+│   │   port_execution_service.py, port_config_service.py  # sin caller (Fase 5, A6/A7)
+│   ├── device_service.py, site_service.py,
+│   │   device_group_service.py                       # sin caller (Fase 6)
+│   ├── cleanup_service.py                            # sin caller (Fase 5, B1)
+│   ├── group_job_service.py, vlan_execution_service.py,
+│   │   job_service.py                                # sin caller recién en Fase 7 — bloqueados
+│   │                                                    hasta entonces por api/devices.py:
+│   │                                                    save_device_config()/enqueue_save_job(),
+│   │                                                    que los importaba a nivel de módulo. Ver
+│   │                                                    FASE_7.md sección 1
+│   ├── retry_policy.py                               # sin caller recién en Fase 7 — Fase 5 lo dio
+│   │                                                    por muerto sin correr el grep correcto:
+│   │                                                    vlan_execution_service.py lo importaba a
+│   │                                                    nivel de módulo (línea 7) aunque ninguna
+│   │                                                    función real lo llamara. Ver FASE_7.md
+│   │                                                    "Riesgos / cosas a validar"
+│   ├── audit_service.py                              # sin caller recién en Fase 7 — 4 callers
+│   │                                                    reales fuera de alcance de fases anteriores
+│   │                                                    (role_assignment_service.py/api/users.py/
+│   │                                                    api/auth.py/api/audit.py) + el de
+│   │                                                    enqueue_save_job() de arriba. Ver
+│   │                                                    FASE_7.md §1.5/1.6
 │   │
 │   └── role_assignment_service.py, refresh_token_service.py,
 │       auth_service.py                              # SIN TOCAR — fuera de alcance (ver "Alcance" arriba)
 │
-├── validators/                    # BORRADO el paquete completo (Fase 2) — funciones absorbidas como privadas de vlan.py/port.py
+├── validators/                    # paquete BORRADO físicamente recién en Fase 7, NO Fase 2 —
+│                                     Fase 2 absorbió la lógica como funciones privadas de
+│                                     vlan.py/port.py, pero vlan_validator.py/port_validator.py
+│                                     siguieron en disco, sin caller real recién desde Fase 5
+│                                     (A6/A7, cuando api/vlans.py/api/ports.py dejaron de
+│                                     llamarlos directo) — mismo patrón que arriba: "sin caller"
+│                                     y "borrado del disco" son fases distintas en todo este plan
 │
 ├── tasks.py                       # nuevo (Fase 5) — un solo Celery task genérico
 ├── composition.py                  # nuevo (Fase 1 en adelante) — wiring, ver lista completa abajo
