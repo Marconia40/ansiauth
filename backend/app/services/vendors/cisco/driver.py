@@ -10,7 +10,7 @@ from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortConfigResult, Puerto
+    from app.models.port import Puerto
     from app.models.vlan import VLAN
 
 logger = logging.getLogger(__name__)
@@ -577,7 +577,7 @@ class CiscoVendor(VendorDriver):
         config: Puerto,
         device: Device,
         password: str,
-    ) -> PortConfigResult:
+    ) -> dict:
         """Composite port configuration — Step 3.1 stub (not yet implemented)."""
         raise NotImplementedError(
             "CiscoVendor.configure_port is not yet implemented — "

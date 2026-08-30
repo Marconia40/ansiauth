@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from app.models.port import PortConfigResult, Puerto
+from app.models.port import Puerto
 from app.models.vlan import VLAN
 from app.services.vendors.base import VendorDriver
 
@@ -192,20 +192,15 @@ class MockVendor(VendorDriver):
 
     def configure_port(
         self, config: "Puerto", device: "Device", password: str
-    ) -> PortConfigResult:
+    ) -> dict:
         if device.name == "fail_device":
             logger.info(
                 "Mock: configure_port FAILED on interface=%s device=%s",
                 config.interface, device.name,
             )
-            return PortConfigResult(
-                success=False, changed=False, interface=config.interface, vendor="mock"
-            )
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
         logger.info(
             "Mock: configure_port on interface=%s device=%s fields=%s",
             config.interface, device.name, config.mutation_fields,
         )
-        return PortConfigResult(
-            success=True, changed=True, interface=config.interface,
-            vendor="mock", execution_time_ms=1.0,
-        )
+        return {"rc": 0, "stdout": "Simulated configure_port applied", "stderr": "", "success": True}

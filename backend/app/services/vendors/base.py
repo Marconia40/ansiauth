@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortConfigResult, Puerto
+    from app.models.port import Puerto
     from app.models.vlan import VLAN
 
 
@@ -443,7 +443,7 @@ class VendorDriver(ABC):
         config: Puerto,
         device: Device,
         password: str,
-    ) -> PortConfigResult:
+    ) -> dict:
         """Apply a composite set of port mutations in a single driver call.
 
         Concrete drivers should override it to apply all fields in *config*
@@ -454,7 +454,6 @@ class VendorDriver(ABC):
 
         The driver is responsible for:
         * Respecting the field ordering (e.g. set mode before VLAN).
-        * Returning a ``PortConfigResult`` that reflects what actually changed.
         * Raising ``RuntimeError`` (not ``NotImplementedError``) if a playbook
           fails mid-operation so the orchestration layer can trigger rollback.
 
@@ -471,9 +470,11 @@ class VendorDriver(ABC):
 
         Returns
         -------
-        PortConfigResult
-            Normalized result describing success, change status, and
-            optional rollback / warning metadata.
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}`` —
+            same contract as every other mutation method on this class, not
+            a dedicated result type (``PortConfigResult`` was removed —
+            it never carried anything a plain dict didn't already).
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement configure_port yet"

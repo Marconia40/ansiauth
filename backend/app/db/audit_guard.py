@@ -41,7 +41,8 @@ def _block_updates(session: Session, flush_context, instances) -> None:  # noqa:
         if isinstance(obj, AuditLogModel) and session.is_modified(obj, include_collections=False):
             raise AuditImmutabilityError(
                 f"audit_logs row id={obj.id} is immutable — "
-                "append a new row via audit_service.append_audit_event() instead"
+                "append a new row via AuditRepository.append() instead "
+                "(set parent_audit_id to chain it to this one)"
             )
 
 

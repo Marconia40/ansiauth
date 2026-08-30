@@ -18,8 +18,8 @@ from app.db.models import (
     UserModel,
 )
 from app.db.session import get_session
+from app.models.audit import AuditRecord
 from app.schemas.role_assignment import RoleAssignmentRead
-from app.services import audit_service
 
 logger = logging.getLogger(__name__)
 
@@ -117,20 +117,32 @@ class RoleAssignmentService:
                 .first()
             )
             if existing is not None:
-                if existing.role != role:
+                # Audita siempre, incluso cuando el rol no cambia -- corrección
+                # real aplicada acá (Fase 7, §1.5): FINAL_ARCHITECTURE.md §6
+                # ("Mismo patrón, 3ra vez") ya había marcado esto como
+                # pendiente desde antes de que existiera AuditRepository --
+                # el código real solo auditaba si `existing.role != role`, un
+                # re-grant del mismo rol quedaba sin ningún registro. Mismo
+                # criterio ya aplicado a Inventory.move() (Fase 6): noop
+                # idempotente, pero SÍ auditado, con "noop": True en el payload.
+                noop = existing.role == role
+                if not noop:
                     existing.role = role
                     session.flush()
-                    audit_service.log_action(
-                        user=(actor.get("username") if actor else None) or "system",
-                        action="update_role_assignment",
-                        resource="role_assignment",
-                        resource_id=str(existing.id),
-                        details={
-                            "user_id": target_user_id, "site_id": site_id,
-                            "device_group_id": device_group_id, "role": role,
-                        },
-                    )
-                return _to_read(existing)
+                record = _to_read(existing)
+                from app.composition import audit_repository
+                audit_repository.append(AuditRecord(
+                    user=(actor.get("username") if actor else None) or "system",
+                    action="update_role_assignment",
+                    resource="role_assignment",
+                    resource_id=str(existing.id),
+                    details={
+                        "user_id": target_user_id, "site_id": site_id,
+                        "device_group_id": device_group_id, "role": role,
+                        "noop": noop,
+                    },
+                ))
+                return record
             row = RoleAssignmentModel(
                 user_id=target_user_id,
                 site_id=site_id,
@@ -141,7 +153,8 @@ class RoleAssignmentService:
             session.add(row)
             session.flush()
             record = _to_read(row)
-        audit_service.log_action(
+        from app.composition import audit_repository
+        audit_repository.append(AuditRecord(
             user=(actor.get("username") if actor else None) or "system",
             action="grant_role_assignment",
             resource="role_assignment",
@@ -152,7 +165,7 @@ class RoleAssignmentService:
                 "device_group_id": device_group_id,
                 "role": role,
             },
-        )
+        ))
         return record
 
     def revoke(self, grant_id: int, actor: dict) -> None:
@@ -178,13 +191,14 @@ class RoleAssignmentService:
                 "role": row.role,
             }
             session.delete(row)
-        audit_service.log_action(
+        from app.composition import audit_repository
+        audit_repository.append(AuditRecord(
             user=(actor.get("username") if actor else None) or "system",
             action="revoke_role_assignment",
             resource="role_assignment",
             resource_id=str(grant_id),
             details=details,
-        )
+        ))
 
     def list_for_user(
         self,
@@ -268,13 +282,14 @@ class RoleAssignmentService:
                         ),
                     )
             row.is_system_admin = bool(is_system_admin)
-        audit_service.log_action(
+        from app.composition import audit_repository
+        audit_repository.append(AuditRecord(
             user=(actor.get("username") if actor else None) or "system",
             action="set_system_admin",
             resource="user",
             resource_id=str(target_user_id),
             details={"is_system_admin": is_system_admin},
-        )
+        ))
 
     # ─── Authorization helper ────────────────────────────────────────────
 

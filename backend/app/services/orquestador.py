@@ -73,7 +73,9 @@ class Orquestador:
         self._repos = repos                # dict[str, Repository] -- "vlan": vlan_repository, "puerto": puerto_repository (Fase 2)
         self._jobs = jobs                  # JobRepository, Fase 4
         self._eventos = eventos            # EventDispatcher, Fase 3
-        self._coordinador = coordinador    # RedisCoordinator, Fase 1 -- ver FASE_5.md A3, gap encontrado ahí
+        self._coordinador = coordinador    # RedisCoordinator, Fase 1 -- ver FASE_5.md A3 (bloquear())
+        # y FASE_7.md §6 (limitar(), agregado ahí -- mismo tipo de gap que
+        # bloquear() ya tuvo: diseñado en Fase 1, nunca conectado a ejecutar()).
 
     def ejecutar(self, recurso: "RecursoGestionable", device_name: str, actor: str, job: "Job") -> None:
         if job.esta_en_estado_terminal():
@@ -87,6 +89,7 @@ class Orquestador:
             job.marcar_iniciado()
             self._jobs.add(job)
             with self._coordinador.bloquear(device_name):
+                self._coordinador.limitar(device_name)
                 recurso.validar()
                 pre_state = recurso.reconciliar(device)
                 resultado, retry_count = self._ejecutar_con_retry(
@@ -112,6 +115,59 @@ class Orquestador:
             job.marcar_completado(resultado)
             self._jobs.add(job)
             self._eventos.despachar([DomainEvent("recurso_aplicado", recurso, device, actor, resultado)])
+        finally:
+            if not job.esta_en_estado_terminal():
+                job.asegurar_estado_final()
+                self._jobs.add(job)
+
+    def ejecutar_comando(self, fn, device_name: str, actor: str, job: "Job", tipo_evento: str) -> None:
+        """Variante de ejecutar() para comandos a nivel device que no son un
+        RecursoGestionable -- Fase 7, encontrado con ``POST /devices/{name}/
+        save`` (guardar configuración): no hay ``validar()``/``reconciliar()``/
+        ``aplicar()`` ni un recurso con identidad que persistir en un
+        Repository (`self._repos[...].add(...)` no aplica acá, es la única
+        diferencia real con ``ejecutar()``) -- pero sí hace falta el mismo
+        lock por device, la misma clasificación de errores/reintentos, y el
+        mismo manejo de estado del Job. Reusa ``_coordinador``/
+        ``_ejecutar_con_retry`` (privados de esta clase) en vez de duplicar
+        esa lógica en un módulo aparte.
+
+        *fn* recibe el ``Device`` ya resuelto (``fn(device) -> dict``) --
+        distinto de ``ejecutar()``, que arma el callable con el recurso ya
+        cerrado sobre `device` desde afuera.
+
+        El guard ``esta_en_estado_terminal()`` -- corrección real encontrada
+        vía un chequeo de trazabilidad RNF-API-05 (idempotencia): faltaba
+        acá, aunque ``ejecutar()`` (arriba) sí lo tiene desde Fase 4/5. Sin
+        él, una reentrega de Celery sobre un job ya completado llamaba
+        ``job.marcar_iniciado()`` de nuevo -- `_TRANSICIONES_VALIDAS`
+        (`models/job.py`) no permite `completed`/`failed` -> `running`, así
+        que la reentrega no era un no-op silencioso sino un crash real
+        (`TransicionInvalidaError`)."""
+        if job.esta_en_estado_terminal():
+            return
+        device = self._device_repo.get(device_name)
+        if device is None:
+            raise NotFoundError(device_name)
+        try:
+            job.marcar_iniciado()
+            self._jobs.add(job)
+            with self._coordinador.bloquear(device_name):
+                self._coordinador.limitar(device_name)
+                resultado, _ = self._ejecutar_con_retry(lambda: fn(device), job, device_name)
+                if resultado.get("rc", 0) != 0:
+                    raise DeviceExecutionError(resultado.get("stderr") or resultado.get("stdout") or "Execution failed")
+        except Exception as error:
+            job.marcar_fallido(str(error))
+            self._jobs.add(job)
+            self._eventos.despachar([DomainEvent(
+                tipo_evento, device, device, actor, {"error": str(error)}, exitoso=False,
+            )])
+            raise
+        else:
+            job.marcar_completado(resultado)
+            self._jobs.add(job)
+            self._eventos.despachar([DomainEvent(tipo_evento, device, device, actor, resultado)])
         finally:
             if not job.esta_en_estado_terminal():
                 job.asegurar_estado_final()
@@ -241,7 +297,7 @@ class Orquestador:
                 if not restaurar.mutation_fields:
                     return False, None
                 resultado = device.driver.configure_port(restaurar, device, device.password)
-                exitoso = bool(resultado.success)
+                exitoso = resultado.get("rc", 1) == 0
             else:
                 campo = next(iter(campos))
                 if campo == "description":

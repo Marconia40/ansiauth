@@ -6,7 +6,15 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-MAX_JOBS_PER_WINDOW: int = 5
+# Subido de 5 a 30 -- corrección real encontrada en Fase 7 (RNF-ESCAL-01):
+# limitar() se diseñó en Fase 1 pero nunca se conectó a Orquestador hasta
+# ahora. Con 5/60s, un batch legítimo de operaciones seguidas sobre el mismo
+# device (ej. editar varios puertos de un switch, o los reintentos de
+# Orquestador._ejecutar_con_retry() sobre esos mismos 5 slots) bloqueaba
+# hasta 60s por operación -- confirmado con un test real que colgó 2+
+# minutos. 30/60s sigue protegiendo contra un loop descontrolado real sin
+# frenar un batch de tamaño normal.
+MAX_JOBS_PER_WINDOW: int = 30
 WINDOW_SECONDS: float = 60.0
 _REDIS_RECHECK_SECONDS: float = 30.0
 

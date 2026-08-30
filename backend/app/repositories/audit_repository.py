@@ -11,9 +11,12 @@ scope filter delegates to device_repository.nombres_visibles /
 device_group_repository.grupos_visibles — the two joins that
 VisibilityScope alone cannot answer.
 
-audit_service.py stays live and untouched — this repository is
-additive. The old function-level API is retired in Fase 7 once every
-caller is rewired.
+audit_service.py stayed live and untouched when this repository was
+added (Fase 3) — additive at the time. Fase 7 rewired every remaining
+real caller (role_assignment_service.py, api/users.py, api/auth.py,
+api/audit.py, api/devices.py's save-config path) and deleted
+audit_service.py — this repository is now the sole audit write/read
+surface.
 """
 from __future__ import annotations
 

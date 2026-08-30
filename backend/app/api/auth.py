@@ -4,8 +4,9 @@ from fastapi.security import OAuth2PasswordRequestForm
 from app.core.config import COOKIE_SAMESITE, COOKIE_SECURE, REFRESH_TOKEN_EXPIRE_MINUTES
 from app.core.scope import require_system_admin
 from app.core.security import create_access_token
+from app.models.audit import AuditRecord
 from app.schemas.auth import TokenResponse
-from app.services import audit_service, login_attempt_service, refresh_token_service
+from app.services import login_attempt_service, refresh_token_service
 from app.services.auth_service import authenticate_user
 
 router = APIRouter()
@@ -44,51 +45,53 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
     ip = request.client.host if request.client else "unknown"
     username = form_data.username
 
+    from app.composition import audit_repository
+
     if login_attempt_service.is_ip_blocked(ip):
-        audit_service.log_action(
+        audit_repository.append(AuditRecord(
             user=username,
             action="login",
             resource="auth",
             details={"username": username, "reason": "ip_blocked"},
             status="blocked",
-        )
+        ))
         raise HTTPException(status_code=429, detail="Too many requests")
 
     if login_attempt_service.is_username_locked(username):
         login_attempt_service.record_attempt(username, ip, succeeded=False)
-        audit_service.log_action(
+        audit_repository.append(AuditRecord(
             user=username,
             action="login",
             resource="auth",
             details={"username": username, "reason": "account_locked"},
             status="blocked",
-        )
+        ))
         raise HTTPException(status_code=429, detail="Too many requests")
 
     user = authenticate_user(username, form_data.password)
 
     if not user:
         login_attempt_service.record_attempt(username, ip, succeeded=False)
-        audit_service.log_action(
+        audit_repository.append(AuditRecord(
             user=username,
             action="login",
             resource="auth",
             details={"username": username},
             status="failed",
-        )
+        ))
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     login_attempt_service.record_attempt(username, ip, succeeded=True)
     login_attempt_service.reset_username_failures(username)
     access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
     refresh_token = refresh_token_service.create(user.username)
-    audit_service.log_action(
+    audit_repository.append(AuditRecord(
         user=user.username,
         action="login",
         resource="auth",
         details={"username": user.username},
         status="success",
-    )
+    ))
     _set_refresh_cookie(response, refresh_token)
     return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token}
 
@@ -120,13 +123,14 @@ def refresh(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user=user.username,
         action="token_refresh",
         resource="auth",
         details={"username": user.username},
         status="success",
-    )
+    ))
     _set_refresh_cookie(response, new_refresh_token)
     return {"access_token": access_token, "token_type": "bearer", "refresh_token": new_refresh_token}
 
@@ -160,11 +164,12 @@ def unlock_account(
     current_user: dict = Depends(require_system_admin),
 ):
     count = login_attempt_service.unlock_username(username)
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="unlock_account",
         resource="auth",
         details={"username": username, "attempts_cleared": count},
         status="success",
-    )
+    ))
     return {"success": True, "data": {"username": username, "attempts_cleared": count}}

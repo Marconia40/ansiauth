@@ -10,7 +10,7 @@ from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortConfigResult, Puerto
+    from app.models.port import Puerto
     from app.models.vlan import VLAN
 
 logger = logging.getLogger(__name__)
@@ -640,7 +640,7 @@ class HuaweiVendor(VendorDriver):
         config: Puerto,
         device: Device,
         password: str,
-    ) -> PortConfigResult:
+    ) -> dict:
         """Apply a composite set of port mutations on a Huawei VRP device.
 
         All requested fields are applied in a single candidate-config session
@@ -657,14 +657,11 @@ class HuaweiVendor(VendorDriver):
 
         Returns
         -------
-        PortConfigResult
-            ``success=True`` and ``changed=True`` when ``rc == 0``.
-            ``success=False`` and ``changed=False`` on playbook failure.
-            ``rollback_performed`` is always ``None`` — the orchestration layer
-            sets this field after deciding whether to trigger rollback.
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}`` —
+            same contract as every other mutation method on this driver.
         """
         import time
-        from app.models.port import PortConfigResult as _PCR
 
         start = time.time()
 
@@ -730,15 +727,7 @@ class HuaweiVendor(VendorDriver):
                     config.interface, device.name,
                     result.get("stderr") or result.get("stdout"),
                 )
-            return _PCR(
-                success=success,
-                changed=success,
-                interface=config.interface,
-                vendor="huawei_vrp",
-                execution_time_ms=round(elapsed_ms, 1),
-                rollback_performed=None,
-                warnings=None,
-            )
+            return {**result, "success": success}
         except Exception as exc:
             logger.exception(
                 "FULL HUAWEI TRACEBACK [configure_port interface=%s device=%s]: %s\n%s",

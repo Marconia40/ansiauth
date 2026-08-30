@@ -4,8 +4,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.core.config import AUDIT_RETENTION_DAYS
-from app.core.scope import require_authenticated, require_system_admin
-from app.services import audit_service
+from app.core.scope import obtener_scope, require_authenticated, require_system_admin
+from app.models.visibility_scope import VisibilityScope
 
 router = APIRouter()
 
@@ -24,11 +24,10 @@ def purge_audit_log(
     retention_days: Optional[int] = Query(default=None, ge=1),
     current_user: dict = Depends(require_system_admin),
 ):
+    from app.composition import audit_repository
+
     days = retention_days if retention_days is not None else AUDIT_RETENTION_DAYS
-    deleted = audit_service.purge_old_records(
-        retention_days=days,
-        triggered_by=current_user["username"],
-    )
+    deleted = audit_repository.purge_old(days, triggered_by=current_user["username"])
     return {"success": True, "data": {"deleted": deleted, "retention_days": days}}
 
 
@@ -58,48 +57,31 @@ def get_audit_log(
     page: Optional[int] = Query(default=None, ge=1),
     page_size: Optional[int] = Query(default=None, ge=1, le=1000),
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     # Endpoint stays behind require_authenticated: the D27 scoping filter
-    # *is* the authorization. Non-admins that hit /audit see only rows their
-    # grants cover.
+    # (AuditRepository.query()'s scope param, Fase 3) *is* the authorization.
+    # Non-admins that hit /audit see only rows their grants cover.
+    from app.composition import audit_repository
+
     if from_date is not None and to_date is not None and from_date > to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
 
+    # Acepta 2 formatos de paginación (skip/limit y page/page_size) -- mismo
+    # cálculo real que el endpoint viejo, AuditRepository.query() solo habla
+    # page/page_size (Fase 3).
     if page is not None or page_size is not None:
-        effective_page_size = page_size if page_size is not None else limit
         effective_page = page if page is not None else 1
-        skip = (effective_page - 1) * effective_page_size
-        limit = effective_page_size
+        effective_page_size = page_size if page_size is not None else limit
+    else:
+        effective_page = (skip // limit) + 1 if limit else 1
+        effective_page_size = limit
 
-    viewer = current_user
-    allowed = None
-
-    total = audit_service.count_audit_log(
-        user=user,
-        action=action,
-        resource=resource,
-        status=status,
-        from_date=from_date,
-        to_date=to_date,
-        device_id=device_id,
-        site_id=site_id,
-        allowed_devices=allowed,
-        viewer=viewer,
+    records, total = audit_repository.query(
+        user=user, action=action, resource=resource, status=status,
+        from_date=from_date, to_date=to_date, device_id=device_id, site_id=site_id,
+        scope=scope, page=effective_page, page_size=effective_page_size,
     )
     response.headers["X-Total-Count"] = str(total)
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
-
-    return audit_service.get_audit_log(
-        user=user,
-        action=action,
-        resource=resource,
-        status=status,
-        from_date=from_date,
-        to_date=to_date,
-        device_id=device_id,
-        site_id=site_id,
-        allowed_devices=allowed,
-        viewer=viewer,
-        skip=skip,
-        limit=limit,
-    )
+    return records

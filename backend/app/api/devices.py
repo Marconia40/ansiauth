@@ -218,18 +218,22 @@ def save_device_config(
                 f"(got {role or 'none'})"
             ),
         )
-    # NOTA (encontrado en Fase 6, no cubierto por ningún plan hasta ahora):
-    # este endpoint sigue llamando vlan_execution_service.enqueue_save_job()
-    # -- Fase 5 concluyó que vlan_execution_service.py quedaba "sin caller
-    # real" tras A6/A7 (FASE_5.md/FASE_7.md), pero no es cierto: este es un
-    # caller real que ninguna fase (5 ni 6) cubre -- "save config" no es una
-    # operación de VLAN/Puerto (Fase 5) ni de Device/Site/DeviceGroup (Fase
-    # 6, Inventory tiene el cap de 5 métodos, esto no encaja). Queda fuera
-    # de alcance de esta fase; documentado como corrección pendiente en
-    # FASE_5.md/FASE_7.md, no resuelto acá.
-    from app.services.vlan_execution_service import enqueue_save_job
-    entry = enqueue_save_job(name, current_user["username"])
-    return {"success": True, "data": entry}
+    # "Guardar configuración" no es un RecursoGestionable (Fase 5) ni una
+    # operación de Inventory (Fase 6, cap de 5 métodos) -- Fase 7 le agregó
+    # su propio camino mínimo (Orquestador.ejecutar_comando() +
+    # app.tasks.guardar_config_task), reemplazando
+    # vlan_execution_service.enqueue_save_job() (que además ya estaba roto
+    # en producción: despachaba a un task Celery que ningún worker real
+    # tenía registrado desde Fase 5/A5, ver docstring de
+    # guardar_config_task).
+    from app.composition import job_repository
+    from app.models.job import Job
+    from app.tasks import guardar_config_task
+
+    job = Job(operation="guardar_config", device=name)
+    job_repository.add(job)
+    guardar_config_task.delay(name, current_user["username"], job.job_id)
+    return {"success": True, "data": {"device": name, "job_id": job.job_id, "status": job.status}}
 
 
 @router.delete(

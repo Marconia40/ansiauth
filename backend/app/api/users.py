@@ -11,8 +11,9 @@ from app.schemas.role_assignment import (
     RoleAssignmentCreate,
     SystemAdminUpdate,
 )
+from app.models.audit import AuditRecord
 from app.schemas.user import UserCreate, UserUpdate
-from app.services import audit_service, user_service
+from app.services import user_service
 from app.services.role_assignment_service import RoleAssignmentService
 
 logger = logging.getLogger(__name__)
@@ -37,13 +38,14 @@ def create_user(data: UserCreate, current_user: dict = Depends(require_authentic
         user = user_service.create_user(data)
     except ValueError as e:
         raise ValidationError(str(e))
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="create_user",
         resource="user",
         resource_id=str(user.id),
         details={"username": user.username},
-    )
+    ))
     return {"success": True, "data": user.model_dump()}
 
 
@@ -122,13 +124,14 @@ def update_user(
     audit_fields = {k: v for k, v in data.model_dump(exclude_none=True).items() if k != "password"}
     if data.password is not None:
         audit_fields["password_changed"] = True
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="update_user",
         resource="user",
         resource_id=str(user_id),
         details={"updated_fields": audit_fields},
-    )
+    ))
     return {"success": True, "data": user.model_dump()}
 
 
@@ -151,13 +154,14 @@ def deactivate_user(user_id: int, current_user: dict = Depends(require_authentic
         user = user_service.deactivate_user(user_id)
     except ValueError as e:
         raise ValidationError(str(e))
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="deactivate_user",
         resource="user",
         resource_id=str(user_id),
         details={"username": user.username},
-    )
+    ))
     return {"success": True, "data": {"id": user_id, "is_active": False}}
 
 
