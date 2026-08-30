@@ -31,12 +31,12 @@ entre fases:
 |---|---|---|
 | `app/services/vlan_service.py` | `VLAN` + `Orquestador` | Fase 5 (A6) |
 | `app/services/port_service.py` | `Puerto` + `Orquestador` | Fase 5 (A7) |
-| `app/services/vlan_execution_service.py` | `GroupOperationRunner` + `app/tasks.py` | Fase 5 (A4/A5) |
-| `app/services/port_execution_service.py` | ídem | Fase 5 |
-| `app/services/port_config_service.py` | ídem | Fase 5 |
-| `app/services/group_job_service.py` | `JobRepository.resumen_de_grupo()` (Fase 4 A3) | Fase 5 (A4/A5) — hasta entonces `vlan_execution_service.py`/`port_execution_service.py`/`port_config_service.py` lo importan a nivel de módulo, no borrar antes |
-| `app/models/group_job.py` (`GroupJob`, `DeviceExecution`) | ídem — su único caller real es `group_job_service.py` | Fase 5 (A4/A5), misma fila que arriba |
-| `app/services/job_service.py` | `Job` + `JobRepository` | Fase 5 (A8/A9) |
+| `app/services/vlan_execution_service.py` — **NO borrar todavía, ver nota abajo** | `GroupOperationRunner` + `app/tasks.py` para VLAN/Puerto (Fase 5); `enqueue_save_job()` sigue sin reemplazo | Ningún caller de VLAN/Puerto le queda tras Fase 5 (A4/A5), pero `api/devices.py: save_device_config()` (`POST /devices/{name}/save`, fuera de alcance de Fase 5/6) sigue llamando `enqueue_save_job()` — encontrado en Fase 6, ver `FASE_6.md` "Correcciones reales", punto 8 |
+| `app/services/port_execution_service.py` | ídem (VLAN/Puerto) | Fase 5 |
+| `app/services/port_config_service.py` | ídem (VLAN/Puerto) | Fase 5 |
+| `app/services/group_job_service.py` — **NO borrar todavía, misma razón que `vlan_execution_service.py`** | `JobRepository.resumen_de_grupo()` (Fase 4 A3) para VLAN/Puerto | `enqueue_save_job()` también llama `group_job_service.create_group_job()` — mismo caller real que la fila de arriba |
+| `app/models/group_job.py` (`GroupJob`, `DeviceExecution`) | ídem — su único caller real hoy es `group_job_service.py`, que a su vez sigue vivo por `enqueue_save_job()` | Misma nota que las 2 filas de arriba |
+| `app/services/job_service.py` — **NO borrar todavía, misma razón** | `Job` + `JobRepository` para todo excepto `save_device_config()` | Fase 5 (A8/A9) migró `api/jobs.py`/`main.py`, pero `enqueue_save_job()` sigue llamando `job_service.create_job()` |
 | `app/services/retry_policy.py` | `Orquestador._clasificar_error()`/`_ejecutar_con_retry()` | Fase 5 (A3) |
 | `app/services/orchestration_runner.py` | `Orquestador.ejecutar()` | Fase 5 (A3) |
 | `app/services/cleanup_service.py` | `CleanupScheduler` + `LoginAttemptRepository.purgar_antiguos()` | Fase 5 (B1) |
@@ -131,6 +131,7 @@ directo:
 | `app/api/users.py` | 3 (líneas 40, 125, 154) | ídem — `user_service.py` (el resto del archivo) sigue fuera de alcance, **solo** estas 3 llamadas cambian |
 | `app/api/auth.py` | 6 (líneas 48, 59, 72, 85, 123, 163 — login éxito/fallo, logout, etc.) | ídem — `auth_service.py`/`refresh_token_service.py` (el resto) siguen fuera de alcance, **solo** estas 6 llamadas cambian |
 | `app/api/audit.py` | 3, pero **distintas** — no son `log_action()`, son las funciones de lectura/purga del router de auditoría mismo | Ver abajo, no es un swap mecánico |
+| `app/services/vlan_execution_service.py: enqueue_save_job()` — **5to caller, encontrado en Fase 6, no en esta revisión de Fase 7** | 1 (`audit=audit_service.log_action(..., status="pending", job_id=job.job_id, device=device_name)`, el `audit.id` se pasa al Celery task) | Llamado real desde `api/devices.py: POST /devices/{name}/save` — ninguna fase (5 ni 6) migra este camino todavía, ver `FASE_6.md` "Correcciones reales", punto 8. No es un swap mecánico de 1 línea como los de arriba: el `audit.id` devuelto se propaga a `_save_task` para actualizarlo después — hay que resolver eso también, no solo el `.log_action()` inicial |
 
 **`api/audit.py` es el caso más importante de encontrar acá — es el router que
 expone lo que `AuditRepository` (Fase 3) existe para servir, y nadie lo había

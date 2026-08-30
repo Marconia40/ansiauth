@@ -397,6 +397,88 @@ construido" no puede haber nada nuevo.
 
 ---
 
+## Correcciones reales encontradas implementando esta fase de punta a punta
+
+Mismo método que Fase 5: cada pieza se probó contra un in-memory SQLite real
+(sitio/grupo/device/usuario reales, no mocks a nivel de servicio) antes de
+darla por terminada. 8 correcciones reales, ninguna prevista en la versión
+del plan que existía al empezar a escribir el código:
+
+1. **`DeviceGroup` (A2) le faltaba `created_at` — mismo gap que `Site` ya
+   tuvo, no detectado a tiempo para el snippet canónico de A2.**
+   `frontend/src/services/api.ts: DeviceGroup` declara `created_at: string`
+   no-opcional — sin este campo, cualquier `DeviceGroupRead` real rompe con
+   un 500 de validación Pydantic. Agregado a la entidad y a los 2 lugares
+   que la construyen (`DeviceGroupRepository._to_domain()`,
+   `SiteRepository.grupo_default()`).
+2. **`Inventory.register()` (A5) devolvía/auditaba el `device` recién
+   construido con `Device.nuevo()`, no el que vuelve de `add()`.**
+   `Device.nuevo()` nunca setea `site_id`/`site_name`/`device_group_name`
+   (no los recibe) — `DevicePublic` (schema real) los declara **no**
+   opcionales, así que el router rompía con un 500 en **cada** alta de
+   device. Fix: capturar `device = self._devices.add(device)` (que sí los
+   resuelve vía la relación ORM `device_group.site`) antes de auditar/
+   devolver.
+3. **`Inventory.register()` no rechazaba un nombre ya existente.**
+   `create_device()` real rechaza con `IntegrityError` → "already exists";
+   `Repository[Device].add()` es upsert (`session.merge()` por
+   `pk_field="name"`), así que sin un chequeo explícito, registrar un
+   nombre repetido pisaba en silencio el device viejo (host/vendor/etc.)
+   en vez de rechazar. Fix: `self._devices.get(name) is not None` antes de
+   construir/guardar.
+4. **`SiteRepository.grupo_default(site)` no estaba especificado en
+   ningún lado con una implementación real.** `FINAL_ARCHITECTURE.md`'s
+   snippet de `Inventory.register()`/`move()` usa `site.grupo_default()`
+   (método en `Site`, imposible sin acceso a DB desde un dataclass puro) y
+   `FASE_6.md`'s propio snippet de A5 usa `self._sites.grupo_default(site)`
+   sin que A3 lo defina. Agregado a `SiteRepository` (ya toca
+   `DeviceGroupModel` directo en `crear_con_grupo_default()`/
+   `contar_devices()`, mismo criterio).
+5. **`SiteRepository.visibles(scope)` no estaba especificado — necesario
+   para `GET /sites`.** Ninguna sección de A3 cubre el reemplazo de
+   `site_service.list_sites_for_user()`. Agregado, usando
+   `scope.grants` directo (no `scope.site_ids`, que el propio docstring de
+   `VisibilityScope` avisa que excluye grants solo-de-grupo — exactamente
+   el caso que `list_sites_for_user()` real sí cuenta).
+6. **`DeviceGroupRepository.visibles_para_usuario()`/`en_site()`/
+   `contar_miembros()` — mismo tipo de gap que el punto 5, para
+   `GET /device-groups`, `GET /sites/{id}/groups`, y el `member_count` de
+   cualquier `DeviceGroupRead` real.** Agregados con el mismo criterio que
+   `grupos_visibles()` (ya existente, Fase 3) — `site_id`/`device_group_id`
+   grants unionados vía `scope.site_ids`/`scope.device_group_ids` (acá sí
+   son los correctos — a diferencia del punto 5, esta lectura replica
+   exactamente lo que esas 2 properties calculan).
+7. **La tabla de A7 dice `POST/GET/PUT/DELETE /device-groups` — el `PUT`
+   no existe en el código real.** `api/device_groups.py` real tiene 5
+   rutas (`POST /`, `GET /`, `GET /{id}`, `DELETE /{id}`,
+   `GET /{id}/devices`) — nunca un `PUT`/rename. `DeviceGroup.renombrar()`
+   (A2) existe como método de dominio pero no tiene ningún endpoint HTTP
+   real que lo llame — ninguna fase lo expone, y esta fase tampoco lo
+   agrega (fuera de alcance, no pedido). Confirmado con
+   `grep -n "@router\." app/api/device_groups.py`.
+8. **`POST /devices/{name}/save` (`save_device_config()`) es un caller
+   real de `vlan_execution_service.py`/`group_job_service.py`/
+   `job_service.create_job()`/`audit_service.log_action()` que ni Fase 5
+   ni Fase 6 cubren — corrige una claim incorrecta de `FASE_5.md`/
+   `FASE_7.md`.** `enqueue_save_job()` (`vlan_execution_service.py:727`)
+   llama `group_job_service.create_group_job()` + `job_service.create_job()`
+   + `audit_service.log_action()` + despacha un Celery task propio
+   (`_save_task`, fuera del `app.tasks` unificado de Fase 5/A5) — ninguno
+   de los 3 módulos que Fase 5 marcó "sin caller real después de A6-A9"
+   (`vlan_execution_service.py`, en `FASE_5.md`/`FASE_7.md`) ni el que
+   Fase 5/7 documentó para `audit_service.py` (§1.5/1.6 de `FASE_7.md`,
+   que ya lista 4 archivos con callers reales pero no éste) contaba con
+   este quinto. Fix acotado de esta fase: `save_device_config()` pasa de
+   `device_service.get_device(name)` a `inventory.get(name)` (satisface el
+   criterio "no importa device_service" sin tocar `enqueue_save_job()` en
+   sí) — "guardar configuración" no es una operación de VLAN/Puerto (Fase
+   5) ni encaja en el cap de 5 métodos de `Inventory` (Fase 6), así que
+   migrarla de verdad es alcance nuevo, no de esta fase. Queda como
+   corrección pendiente real para quien la tome — `FASE_5.md`/`FASE_7.md`
+   corregidos para reflejar este caller.
+
+---
+
 ## Dependencias cruzadas
 
 - A5 (`Inventory`) depende de A3 (`SiteRepository`) y A4
@@ -407,30 +489,40 @@ construido" no puede haber nada nuevo.
 
 ## Criterio de finalización
 
-- [ ] `Site`/`DeviceGroup` existen como entidades (`app/models/site.py`,
+- [x] `Site`/`DeviceGroup` existen como entidades (`app/models/site.py`,
       `app/models/device_group.py`), con `renombrar()` — el de `DeviceGroup`
       bloqueando por `es_default` (D7), no por cantidad de devices. `Site`
-      tiene `created_at`/`updated_at` (confirmado contra `SiteModel` real y
-      `frontend/src/types/site.ts`).
-- [ ] `SiteRepository` existe (`crear_con_grupo_default()`, `contar_devices()`,
+      **y `DeviceGroup`** tienen `created_at` (`Site` también `updated_at`) —
+      confirmado contra `SiteModel`/`DeviceGroupModel` reales y
+      `frontend/src/types/site.ts`/`frontend/src/services/api.ts: DeviceGroup`
+      (`DeviceGroup.created_at` fue un gap real encontrado en esta fase, ver
+      corrección 1 arriba).
+- [x] `SiteRepository` existe (`crear_con_grupo_default()`, `contar_devices()`,
       `tiene_devices()`, `eliminar()`) — 7ma subclase de `Repository[T]`,
       justificación documentada (transaccional, no de consulta). `GET /sites`
-      usa `contar_devices()` para completar `SiteRead.device_count`.
-- [ ] `Repository[T]` genérico tiene `existe(**criterio)`.
-- [ ] `DeviceGroupRepository` (Fase 3) tiene `eliminar_con_auto_move()` agregado.
-- [ ] `SiteHasDevicesError`/`DefaultGroupImmutableError` viven en
+      usa `contar_devices()` para completar `SiteRead.device_count`. También
+      `grupo_default()`/`visibles()` (correcciones 4/5 arriba, no estaban en
+      ningún snippet del plan original).
+- [x] `Repository[T]` genérico tiene `existe(**criterio)`.
+- [x] `DeviceGroupRepository` (Fase 3) tiene `eliminar_con_auto_move()`
+      agregado. También `visibles_para_usuario()`/`en_site()`/
+      `contar_miembros()` (corrección 6 arriba).
+- [x] `SiteHasDevicesError`/`DefaultGroupImmutableError` viven en
       `app/core/exceptions.py`. `api/sites.py`/`api/device_groups.py` las
       importan de ahí, no de `site_service`/`device_group_service`.
       `GroupHasDevicesError` no se migra (confirmado sin ningún `raise` real).
-- [ ] `Inventory` reescrita, respeta el cap de 5 métodos, `list()` usa
+- [x] `Inventory` reescrita, respeta el cap de 5 métodos, `list()` usa
       `DeviceRepository.nombres_visibles(scope)` en vez de su propio JOIN.
-- [ ] `Device.actualizar()` existe, `api/devices.py: PUT /devices/{name}` la usa
+- [x] `Device.actualizar()` existe, `api/devices.py: PUT /devices/{name}` la usa
       en vez de `device_service.update_device()`.
-- [ ] `api/devices.py`/`api/sites.py`/`api/device_groups.py` no importan
-      `device_service`/`site_service`/`device_group_service`.
-- [ ] `main.py` usa `site_repository.crear_con_grupo_default(kind="BASE_INFRASTRUCTURE")`.
+- [x] `api/devices.py`/`api/sites.py`/`api/device_groups.py` no importan
+      `device_service`/`site_service`/`device_group_service` — confirmado con
+      `grep`. `api/devices.py: save_device_config()` sigue importando
+      `vlan_execution_service` (corrección 8 arriba, fuera de alcance de esta
+      fase, no de la lista de 3 módulos de este ítem).
+- [x] `main.py` usa `site_repository.crear_con_grupo_default(kind="BASE_INFRASTRUCTURE")`.
 
-- [ ] `python -c "import app.composition"` y `python -c "import app.main"` corren sin error (ver `FASE_7.md` sección 5).
+- [x] `python -c "import app.composition"` y `python -c "import app.main"` corren sin error (ver `FASE_7.md` sección 5).
 
 ## Riesgos / cosas a validar
 

@@ -671,14 +671,29 @@ abajo.
 
 ### Callers reales que quedan rotos/muertos al terminar esta fase (Línea A + B)
 
-`vlan_service.py`, `port_service.py`, `vlan_execution_service.py`,
-`port_execution_service.py`, `port_config_service.py`, `job_service.py`,
-`cleanup_service.py` (B1), `retry_policy.py`/`orchestration_runner.py`
-(A3) quedan **sin ningún caller real** al terminar esta fase (Línea A +
-B completas) — no se borran acá (eso es Fase 7, `FASE_7.md` §1, ya los
-tiene listados salvo los últimos 3, agregados ahí en esta misma revisión),
-pero ya no los ejecuta ningún camino real del sistema. Confirmado con
-`grep -rn` contra `app/` para cada uno.
+`vlan_service.py`, `port_service.py`, `port_execution_service.py`,
+`port_config_service.py`, `cleanup_service.py` (B1),
+`retry_policy.py`/`orchestration_runner.py` (A3) quedan **sin ningún
+caller real** al terminar esta fase (Línea A + B completas) — no se
+borran acá (eso es Fase 7, `FASE_7.md` §1, ya los tiene listados salvo los
+últimos 3, agregados ahí en esta misma revisión), pero ya no los ejecuta
+ningún camino real del sistema. Confirmado con `grep -rn` contra `app/`
+para cada uno.
+
+**Corrección tardía, encontrada en Fase 6 tocando `api/devices.py` — NO
+incluir acá `vlan_execution_service.py` ni `job_service.py`.**
+`api/devices.py: save_device_config()` (`POST /devices/{name}/save`, fuera
+del alcance de Fase 5 — no es VLAN ni Puerto) llama
+`vlan_execution_service.enqueue_save_job()`, que a su vez llama
+`group_job_service.create_group_job()` + `job_service.create_job()` +
+`audit_service.log_action()` + despacha su propio Celery task (`_save_task`,
+fuera de `app.tasks`, A5). Ninguna fase (ni 5 ni 6) migra este camino
+todavía — `FASE_6.md` lo documenta como corrección pendiente real (§
+"Correcciones reales encontradas", punto 8) en vez de acá, porque recién
+se encontró trabajando esa fase, pero corresponde corregir la claim de
+esta sección: **`vlan_execution_service.py`/`job_service.py` siguen
+teniendo un caller real** — no entran en el sweep mecánico de `FASE_7.md`
+§1 hasta que alguna fase futura migre `save_device_config()`.
 
 **`audit_service.py` — corregido: NO queda sin caller real al terminar
 Fase 5, ni siquiera "casi".** La parte de escritura (`log_action`) sigue
