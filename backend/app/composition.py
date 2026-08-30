@@ -17,6 +17,11 @@ from app.repositories.device_repository import DeviceRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.login_attempt_repository import LoginAttemptRepository
 from app.repositories.role_assignment_repository import RoleAssignmentRepository
+from app.services.audit_listener import AuditListener
+from app.services.event_dispatcher import EventDispatcher
+from app.services.group_operation_runner import GroupOperationRunner
+from app.services.job_queue import JobQueue
+from app.services.orquestador import Orquestador
 from app.services.plugin_registry import PluginRegistry
 from app.services.redis_coordinator import RedisCoordinator
 from app.services.secret_service import vault as secret_vault  # noqa: F401
@@ -97,3 +102,14 @@ def get_role_assignment_repo() -> RoleAssignmentRepository:
     reaching for EXECUTION_MODE or a fresh DB.
     """
     return role_assignment_repository
+
+
+event_dispatcher = EventDispatcher()
+event_dispatcher.suscribir(AuditListener(audit_repository))
+
+orquestador = Orquestador(
+    device_repository, {"vlan": vlan_repository, "puerto": puerto_repository},
+    job_repository, event_dispatcher, redis_coordinator,
+)
+
+group_operation_runner = GroupOperationRunner(orquestador, JobQueue(), job_repository)

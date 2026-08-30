@@ -93,15 +93,27 @@ class VLAN:
 
     def validar(self) -> None:
         """Validate ``name`` against the user-input format rules — satisface
-        el contrato ``RecursoGestionable`` (Fase 5). Renombrado desde
-        ``validate_name()`` (Fase 2) según lo ya previsto ahí: "el renombre
-        es cosmético, se hace en Fase 5 al mismo tiempo que se cablea
-        Orquestador".
+        el contrato ``RecursoGestionable`` (Fase 5), llamado por
+        ``Orquestador.ejecutar()`` sin condicionales (no sabe qué es una
+        VLAN). Renombrado desde ``validate_name()`` (Fase 2) según lo ya
+        previsto ahí: "el renombre es cosmético, se hace en Fase 5 al mismo
+        tiempo que se cablea Orquestador".
+
+        ``self.eliminar`` corta antes de validar ``name`` — corrección real
+        encontrada en Fase 5 probando `DELETE /vlans/{id}` de punta a punta:
+        una `VLAN(vlan_id=..., eliminar=True)` deja `name=""` a propósito
+        (irrelevante para borrar), pero `Orquestador.ejecutar()` llama
+        `validar()` siempre, sin importar la operación — sin este corte,
+        cualquier delete fallaba con "Invalid VLAN name" antes de tocar el
+        device. Mismo criterio que ``aplicar()`` ya usa para no mirar
+        ``name`` en la rama de `eliminar`.
 
         Not run automatically by ``__post_init__`` — see the class
         docstring. Call this explicitly before using ``name`` in a write
         operation (create / rename).
         """
+        if self.eliminar:
+            return
         _validate_vlan_name(self.name)
 
     def reconciliar(self, device: "Device") -> dict:
