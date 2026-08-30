@@ -511,26 +511,38 @@ el JWT). `api/jobs.py: list_jobs()` (Fase 5, A8) pasa a llamar
   git de verdad, a diferencia del resto de las fases donde eso es estructuralmente
   imposible. Vale la pena que quien ejecute esta fase avise explícitamente cuándo
   A3 está listo, en vez de asumir un tiempo fijo.
-- **`JobModel.operation` (columna nueva, A1/A3) rompe la suite de tests local
-  completa, no solo lo que toca Job — encontrado implementando A3, consecuencia
-  real de la decisión ya tomada de dejar Alembic fuera de alcance.** Distinto de
-  `DeviceVlanModel`/`DevicePortModel` (Fase 2): esas son tablas **nuevas**, nada
-  las consulta todavía, el mismatch contra un schema armado por Alembic
-  (`tests/conftest.py: alembic upgrade head`, no `Base.metadata.create_all()`)
-  queda dormido. `jobs` es una tabla **existente, activa** — `main.py:71`
-  (`job_service.mark_orphaned_jobs_failed()`, corre al arrancar) hace `SELECT
-  jobs.*`, y cualquier test que levante la app vía `TestClient` dispara esa
-  query — con la columna nueva en el modelo pero no en el schema real
-  (Alembic no la tiene, no hay migración), truena con `OperationalError: no
-  such column: jobs.operation` en **toda** la suite, no solo en tests de Job.
-  Verificado reproduciendo con `test.db` borrado y reconstruido de cero (mismo
-  error, no es un archivo viejo). No es un bug de este plan — es el precio ya
-  aceptado de "sin migraciones en esta fase" (`FASE_2.md`, mismo supuesto),
-  simplemente esta es la primera vez que una fase toca una columna nueva sobre
-  una tabla que el código viejo todavía usa de verdad. Corrección operativa,
-  no de código: quien vaya a correr la suite localmente necesita
-  `Base.metadata.create_all()` (no Alembic) o una migración aparte — fuera de
-  este plan, igual que ya estaba documentado para `DeviceVlanModel`/
-  `DevicePortModel`. `Repository[Job]` en sí, probado contra una DB armada con
-  `Base.metadata.create_all()` (no Alembic), funciona correctamente de punta a
-  punta — no hay ningún bug de diseño acá, es puramente el desfasaje de schema.
+- **`JobModel.operation` (columna nueva, A1/A3) — corrección real, más grave de
+  lo que una primera pasada de este documento decía.** No es "rompe la suite de
+  tests" — es que **`app.main` no arranca en absoluto** contra cualquier DB
+  migrada con Alembic real (test o producción), no solo la de los tests.
+  `main.py:71` (`job_service.mark_orphaned_jobs_failed()`, código viejo,
+  todavía la ruta real) hace `SELECT jobs.*` al arrancar — con la columna en
+  el modelo Python pero no en el schema real (sin migración), truena con
+  `OperationalError: no such column: jobs.operation` **en el import mismo de
+  `app.main`**, antes de levantar nada. Verificado 2 veces: reconstruyendo
+  `test.db` desde cero, y con una DB nueva migrada con `alembic upgrade head`
+  fuera del entorno de tests — mismo error en los 2 casos. Distinto de
+  `DeviceVlanModel`/`DevicePortModel` (Fase 2): esas son tablas **nuevas**,
+  nada las consulta todavía, quedan dormidas; `jobs` es una tabla existente
+  que código viejo sigue usando de verdad.
+
+  **Excepción puntual a la decisión de "sin migraciones" de este plan,
+  justificada por la severidad** (no es un test roto, es que la app no
+  levanta): se agregó una migración Alembic mínima, de una sola columna
+  (`migrations/versions/g1msp6_jobs_operation.py`, `ALTER TABLE jobs ADD
+  COLUMN operation`), encadenada después de la última migración real
+  (`f6msp5_rls`). Ninguna otra tabla/columna de este plan necesita esto —
+  todas las demás son aditivas sobre código que todavía no las consulta.
+  Verificado: `import app.main` corre limpio contra una DB recién migrada con
+  Alembic real. `Repository[Job]` en sí, probado contra una DB armada con
+  `Base.metadata.create_all()`, ya funcionaba correctamente de punta a
+  punta — no había ningún bug de diseño, era puramente el desfasaje de schema,
+  ahora cerrado.
+
+  El resto de la suite de tests local sigue sin poder correr — pero por un
+  motivo **distinto y ya aceptado**: `tests/conftest.py` tiene fixtures
+  `autouse=True` (`reset_rate_limiter`, etc.) que importan `rate_limiter`/
+  `device_locks`, borrados en esta misma fase (Línea B, fusionados en
+  `RedisCoordinator`). Mismo tipo de "test referencia módulo ya migrado" ya
+  aceptado como fuera de alcance en todo este plan — no es nuevo, no bloquea
+  nada, los tests no se tocan hasta que se decida rehacerlos de cero.
