@@ -65,7 +65,7 @@ logger.info("Database ready: %s", DATABASE_URL)
 from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.core.rls_context import system_context  # noqa: E402
 from app.models.audit import AuditRecord  # noqa: E402
-from app.services import site_service, user_service  # noqa: E402
+from app.services import user_service  # noqa: E402
 from app.schemas.user import UserCreate  # noqa: E402
 
 with system_context():
@@ -128,7 +128,13 @@ with system_context():
     _bootstrap_admin()
     # MSP: Phase 1 — idempotent bootstrap of the mandatory Base-Infrastructure
     # Site + its Default DeviceGroup. Safe to call every boot.
-    site_service.ensure_base_infrastructure()
+    from app.composition import site_repository
+    from app.repositories.site_repository import BASE_INFRA_SITE_KIND
+
+    site_repository.crear_con_grupo_default(
+        "Base Infrastructure", "System-managed base infrastructure site.",
+        kind=BASE_INFRA_SITE_KIND,
+    )
 
 
 def _make_scheduler():

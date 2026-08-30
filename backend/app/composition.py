@@ -17,10 +17,12 @@ from app.repositories.device_repository import DeviceRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.login_attempt_repository import LoginAttemptRepository
 from app.repositories.role_assignment_repository import RoleAssignmentRepository
+from app.repositories.site_repository import SiteRepository
 from app.services.audit_listener import AuditListener
 from app.services.cleanup_scheduler import CleanupScheduler
 from app.services.event_dispatcher import EventDispatcher
 from app.services.group_operation_runner import GroupOperationRunner
+from app.services.inventory_service import Inventory
 from app.services.job_queue import JobQueue
 from app.services.orquestador import Orquestador
 from app.services.plugin_registry import PluginRegistry
@@ -92,6 +94,8 @@ device_repository = DeviceRepository()
 
 device_group_repository = DeviceGroupRepository()
 
+site_repository = SiteRepository()
+
 audit_repository = AuditRepository()
 
 login_attempt_repository = LoginAttemptRepository()
@@ -116,3 +120,8 @@ orquestador = Orquestador(
 group_operation_runner = GroupOperationRunner(orquestador, JobQueue(), job_repository)
 
 cleanup_scheduler = CleanupScheduler(login_attempt_repository)
+
+inventory = Inventory(
+    device_repository, site_repository, device_group_repository,
+    role_assignment_repository, job_repository, event_dispatcher, secret_vault,
+)

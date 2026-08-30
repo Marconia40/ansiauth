@@ -6,8 +6,10 @@ repository. This class fills that gap and adds a single scoped read
 JobRepository.query() need to answer "which device names can this
 caller see" without recomputing grants each time.
 
-device_service.py stays live and untouched — this repository is
-additive. Fase 6 rewires its callers.
+device_service.py stayed live and untouched when this class was added
+(Fase 3) — additive at the time. Fase 6 rewired every real caller
+(``Inventory``, ``api/devices.py``); device_service.py has no live
+caller left as of that fase.
 """
 from __future__ import annotations
 

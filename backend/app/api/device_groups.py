@@ -2,28 +2,36 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import DefaultGroupImmutableError, NotFoundError, ValidationError
 from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
-from app.db.models import DeviceGroupModel, DeviceModel
-from app.db.session import get_session
+from app.models.audit import AuditRecord
+from app.models.device_group import DeviceGroup
 from app.models.visibility_scope import VisibilityScope
-from app.schemas.device_group import DeviceGroupCreate
-from app.services import audit_service, device_group_service
-from app.services.device_group_service import DefaultGroupImmutableError
+from app.schemas.device_group import DeviceGroupCreate, DeviceGroupRead
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _to_read(group: DeviceGroup) -> dict:
+    from app.composition import device_group_repository, site_repository
+
+    site = site_repository.get(group.site_id) if group.site_id else None
+    return DeviceGroupRead(
+        id=group.id, name=group.name, description=group.description,
+        created_at=group.created_at,
+        member_count=device_group_repository.contar_miembros(group.id),
+        site_id=group.site_id,
+        site_name=site.name if site is not None else None,
+    ).model_dump()
+
+
 def _reject_if_default(group_id: int) -> None:
     """Return 400 if ``group_id`` is a Site's Default (D7 immutability)."""
-    with get_session() as session:
-        row = (
-            session.query(DeviceGroupModel.is_default)
-            .filter(DeviceGroupModel.id == group_id)
-            .first()
-        )
-    if row is not None and bool(row[0]):
+    from app.composition import device_group_repository
+
+    group = device_group_repository.get(group_id)
+    if group is not None and group.es_default:
         raise ValidationError(
             f"Group {group_id} is a Site's Default group and is immutable (D7)"
         )
@@ -42,27 +50,30 @@ def create_group(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import audit_repository, device_group_repository, site_repository
+
     role = scope.rol_para(data.site_id, None)
     if not current_user.get("is_system_admin") and role != "admin":
         raise ValidationError(
             f"create_group requires admin on site {data.site_id} (got {role or 'none'})"
         )
-    try:
-        group = device_group_service.create_group(
-            name=data.name,
-            description=data.description,
-            site_id=data.site_id,
+    if site_repository.get(data.site_id) is None:
+        raise ValidationError(f"Site {data.site_id} not found")
+    if device_group_repository.existe(name=data.name, site_id=data.site_id):
+        raise ValidationError(
+            f"Device group '{data.name}' already exists in site {data.site_id}"
         )
-    except ValueError as e:
-        raise ValidationError(str(e))
-    audit_service.log_action(
+    group = device_group_repository.add(DeviceGroup(
+        id=None, name=data.name, description=data.description, site_id=data.site_id,
+    ))
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="create_device_group",
         resource="device_group",
         resource_id=str(group.id),
         details={"name": group.name, "site_id": group.site_id},
-    )
-    return {"success": True, "data": group.model_dump()}
+    ))
+    return {"success": True, "data": _to_read(group)}
 
 
 @router.get(
@@ -73,9 +84,14 @@ def create_group(
         "role_assignments."
     ),
 )
-def list_groups(current_user: dict = Depends(require_authenticated)):
-    groups = device_group_service.list_groups_for_user(current_user)
-    return {"success": True, "data": [g.model_dump() for g in groups]}
+def list_groups(
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import device_group_repository
+
+    groups = device_group_repository.visibles_para_usuario(scope)
+    return {"success": True, "data": [_to_read(g) for g in groups]}
 
 
 @router.get(
@@ -88,7 +104,9 @@ def get_group(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    group = device_group_service.get_group(group_id)
+    from app.composition import device_group_repository
+
+    group = device_group_repository.get(group_id)
     if not group:
         raise NotFoundError(f"Device group {group_id} not found")
     resolved = resolver_site_group(group_id, "device_group")
@@ -96,7 +114,7 @@ def get_group(
     if role is None:
         # Hide existence to non-authorized callers.
         raise NotFoundError(f"Device group {group_id} not found")
-    return {"success": True, "data": group.model_dump()}
+    return {"success": True, "data": _to_read(group)}
 
 
 @router.delete(
@@ -112,6 +130,8 @@ def delete_group(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import audit_repository, device_group_repository, inventory
+
     _reject_if_default(group_id)
     resolved = resolver_site_group(group_id, "device_group")
     role = scope.rol_para(*resolved) if resolved is not None else None
@@ -121,14 +141,14 @@ def delete_group(
             detail=f"delete_group requires admin on group {group_id} (got {role or 'none'})",
         )
     try:
-        result = device_group_service.delete_group(group_id, actor=current_user)
+        result = device_group_repository.eliminar_con_auto_move(group_id, current_user, inventory)
     except DefaultGroupImmutableError as exc:
         raise ValidationError(str(exc))
     except ValueError as exc:
         raise ValidationError(str(exc))
     if result is None:
         raise NotFoundError(f"Device group {group_id} not found")
-    audit_service.log_action(
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="delete_device_group",
         resource="device_group",
@@ -137,7 +157,7 @@ def delete_group(
             "group_id": group_id,
             "moved_devices": result.get("moved_devices", []),
         },
-    )
+    ))
     return {"success": True, "data": result}
 
 
@@ -151,13 +171,18 @@ def list_group_devices(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    group = device_group_service.get_group(group_id)
+    from app.composition import device_group_repository
+
+    group = device_group_repository.get(group_id)
     if group is None:
         raise NotFoundError(f"Device group {group_id} not found")
     resolved = resolver_site_group(group_id, "device_group")
     role = scope.rol_para(*resolved) if resolved is not None else None
     if role is None:
         raise NotFoundError(f"Device group {group_id} not found")
+    from app.db.models import DeviceModel
+    from app.db.session import get_session
+
     with get_session() as session:
         names = [
             r[0]

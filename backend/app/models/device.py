@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from app.services.vendors.base import VendorDriver
 
+# Duplicado hoy en device_service.py y inventory_service.py -- Fase 6 (A5)
+# lo centraliza acá, el único lugar que le queda una vez que Inventory deja
+# de tener su propio chequeo suelto.
+_VALID_VENDORS = {"cisco_ios", "cisco", "huawei"}
+
 
 @dataclass
 class Device:
@@ -35,6 +40,24 @@ class Device:
     _driver: "VendorDriver | None" = field(default=None, repr=False, compare=False, init=False)
     _password: "str | None" = field(default=None, repr=False, compare=False, init=False)
 
+    @classmethod
+    def nuevo(
+        cls, name: str, host: str, vendor: str, platform: str, username: str,
+        encrypted_password: str, device_group_id: int,
+    ) -> "Device":
+        """Fábrica para Inventory.register() (Fase 6, A5) -- valida el vendor
+        acá, en vez de un ``if vendor not in _VALID_VENDORS`` suelto en el
+        caller (antes duplicado en device_service.py/inventory_service.py)."""
+        if vendor not in _VALID_VENDORS:
+            raise ValueError(
+                f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}"
+            )
+        return cls(
+            name=name, host=host, vendor=vendor, platform=platform,
+            username=username, encrypted_password=encrypted_password,
+            device_group_id=device_group_id,
+        )
+
     @property
     def driver(self) -> "VendorDriver":
         if self._driver is None:
@@ -48,3 +71,30 @@ class Device:
             from app.composition import secret_vault  # import local -- ver FASE_1.md A3
             self._password = secret_vault.decrypt(self.encrypted_password)
         return self._password
+
+    def actualizar(
+        self, *, host: str | None = None, vendor: str | None = None,
+        platform: str | None = None, username: str | None = None,
+        password: str | None = None, vault=None,
+    ) -> None:
+        """Reemplaza device_service.update_device() (Fase 6, A6) -- no encaja
+        en ninguno de los 5 métodos de Inventory (no es create/list/get/move/
+        delete), pasa a vivir acá. El grupo/site de un device se cambia vía
+        POST /devices/{name}/move (Inventory.move()), nunca acá."""
+        if host is not None:
+            self.host = host
+        if vendor is not None:
+            if vendor not in _VALID_VENDORS:
+                raise ValueError(
+                    f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}"
+                )
+            self.vendor = vendor
+        if platform is not None:
+            self.platform = platform
+        if username is not None:
+            self.username = username
+        if password is not None:
+            if vault is None:
+                raise ValueError("actualizar(): password nuevo requiere vault")
+            self.encrypted_password = vault.encrypt(password)
+            self._password = None  # invalida el cache de Device.password

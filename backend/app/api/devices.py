@@ -4,10 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.scope import obtener_scope, require_authenticated, require_scope, resolver_site_group
+from app.models.audit import AuditRecord
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.device import DeviceCreate, DeviceMove, DevicePublic, DeviceUpdate
-from app.services import audit_service, device_service
-from app.services.inventory_service import Inventory
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,8 +39,11 @@ def list_devices(
     site_id: int | None = None,
     device_group_id: int | None = None,
     current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
-    devices = Inventory().list(current_user, site_id=site_id, device_group_id=device_group_id)
+    from app.composition import inventory
+
+    devices = inventory.list(scope, site_id=site_id, device_group_id=device_group_id)
     return {"success": True, "data": [_to_public(d) for d in devices]}
 
 
@@ -55,7 +57,9 @@ def get_device(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    device = device_service.get_device(name)
+    from app.composition import inventory
+
+    device = inventory.get(name)
     if not device:
         raise NotFoundError(f"Device '{name}' not found")
     resolved = resolver_site_group(name, "device")
@@ -79,6 +83,8 @@ def create_device(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import inventory
+
     # site_id lives in the body, not the path — the require_scope dep
     # can't pre-resolve it, so this stays imperative.
     role = scope.rol_para(data.site_id, None) if data.site_id else None
@@ -91,7 +97,7 @@ def create_device(
             ),
         )
     try:
-        device = Inventory().register(
+        device = inventory.register(
             name=data.name,
             host=data.host,
             vendor=data.vendor,
@@ -122,6 +128,9 @@ def update_device(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import audit_repository, device_repository
+    from app.services.secret_service import vault
+
     provided = data.model_dump(exclude_unset=True)
     if not provided:
         raise ValidationError("No fields provided for update")
@@ -135,24 +144,25 @@ def update_device(
                 f"(got {role or 'none'})"
             ),
         )
+    device = device_repository.get(name)
+    if device is None:
+        raise NotFoundError(f"Device '{name}' not found")
     try:
-        device = device_service.update_device(
-            name=name,
-            host=data.host,
-            vendor=data.vendor,
-            platform=data.platform,
-            username=data.username,
-            password=data.password,
+        device.actualizar(
+            host=data.host, vendor=data.vendor, platform=data.platform,
+            username=data.username, password=data.password, vault=vault,
         )
     except ValueError as e:
         raise ValidationError(str(e))
+    device = device_repository.add(device)
     audit_fields = {k: v for k, v in provided.items() if k != "password"}
-    audit_service.log_action(
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="update_device",
         resource="device",
         details={"name": name, "updated_fields": audit_fields},
-    )
+        device=name,
+    ))
     return {"success": True, "data": _to_public(device)}
 
 
@@ -172,7 +182,9 @@ def move_device(
     body: DeviceMove,
     current_user: dict = Depends(require_scope("move_device")),
 ):
-    device = Inventory().move(name, body.device_group_id, actor=current_user)
+    from app.composition import inventory
+
+    device = inventory.move(name, body.device_group_id, actor=current_user)
     return {"success": True, "data": _to_public(device)}
 
 
@@ -191,7 +203,9 @@ def save_device_config(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    device = device_service.get_device(name)
+    from app.composition import inventory
+
+    device = inventory.get(name)
     if not device:
         raise NotFoundError(f"Device '{name}' not found")
     resolved = resolver_site_group(name, "device")
@@ -204,6 +218,15 @@ def save_device_config(
                 f"(got {role or 'none'})"
             ),
         )
+    # NOTA (encontrado en Fase 6, no cubierto por ningún plan hasta ahora):
+    # este endpoint sigue llamando vlan_execution_service.enqueue_save_job()
+    # -- Fase 5 concluyó que vlan_execution_service.py quedaba "sin caller
+    # real" tras A6/A7 (FASE_5.md/FASE_7.md), pero no es cierto: este es un
+    # caller real que ninguna fase (5 ni 6) cubre -- "save config" no es una
+    # operación de VLAN/Puerto (Fase 5) ni de Device/Site/DeviceGroup (Fase
+    # 6, Inventory tiene el cap de 5 métodos, esto no encaja). Queda fuera
+    # de alcance de esta fase; documentado como corrección pendiente en
+    # FASE_5.md/FASE_7.md, no resuelto acá.
     from app.services.vlan_execution_service import enqueue_save_job
     entry = enqueue_save_job(name, current_user["username"])
     return {"success": True, "data": entry}
@@ -219,6 +242,8 @@ def delete_device(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import inventory
+
     resolved = resolver_site_group(name, "device")
     role = scope.rol_para(*resolved) if resolved is not None else None
     if not current_user.get("is_system_admin") and role != "admin":
@@ -226,5 +251,5 @@ def delete_device(
             status_code=403,
             detail=f"delete_device requires admin on device '{name}' (got {role or 'none'})",
         )
-    Inventory().deregister(name, actor=current_user)
+    inventory.deregister(name, actor=current_user)
     return {"success": True, "data": {"name": name}}

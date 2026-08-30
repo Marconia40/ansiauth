@@ -93,3 +93,11 @@ class Repository(Generic[T]):
     def remove(self, pk: Any) -> None:
         with get_session() as session:
             session.query(self._orm_model).filter_by(**self._pk_filtro(pk)).delete()
+
+    def existe(self, **criterio: Any) -> bool:
+        """Chequeo de unicidad genérico -- agregado en Fase 6 (A4) para
+        DeviceGroup (name+site_id, D6), mencionado como pendiente desde
+        FINAL_ARCHITECTURE.md §2.2.1, nunca se había necesitado hasta esa
+        fase."""
+        with get_session() as session:
+            return session.query(self._orm_model).filter_by(**criterio).first() is not None

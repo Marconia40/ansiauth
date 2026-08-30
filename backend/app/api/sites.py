@@ -2,21 +2,25 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, SiteHasDevicesError, ValidationError
 from app.core.scope import obtener_scope, require_authenticated, require_scope
-from app.db.models import SiteModel
-from app.db.session import get_session
+from app.models.audit import AuditRecord
 from app.models.visibility_scope import VisibilityScope
+from app.repositories.site_repository import BASE_INFRA_SITE_KIND, DEFAULT_GROUP_NAME
 from app.schemas.site import SiteCreate, SiteRead, SiteUpdate
-from app.services import audit_service, site_service
-from app.services.site_service import (
-    BASE_INFRA_SITE_KIND,
-    DEFAULT_GROUP_NAME,
-    SiteHasDevicesError,
-)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _to_read(site) -> dict:
+    from app.composition import site_repository
+
+    return SiteRead(
+        id=site.id, name=site.name, description=site.description,
+        created_at=site.created_at, updated_at=site.updated_at,
+        device_count=site_repository.contar_devices(site.id),
+    ).model_dump()
 
 
 @router.post(
@@ -31,38 +35,39 @@ def create_site(
     data: SiteCreate,
     current_user: dict = Depends(require_authenticated),
 ):
+    from app.composition import audit_repository, site_repository
+
     if not current_user.get("is_system_admin"):
         raise HTTPException(
             status_code=403,
             detail="create_site requires system-admin",
         )
     try:
-        site = site_service.create_site(name=data.name, description=data.description)
+        site = site_repository.crear_con_grupo_default(name=data.name, description=data.description)
     except ValueError as e:
         raise ValidationError(str(e))
-    audit_service.log_action(
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="create_site",
         resource="site",
         resource_id=str(site.id),
         details={"name": site.name},
-    )
+    ))
     # Second audit row for the Default group creation — the site + group are
     # one atomic operation but the audit surface makes both transitions
     # visible.
-    if site.id is not None:
-        audit_service.log_action(
-            user=current_user["username"],
-            action="create_device_group",
-            resource="device_group",
-            details={
-                "name": DEFAULT_GROUP_NAME,
-                "site_id": site.id,
-                "is_default": True,
-                "reason": "site_bootstrap",
-            },
-        )
-    return {"success": True, "data": site.model_dump()}
+    audit_repository.append(AuditRecord(
+        user=current_user["username"],
+        action="create_device_group",
+        resource="device_group",
+        details={
+            "name": DEFAULT_GROUP_NAME,
+            "site_id": site.id,
+            "is_default": True,
+            "reason": "site_bootstrap",
+        },
+    ))
+    return {"success": True, "data": _to_read(site)}
 
 
 @router.get(
@@ -73,9 +78,14 @@ def create_site(
         "hides Base-Infrastructure from non system-admins (D14)."
     ),
 )
-def list_sites(current_user: dict = Depends(require_authenticated)):
-    sites = site_service.list_sites_for_user(current_user)
-    return {"success": True, "data": [s.model_dump() for s in sites]}
+def list_sites(
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import site_repository
+
+    sites = site_repository.visibles(scope)
+    return {"success": True, "data": [_to_read(s) for s in sites]}
 
 
 @router.get(
@@ -88,21 +98,19 @@ def get_site(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    site = site_service.get_site(site_id)
+    from app.composition import site_repository
+
+    site = site_repository.get(site_id)
     if not site:
         raise NotFoundError(f"Site {site_id} not found")
-    role = scope.rol_para(site_id, None)
-    with get_session() as session:
-        kind = (
-            session.query(SiteModel.kind).filter(SiteModel.id == site_id).scalar()
-        )
     # D14: Base-Infrastructure is invisible to non system-admins even if a
     # stray grant somehow lands on it.
-    if kind == BASE_INFRA_SITE_KIND and not current_user.get("is_system_admin"):
+    if site.kind == BASE_INFRA_SITE_KIND and not current_user.get("is_system_admin"):
         raise NotFoundError(f"Site {site_id} not found")
+    role = scope.rol_para(site_id, None)
     if role is None:
         raise NotFoundError(f"Site {site_id} not found")
-    return {"success": True, "data": site.model_dump()}
+    return {"success": True, "data": _to_read(site)}
 
 
 @router.get(
@@ -114,11 +122,14 @@ def list_groups_for_site(
     site_id: int,
     current_user: dict = Depends(require_scope("list_site_groups")),
 ):
-    from app.services import device_group_service
-    groups = device_group_service.list_site_groups(site_id)
-    if groups is None:
+    from app.api.device_groups import _to_read as _group_to_read
+    from app.composition import device_group_repository, site_repository
+
+    site = site_repository.get(site_id)
+    if site is None:
         raise NotFoundError(f"Site {site_id} not found")
-    return {"success": True, "data": [g.model_dump() for g in groups]}
+    groups = device_group_repository.en_site(site_id)
+    return {"success": True, "data": [_group_to_read(g) for g in groups]}
 
 
 @router.put(
@@ -132,6 +143,8 @@ def update_site(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import audit_repository, site_repository
+
     changed = data.model_dump(exclude_none=True)
     if not changed:
         raise ValidationError("No fields provided for update")
@@ -141,24 +154,25 @@ def update_site(
             status_code=403,
             detail=f"edit site requires admin on site {site_id} (got {role or 'none'})",
         )
-    try:
-        site = site_service.update_site(
-            site_id=site_id,
-            name=data.name,
-            description=data.description,
-        )
-    except ValueError as e:
-        raise ValidationError(str(e))
+    site = site_repository.get(site_id)
     if not site:
         raise NotFoundError(f"Site {site_id} not found")
-    audit_service.log_action(
+    if data.name is not None and data.name != site.name:
+        conflicto = [s for s in site_repository.list(name=data.name) if s.id != site_id]
+        if conflicto:
+            raise ValidationError(f"Site '{data.name}' already exists")
+        site.renombrar(data.name)
+    if data.description is not None:
+        site.actualizar_descripcion(data.description)
+    site = site_repository.add(site)
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="update_site",
         resource="site",
         resource_id=str(site_id),
         details={"site_id": site_id, "updated_fields": changed},
-    )
-    return {"success": True, "data": site.model_dump()}
+    ))
+    return {"success": True, "data": _to_read(site)}
 
 
 @router.delete(
@@ -170,13 +184,15 @@ def update_site(
     ),
 )
 def delete_site(site_id: int, current_user: dict = Depends(require_authenticated)):
+    from app.composition import audit_repository, site_repository
+
     if not current_user.get("is_system_admin"):
         raise HTTPException(
             status_code=403,
             detail="delete_site requires system-admin",
         )
     try:
-        deleted = site_service.delete_site(site_id)
+        deleted = site_repository.eliminar(site_id)
     except SiteHasDevicesError as e:
         raise ConflictError(str(e))
     except ValueError as e:
@@ -184,13 +200,13 @@ def delete_site(site_id: int, current_user: dict = Depends(require_authenticated
         raise ValidationError(str(e))
     if not deleted:
         raise NotFoundError(f"Site {site_id} not found")
-    audit_service.log_action(
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="delete_site",
         resource="site",
         resource_id=str(site_id),
         details={"site_id": site_id},
-    )
+    ))
     return {"success": True, "data": {"site_id": site_id}}
 
 
