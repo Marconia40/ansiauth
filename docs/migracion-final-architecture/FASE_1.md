@@ -653,7 +653,9 @@ redis_coordinator = RedisCoordinator()
 
 - [ ] `app/core/repository.py` existe, `Repository[T]` tiene los 4 métodos
       (`get`/`list`/`add`/`remove`) con la firma exacta de este documento, `add()` usa
-      `session.merge()`.
+      `session.merge()` — con el fix de PK real vs `pk_field` (nota debajo del
+      código, encontrado en Fase 4): busca la fila existente primero cuando
+      `pk_field` no coincide con la PK real de la tabla.
 - [ ] `app/services/vendors/base.py` define `VendorDriver(ABC)` con los 17 métodos
       fusionados (7 de VLAN + 10 de Port). `port_driver_base.py` no existe más.
 - [ ] `HuaweiVendor`, `CiscoVendor`, `MockVendor` existen, cada una implementa
