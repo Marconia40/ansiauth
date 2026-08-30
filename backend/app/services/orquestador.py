@@ -83,6 +83,23 @@ class Orquestador:
         device = self._device_repo.get(device_name)
         if device is None:
             raise NotFoundError(device_name)
+        # Corrección real encontrada revisando FINAL_ARCHITECTURE.md de punta a
+        # punta: nada en todo el pipeline (GroupOperationRunner.encolar() ->
+        # JobQueue.dispatch() -> ejecutar_task -> acá) asignaba `recurso.device`
+        # -- las rutas construyen VLAN/Puerto sin `device` (queda "", su
+        # default) y eso es lo que `self._repos[...].add(recurso)` persistía
+        # más abajo. Como VLAN/Puerto tienen PK compuesta (vlan_id, device) /
+        # (interface, device), toda VLAN/Puerto con el mismo vlan_id/interface
+        # en CUALQUIER device colapsaba en una sola fila con device="" --
+        # confirmado con un test real (2 devices, mismo vlan_id, encolar()
+        # una sola vez: vlan_repository.list() devolvía 1 fila, no 2). Las
+        # llamadas reales al driver (`reconciliar()`/`aplicar()`, abajo) no
+        # se veían afectadas -- reciben `device` como objeto aparte, no leen
+        # `recurso.device` -- pero la tabla de tracking quedaba corrupta. El
+        # propio docstring de `VLAN.device` ya decía "quien la reparte se lo
+        # asigna (Fase 5, GroupOperationRunner/Orquestador)" -- nunca se
+        # escribió el código que lo hiciera.
+        recurso.device = device_name
 
         pre_state = None
         try:
