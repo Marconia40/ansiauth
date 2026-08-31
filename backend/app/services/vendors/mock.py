@@ -190,17 +190,24 @@ class MockVendor(VendorDriver):
         )
         return {"rc": 0, "stdout": "Simulated trunk VLANs applied", "stderr": "", "success": True}
 
-    def configure_port(
-        self, config: "Puerto", device: "Device", password: str
+    def set_access_mode(
+        self, interface: str, vlan_id: int, device: "Device", password: str
     ) -> dict:
         if device.name == "fail_device":
-            logger.info(
-                "Mock: configure_port FAILED on interface=%s device=%s",
-                config.interface, device.name,
-            )
             return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
         logger.info(
-            "Mock: configure_port on interface=%s device=%s fields=%s",
-            config.interface, device.name, config.mutation_fields,
+            "Mock: set access mode on interface=%s device=%s vlan_id=%d",
+            interface, device.name, vlan_id,
         )
-        return {"rc": 0, "stdout": "Simulated configure_port applied", "stderr": "", "success": True}
+        return {"rc": 0, "stdout": "Simulated access mode applied", "stderr": "", "success": True}
+
+    def set_trunk_mode(
+        self, interface: str, native_vlan: int, vlan_list: list[int], device: "Device", password: str
+    ) -> dict:
+        if device.name == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: set trunk mode on interface=%s device=%s native_vlan=%d vlans=%s",
+            interface, device.name, native_vlan, vlan_list,
+        )
+        return {"rc": 0, "stdout": "Simulated trunk mode applied", "stderr": "", "success": True}

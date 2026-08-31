@@ -18,6 +18,8 @@ import type {
   PortDescriptionUpdateRequest,
   PortListResponse,
   PortOperationResult,
+  PortSetAccessModeRequest,
+  PortSetTrunkModeRequest,
   PortTrunkVlansUpdateRequest,
 } from '@/types/port';
 
@@ -372,28 +374,17 @@ export async function setTrunkAllowedVlans(
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
-export async function configurePort(body: {
-  device: string;
-  port_name: string;
-  enabled?: boolean | null;
-  description?: string | null;
-  mode?: 'access' | 'trunk' | null;
-  access_vlan?: number | null;
-  allowed_vlans?: number[] | null;
-  allowed_vlan_operation?: 'replace' | 'add' | 'remove';
-}): Promise<PortOperationResult> {
-  const payload: Record<string, unknown> = {
-    device: body.device,
-    interface: body.port_name,
-  };
-  // null / undefined → omit field (no change); boolean → send; "" → send (clears description)
-  if (body.enabled != null) payload.admin_enabled = body.enabled;
-  if (body.description != null) payload.description = body.description;
-  if (body.mode != null) payload.mode = body.mode;
-  if (body.access_vlan != null) payload.access_vlan = body.access_vlan;
-  if (body.allowed_vlans != null && body.allowed_vlans.length > 0) payload.allowed_vlans = body.allowed_vlans;
-  if (body.allowed_vlan_operation) payload.allowed_vlan_operation = body.allowed_vlan_operation;
-  const { data } = await client.post<PortJobRawResponse>('/ports/configure', payload);
+export async function setPortAccessMode(
+  body: PortSetAccessModeRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.post<PortJobRawResponse>('/ports/access-mode', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setPortTrunkMode(
+  body: PortSetTrunkModeRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.post<PortJobRawResponse>('/ports/trunk-mode', body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 

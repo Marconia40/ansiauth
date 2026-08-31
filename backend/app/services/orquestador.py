@@ -263,6 +263,17 @@ class Orquestador:
         return True, verificado
 
     def _rollback_puerto(self, puerto: "Puerto", pre_state: dict, device: "Device") -> tuple[bool, "bool | None"]:
+        """Ramas explícitas, calzadas 1 a 1 con el dispatch de
+        ``Puerto.aplicar()`` (``puerto.mode`` primero, después el único
+        campo restante) -- corrección real: la versión anterior decidía
+        acá con `len(campos) > 1`, mientras `aplicar()`/`Puerto._es_composite`
+        (ya retirada) decidían con `len(campos) > 1 or "mode" in campos`.
+        Un `Puerto(mode="trunk")` de un solo campo caía acá en la rama de
+        UN campo, que no tenía caso para `"mode"`, y el rollback quedaba
+        como no-op silencioso (`return False, None`) aunque `aplicar()` sí
+        había cambiado el device. Ya no hay heurística de conteo de
+        campos que pueda desalinearse -- ambos lados miran `puerto.mode`
+        directo."""
         if not pre_state.get("existed"):
             return False, None
         anterior = pre_state.get("actual")
@@ -271,21 +282,26 @@ class Orquestador:
 
         campos = puerto.mutation_fields
         try:
-            if len(campos) > 1:
-                from app.models.port import Puerto as _Puerto
-                restaurar = _Puerto(
-                    interface=puerto.interface,
-                    device=puerto.device,
-                    description=anterior.description if "description" in campos else None,
-                    admin_up=anterior.admin_up if "admin_up" in campos else None,
-                    mode=anterior.mode if "mode" in campos else None,
-                    access_vlan=anterior.access_vlan if "access_vlan" in campos else None,
-                    allowed_vlans=anterior.allowed_vlans if "allowed_vlans" in campos else None,
-                    poe_enabled=anterior.poe_enabled if "poe_enabled" in campos else None,
-                )
-                if not restaurar.mutation_fields:
+            if puerto.mode in ("access", "trunk"):
+                # aplicar() cambió el modo del puerto -- restaurar significa
+                # devolverlo al modo/VLAN que tenía ANTES, que puede ser
+                # distinto al que se acaba de aplicar (venía de trunk y se
+                # cambió a access, o viceversa).
+                if anterior.mode == "access":
+                    if anterior.access_vlan is None:
+                        return False, None
+                    resultado = device.driver.set_access_mode(puerto.interface, int(anterior.access_vlan), device, device.password)
+                elif anterior.mode == "trunk":
+                    if anterior.access_vlan is None or not anterior.allowed_vlans:
+                        return False, None
+                    resultado = device.driver.set_trunk_mode(
+                        puerto.interface, int(anterior.access_vlan), list(anterior.allowed_vlans),
+                        device, device.password,
+                    )
+                else:
+                    # modo previo desconocido/no reconocido -- no hay forma
+                    # segura de reconstruirlo.
                     return False, None
-                resultado = device.driver.configure_port(restaurar, device, device.password)
                 exitoso = resultado.get("rc", 1) == 0
             else:
                 campo = next(iter(campos))

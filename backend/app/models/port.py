@@ -184,35 +184,18 @@ class Puerto:
                   "allowed_vlans", "poe_enabled")
         return {c for c in campos if getattr(self, c) is not None}
 
-    @property
-    def _es_composite(self) -> bool:
-        """True cuando ``aplicar()`` necesita pasar por ``configure_port()``
-        en vez de un método puntual del driver — corrección real encontrada
-        en Fase 5, A7: no es solo "más de un campo". ``mode`` no tiene un
-        método de driver propio (no existe ``set_port_mode()`` en
-        ``VendorDriver`` — cambiar de modo solo se puede vía
-        ``configure_port()``), así que un `Puerto(mode="trunk")` solo
-        (1 campo) también necesita el camino compuesto. Sin esto,
-        ``aplicar()`` caía en el dispatch de campo único, no encontraba caso
-        para ``"mode"`` y lanzaba ``ValueError``."""
-        campos = self.mutation_fields
-        return len(campos) > 1 or "mode" in campos
-
     def validar(self) -> None:
         """Reglas de escritura — solo se llaman antes de ``aplicar()``, nunca
         durante ``reconciliar()``. Mismo criterio que ``VLAN.validar()``.
 
-        Las 2 reglas cruzadas (access_vlan/allowed_vlans requieren `mode`)
-        solo corren cuando ``_es_composite`` -- corrección real encontrada
-        en Fase 5, A7: los endpoints de campo único (`/access-vlan`,
-        `/trunk-vlans`) no setean `mode` a propósito -- `_aplicar_access_vlan()`/
-        `_aplicar_allowed_vlans()` leen el modo en vivo del device, no lo
-        reciben del caller. Exigir `mode` seteado acá rompía todo job de
-        esos 2 endpoints: `Orquestador.ejecutar()` llama `validar()` sin
-        condicionales antes de `aplicar()`, así que un `Puerto(access_vlan=X)`
-        con `mode=None` fallaba siempre, confirmado con un test end-to-end
-        (`Orquestador.ejecutar()` sobre un `Puerto(access_vlan=...)` sin
-        `mode` lanzaba antes de esta corrección)."""
+        Ya no hay una noción de "compuesto" genérico (``_es_composite`` se
+        borró junto con el ``configure_port()`` de campo arbitrario que
+        reemplazaba, ver ``aplicar()``) -- las 2 reglas cruzadas cuelgan
+        directo de ``self.mode``: `mode="access"` exige `access_vlan`
+        seteado, `mode="trunk"` exige `allowed_vlans` seteado. Cuando
+        `mode` es `None` (los 4 endpoints de campo único -- `/access-vlan`,
+        `/trunk-vlans` incluidos, que leen el modo en vivo del device en
+        vez de recibirlo del caller) no hay regla cruzada que aplicar."""
         _mutation_fields = (
             self.description, self.admin_up, self.mode,
             self.access_vlan, self.allowed_vlans,
@@ -222,17 +205,18 @@ class Puerto:
                 "at least one mutation field must be provided "
                 "(description, admin_up, mode, access_vlan, or allowed_vlans)"
             )
-        if self._es_composite:
-            if self.access_vlan is not None and self.mode not in ("access", "trunk"):
-                raise ValueError(
-                    f"'access_vlan' (PVID) may only be set when mode='access' or mode='trunk' "
-                    f"(got mode={self.mode!r})"
-                )
-            if self.allowed_vlans is not None and self.mode != "trunk":
-                raise ValueError(
-                    f"'allowed_vlans' may only be set when mode='trunk' "
-                    f"(got mode={self.mode!r})"
-                )
+        if self.mode == "access" and self.access_vlan is None:
+            raise ValueError("mode='access' requires 'access_vlan' to be set")
+        if self.mode == "trunk":
+            # `access_vlan` es dual-purpose (ver docstring de la clase): VLAN
+            # de acceso en modo access, PVID/native VLAN en modo trunk --
+            # mismo campo, no uno nuevo. Un cambio de modo a trunk exige las
+            # 2 dimensiones explícitas (PVID + lista permitida), sin
+            # ambigüedad -- decisión real, no un default silencioso.
+            if self.access_vlan is None:
+                raise ValueError("mode='trunk' requires 'access_vlan' (native VLAN/PVID) to be set")
+            if not self.allowed_vlans:
+                raise ValueError("mode='trunk' requires 'allowed_vlans' to be set")
         if self.access_vlan is not None:
             _validate_access_vlan_id(self.access_vlan)
         if self.allowed_vlans is not None:
@@ -248,40 +232,38 @@ class Puerto:
     def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """Mismo criterio que VLAN.aplicar(): el dict devuelto siempre
         incluye "accion", agregado acá, no por el driver — Fase 3
-        (AuditListener) lo necesita para RF-AUD-02. `configure_port()`
-        devuelve un dict, mismo shape (`rc`/`stdout`/`stderr`/`success`) que
-        cualquier otro método puntual del driver.
+        (AuditListener) lo necesita para RF-AUD-02.
 
-        `configure_port()` devolvía `PortConfigResult` (dataclass aparte)
-        hasta acá -- corrección real de esta revisión: la clase se
-        destructuraba de vuelta a un dict una línea después de recibirla
-        (`resultado.to_dict()` + `"rc": 0 if resultado.success else 1`, ver
-        historial), sin que nada más leyera sus atributos como objeto --
-        pura ceremonia. `VendorDriver.configure_port()` pasa a devolver
-        `dict` directo, mismo contrato que `create_vlan()`/
-        `update_port_description()`/etc -- una excepción menos al patrón ya
-        establecido, no una clase nueva que justificar.
+        Dispatch por ``self.mode`` primero (dos operaciones con nombre,
+        cada una con su propio método de driver -- ``set_access_mode()``/
+        ``set_trunk_mode()``), después por el único campo restante para
+        los 4 endpoints de campo único de siempre. Ya no hay un camino
+        "compuesto" genérico que acepte cualquier combinación de campos
+        (``_es_composite``/``configure_port(self, ...)`` -- retirados: la
+        única combinación de 2+ campos que existía en la práctica era
+        `mode` + su VLAN correspondiente, así que ahora tiene su propio
+        método en vez de una rama genérica).
 
         *pre_state* -- igual criterio que VLAN.aplicar(): si viene seteado
         (``Orquestador.ejecutar()`` se lo pasa en el primer intento, con lo
-        que ya capturó para su propio rollback) las 4 ramas de campo único
+        que ya capturó para su propio rollback) las ramas de campo único
         de abajo lo usan en vez de llamar su propio ``reconciliar()`` de
         nuevo. En ``None`` (reintentos reales, o default), cada rama relee
         el estado -- necesario ahí porque el device puede haber cambiado de
-        verdad entre intentos. La rama composite (``configure_port()``) no
-        lo usa -- nunca llamó ``reconciliar()`` acá, no hay nada que
-        ahorrarle."""
+        verdad entre intentos. Las 2 ramas de modo no lo usan -- igual que
+        el viejo camino compuesto, nunca llamaron ``reconciliar()`` acá."""
+        if self.mode == "access":
+            return self._aplicar_modo_access(device)
+        if self.mode == "trunk":
+            return self._aplicar_modo_trunk(device)
         campos = self.mutation_fields
-        if self._es_composite:
-            # Sin rama no-op acá a propósito -- distinto alcance que las 4
-            # ramas de campo único de abajo (corrección real de Fase 7,
-            # RNF-API-05, ver esas 4). Comparar "ya está aplicado" contra
-            # varios campos a la vez (incluido `allowed_vlan_operation` sobre
-            # una lista) es una pregunta combinatoria distinta, no resuelta
-            # acá -- queda documentado como alcance separado, no un caso
-            # olvidado.
-            resultado = device.driver.configure_port(self, device, device.password)
-            return {**resultado, "accion": "configurar_puerto"}
+        if len(campos) != 1:
+            raise ValueError(
+                f"Puerto.aplicar(): sin mode seteado se espera exactamente "
+                f"1 campo de mutación (se recibieron {sorted(campos)}) -- "
+                f"las únicas combinaciones válidas de 2+ campos son "
+                f"mode='access'+access_vlan o mode='trunk'+allowed_vlans"
+            )
         campo = next(iter(campos))
         if campo == "description":
             return self._aplicar_description(device, pre_state)
@@ -292,6 +274,26 @@ class Puerto:
         if campo == "allowed_vlans":
             return self._aplicar_allowed_vlans(device, pre_state)
         raise ValueError(f"Puerto.aplicar(): no hay driver call para el campo {campo!r}")
+
+    def _aplicar_modo_access(self, device: "Device") -> dict:
+        """Cambia el puerto a modo access con ``self.access_vlan``,
+        atómico -- reemplaza la rama ``_es_composite`` vieja para este caso
+        puntual. Sin ``_noop_resultado()`` a propósito, mismo criterio que
+        el camino que reemplaza: comparar "ya está en access con esta
+        VLAN" es una pregunta legítima pero separada, documentada como
+        alcance no resuelto, no un caso olvidado."""
+        resultado = device.driver.set_access_mode(self.interface, self.access_vlan, device, device.password)
+        return {**resultado, "accion": "configurar_modo_access"}
+
+    def _aplicar_modo_trunk(self, device: "Device") -> dict:
+        """Cambia el puerto a modo trunk con ``self.access_vlan`` (PVID/
+        native VLAN -- mismo campo dual-purpose que usa el modo access,
+        ver docstring de la clase) y ``self.allowed_vlans``, atómico --
+        mismo criterio que ``_aplicar_modo_access()``."""
+        resultado = device.driver.set_trunk_mode(
+            self.interface, self.access_vlan, list(self.allowed_vlans), device, device.password,
+        )
+        return {**resultado, "accion": "configurar_modo_trunk"}
 
     def _noop_resultado(self, accion: str) -> dict:
         """Mismo shape que el no-op de VLAN.aplicar() -- corrección real de

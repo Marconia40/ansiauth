@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 PortMode = Literal["access", "trunk", "unknown"]
 
@@ -172,15 +172,12 @@ class PortTrunkVlansUpdateRequest(BaseModel):
     )
 
 
-class PortConfigureRequest(BaseModel):
-    """Request body for ``PATCH /api/v1/ports/configure`` (Step 3.3).
+class PortSetAccessModeRequest(BaseModel):
+    """Request body for ``POST /api/v1/ports/access-mode``.
 
-    Applies one or more port configuration fields in a single driver call.
-    At least one mutation field must be non-``None``.
-
-    Cross-field constraints (mirroring ``PortConfigRequest`` domain model):
-    * ``access_vlan`` is only valid when ``mode='access'``.
-    * ``allowed_vlans`` is only valid when ``mode='trunk'``.
+    Sets a single interface to access mode with *access_vlan*, atomically.
+    Replaces the old generic ``PortConfigureRequest``/``/configure`` for
+    this specific, well-defined operation.
     """
 
     device: str = Field(..., min_length=1, description="Target device name.")
@@ -190,66 +187,43 @@ class PortConfigureRequest(BaseModel):
         max_length=64,
         description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
     )
-    description: Optional[str] = Field(
-        None,
-        max_length=200,
-        description=(
-            "New description. Empty string clears it. "
-            "``None`` leaves the description unchanged."
-        ),
-    )
-    admin_enabled: Optional[bool] = Field(
-        None,
-        description="True to enable, False to disable. None = do not change.",
-    )
-    mode: Optional[Literal["access", "trunk"]] = Field(
-        None,
-        description="Switchport mode. None = do not change.",
-    )
-    access_vlan: Optional[int] = Field(
-        None,
+    access_vlan: int = Field(
+        ...,
         ge=1,
         le=4094,
-        description="Access VLAN ID (1-4094). Only valid when mode='access'.",
-    )
-    allowed_vlans: Optional[list[int]] = Field(
-        None,
-        min_length=1,
-        description="Trunk allowed VLANs. Only valid when mode='trunk'.",
-    )
-    allowed_vlan_operation: Literal["replace", "add", "remove"] = Field(
-        "add",
-        description=(
-            "How allowed_vlans is applied to the current trunk config when mode='trunk'. "
-            "'replace' sets the list exactly (clears existing first); "
-            "'add' appends without removing existing; "
-            "'remove' removes only the specified VLANs. "
-            "Default: 'add'. Ignored when allowed_vlans is None."
-        ),
+        description="Access VLAN ID to assign (1-4094).",
     )
 
-    @model_validator(mode="after")
-    def _validate_fields(self) -> "PortConfigureRequest":
-        mutation_fields = [
-            self.description, self.admin_enabled, self.mode,
-            self.access_vlan, self.allowed_vlans,
-        ]
-        if all(v is None for v in mutation_fields):
-            raise ValueError(
-                "at least one mutation field must be provided "
-                "(description, admin_enabled, mode, access_vlan, or allowed_vlans)"
-            )
-        if self.access_vlan is not None and self.mode not in ("access", "trunk"):
-            raise ValueError(
-                f"'access_vlan' (PVID) may only be set when mode='access' or mode='trunk' "
-                f"(got mode={self.mode!r})"
-            )
-        if self.allowed_vlans is not None and self.mode != "trunk":
-            raise ValueError(
-                f"'allowed_vlans' may only be set when mode='trunk' "
-                f"(got mode={self.mode!r})"
-            )
-        return self
+
+class PortSetTrunkModeRequest(BaseModel):
+    """Request body for ``POST /api/v1/ports/trunk-mode``.
+
+    Sets a single interface to trunk mode with *native_vlan* (PVID) and
+    *allowed_vlans*, atomically. Both always fully replace whatever the
+    port had before — this is a mode change, not an add/remove relative
+    to an existing trunk. Use ``PATCH /ports/access-vlan``/
+    ``PATCH /ports/trunk-vlans`` to adjust either dimension individually
+    on a port that's already trunk.
+    """
+
+    device: str = Field(..., min_length=1, description="Target device name.")
+    interface: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
+    )
+    native_vlan: int = Field(
+        ...,
+        ge=1,
+        le=4094,
+        description="Native VLAN (PVID) for the trunk.",
+    )
+    allowed_vlans: list[int] = Field(
+        ...,
+        min_length=1,
+        description="Trunk allowed VLANs (non-empty).",
+    )
 
 
 class PortShutdownRequest(BaseModel):

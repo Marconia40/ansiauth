@@ -31,8 +31,6 @@ _PLAYBOOK_SET_ACCESS_VLAN = "vendors/huawei/set_access_vlan.yml"
 _PLAYBOOK_SET_TRUNK_VLANS = "vendors/huawei/set_trunk_allowed_vlans.yml"
 _PLAYBOOK_CONFIGURE_PORT = "vendors/huawei/configure_port.yml"
 _PLAYBOOK_SET_TRUNK_PVID = "vendors/huawei/set_trunk_pvid.yml"
-_PLAYBOOK_SHUTDOWN_PORT = "vendors/huawei/shutdown_port.yml"
-_PLAYBOOK_ENABLE_PORT = "vendors/huawei/enable_port.yml"
 
 # The Huawei get_ports playbook issues three cli_command tasks in this order:
 #   0. display interface brief
@@ -635,7 +633,33 @@ class HuaweiVendor(VendorDriver):
 
     # ── Step 3.2 composite / semantic implementations ────────────────────────
 
-    def configure_port(
+    def set_access_mode(
+        self, interface: str, vlan_id: int, device: Device, password: str,
+    ) -> dict:
+        """Set *interface* to access mode with *vlan_id*, atomically.
+        Thin wrapper over ``_configure_port()`` — same underlying VRP
+        candidate-config session that already handled this combination
+        before the generic ``configure_port()`` entry point was retired
+        (composite driver call, one Puerto per arbitrary field
+        combination) in favor of this named, purpose-specific method."""
+        puerto = Puerto(interface=interface, mode="access", access_vlan=vlan_id)
+        return self._configure_port(puerto, device, password)
+
+    def set_trunk_mode(
+        self, interface: str, native_vlan: int, vlan_list: list[int], device: Device, password: str,
+    ) -> dict:
+        """Set *interface* to trunk mode with *native_vlan* (PVID) and
+        *vlan_list*, atomically. Same criteria as ``set_access_mode()`` —
+        thin wrapper over ``_configure_port()``, which already handles
+        `access_vlan` as the trunk's PVID when `mode="trunk"`
+        (`is_trunk_pvid` flag, see below)."""
+        puerto = Puerto(
+            interface=interface, mode="trunk",
+            access_vlan=native_vlan, allowed_vlans=list(vlan_list),
+        )
+        return self._configure_port(puerto, device, password)
+
+    def _configure_port(
         self,
         config: Puerto,
         device: Device,
@@ -732,97 +756,6 @@ class HuaweiVendor(VendorDriver):
             logger.exception(
                 "FULL HUAWEI TRACEBACK [configure_port interface=%s device=%s]: %s\n%s",
                 config.interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
-
-    def shutdown_port(
-        self,
-        interface: str,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Administratively disable *interface* on a Huawei VRP device.
-
-        Runs ``shutdown`` inside the interface view and commits atomically.
-        Intent-named counterpart to ``enable_port`` — produces self-describing
-        Ansible run logs without requiring callers to decode a boolean flag.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
-        logger.info(
-            "Huawei: shutdown_port on interface=%s device=%s", interface, device.name
-        )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_SHUTDOWN_PORT,
-                extravars={"interface": interface, "device": device.name},
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Huawei: shutdown_port OK on interface=%s device=%s",
-                    interface, device.name,
-                )
-            else:
-                logger.error(
-                    "Huawei: shutdown_port FAILED on interface=%s device=%s — %s",
-                    interface, device.name,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL HUAWEI TRACEBACK [shutdown_port interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
-
-    def enable_port(
-        self,
-        interface: str,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Administratively enable *interface* on a Huawei VRP device.
-
-        Runs ``undo shutdown`` inside the interface view and commits atomically.
-        Intent-named counterpart to ``shutdown_port``.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
-        logger.info(
-            "Huawei: enable_port on interface=%s device=%s", interface, device.name
-        )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_ENABLE_PORT,
-                extravars={"interface": interface, "device": device.name},
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Huawei: enable_port OK on interface=%s device=%s",
-                    interface, device.name,
-                )
-            else:
-                logger.error(
-                    "Huawei: enable_port FAILED on interface=%s device=%s — %s",
-                    interface, device.name,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL HUAWEI TRACEBACK [enable_port interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
             )
             raise
 

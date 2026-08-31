@@ -29,6 +29,8 @@ _PLAYBOOK_SET_ADMIN_STATE = "vendors/cisco/set_port_admin_state.yml"
 _PLAYBOOK_SET_ACCESS_VLAN = "vendors/cisco/set_access_vlan.yml"
 _PLAYBOOK_SET_TRUNK_VLANS = "vendors/cisco/set_trunk_allowed_vlans.yml"
 _PLAYBOOK_SET_TRUNK_PVID = "vendors/cisco/set_trunk_pvid.yml"
+_PLAYBOOK_SET_ACCESS_MODE = "vendors/cisco/set_access_mode.yml"
+_PLAYBOOK_SET_TRUNK_MODE = "vendors/cisco/set_trunk_mode.yml"
 
 # The Cisco get_ports playbook issues a single ios_command task with three
 # commands in this order.  ios_command returns stdout as a list, which is
@@ -84,10 +86,16 @@ class CiscoVendor(VendorDriver):
     ``save_config`` is not applicable to IOS — the running config is written
     immediately.  Calling it raises ``NotImplementedError``.
 
-    Port mutation coverage is partial (Step 3.1): ``configure_port``,
-    ``shutdown_port`` and ``enable_port`` are not yet implemented for Cisco —
-    calling them raises ``NotImplementedError`` with a Cisco-specific message
-    pointing at the individual ``set_port_*`` methods to use instead.
+    Full port mutation coverage — ``set_access_mode``/``set_trunk_mode``
+    (mode changes, atomic with their VLAN) join the existing per-field
+    methods (``update_port_description``/``set_port_admin_state``/
+    ``set_port_access_vlan``/``set_trunk_pvid_vlan``/
+    ``set_trunk_allowed_vlans``). The old generic ``configure_port``/
+    ``shutdown_port``/``enable_port`` were retired — ``configure_port`` in
+    particular was a permanent ``NotImplementedError`` stub with no
+    backing playbook, so a mode change via the old composite endpoint
+    always failed for Cisco devices in production (Huawei was the only
+    vendor where it worked).
     """
 
     # ── VLAN mutation operations ──────────────────────────────────────────────
@@ -570,43 +578,117 @@ class CiscoVendor(VendorDriver):
             )
             raise
 
-    # ── Step 3.1 composite / semantic stubs ───────────────────────────────────
-
-    def configure_port(
-        self,
-        config: Puerto,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Composite port configuration — Step 3.1 stub (not yet implemented)."""
-        raise NotImplementedError(
-            "CiscoVendor.configure_port is not yet implemented — "
-            "use the individual set_port_* methods for now"
-        )
-
-    def shutdown_port(
+    def set_access_mode(
         self,
         interface: str,
+        vlan_id: int,
         device: Device,
         password: str,
     ) -> dict:
-        """Shut down *interface* — Step 3.1 stub (not yet implemented)."""
-        raise NotImplementedError(
-            "CiscoVendor.shutdown_port is not yet implemented — "
-            "use set_port_admin_state(enabled=False) for now"
-        )
+        """Set *interface* to access mode with *vlan_id*, atomically, on a
+        Cisco IOS device.
 
-    def enable_port(
+        Runs ``switchport mode access`` + ``switchport access vlan {{
+        vlan_id }}`` inside the interface context, same single
+        ``ios_config`` task as ``set_port_access_vlan()``/
+        ``set_trunk_pvid_vlan()`` next to this method — was previously
+        unreachable in production: the old composite entry point
+        (``configure_port()``) was a permanent ``NotImplementedError``
+        stub with no backing playbook at all, so a mode change via
+        ``/ports/configure`` always failed for Cisco devices (Huawei was
+        the only vendor where it worked).
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        logger.info(
+            "Cisco: set access mode on interface=%s device=%s vlan_id=%d",
+            interface, device.name, vlan_id,
+        )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_ACCESS_MODE,
+                extravars={
+                    "interface": interface,
+                    "vlan_id": int(vlan_id),
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Cisco: set access mode OK on interface=%s device=%s vlan_id=%d",
+                    interface, device.name, vlan_id,
+                )
+            else:
+                logger.error(
+                    "Cisco: set access mode FAILED on interface=%s device=%s vlan_id=%d — %s",
+                    interface, device.name, vlan_id,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [set_access_mode interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def set_trunk_mode(
         self,
         interface: str,
+        native_vlan: int,
+        vlan_list: list[int],
         device: Device,
         password: str,
     ) -> dict:
-        """Enable *interface* — Step 3.1 stub (not yet implemented)."""
-        raise NotImplementedError(
-            "CiscoVendor.enable_port is not yet implemented — "
-            "use set_port_admin_state(enabled=True) for now"
+        """Set *interface* to trunk mode with *native_vlan* (PVID) and
+        *vlan_list* as its allowed VLANs, atomically, on a Cisco IOS
+        device. Same criteria as ``set_access_mode()`` above.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        vlan_str = self._compress_vlans_cisco(sorted(set(vlan_list)))
+        logger.info(
+            "Cisco: set trunk mode on interface=%s device=%s native_vlan=%d vlans=%s",
+            interface, device.name, native_vlan, vlan_str,
         )
+        try:
+            result = ansible_service.run_playbook(
+                playbook=_PLAYBOOK_SET_TRUNK_MODE,
+                extravars={
+                    "interface": interface,
+                    "native_vlan": int(native_vlan),
+                    "vlan_list": vlan_str,
+                    "device": device.name,
+                },
+                inventory=_build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info(
+                    "Cisco: set trunk mode OK on interface=%s device=%s native_vlan=%d vlans=%s",
+                    interface, device.name, native_vlan, vlan_str,
+                )
+            else:
+                logger.error(
+                    "Cisco: set trunk mode FAILED on interface=%s device=%s native_vlan=%d vlans=%s — %s",
+                    interface, device.name, native_vlan, vlan_str,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL CISCO TRACEBACK [set_trunk_mode interface=%s device=%s]: %s\n%s",
+                interface, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
 
     def set_trunk_allowed_vlans(
         self,

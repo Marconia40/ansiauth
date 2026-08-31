@@ -11,10 +11,11 @@ from app.models.visibility_scope import VisibilityScope
 from app.schemas.port import (
     PortAccessVlanUpdateRequest,
     PortAdminStateUpdateRequest,
-    PortConfigureRequest,
     PortDescriptionUpdateRequest,
     PortEnableRequest,
     PortRead,
+    PortSetAccessModeRequest,
+    PortSetTrunkModeRequest,
     PortShutdownRequest,
     PortTrunkVlansUpdateRequest,
 )
@@ -206,6 +207,7 @@ def update_port_description(
     if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
+    _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "update_port_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
@@ -245,6 +247,7 @@ def set_port_admin_state(
     if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
+    _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
@@ -287,6 +290,7 @@ def set_port_access_vlan(
     if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
+    _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_port_access_vlan")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
@@ -336,6 +340,7 @@ def set_trunk_allowed_vlans(
     if dev is None:
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
+    _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_trunk_allowed_vlans")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
@@ -343,14 +348,16 @@ def set_trunk_allowed_vlans(
 
 
 @router.post(
-    "/configure",
-    summary="Configure port (composite)",
+    "/access-mode",
+    summary="Set port to access mode",
     description=(
-        "Apply one or more port configuration fields in a single driver call.  "
-        "All non-``None`` fields are applied atomically on the device.  "
-        "Pre-state is captured for rollback — on failure the orchestration layer "
-        "reconstructs a rollback request covering the changed fields and attempts "
-        "to restore their pre-state values.  "
+        "Set a single interface to access mode with the given access VLAN, "
+        "atomically (mode + VLAN applied together).  "
+        "Replaces the old generic ``/configure`` endpoint for this specific, "
+        "well-defined operation — there is no meaningful 'just change mode, "
+        "keep whatever VLAN was there' case.  "
+        "Pre-state is captured for rollback — if the device-side change "
+        "fails, the port's original mode/VLAN are restored automatically.  "
         "Executed asynchronously: the response carries a ``group_job_id`` and "
         "per-device job entry the frontend can poll via ``GET /api/v1/jobs/{job_id}`` "
         "and ``GET /api/v1/group-jobs/{id}``.  "
@@ -358,27 +365,62 @@ def set_trunk_allowed_vlans(
         "devices in their allowed sites."
     ),
 )
-def configure_port(
-    data: PortConfigureRequest,
+def set_port_access_mode(
+    data: PortSetAccessModeRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """``Puerto`` es también el modelo de la escritura compuesta (no hay una
-    ``PortConfigRequest`` separada del lado nuevo) -- ``Puerto.aplicar()``
-    despacha a ``configure_port()`` del driver cuando hay más de un campo
-    seteado, o cuando ``mode`` es uno de ellos (FASE_5.md A7, corrección
-    ``_es_composite``)."""
+    from app.composition import device_repository, group_operation_runner
+
+    try:
+        entidad = Puerto(interface=data.interface, mode="access", access_vlan=data.access_vlan)
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = device_repository.get(data.device)
+    if dev is None:
+        raise NotFoundError(f"Device '{data.device}' not found")
+    _authz_device(scope, data.device, min_role="operator")
+    _check_device_not_locked(data.device)
+    _require_port_driver_with(dev, "set_access_mode")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
+    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+
+
+@router.post(
+    "/trunk-mode",
+    summary="Set port to trunk mode",
+    description=(
+        "Set a single interface to trunk mode with the given native VLAN "
+        "(PVID) and allowed-VLAN list, atomically (mode + both VLAN "
+        "dimensions applied together).  Both always fully replace whatever "
+        "the port had before — this is a mode change, not an add/remove "
+        "relative to an existing trunk (the port may be coming from access "
+        "mode with no prior trunk config at all).  Use "
+        "``PATCH /ports/access-vlan``/``PATCH /ports/trunk-vlans`` to adjust "
+        "either dimension individually on a port that's already trunk.  "
+        "Pre-state is captured for rollback — if the device-side change "
+        "fails, the port's original mode/VLANs are restored automatically.  "
+        "Executed asynchronously: the response carries a ``group_job_id`` and "
+        "per-device job entry the frontend can poll via ``GET /api/v1/jobs/{job_id}`` "
+        "and ``GET /api/v1/group-jobs/{id}``.  "
+        "Requires operator role or higher; site-scoped users may only target "
+        "devices in their allowed sites."
+    ),
+)
+def set_port_trunk_mode(
+    data: PortSetTrunkModeRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
     from app.composition import device_repository, group_operation_runner
 
     try:
         entidad = Puerto(
-            interface=data.interface,
-            description=data.description,
-            admin_up=data.admin_enabled,
-            mode=data.mode,
-            access_vlan=data.access_vlan,
-            allowed_vlans=list(data.allowed_vlans) if data.allowed_vlans else None,
-            allowed_vlan_operation=data.allowed_vlan_operation,
+            interface=data.interface, mode="trunk",
+            access_vlan=data.native_vlan, allowed_vlans=list(data.allowed_vlans),
         )
         entidad.validar()
     except ValueError as exc:
@@ -389,7 +431,7 @@ def configure_port(
         raise NotFoundError(f"Device '{data.device}' not found")
     _authz_device(scope, data.device, min_role="operator")
     _check_device_not_locked(data.device)
-    _require_port_driver_with(dev, "configure_port")
+    _require_port_driver_with(dev, "set_trunk_mode")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return {"success": True, "group_job_id": group_job_id, "jobs": jobs}

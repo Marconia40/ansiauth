@@ -1,6 +1,6 @@
 'use client';
 
-import type { Port, TrunkVlanMode } from '@/types/port';
+import type { Port } from '@/types/port';
 import { parseVlanInput } from '../helpers';
 import type { EditorsBusy, ModeEditor } from '../types';
 import { ModeBadge, RowSpinner } from './StatusBadges';
@@ -62,17 +62,6 @@ export function PortModeSelector({ port, canEdit, busy, editor }: PortModeSelect
         </div>
         {editor.mode === 'trunk' && (
           <div className="flex items-center gap-1">
-            <select
-              value={editor.vlanOp}
-              onChange={(e) => editor.setVlanOp(e.target.value as TrunkVlanMode)}
-              disabled={isSaving}
-              className="px-1.5 py-1 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:opacity-50"
-              aria-label="Allowed VLANs operation"
-            >
-              <option value="replace">Replace</option>
-              <option value="add">Add</option>
-              <option value="remove">Remove</option>
-            </select>
             <input
               type="text"
               value={editor.trunkVlans}
@@ -90,7 +79,7 @@ export function PortModeSelector({ port, canEdit, busy, editor }: PortModeSelect
                 if (e.key === 'Escape') { e.preventDefault(); editor.cancel(); }
               }}
               disabled={isSaving}
-              placeholder="e.g. 10,20,30-35 (optional)"
+              placeholder="e.g. 10,20,30-35"
               aria-label={`Allowed VLANs for ${port.name}`}
               className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-1 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             />

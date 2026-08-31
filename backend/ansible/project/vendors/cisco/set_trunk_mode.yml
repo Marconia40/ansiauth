@@ -1,0 +1,33 @@
+---
+# Set a port to trunk mode with a given native VLAN (PVID) and allowed-VLAN
+# list, atomically, on Cisco IOS. Replaces the old generic configure_port
+# composite call for this specific, well-defined operation.
+#
+# Runs `switchport mode trunk` + `switchport trunk native vlan {{
+# native_vlan }}` + `switchport trunk allowed vlan {{ vlan_list }}` inside
+# the interface context, in the same ios_config task — one CLI session,
+# one commit. Both native_vlan and vlan_list always fully replace whatever
+# the port had before (this is a mode change, not an add/remove relative
+# to an existing trunk — the port may be coming from access mode with no
+# prior trunk config at all). `set_trunk_pvid.yml`/`set_trunk_allowed_vlans.yml`
+# are the place for adjusting either on a port that's already trunk.
+#
+# Vars expected:
+#   interface   (str)
+#   native_vlan (int)
+#   vlan_list   (str) — e.g. "10-12,20,30-35"
+#   device      (str) — diagnostic only
+
+- name: Set trunk mode on Cisco IOS device
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Apply trunk mode, native VLAN, and allowed VLANs
+      cisco.ios.ios_config:
+        parents: "interface {{ interface }}"
+        lines:
+          - "switchport mode trunk"
+          - "switchport trunk native vlan {{ native_vlan }}"
+          - "switchport trunk allowed vlan {{ vlan_list }}"
+        save_when: always

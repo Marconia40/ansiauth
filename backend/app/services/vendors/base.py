@@ -438,31 +438,32 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement set_trunk_allowed_vlans yet"
         )
 
-    def configure_port(
+    def set_access_mode(
         self,
-        config: Puerto,
+        interface: str,
+        vlan_id: int,
         device: Device,
         password: str,
     ) -> dict:
-        """Apply a composite set of port mutations in a single driver call.
+        """Set *interface* to access mode with *vlan_id* as its access VLAN,
+        atomically (mode + VLAN in the same device interaction).
 
-        Concrete drivers should override it to apply all fields in *config*
-        that are non-``None`` in a single device interaction.  The default
-        raises ``NotImplementedError`` so vendors that haven't wired this
-        yet surface a controlled ``VENDOR_NOT_SUPPORTED`` 501 rather than
-        a bare exception.
+        Replaces the old generic ``configure_port()`` composite call for
+        this one well-defined operation — a real "switch to access mode"
+        request always carries the target VLAN with it, there's no
+        meaningful "just change mode, keep whatever VLAN was there" case.
 
-        The driver is responsible for:
-        * Respecting the field ordering (e.g. set mode before VLAN).
-        * Raising ``RuntimeError`` (not ``NotImplementedError``) if a playbook
-          fails mid-operation so the orchestration layer can trigger rollback.
+        Concrete drivers should override this; the default raises
+        ``NotImplementedError`` so vendors without an implementation surface
+        a controlled ``VENDOR_NOT_SUPPORTED`` 501 rather than a bare
+        exception.
 
         Parameters
         ----------
-        config:
-            Validated ``Puerto`` — callers must pass an already-validated
-            instance (``validar()`` already called); the driver may trust
-            its invariants.
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        vlan_id:
+            Access VLAN to assign (1–4094, excluding 1002–1005).
         device:
             Domain device object exposing ``.name``, ``.host``, ``.username``.
         password:
@@ -471,77 +472,47 @@ class VendorDriver(ABC):
         Returns
         -------
         dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}`` —
-            same contract as every other mutation method on this class, not
-            a dedicated result type (``PortConfigResult`` was removed —
-            it never carried anything a plain dict didn't already).
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement configure_port yet"
-        )
-
-    def shutdown_port(
-        self,
-        interface: str,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Administratively disable *interface* on *device* (shutdown).
-
-        Semantic wrapper: equivalent to ``set_port_admin_state(enabled=False)``
-        but expressed as an explicit, intent-named operation so higher-level
-        orchestration and audit logs can describe the action unambiguously.
-
-        Concrete drivers should override this; the default raises
-        ``NotImplementedError`` so vendors without an implementation surface
-        a controlled 501 at the API boundary.
-
-        Vendor mapping (informational — implementations fill in the details):
-            * Huawei VRP — ``shutdown`` inside interface view + ``commit``.
-            * Cisco IOS  — ``shutdown`` inside ``interface <name>`` context.
-
-        Parameters
-        ----------
-        interface:
-            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
-        device:
-            Domain device object.
-        password:
-            Plaintext device password (decrypted by the caller).
-
-        Returns
-        -------
-        dict
-            Normalized Ansible result:
             ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
         """
         raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement shutdown_port yet"
+            f"{self.__class__.__name__} does not implement set_access_mode yet"
         )
 
-    def enable_port(
+    def set_trunk_mode(
         self,
         interface: str,
+        native_vlan: int,
+        vlan_list: list[int],
         device: Device,
         password: str,
     ) -> dict:
-        """Administratively enable *interface* on *device* (no shutdown).
+        """Set *interface* to trunk mode with *native_vlan* (PVID) and
+        *vlan_list* as its allowed VLANs, atomically (mode + both VLAN
+        dimensions in the same device interaction).
 
-        Semantic wrapper: equivalent to ``set_port_admin_state(enabled=True)``
-        but expressed as an explicit, intent-named operation.
+        Replaces the old generic ``configure_port()`` composite call for
+        this operation. Distinct from ``set_trunk_allowed_vlans()``/
+        ``set_trunk_pvid_vlan()`` (which assume the port is *already*
+        trunk and only change one dimension) — this one is a mode change,
+        so both *native_vlan* and *vlan_list* always fully replace
+        whatever the port had before, there is no add/remove semantics
+        here (the port may be coming from access mode with no prior trunk
+        config at all).
 
         Concrete drivers should override this; the default raises
         ``NotImplementedError`` so vendors without an implementation surface
-        a controlled 501 at the API boundary.
-
-        Vendor mapping (informational — implementations fill in the details):
-            * Huawei VRP — ``undo shutdown`` inside interface view + ``commit``.
-            * Cisco IOS  — ``no shutdown`` inside ``interface <name>`` context.
+        a controlled ``VENDOR_NOT_SUPPORTED`` 501 rather than a bare
+        exception.
 
         Parameters
         ----------
         interface:
             Vendor-native interface name.
+        native_vlan:
+            Native VLAN / PVID for the trunk (1–4094).
+        vlan_list:
+            VLAN IDs to allow on the trunk (non-empty, validated by the
+            caller).
         device:
             Domain device object.
         password:
@@ -550,11 +521,10 @@ class VendorDriver(ABC):
         Returns
         -------
         dict
-            Normalized Ansible result:
             ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
         """
         raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement enable_port yet"
+            f"{self.__class__.__name__} does not implement set_trunk_mode yet"
         )
 
     def get_port(self, name: str, device: Device, password: str) -> Puerto | None:
