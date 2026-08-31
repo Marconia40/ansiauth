@@ -1,8 +1,14 @@
 """MSP: Phase 3 — RoleAssignmentService.
 
-Sole owner of the ``role_assignments`` table and the ``users.is_system_admin``
-column. Endpoints delegate to the four methods below; no other module writes
-to either surface.
+Owns the authorization/audit rules around granting and revoking roles, and
+the ``users.is_system_admin`` column — but ``role_assignments`` itself is
+written exclusively through ``RoleAssignmentRepository`` (``add()``/
+``remove()``), not through a session opened here. This service used to
+write ``RoleAssignmentModel`` directly (``session.add()``/``session.delete()``),
+which meant 2 competing "sole owners" of the same table existed at once —
+the repository sat unused (its own docstring admitted it) while this
+service did the real writes. Fixed by routing through the repository, per
+FINAL_ARCHITECTURE.md §6.
 """
 from __future__ import annotations
 
@@ -18,7 +24,8 @@ from app.db.models import (
     UserModel,
 )
 from app.db.session import get_session
-from app.models.audit import AuditRecord
+from app.models.domain_event import DomainEvent
+from app.repositories.role_assignment_repository import RoleAssignment
 from app.schemas.role_assignment import RoleAssignmentRead
 
 logger = logging.getLogger(__name__)
@@ -45,8 +52,19 @@ def _to_read(row: RoleAssignmentModel) -> RoleAssignmentRead:
     )
 
 
+def _leer(grant_id: int) -> RoleAssignmentRead:
+    """Lee el grant recién escrito con sus 3 joins de display (site_name/
+    device_group_name/created_by_username) -- concern de lectura separado
+    de la escritura (que sí pasa por RoleAssignmentRepository); el dominio
+    de RoleAssignmentRepository no carga esos nombres, solo los ids."""
+    with get_session() as session:
+        row = session.query(RoleAssignmentModel).filter_by(id=grant_id).first()
+        return _to_read(row)
+
+
 class RoleAssignmentService:
-    """Sole owner of role_assignments rows and users.is_system_admin."""
+    """Reglas de autorización/auditoría para grant/revoke -- la escritura
+    real de role_assignments vive en RoleAssignmentRepository."""
 
     def __init__(self, db=None):
         self._db = db  # session-per-call; kept for plan compatibility
@@ -103,102 +121,89 @@ class RoleAssignmentService:
                             f"{group.site_id}, not site {site_id}"
                         ),
                     )
-            self._authorize_grant_or_revoke(
-                session, actor=actor, site_id=site_id,
-                device_group_id=device_group_id, role_being_granted=role,
-            )
-            existing = (
-                session.query(RoleAssignmentModel)
-                .filter(
-                    RoleAssignmentModel.user_id == target_user_id,
-                    RoleAssignmentModel.site_id == site_id,
-                    RoleAssignmentModel.device_group_id == device_group_id,
-                )
-                .first()
-            )
-            if existing is not None:
-                # Audita siempre, incluso cuando el rol no cambia -- corrección
-                # real aplicada acá (Fase 7, §1.5): FINAL_ARCHITECTURE.md §6
-                # ("Mismo patrón, 3ra vez") ya había marcado esto como
-                # pendiente desde antes de que existiera AuditRepository --
-                # el código real solo auditaba si `existing.role != role`, un
-                # re-grant del mismo rol quedaba sin ningún registro. Mismo
-                # criterio ya aplicado a Inventory.move() (Fase 6): noop
-                # idempotente, pero SÍ auditado, con "noop": True en el payload.
-                noop = existing.role == role
-                if not noop:
-                    existing.role = role
-                    session.flush()
-                record = _to_read(existing)
-                from app.composition import audit_repository
-                audit_repository.append(AuditRecord(
-                    user=(actor.get("username") if actor else None) or "system",
-                    action="update_role_assignment",
-                    resource="role_assignment",
-                    resource_id=str(existing.id),
-                    details={
-                        "user_id": target_user_id, "site_id": site_id,
-                        "device_group_id": device_group_id, "role": role,
-                        "noop": noop,
-                    },
-                ))
-                return record
-            row = RoleAssignmentModel(
-                user_id=target_user_id,
-                site_id=site_id,
-                device_group_id=device_group_id,
-                role=role,
-                created_by_user_id=actor.get("id") if actor else None,
-            )
-            session.add(row)
-            session.flush()
-            record = _to_read(row)
-        from app.composition import audit_repository
-        audit_repository.append(AuditRecord(
-            user=(actor.get("username") if actor else None) or "system",
-            action="grant_role_assignment",
-            resource="role_assignment",
-            resource_id=str(record.id),
-            details={
+        self._authorize_grant_or_revoke(
+            actor=actor, site_id=site_id,
+            device_group_id=device_group_id, role_being_granted=role,
+        )
+        from app.composition import event_dispatcher, role_assignment_repository
+
+        actor_username = (actor.get("username") if actor else None) or "system"
+        existentes = role_assignment_repository.list(
+            user_id=target_user_id, site_id=site_id, device_group_id=device_group_id,
+        )
+        existing = existentes[0] if existentes else None
+        if existing is not None:
+            # Audita siempre, incluso cuando el rol no cambia -- corrección
+            # real aplicada acá (Fase 7, §1.5): FINAL_ARCHITECTURE.md §6
+            # ("Mismo patrón, 3ra vez") ya había marcado esto como
+            # pendiente desde antes de que existiera AuditRepository -- el
+            # código real solo auditaba si `existing.role != role`, un
+            # re-grant del mismo rol quedaba sin ningún registro. Mismo
+            # criterio ya aplicado a Inventory.move() (Fase 6): noop
+            # idempotente, pero SÍ auditado, con "noop": True en el payload.
+            noop = existing.role == role
+            if not noop:
+                existing.role = role
+                role_assignment_repository.add(existing)
+            record = _leer(existing.id)
+            # Antes: audit_repository.append(AuditRecord(...)) directo --
+            # único par de writes de esta clase que se saltaba
+            # EventDispatcher (Inventory ya despacha DomainEvent para su
+            # ciclo de vida). resource_id va en el payload -- ver
+            # AuditRecord.desde() (models/audit.py).
+            event_dispatcher.despachar([DomainEvent(
+                "update_role_assignment", existing, None, actor_username,
+                {
+                    "resource_id": existing.id,
+                    "user_id": target_user_id, "site_id": site_id,
+                    "device_group_id": device_group_id, "role": role,
+                    "noop": noop,
+                },
+            )])
+            return record
+        nuevo = RoleAssignment(
+            user_id=target_user_id, site_id=site_id, device_group_id=device_group_id,
+            role=role, created_by_user_id=actor.get("id") if actor else None,
+        )
+        creado = role_assignment_repository.add(nuevo)
+        record = _leer(creado.id)
+        event_dispatcher.despachar([DomainEvent(
+            "grant_role_assignment", creado, None, actor_username,
+            {
+                "resource_id": creado.id,
                 "target_user_id": target_user_id,
                 "site_id": site_id,
                 "device_group_id": device_group_id,
                 "role": role,
             },
-        ))
+        )])
         return record
 
     def revoke(self, grant_id: int, actor: dict) -> None:
         """Delete a grant. Same authz as :py:meth:`grant`."""
-        with get_session() as session:
-            row = (
-                session.query(RoleAssignmentModel)
-                .filter_by(id=grant_id)
-                .first()
-            )
-            if row is None:
-                raise HTTPException(status_code=404, detail=f"Grant {grant_id} not found")
-            self._authorize_grant_or_revoke(
-                session, actor=actor, site_id=row.site_id,
-                device_group_id=row.device_group_id,
-                role_being_granted=row.role,
-            )
-            details = {
-                "grant_id": grant_id,
-                "user_id": row.user_id,
-                "site_id": row.site_id,
-                "device_group_id": row.device_group_id,
-                "role": row.role,
-            }
-            session.delete(row)
-        from app.composition import audit_repository
-        audit_repository.append(AuditRecord(
-            user=(actor.get("username") if actor else None) or "system",
-            action="revoke_role_assignment",
-            resource="role_assignment",
-            resource_id=str(grant_id),
-            details=details,
-        ))
+        from app.composition import event_dispatcher, role_assignment_repository
+
+        existing = role_assignment_repository.get(grant_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail=f"Grant {grant_id} not found")
+        self._authorize_grant_or_revoke(
+            actor=actor, site_id=existing.site_id,
+            device_group_id=existing.device_group_id,
+            role_being_granted=existing.role,
+        )
+        details = {
+            "resource_id": grant_id,
+            "grant_id": grant_id,
+            "user_id": existing.user_id,
+            "site_id": existing.site_id,
+            "device_group_id": existing.device_group_id,
+            "role": existing.role,
+        }
+        role_assignment_repository.remove(grant_id)
+        actor_username = (actor.get("username") if actor else None) or "system"
+        event_dispatcher.despachar([DomainEvent(
+            "revoke_role_assignment", existing, None, actor_username, details,
+        )])
 
     def list_for_user(
         self,
@@ -282,20 +287,24 @@ class RoleAssignmentService:
                         ),
                     )
             row.is_system_admin = bool(is_system_admin)
-        from app.composition import audit_repository
-        audit_repository.append(AuditRecord(
-            user=(actor.get("username") if actor else None) or "system",
-            action="set_system_admin",
-            resource="user",
-            resource_id=str(target_user_id),
-            details={"is_system_admin": is_system_admin},
-        ))
+        # Mismo criterio que grant()/revoke() -- despacha vía EventDispatcher
+        # en vez de audit_repository.append() directo. `recurso` es el User
+        # de dominio (no la fila ORM) -- su nombre de clase ya lowercasea a
+        # "user", el resource string que esto necesita, sin agregar un
+        # repositorio() artificial.
+        from app.composition import event_dispatcher, user_repository
+
+        target_user = user_repository.get(target_user_id)
+        event_dispatcher.despachar([DomainEvent(
+            "set_system_admin", target_user, None,
+            (actor.get("username") if actor else None) or "system",
+            {"resource_id": target_user_id, "is_system_admin": is_system_admin},
+        )])
 
     # ─── Authorization helper ────────────────────────────────────────────
 
     def _authorize_grant_or_revoke(
         self,
-        session,
         *,
         actor: dict,
         site_id: int,
@@ -306,7 +315,16 @@ class RoleAssignmentService:
 
         Group-admins may not delegate (they cannot grant *any* role — the
         privilege to grant lives at the site level and above).
-        """
+
+        Antes reimplementaba acá su propia query "¿tiene el actor un grant
+        admin site-wide?" en vez de reusar RoleAssignmentRepository.scope_de()
+        -- 2da forma de responder la misma pregunta que ya contesta
+        VisibilityScope.rol_para() en el resto de la API (FINAL_ARCHITECTURE.md
+        §6). ``rol_para(site_id, None)`` -- con ``device_group_id=None`` a
+        propósito, no el ``device_group_id`` del grant que se está creando --
+        replica exactamente el filtro ``device_group_id IS NULL`` de la query
+        vieja: un admin de GRUPO nunca cuenta acá, solo site-wide o
+        system-admin (ya cortado arriba)."""
         if actor.get("is_system_admin"):
             return
         actor_id = actor.get("id")
@@ -315,18 +333,10 @@ class RoleAssignmentService:
                 status_code=403,
                 detail="Grant operations require a fully-authenticated actor",
             )
-        # Does the actor hold a site-wide admin grant on this site?
-        site_admin = (
-            session.query(RoleAssignmentModel.id)
-            .filter(
-                RoleAssignmentModel.user_id == actor_id,
-                RoleAssignmentModel.site_id == site_id,
-                RoleAssignmentModel.device_group_id.is_(None),
-                RoleAssignmentModel.role == "admin",
-            )
-            .first()
-        )
-        if site_admin is not None:
+        from app.composition import role_assignment_repository
+
+        scope = role_assignment_repository.scope_de(actor)
+        if scope.rol_para(site_id, None) == "admin":
             return
         raise HTTPException(
             status_code=403,

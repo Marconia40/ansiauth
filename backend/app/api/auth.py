@@ -6,7 +6,7 @@ from app.core.scope import require_system_admin
 from app.core.security import create_access_token
 from app.models.audit import AuditRecord
 from app.schemas.auth import TokenResponse
-from app.services import login_attempt_service, refresh_token_service
+from app.services import refresh_token_service
 from app.services.auth_service import authenticate_user
 
 router = APIRouter()
@@ -45,9 +45,9 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
     ip = request.client.host if request.client else "unknown"
     username = form_data.username
 
-    from app.composition import audit_repository
+    from app.composition import audit_repository, login_attempt_repository
 
-    if login_attempt_service.is_ip_blocked(ip):
+    if login_attempt_repository.ip_bloqueada(ip):
         audit_repository.append(AuditRecord(
             user=username,
             action="login",
@@ -57,8 +57,8 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
         ))
         raise HTTPException(status_code=429, detail="Too many requests")
 
-    if login_attempt_service.is_username_locked(username):
-        login_attempt_service.record_attempt(username, ip, succeeded=False)
+    if login_attempt_repository.esta_bloqueado(username):
+        login_attempt_repository.registrar_intento(username, ip, exitoso=False)
         audit_repository.append(AuditRecord(
             user=username,
             action="login",
@@ -71,7 +71,7 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
     user = authenticate_user(username, form_data.password)
 
     if not user:
-        login_attempt_service.record_attempt(username, ip, succeeded=False)
+        login_attempt_repository.registrar_intento(username, ip, exitoso=False)
         audit_repository.append(AuditRecord(
             user=username,
             action="login",
@@ -81,8 +81,8 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
         ))
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    login_attempt_service.record_attempt(username, ip, succeeded=True)
-    login_attempt_service.reset_username_failures(username)
+    login_attempt_repository.registrar_intento(username, ip, exitoso=True)
+    login_attempt_repository.resetear(username)
     access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
     refresh_token = refresh_token_service.create(user.username)
     audit_repository.append(AuditRecord(
@@ -163,8 +163,9 @@ def unlock_account(
     username: str,
     current_user: dict = Depends(require_system_admin),
 ):
-    count = login_attempt_service.unlock_username(username)
-    from app.composition import audit_repository
+    from app.composition import audit_repository, login_attempt_repository
+
+    count = login_attempt_repository.resetear(username)
     audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="unlock_account",

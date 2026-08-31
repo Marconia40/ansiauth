@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.scope import obtener_scope, require_authenticated, require_scope, resolver_site_group
-from app.models.audit import AuditRecord
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.device import DeviceCreate, DeviceMove, DevicePublic, DeviceUpdate
 
@@ -125,7 +124,8 @@ def update_device(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import audit_repository, device_repository
+    from app.composition import device_repository, event_dispatcher
+    from app.models.domain_event import DomainEvent
     from app.services.secret_vault import vault
 
     provided = data.model_dump(exclude_unset=True)
@@ -153,13 +153,16 @@ def update_device(
         raise ValidationError(str(e))
     device = device_repository.add(device)
     audit_fields = {k: v for k, v in provided.items() if k != "password"}
-    audit_repository.append(AuditRecord(
-        user=current_user["username"],
-        action="update_device",
-        resource="device",
-        details={"name": name, "updated_fields": audit_fields},
-        device=name,
-    ))
+    # Antes llamaba audit_repository.append(AuditRecord(...)) directo --
+    # único endpoint del ciclo de vida de Device que se saltaba
+    # EventDispatcher (register()/move()/deregister() en Inventory ya
+    # despachan DomainEvent) -- corrección real, FINAL_ARCHITECTURE.md §6:
+    # si mañana se agrega un 2do EventListener, esta escritura ahora
+    # participa igual que las otras 3.
+    event_dispatcher.despachar([DomainEvent(
+        "update_device", device, device, current_user["username"],
+        {"name": name, "updated_fields": audit_fields},
+    )])
     return {"success": True, "data": _to_public(device)}
 
 

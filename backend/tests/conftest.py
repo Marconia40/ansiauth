@@ -118,10 +118,10 @@ def reset_rate_limiter():
 
 @pytest.fixture(autouse=True)
 def reset_login_attempts():
-    from app.services import login_attempt_service
-    login_attempt_service.reset_all()
+    from app.composition import login_attempt_repository
+    login_attempt_repository.resetear_todo()
     yield
-    login_attempt_service.reset_all()
+    login_attempt_repository.resetear_todo()
 
 
 @pytest.fixture(autouse=True)

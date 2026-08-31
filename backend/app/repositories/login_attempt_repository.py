@@ -8,11 +8,13 @@ real operation is a windowed count, an insert-and-forget, or a bulk
 delete. Inheriting a get/add/list/remove contract for zero real callers
 would be noise, not scaffolding.
 
-Unifies the 5 free functions in login_attempt_service.py: the two
-identical "delete all failed attempts for username" variants
-(reset_username_failures returning nothing vs unlock_username returning
-the count) collapse into resetear(username) -> int, keeping the more
-informative signature.
+Reemplaza las 6 funciones sueltas que tenía login_attempt_service.py
+(borrado — este repo era la única "dueña" real de la tabla desde que se
+escribió, pero api/auth.py seguía llamando al módulo viejo hasta ahora,
+FINAL_ARCHITECTURE.md §6): las dos variantes idénticas "borrar los
+intentos fallidos de un username" (reset_username_failures, que no
+devolvía nada, vs. unlock_username, que devolvía la cantidad) colapsan en
+resetear(username) -> int, con la firma más informativa de las dos.
 """
 from __future__ import annotations
 
@@ -97,3 +99,10 @@ class LoginAttemptRepository:
                 )
                 .delete(synchronize_session=False)
             )
+
+    def resetear_todo(self) -> None:
+        """Borra toda la tabla -- reemplaza login_attempt_service.reset_all(),
+        usado solo en tests (conftest.py) para aislar cada test del estado
+        de lockout que dejó el anterior."""
+        with get_session() as session:
+            session.query(LoginAttemptModel).delete(synchronize_session=False)
