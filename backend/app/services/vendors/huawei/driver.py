@@ -131,95 +131,36 @@ class HuaweiVendor(VendorDriver):
         )
         return self._aplicar({"command_block": block}, device, password, op_label="set trunk allowed VLANs")
 
-    # ── Step 3.2 composite / semantic implementations ────────────────────────
+    # ── Mode-change operations ────────────────────────────────────────────────
 
     def set_access_mode(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
-        """Set *interface* to access mode with *vlan_id*, atomically.
-        Thin wrapper over ``_configure_port()`` — same underlying VRP
-        candidate-config session that already handled this combination
-        before the generic ``configure_port()`` playbook was retired in
-        favor of the shared ``run.yml``."""
-        from app.models.port import Puerto
-        puerto = Puerto(interface=interface, mode="access", access_vlan=vlan_id)
-        return self._configure_port(puerto, device, password)
+        """Set *interface* to access mode with *vlan_id*, atomically —
+        ``port link-type access`` + ``port default vlan``, same single
+        candidate-config session as every other mutation on this driver.
+        No intermediate ``Puerto``/composite-builder step, same directness
+        as ``CiscoVendor.set_access_mode()``."""
+        block = (
+            f"system-view\ninterface {interface}\n"
+            f"port link-type access\nport default vlan {vlan_id}\n"
+            f"commit\nquit\nquit"
+        )
+        return self._aplicar({"command_block": block}, device, password, op_label="set access mode")
 
     def set_trunk_mode(
         self, interface: str, native_vlan: int, vlan_list: list[int], device: Device, password: str,
     ) -> dict:
         """Set *interface* to trunk mode with *native_vlan* (PVID) and
-        *vlan_list*, atomically. Same criteria as ``set_access_mode()`` —
-        thin wrapper over ``_configure_port()``, which already handles
-        `access_vlan` as the trunk's PVID when `mode="trunk"`.
-
-        ``allowed_vlan_operation="replace"`` is required here — a mode
-        change always fully replaces the trunk's allowed-VLAN list (per
-        this method's own contract), but ``Puerto.allowed_vlan_operation``
-        defaults to ``"add"``. Without setting it explicitly,
-        ``_configure_port()`` would union *vlan_list* with whatever was on
-        the port before instead of replacing it — a real bug found while
-        rewriting this method (pre-existing, not introduced by this
-        rewrite: the old code never set it either); Cisco's implementation
-        was unaffected since it always issues a direct CLI replace with no
-        operation flag involved."""
-        from app.models.port import Puerto
-        puerto = Puerto(
-            interface=interface, mode="trunk", access_vlan=native_vlan,
-            allowed_vlans=list(vlan_list), allowed_vlan_operation="replace",
+        *vlan_list*, atomically. *vlan_list* always fully replaces whatever
+        the port had before (``undo ... all`` + set) — this is a mode
+        change, not an add/remove relative to an existing trunk."""
+        vlan_str = self._compress_vlans_huawei(sorted(set(vlan_list)))
+        block = (
+            f"system-view\ninterface {interface}\n"
+            f"port link-type trunk\nport trunk pvid vlan {native_vlan}\n"
+            f"undo port trunk allow-pass vlan all\nport trunk allow-pass vlan {vlan_str}\n"
+            f"commit\nquit\nquit"
         )
-        return self._configure_port(puerto, device, password)
-
-    def _configure_port(self, config: Puerto, device: Device, password: str) -> dict:
-        """Apply a composite set of port mutations on a Huawei VRP device,
-        in a single candidate-config session committed atomically.
-
-        Only the fields set on *config* are emitted — no mutation touches
-        fields that weren't requested. Field application order (VRP
-        constraint):
-            1. ``port link-type`` (mode) — must precede VLAN commands.
-            2. VLAN assignment (access or trunk, never both).
-            3. ``description`` / ``undo description``.
-            4. ``shutdown`` / ``undo shutdown`` (admin state).
-            5. ``commit`` + ``quit``.
-
-        Builds the full command block in Python instead of leaving the
-        conditional assembly to Jinja inside the (now-retired)
-        ``configure_port.yml`` — same logic, moved to the one place command
-        construction lives for every other operation on this driver.
-        """
-        lines: list[str] = []
-
-        if config.mode is not None:
-            lines.append(f"port link-type {config.mode}")
-
-        if config.access_vlan is not None:
-            if config.mode == "trunk":
-                lines.append(f"port trunk pvid vlan {config.access_vlan}")
-            else:
-                lines.append(f"port default vlan {config.access_vlan}")
-
-        if config.allowed_vlans is not None:
-            vlan_str = self._compress_vlans_huawei(sorted(set(config.allowed_vlans))) if config.allowed_vlans else ""
-            operation = getattr(config, "allowed_vlan_operation", "add") or "add"
-            if operation == "remove":
-                lines.append(f"undo port trunk allow-pass vlan {vlan_str}")
-            elif operation == "add":
-                lines.append(f"port trunk allow-pass vlan {vlan_str}")
-            else:
-                lines.append("undo port trunk allow-pass vlan all")
-                lines.append(f"port trunk allow-pass vlan {vlan_str}")
-
-        if config.description is not None:
-            is_empty = not bool(config.description and config.description.strip())
-            lines.append("undo description" if is_empty else f"description {config.description}")
-
-        # NOTE: previously read `config.admin_enabled`, an attribute Puerto
-        # doesn't have (renamed to `admin_up` in an earlier session) — every
-        # real call to this method raised AttributeError. Fixed here.
-        if config.admin_up is not None:
-            lines.append("undo shutdown" if config.admin_up else "shutdown")
-
-        block = "\n".join(["system-view", f"interface {config.interface}", *lines, "commit", "quit", "quit"])
-        return self._aplicar({"command_block": block}, device, password, op_label="configure_port")
+        return self._aplicar({"command_block": block}, device, password, op_label="set trunk mode")
 
     # ── VLAN list compression (Fase 2, A2 — movida desde validators/port_validator.py,
     # no es validación, es formato de CLI, específico de este vendor) ────────────
