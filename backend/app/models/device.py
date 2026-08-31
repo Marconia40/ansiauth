@@ -11,7 +11,17 @@ if TYPE_CHECKING:
 # Duplicado hoy en device_service.py y inventory_service.py -- Fase 6 (A5)
 # lo centraliza acá, el único lugar que le queda una vez que Inventory deja
 # de tener su propio chequeo suelto.
-_VALID_VENDORS = {"cisco_ios", "cisco", "huawei"}
+#
+# Debe coincidir exactamente con las claves que composition.py registra en
+# PluginRegistry ("cisco_ios"/"huawei_vrp") -- bug real encontrado en una
+# revisión de código: este set aceptaba "cisco"/"huawei" (sin driver
+# registrado bajo esas claves -- Device.driver crasheaba con ValueError sin
+# capturar, 500, la primera vez que se tocaba) y rechazaba "huawei_vrp" (la
+# única clave que sí tiene un driver Huawei real). "cisco"/"huawei" ya no se
+# aceptan -- si hace falta un alias corto en el futuro, tiene que traducirse
+# a la clave real acá mismo, no vivir como 2 nombres que resuelven distinto
+# según a qué capa se le pregunte.
+_VALID_VENDORS = {"cisco_ios", "huawei_vrp"}
 
 
 @dataclass

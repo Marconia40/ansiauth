@@ -80,14 +80,22 @@ class RoleAssignmentService:
     ) -> RoleAssignmentRead:
         """Create (or return) a role grant at the given scope.
 
-        Authz (D25):
+        Authz (D25), enforced by ``_authorize_grant_or_revoke()``:
           * system-admin actor → allowed to grant any role anywhere.
-          * site-admin actor (an admin grant on ``site_id``) → may grant
-            observer/operator/admin on *that* site.
-          * group-admin actor (an admin grant on a specific group of
-            ``site_id``) → may only grant observer/operator within their
-            group; **may not grant admin** and may not create site-wide
-            grants (device_group_id must equal their scope group).
+          * site-admin actor (an admin grant on ``site_id``, site-wide —
+            ``device_group_id=None``) → may grant any role at any scope
+            within that site.
+          * any other actor, including a group-admin (an admin grant
+            scoped to one ``device_group_id`` rather than the whole site)
+            → rejected with 403. Group-admins cannot delegate: the
+            privilege to grant lives at the site level and above, per D25.
+
+        Correction: this docstring previously described a 3rd tier
+        ("group-admin actor... may grant observer/operator within their
+        group") that was never implemented — found reviewing this file
+        against its own enforcement method, whose docstring states the
+        opposite. The actual behavior (the more restrictive one) was
+        always correct; only this docstring was wrong.
         """
         if role not in _VALID_ASSIGNMENT_ROLES:
             raise ValueError(

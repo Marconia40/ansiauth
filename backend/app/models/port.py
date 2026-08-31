@@ -194,15 +194,21 @@ class Puerto:
         seteado, `mode="trunk"` exige `allowed_vlans` seteado. Cuando
         `mode` es `None` (los 4 endpoints de campo único -- `/access-vlan`,
         `/trunk-vlans` incluidos, que leen el modo en vivo del device en
-        vez de recibirlo del caller) no hay regla cruzada que aplicar."""
-        _mutation_fields = (
-            self.description, self.admin_up, self.mode,
-            self.access_vlan, self.allowed_vlans,
-        )
-        if all(v is None for v in _mutation_fields):
+        vez de recibirlo del caller) no hay regla cruzada que aplicar.
+
+        Reusa ``self.mutation_fields`` en vez de mantener una 2da lista de
+        campos acá -- bug real encontrado en una revisión de código: esta
+        tupla tenía 5 campos, ``mutation_fields`` (usada por ``aplicar()``)
+        tiene 6 (incluye ``poe_enabled``), así que un ``Puerto(poe_enabled=
+        True)`` sin ningún otro campo pasaba por acá como "sin campo de
+        mutación" a pesar de tener uno seteado. Hoy `poe_enabled` no es
+        escribible por ningún endpoint real (solo aparece en `PortRead`,
+        de solo lectura) así que era inalcanzable, pero las 2 listas podían
+        desalinearse sin que nada lo notara -- ahora hay una sola."""
+        if not self.mutation_fields:
             raise ValueError(
                 "at least one mutation field must be provided "
-                "(description, admin_up, mode, access_vlan, or allowed_vlans)"
+                "(description, admin_up, mode, access_vlan, allowed_vlans, or poe_enabled)"
             )
         if self.mode == "access" and self.access_vlan is None:
             raise ValueError("mode='access' requires 'access_vlan' to be set")

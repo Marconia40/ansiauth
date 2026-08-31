@@ -249,4 +249,18 @@ class AuditRepository(Repository):
             AuditLogModel.resource == "site",
             AuditLogModel.resource_id.in_([str(s) for s in (scope.site_ids or set())]),
         ))
+        # role_assignment (grant/revoke/update) had no branch at all here --
+        # bug real encontrado en una revisión de código: cualquier
+        # site-admin/group-admin que otorga/revoca un rol dentro de su
+        # propio scope (D25 se lo permite) nunca veía esa fila en su propio
+        # /audit, ni la suya ni la de otro admin del mismo site. resource_id
+        # acá es el id del propio grant, no un site/group id -- no puede
+        # reusar el patrón de arriba, así que compara el `site_id` que ya
+        # viaja en el payload JSON (`details`) contra los sites visibles del
+        # caller.
+        if scope.site_ids:
+            conds.append(and_(
+                AuditLogModel.resource == "role_assignment",
+                AuditLogModel.details["site_id"].as_integer().in_(list(scope.site_ids)),
+            ))
         return q.filter(or_(*conds))

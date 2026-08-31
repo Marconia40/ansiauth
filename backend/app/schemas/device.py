@@ -27,7 +27,7 @@ class DeviceCreate(BaseModel):
         "example": {
             "name": "switch-01",
             "host": "192.168.1.10",
-            "vendor": "cisco",
+            "vendor": "cisco_ios",
             "platform": "ios",
             "username": "admin",
             "password": "s3cr3tpass",

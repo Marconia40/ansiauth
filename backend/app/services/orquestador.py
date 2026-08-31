@@ -1,4 +1,5 @@
 import time
+from dataclasses import asdict, is_dataclass
 
 from app.core.exceptions import DeviceExecutionError, NotFoundError
 from app.models.domain_event import DomainEvent
@@ -63,6 +64,16 @@ _RC_TRANSITORIOS: frozenset = frozenset({4, 6, 255})
 _MAX_RETRY_DELAY: float = 5.0
 
 
+def _pre_state_json_safe(pre_state: dict) -> dict:
+    """Return a JSON-serializable copy of a ``reconciliar()`` result.
+
+    ``VLAN.reconciliar()`` already returns plain JSON-safe values.
+    ``Puerto.reconciliar()`` returns ``{"actual": Puerto | None, ...}`` --
+    a raw dataclass instance would blow up ``Job.pre_state``'s JSON column
+    on write."""
+    return {k: (asdict(v) if is_dataclass(v) else v) for k, v in pre_state.items()}
+
+
 class Orquestador:
     """FINAL_ARCHITECTURE.md §2.4 -- Template Method por composición, no
     herencia. No sabe qué es una VLAN ni un Puerto, solo el contrato
@@ -115,6 +126,17 @@ class Orquestador:
                 self._coordinador.limitar(device_name)
                 recurso.validar()
                 pre_state = recurso.reconciliar(device)
+                # Bug real encontrado en una revisión de código: pre_state
+                # se calculaba acá y se usaba para el rollback, pero nunca
+                # se escribía de vuelta al Job -- GET /jobs/{id} siempre
+                # devolvía pre_state=null, contradiciendo la propia
+                # descripción del endpoint ("Pre-state is captured for
+                # rollback"). _pre_state_json_safe() reemplaza cualquier
+                # dataclass anidado (Puerto.reconciliar() devuelve
+                # {"actual": Puerto(...)}, no serializable tal cual a JSON)
+                # por su asdict() -- VLAN.reconciliar() ya es JSON-safe de
+                # por sí, la conversión ahí es un no-op.
+                job.pre_state = _pre_state_json_safe(pre_state)
 
                 primer_intento = True
 
@@ -135,7 +157,7 @@ class Orquestador:
                     return recurso.aplicar(device)
 
                 resultado, retry_count = self._ejecutar_con_retry(
-                    _aplicar, job, device_name,
+                    _aplicar, job, device_name, max_retries=job.max_retries,
                 )
                 if resultado.get("rc", 0) != 0:
                     raise DeviceExecutionError(resultado.get("stderr") or resultado.get("stdout") or "Execution failed")

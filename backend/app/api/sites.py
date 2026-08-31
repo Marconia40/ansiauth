@@ -61,6 +61,15 @@ def create_site(
         user=current_user["username"],
         action="create_device_group",
         resource="device_group",
+        # resource_id faltaba -- bug real encontrado en una revisión de
+        # código: _aplicar_scope() filtra filas resource="device_group" por
+        # resource_id IN (grupos visibles), y None nunca matchea un IN --
+        # esta fila quedaba invisible para cualquier admin de ese grupo,
+        # a diferencia de cualquier otra fila device_group (creada vía
+        # DomainEvent, que sí setea resource_id=group.id). site.default_
+        # group_id ya está poblado acá (crear_con_grupo_default() lo setea),
+        # no hace falta el objeto DeviceGroup completo para esto.
+        resource_id=str(site.default_group_id),
         details={
             "name": DEFAULT_GROUP_NAME,
             "site_id": site.id,
