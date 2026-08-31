@@ -66,7 +66,13 @@ _MAX_RETRY_DELAY: float = 5.0
 class Orquestador:
     """FINAL_ARCHITECTURE.md §2.4 -- Template Method por composición, no
     herencia. No sabe qué es una VLAN ni un Puerto, solo el contrato
-    RecursoGestionable (4 métodos)."""
+    RecursoGestionable (4 métodos). Único camino real -- ``ejecutar_comando()``
+    (Fase 7, variante para "guardar configuración" sin RecursoGestionable
+    detrás) se retiró en esta sesión junto con ``POST /devices/{name}/save``
+    (``api/devices.py``) y ``app.tasks.guardar_config_task`` -- la feature
+    queda inactiva hasta que se implemente como RecursoGestionable de
+    verdad (recurso de config modular, a diseñar más adelante), en vez de
+    mantener un 2do camino especial mientras tanto."""
 
     def __init__(self, device_repo, repos: dict, jobs, eventos, coordinador):
         self._device_repo = device_repo    # Repository[Device] o DeviceRepository, Fase 1/3
@@ -151,59 +157,6 @@ class Orquestador:
             job.marcar_completado(resultado)
             self._jobs.add(job)
             self._eventos.despachar([DomainEvent("recurso_aplicado", recurso, device, actor, resultado)])
-        finally:
-            if not job.esta_en_estado_terminal():
-                job.asegurar_estado_final()
-                self._jobs.add(job)
-
-    def ejecutar_comando(self, fn, device_name: str, actor: str, job: "Job", tipo_evento: str) -> None:
-        """Variante de ejecutar() para comandos a nivel device que no son un
-        RecursoGestionable -- Fase 7, encontrado con ``POST /devices/{name}/
-        save`` (guardar configuración): no hay ``validar()``/``reconciliar()``/
-        ``aplicar()`` ni un recurso con identidad que persistir en un
-        Repository (`self._repos[...].add(...)` no aplica acá, es la única
-        diferencia real con ``ejecutar()``) -- pero sí hace falta el mismo
-        lock por device, la misma clasificación de errores/reintentos, y el
-        mismo manejo de estado del Job. Reusa ``_coordinador``/
-        ``_ejecutar_con_retry`` (privados de esta clase) en vez de duplicar
-        esa lógica en un módulo aparte.
-
-        *fn* recibe el ``Device`` ya resuelto (``fn(device) -> dict``) --
-        distinto de ``ejecutar()``, que arma el callable con el recurso ya
-        cerrado sobre `device` desde afuera.
-
-        El guard ``esta_en_estado_terminal()`` -- corrección real encontrada
-        vía un chequeo de trazabilidad RNF-API-05 (idempotencia): faltaba
-        acá, aunque ``ejecutar()`` (arriba) sí lo tiene desde Fase 4/5. Sin
-        él, una reentrega de Celery sobre un job ya completado llamaba
-        ``job.marcar_iniciado()`` de nuevo -- `_TRANSICIONES_VALIDAS`
-        (`models/job.py`) no permite `completed`/`failed` -> `running`, así
-        que la reentrega no era un no-op silencioso sino un crash real
-        (`TransicionInvalidaError`)."""
-        if job.esta_en_estado_terminal():
-            return
-        device = self._device_repo.get(device_name)
-        if device is None:
-            raise NotFoundError(device_name)
-        try:
-            job.marcar_iniciado()
-            self._jobs.add(job)
-            with self._coordinador.bloquear(device_name):
-                self._coordinador.limitar(device_name)
-                resultado, _ = self._ejecutar_con_retry(lambda: fn(device), job, device_name)
-                if resultado.get("rc", 0) != 0:
-                    raise DeviceExecutionError(resultado.get("stderr") or resultado.get("stdout") or "Execution failed")
-        except Exception as error:
-            job.marcar_fallido(str(error))
-            self._jobs.add(job)
-            self._eventos.despachar([DomainEvent(
-                tipo_evento, device, device, actor, {"error": str(error)}, exitoso=False,
-            )])
-            raise
-        else:
-            job.marcar_completado(resultado)
-            self._jobs.add(job)
-            self._eventos.despachar([DomainEvent(tipo_evento, device, device, actor, resultado)])
         finally:
             if not job.esta_en_estado_terminal():
                 job.asegurar_estado_final()

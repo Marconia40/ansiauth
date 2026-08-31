@@ -12,9 +12,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-_ROLE_LEVEL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
-
-
 def _to_public(device) -> dict:
     return DevicePublic(
         id=device.id,
@@ -187,53 +184,6 @@ def move_device(
     device = inventory.move(name, body.device_group_id, actor=current_user)
     return {"success": True, "data": _to_public(device)}
 
-
-@router.post(
-    "/{name}/save",
-    summary="Save device configuration",
-    description=(
-        "Persist the running configuration to flash on the target device. "
-        "Runs asynchronously — poll the returned job_id for the result. "
-        "Only supported for vendors with a save_config implementation (e.g. Huawei VRP). "
-        "Requires operator role or higher on the device."
-    ),
-)
-def save_device_config(
-    name: str,
-    current_user: dict = Depends(require_authenticated),
-    scope: VisibilityScope = Depends(obtener_scope),
-):
-    from app.composition import inventory
-
-    device = inventory.get(name)
-    if not device:
-        raise NotFoundError(f"Device '{name}' not found")
-    resolved = resolver_site_group(name, "device")
-    role = scope.rol_para(*resolved) if resolved is not None else None
-    if _ROLE_LEVEL.get(role or "", 0) < _ROLE_LEVEL["operator"]:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"write_device_config requires operator on device '{name}' "
-                f"(got {role or 'none'})"
-            ),
-        )
-    # "Guardar configuración" no es un RecursoGestionable (Fase 5) ni una
-    # operación de Inventory (Fase 6, cap de 5 métodos) -- Fase 7 le agregó
-    # su propio camino mínimo (Orquestador.ejecutar_comando() +
-    # app.tasks.guardar_config_task), reemplazando
-    # vlan_execution_service.enqueue_save_job() (que además ya estaba roto
-    # en producción: despachaba a un task Celery que ningún worker real
-    # tenía registrado desde Fase 5/A5, ver docstring de
-    # guardar_config_task).
-    from app.composition import job_repository
-    from app.models.job import Job
-    from app.tasks import guardar_config_task
-
-    job = Job(operation="guardar_config", device=name)
-    job_repository.add(job)
-    guardar_config_task.delay(name, current_user["username"], job.job_id)
-    return {"success": True, "data": {"device": name, "job_id": job.job_id, "status": job.status}}
 
 
 @router.delete(
