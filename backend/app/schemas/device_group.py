@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class DeviceGroupCreate(BaseModel):
@@ -14,6 +14,17 @@ class DeviceGroupCreate(BaseModel):
     # site_id is required for new groups (step 7.4). Legacy groups created before
     # this step may still exist with site_id=NULL and are admin-only.
     site_id: int = Field(..., ge=1)
+
+    @field_validator("name")
+    @classmethod
+    def _trim_name(cls, v: str) -> str:
+        # Same rule as SiteCreate -- without it, "Core" and "  Core  " pass
+        # device_group_repository.existe()'s exact-string uniqueness check
+        # as two different names despite displaying identically.
+        trimmed = v.strip()
+        if not trimmed:
+            raise ValueError("name must not be empty")
+        return trimmed
 
 
 class DeviceGroupRead(BaseModel):

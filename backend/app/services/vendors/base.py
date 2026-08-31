@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -7,6 +8,8 @@ if TYPE_CHECKING:
     from app.models.device import Device
     from app.models.port import Puerto
     from app.models.vlan import VLAN
+
+logger = logging.getLogger(__name__)
 
 
 class VendorDriver(ABC):
@@ -45,7 +48,120 @@ class VendorDriver(ABC):
     vendors that haven't wired a given operation yet are explicit about the
     gap — the orchestration layer converts this into a controlled
     ``UnsupportedVendorError``/501 for the API client.
+
+    Shared execution helpers
+    -------------------------
+    Concrete drivers used to each reimplement "build extravars, run the
+    playbook, normalize the result, log" for every single operation --
+    8 of ~14 methods were identical Python across ``CiscoVendor``/
+    ``HuaweiVendor``, differing only in which playbook they called. That
+    boilerplate now lives once, here, as ``_aplicar()``/``_leer()``.
+    Concrete drivers only need to declare 3 class attributes
+    (``_PLAYBOOK``, ``_NETWORK_OS``, ``_CONNECTION``) and, per operation,
+    build the small vendor-specific ``extravars`` dict the one shared
+    playbook understands -- that command construction is the one thing
+    that's genuinely different per vendor (``switchport access vlan X``
+    vs. ``port default vlan X``), everything around it is not.
     """
+
+    _PLAYBOOK: str
+    _NETWORK_OS: str
+    _CONNECTION: str = "network_cli"
+
+    def _build_inventory(self, device: Device, password: str) -> dict:
+        from app.services import ansible_service
+        return ansible_service.build_inventory(
+            device.name, device.host, device.username, password,
+            network_os=self._NETWORK_OS, connection=self._CONNECTION,
+        )
+
+    def _aplicar(self, extravars: dict, device: Device, password: str, *, op_label: str) -> dict:
+        """Run this driver's single playbook with *extravars* and normalize
+        the result to ``{"rc", "stdout", "stderr", "success"}``.
+
+        Shared by every mutation method (and ``save_config()``) across both
+        concrete drivers -- what varies per call is only the shape of
+        *extravars* (``{"lines":..., "parents":...}`` for Cisco,
+        ``{"command_block":...}`` for Huawei, or ``{"commands":[...]}`` for
+        either vendor's "run a bare exec command" case, e.g. Cisco's
+        ``write``).
+        """
+        import traceback
+
+        from app.services import ansible_service
+
+        logger.info("%s: %s on device=%s", type(self).__name__, op_label, device.name)
+        try:
+            result = ansible_service.run_playbook(
+                playbook=self._PLAYBOOK,
+                extravars={**extravars, "device": device.name},
+                inventory=self._build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info("%s: %s OK on device=%s", type(self).__name__, op_label, device.name)
+            else:
+                logger.error(
+                    "%s: %s FAILED on device=%s — %s",
+                    type(self).__name__, op_label, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL %s TRACEBACK [%s device=%s]: %s\n%s",
+                type(self).__name__.upper(), op_label, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def _leer(self, commands: list[str], device: Device, password: str) -> list[str]:
+        """Run this driver's single playbook in "read" mode (``commands``)
+        and return every command's stdout, in execution order.
+
+        Raises ``RuntimeError`` on a non-zero rc or empty output -- callers
+        (``list_vlans``/``list_ports``) hand the returned strings to their
+        vendor-specific parser, unchanged.
+        """
+        from app.services import ansible_service
+
+        logger.info("%s: run %d command(s) on device=%s", type(self).__name__, len(commands), device.name)
+        result = ansible_service.run_playbook(
+            playbook=self._PLAYBOOK,
+            extravars={"commands": commands, "device": device.name},
+            inventory=self._build_inventory(device, password),
+        )
+        if result["rc"] != 0:
+            error = result.get("stderr") or result.get("stdout") or "playbook exited non-zero"
+            logger.error("%s: read failed on device=%s — %s", type(self).__name__, device.name, error)
+            raise RuntimeError(f"Cannot read state on device '{device.name}': {error}")
+        stdouts = result.get("stdouts") or []
+        if not stdouts:
+            raise RuntimeError(f"Cannot read state on device '{device.name}': no command output returned")
+        return stdouts
+
+    @staticmethod
+    def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:
+        """Collapse *vlans* into (start, end) range tuples.
+
+        Shared by both concrete drivers' VLAN-list formatting -- was
+        duplicated byte-for-byte in each (``_compress_vlans_cisco``/
+        ``_compress_vlans_huawei`` only differ in the join format).
+        """
+        if not vlans:
+            return []
+        sv = sorted(set(vlans))
+        ranges: list[tuple[int, int]] = []
+        start = sv[0]
+        prev = sv[0]
+        for v in sv[1:]:
+            if v == prev + 1:
+                prev = v
+            else:
+                ranges.append((start, prev))
+                start = v
+                prev = v
+        ranges.append((start, prev))
+        return ranges
 
     # ── VLAN mutation operations (must be implemented by every driver) ───────
 

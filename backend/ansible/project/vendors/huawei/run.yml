@@ -1,0 +1,34 @@
+---
+# Single generic playbook for every Huawei VRP operation — mutations run
+# a full command block (system-view / context / commands / commit / quit(s),
+# or a bare exec command like `save force`) through `command_block`
+# (ansible.netcommon.cli_command); reads loop over `commands`. Replaces the
+# 14 near-identical per-operation playbooks this used to be split across
+# (including configure_port.yml and save_config.yml) — the only thing that
+# varied between them was the content of the command block, which now
+# lives in the Python driver instead.
+#
+# Vars expected (mutually exclusive):
+#   command_block (str) — full multi-line command sequence to run verbatim,
+#     already including system-view/context/commit/quit(s) as needed (VRP's
+#     exact ordering differs by context — `vlan X` wants `quit` before
+#     `commit`, `interface X` wants `commit` before `quit` — so the driver
+#     builds the whole block instead of this playbook guessing an order).
+#   commands (list[str]) — read commands, one cli_command task per item.
+#   device (str) — diagnostic only.
+
+- name: Huawei VRP device operation
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Apply command block
+      when: command_block is defined
+      ansible.netcommon.cli_command:
+        command: "{{ command_block }}"
+
+    - name: Run read commands
+      when: commands is defined
+      ansible.netcommon.cli_command:
+        command: "{{ item }}"
+      loop: "{{ commands }}"

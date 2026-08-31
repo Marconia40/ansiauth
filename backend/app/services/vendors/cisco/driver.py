@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import logging
-import traceback
 from typing import TYPE_CHECKING
 
-from app.services import ansible_service
 from app.services.parsers.cisco_port_parser import parse_ios_ports
 from app.services.vendors.base import VendorDriver
 
@@ -13,53 +10,13 @@ if TYPE_CHECKING:
     from app.models.port import Puerto
     from app.models.vlan import VLAN
 
-logger = logging.getLogger(__name__)
+_PLAYBOOK = "vendors/cisco/run.yml"
 
-_NETWORK_OS = "ios"
-_CONNECTION = "network_cli"
-
-_PLAYBOOK_CREATE = "vendors/cisco/create_vlan.yml"
-_PLAYBOOK_DELETE = "vendors/cisco/delete_vlan.yml"
-_PLAYBOOK_GET = "vendors/cisco/get_vlans.yml"
-_PLAYBOOK_UPDATE = "vendors/cisco/update_vlan.yml"
-
-_PLAYBOOK_GET_PORTS = "vendors/cisco/get_ports.yml"
-_PLAYBOOK_UPDATE_DESCRIPTION = "vendors/cisco/update_port_description.yml"
-_PLAYBOOK_SET_ADMIN_STATE = "vendors/cisco/set_port_admin_state.yml"
-_PLAYBOOK_SET_ACCESS_VLAN = "vendors/cisco/set_access_vlan.yml"
-_PLAYBOOK_SET_TRUNK_VLANS = "vendors/cisco/set_trunk_allowed_vlans.yml"
-_PLAYBOOK_SET_TRUNK_PVID = "vendors/cisco/set_trunk_pvid.yml"
-_PLAYBOOK_SET_ACCESS_MODE = "vendors/cisco/set_access_mode.yml"
-_PLAYBOOK_SET_TRUNK_MODE = "vendors/cisco/set_trunk_mode.yml"
-
-# The Cisco get_ports playbook issues a single ios_command task with three
-# commands in this order.  ios_command returns stdout as a list, which is
-# expanded into the `stdouts` array by `_extract_all_command_outputs`.
-#   0. show interfaces status
-#   1. show interfaces description
-#   2. show interfaces switchport
-# If the playbook is changed to emit a different order, these indices must
-# be updated alongside it.
+# The Cisco get_ports read issues 3 commands in this order.  If that order
+# changes, these indices must be updated alongside it.
 _STATUS_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _SWITCHPORT_INDEX = 2
-
-
-def _normalize_result(raw: dict) -> dict:
-    """Attach a ``success`` boolean to an Ansible result dict.
-
-    Callers that already read ``rc`` / ``stdout`` / ``stderr`` are unaffected;
-    the new key is purely additive and satisfies the ``VendorDriver``
-    mutation-result contract.
-    """
-    return {**raw, "success": raw.get("rc", 1) == 0}
-
-
-def _build_inventory(device: Device, password: str) -> dict:
-    return ansible_service.build_inventory(
-        device.name, device.host, device.username, password,
-        network_os=_NETWORK_OS, connection=_CONNECTION,
-    )
 
 
 class CiscoVendor(VendorDriver):
@@ -67,9 +24,14 @@ class CiscoVendor(VendorDriver):
     fused into one class (FINAL_ARCHITECTURE.md §1.6; ``Device.driver`` is a
     single property, ver `docs/migracion-final-architecture/FASE_1.md` A2).
 
-    Selects Cisco-specific Ansible playbooks, executes them via
-    ``ansible_service``, and normalizes all outputs to the ``VendorDriver``
-    contract.
+    All operations run through a single playbook, ``vendors/cisco/run.yml``,
+    with 2 modes selected by which extravar is present:
+    ``cisco.ios.ios_config`` (``lines``/``parents``, for mutations) or
+    ``cisco.ios.ios_command`` (``commands``, for reads *and* ``save_config()``
+    — ``write`` is an exec-mode command on IOS, same register as ``show``,
+    not a config line). ``VendorDriver._aplicar()``/``._leer()`` own the
+    run-playbook/normalize/log boilerplate; this class only builds each
+    operation's command content.
 
     Normalized API
     --------------
@@ -83,687 +45,136 @@ class CiscoVendor(VendorDriver):
 
     Notes
     -----
-    ``save_config`` is not applicable to IOS — the running config is written
-    immediately.  Calling it raises ``NotImplementedError``.
-
-    Full port mutation coverage — ``set_access_mode``/``set_trunk_mode``
-    (mode changes, atomic with their VLAN) join the existing per-field
-    methods (``update_port_description``/``set_port_admin_state``/
-    ``set_port_access_vlan``/``set_trunk_pvid_vlan``/
-    ``set_trunk_allowed_vlans``). The old generic ``configure_port``/
-    ``shutdown_port``/``enable_port`` were retired — ``configure_port`` in
-    particular was a permanent ``NotImplementedError`` stub with no
-    backing playbook, so a mode change via the old composite endpoint
-    always failed for Cisco devices in production (Huawei was the only
-    vendor where it worked).
+    ``save_config()`` is a real, explicit operation (``write``) — it is
+    never called automatically after a mutation; nothing in the app calls
+    it today for either vendor, and mutations here do not auto-persist to
+    startup-config (unlike the old per-operation playbooks' ``save_when:
+    always``). Persisting is a deliberate, separate action.
     """
+
+    _NETWORK_OS = "ios"
+    _PLAYBOOK = _PLAYBOOK
 
     # ── VLAN mutation operations ──────────────────────────────────────────────
 
     def create_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
-        """Provision *vlan_id* with label *name* on *device*.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
-        """
-        logger.info("CiscoVendor: create VLAN %s on device=%s", vlan_id, device.name)
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_CREATE,
-                extravars={"vlan_id": vlan_id, "vlan_name": name, "device": device.name},
-                inventory=_build_inventory(device, password),
-            )
-            normalized = _normalize_result(result)
-            if normalized["success"]:
-                logger.info(
-                    "CiscoVendor: create VLAN %s on device=%s — OK",
-                    vlan_id, device.name,
-                )
-            else:
-                logger.error(
-                    "CiscoVendor: create VLAN %s on device=%s — FAILED: %s",
-                    vlan_id, device.name,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [create_vlan vlan_id=%s device=%s]: %s\n%s",
-                vlan_id, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
+        return self._aplicar(
+            {"parents": f"vlan {vlan_id}", "lines": [f"name {name}"]},
+            device, password, op_label=f"create VLAN {vlan_id}",
+        )
 
     def delete_vlan(self, vlan_id: int, device: Device, password: str) -> dict:
-        """Remove *vlan_id* from *device*.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
-        """
-        logger.info("CiscoVendor: delete VLAN %s on device=%s", vlan_id, device.name)
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_DELETE,
-                extravars={"vlan_id": vlan_id, "device": device.name},
-                inventory=_build_inventory(device, password),
-            )
-            normalized = _normalize_result(result)
-            if normalized["success"]:
-                logger.info(
-                    "CiscoVendor: delete VLAN %s on device=%s — OK",
-                    vlan_id, device.name,
-                )
-            else:
-                logger.error(
-                    "CiscoVendor: delete VLAN %s on device=%s — FAILED: %s",
-                    vlan_id, device.name,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [delete_vlan vlan_id=%s device=%s]: %s\n%s",
-                vlan_id, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
+        return self._aplicar(
+            {"lines": [f"no vlan {vlan_id}"]},
+            device, password, op_label=f"delete VLAN {vlan_id}",
+        )
 
     def update_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
-        """Rename / update the description of *vlan_id* on *device*.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
-        """
-        logger.info("CiscoVendor: update VLAN %s on device=%s", vlan_id, device.name)
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_UPDATE,
-                extravars={"vlan_id": vlan_id, "description": name, "device": device.name},
-                inventory=_build_inventory(device, password),
-            )
-            normalized = _normalize_result(result)
-            if normalized["success"]:
-                logger.info(
-                    "CiscoVendor: update VLAN %s on device=%s — OK",
-                    vlan_id, device.name,
-                )
-            else:
-                logger.error(
-                    "CiscoVendor: update VLAN %s on device=%s — FAILED: %s",
-                    vlan_id, device.name,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [update_vlan vlan_id=%s device=%s]: %s\n%s",
-                vlan_id, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
+        return self._aplicar(
+            {"parents": f"vlan {vlan_id}", "lines": [f"name {name}"]},
+            device, password, op_label=f"update VLAN {vlan_id}",
+        )
 
     def save_config(self, device: Device, password: str) -> dict:
-        """Not supported — Cisco IOS commits changes to the running config immediately.
+        """Persist the running configuration via ``write`` (exec-mode
+        command, equivalent to ``copy running-config startup-config``).
 
-        Raises
-        ------
-        NotImplementedError
-            Always.  Use ``write memory`` explicitly if non-volatile persistence
-            is required, or implement a subclass that calls the appropriate
-            playbook.
+        Explicit operation only — never invoked automatically by any
+        mutation method in this class.
         """
-        raise NotImplementedError(
-            f"save_config is not supported for Cisco IOS device '{device.name}'. "
-            "Cisco IOS writes changes to the running config automatically."
-        )
+        return self._aplicar({"commands": ["write"]}, device, password, op_label="save config")
 
     # ── VLAN query operations ─────────────────────────────────────────────────
 
     def list_vlans(self, device: Device, password: str) -> list[VLAN]:
-        """Return all user VLANs configured on *device*.
-
-        Runs the ``get_vlans`` playbook, strips ANSI escape codes from the
-        IOS ``show vlan brief`` output, and delegates parsing to
-        ``parse_vlan_brief``.
-
-        Parameters
-        ----------
-        device:
-            Domain device object exposing .name, .host, .username.
-        password:
-            Plaintext device password (decrypted by caller before passing in).
-
-        Returns
-        -------
-        list[VLAN]
-            Normalized VLAN entries, excluding IOS-internal VLANs 1 and
-            1002–1005.
-
-        Raises
-        ------
-        RuntimeError
-            If the playbook returns a non-zero exit code.
-        """
-        logger.info("CiscoVendor: list VLANs on device=%s", device.name)
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_GET,
-                extravars={"device": device.name},
-                inventory=_build_inventory(device, password),
-            )
-            if result["rc"] != 0:
-                error = result.get("stderr") or result.get("stdout") or "get_vlans playbook failed"
-                logger.error(
-                    "CiscoVendor: list VLANs on device=%s — FAILED: %s",
-                    device.name, error,
-                )
-                raise RuntimeError(error)
-            from app.services.parsers.vlan_parser import parse_vlan_brief
-            vlans = parse_vlan_brief(result["stdout"])
-            logger.info(
-                "CiscoVendor: list VLANs on device=%s — returned %d VLANs",
-                device.name, len(vlans),
-            )
-            return vlans
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [list_vlans device=%s]: %s\n%s",
-                device.name, str(exc), traceback.format_exc(),
-            )
-            raise
+        stdouts = self._leer(["show vlan brief"], device, password)
+        from app.services.parsers.vlan_parser import parse_vlan_brief
+        vlans = parse_vlan_brief(stdouts[0])
+        return vlans
 
     def get_vlans(self, device: Device, password: str) -> list[VLAN]:
-        """Backward-compatible alias for ``list_vlans()``.
-
-        All existing callers continue to work without modification.
-        New code should call ``list_vlans()`` directly.
-        """
+        """Backward-compatible alias for ``list_vlans()``."""
         return self.list_vlans(device, password)
 
     # ── Port query operation ──────────────────────────────────────────────────
 
     def list_ports(self, device: Device, password: str) -> list[Puerto]:
-        """Return all physical switchports on *device* as ``Puerto`` objects.
-
-        Filters out routed L3 interfaces, SVIs, loopbacks, tunnels, and
-        management ports.  Fields the chosen read commands do not expose
-        (PoE / speed / duplex in Step 1.3) are left as ``None`` per the
-        "do not invent values" rule.
-
-        Parameters
-        ----------
-        device:
-            Domain device object exposing ``.name``, ``.host``, ``.username``.
-        password:
-            Plaintext device password (decrypted by the caller).
-
-        Returns
-        -------
-        list[Puerto]
-            Normalized port inventory, sorted by interface name.
-
-        Raises
-        ------
-        RuntimeError
-            If the playbook fails or returns output that cannot be parsed.
-        """
-        logger.info("Listing ports on device=%s", device.name)
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_GET_PORTS,
-                extravars={"device": device.name},
-                inventory=_build_inventory(device, password),
-            )
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [list_ports device=%s]: %s\n%s",
-                device.name, str(exc), traceback.format_exc(),
-            )
-            raise
-
-        if result["rc"] != 0:
-            error = result.get("stderr") or result.get("stdout") or "playbook exited non-zero"
-            logger.error(
-                "Cisco command failed: get_ports on device=%s — %s",
-                device.name, error,
-            )
-            raise RuntimeError(
-                f"Cannot determine port state on device '{device.name}': {error}"
-            )
-
-        stdouts = result.get("stdouts") or []
-        if not stdouts:
-            logger.error(
-                "Cisco get_ports on device=%s returned no command outputs",
-                device.name,
-            )
-            raise RuntimeError(
-                f"Cannot determine port state on device '{device.name}': "
-                "no command outputs returned by playbook"
-            )
-
+        stdouts = self._leer(
+            ["show interfaces status", "show interfaces description", "show interfaces switchport"],
+            device, password,
+        )
         status = stdouts[_STATUS_INDEX] if len(stdouts) > _STATUS_INDEX else ""
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         switchport = stdouts[_SWITCHPORT_INDEX] if len(stdouts) > _SWITCHPORT_INDEX else ""
-
-        logger.debug(
-            "Cisco get_ports raw lengths on device=%s: status=%d desc=%d switchport=%d",
-            device.name, len(status), len(description), len(switchport),
-        )
-
         try:
             ports = parse_ios_ports(status, description, switchport)
         except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [list_ports parse device=%s]: %s\n%s",
-                device.name, str(exc), traceback.format_exc(),
-            )
-            raise RuntimeError(
-                f"Cannot determine port state on device '{device.name}': {exc}"
-            ) from exc
-
-        logger.info(
-            "Cisco port parser returned %d interfaces on device=%s",
-            len(ports), device.name,
-        )
+            raise RuntimeError(f"Cannot determine port state on device '{device.name}': {exc}") from exc
         return ports
 
     # ── Port mutation operations ──────────────────────────────────────────────
 
-    def update_port_description(
-        self,
-        interface: str,
-        description: str,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Set the port description on a Cisco IOS device.
-
-        Runs ``cisco.ios.ios_config`` inside the interface parent context.
-        Empty / whitespace-only ``description`` triggers ``no description``
-        rather than echoing an empty literal — keeping the device's
-        running config clean.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
+    def update_port_description(self, interface: str, description: str, device: Device, password: str) -> dict:
         is_empty = not bool(description and description.strip())
-        logger.info(
-            "Cisco: update description on interface=%s device=%s (clear=%s)",
-            interface, device.name, is_empty,
+        line = "no description" if is_empty else f"description {description}"
+        return self._aplicar(
+            {"parents": f"interface {interface}", "lines": [line]},
+            device, password, op_label="update port description",
         )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_UPDATE_DESCRIPTION,
-                extravars={
-                    "interface": interface,
-                    "description": description or "",
-                    "description_is_empty": is_empty,
-                    "device": device.name,
-                },
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Cisco: update description OK on interface=%s device=%s",
-                    interface, device.name,
-                )
-            else:
-                logger.error(
-                    "Cisco: update description FAILED on interface=%s device=%s — %s",
-                    interface, device.name,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [update_port_description interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
 
-    def set_port_admin_state(
-        self,
-        interface: str,
-        enabled: bool,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Administratively enable / disable *interface* on a Cisco IOS device.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
-        logger.info(
-            "Cisco: set admin state on interface=%s device=%s enabled=%s",
-            interface, device.name, enabled,
+    def set_port_admin_state(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
+        line = "no shutdown" if enabled else "shutdown"
+        return self._aplicar(
+            {"parents": f"interface {interface}", "lines": [line]},
+            device, password, op_label=f"set admin state enabled={enabled}",
         )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_SET_ADMIN_STATE,
-                extravars={
-                    "interface": interface,
-                    "enabled": bool(enabled),
-                    "device": device.name,
-                },
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Cisco: set admin state OK on interface=%s device=%s enabled=%s",
-                    interface, device.name, enabled,
-                )
-            else:
-                logger.error(
-                    "Cisco: set admin state FAILED on interface=%s device=%s enabled=%s — %s",
-                    interface, device.name, enabled,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [set_port_admin_state interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
 
-    def set_port_access_vlan(
-        self,
-        interface: str,
-        vlan_id: int,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Set the access VLAN of *interface* on a Cisco IOS device.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
-        logger.info(
-            "Cisco: set access VLAN on interface=%s device=%s vlan_id=%d",
-            interface, device.name, vlan_id,
+    def set_port_access_vlan(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar(
+            {"parents": f"interface {interface}", "lines": [f"switchport access vlan {vlan_id}"]},
+            device, password, op_label="set access VLAN",
         )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_SET_ACCESS_VLAN,
-                extravars={
-                    "interface": interface,
-                    "vlan_id": int(vlan_id),
-                    "device": device.name,
-                },
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Cisco: set access VLAN OK on interface=%s device=%s vlan_id=%d",
-                    interface, device.name, vlan_id,
-                )
-            else:
-                logger.error(
-                    "Cisco: set access VLAN FAILED on interface=%s device=%s vlan_id=%d — %s",
-                    interface, device.name, vlan_id,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [set_port_access_vlan interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
 
-    def set_trunk_pvid_vlan(
-        self,
-        interface: str,
-        vlan_id: int,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Set the trunk native VLAN of *interface* on a Cisco IOS device.
-
-        Runs ``switchport trunk native vlan {{ vlan_id }}`` inside the interface
-        context.  The orchestration layer must guarantee the port is already
-        in trunk mode before this is called.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
-        logger.info(
-            "Cisco: set trunk native VLAN on interface=%s device=%s vlan_id=%d",
-            interface, device.name, vlan_id,
+    def set_trunk_pvid_vlan(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar(
+            {"parents": f"interface {interface}", "lines": [f"switchport trunk native vlan {vlan_id}"]},
+            device, password, op_label="set trunk native VLAN",
         )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_SET_TRUNK_PVID,
-                extravars={
-                    "interface": interface,
-                    "vlan_id": int(vlan_id),
-                    "device": device.name,
-                },
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Cisco: set trunk native VLAN OK on interface=%s device=%s vlan_id=%d",
-                    interface, device.name, vlan_id,
-                )
-            else:
-                logger.error(
-                    "Cisco: set trunk native VLAN FAILED on interface=%s device=%s vlan_id=%d — %s",
-                    interface, device.name, vlan_id,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [set_trunk_pvid_vlan interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
 
-    def set_access_mode(
-        self,
-        interface: str,
-        vlan_id: int,
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Set *interface* to access mode with *vlan_id*, atomically, on a
-        Cisco IOS device.
-
-        Runs ``switchport mode access`` + ``switchport access vlan {{
-        vlan_id }}`` inside the interface context, same single
-        ``ios_config`` task as ``set_port_access_vlan()``/
-        ``set_trunk_pvid_vlan()`` next to this method — was previously
-        unreachable in production: the old composite entry point
-        (``configure_port()``) was a permanent ``NotImplementedError``
-        stub with no backing playbook at all, so a mode change via
-        ``/ports/configure`` always failed for Cisco devices (Huawei was
-        the only vendor where it worked).
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
-        logger.info(
-            "Cisco: set access mode on interface=%s device=%s vlan_id=%d",
-            interface, device.name, vlan_id,
+    def set_trunk_allowed_vlans(self, interface: str, vlan_list: list[int], device: Device, password: str) -> dict:
+        vlan_str = self._compress_vlans_cisco(sorted(set(vlan_list)))
+        return self._aplicar(
+            {"parents": f"interface {interface}", "lines": [f"switchport trunk allowed vlan {vlan_str}"]},
+            device, password, op_label="set trunk allowed VLANs",
         )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_SET_ACCESS_MODE,
-                extravars={
-                    "interface": interface,
-                    "vlan_id": int(vlan_id),
-                    "device": device.name,
-                },
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Cisco: set access mode OK on interface=%s device=%s vlan_id=%d",
-                    interface, device.name, vlan_id,
-                )
-            else:
-                logger.error(
-                    "Cisco: set access mode FAILED on interface=%s device=%s vlan_id=%d — %s",
-                    interface, device.name, vlan_id,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [set_access_mode interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
+
+    def set_access_mode(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar(
+            {
+                "parents": f"interface {interface}",
+                "lines": ["switchport mode access", f"switchport access vlan {vlan_id}"],
+            },
+            device, password, op_label="set access mode",
+        )
 
     def set_trunk_mode(
-        self,
-        interface: str,
-        native_vlan: int,
-        vlan_list: list[int],
-        device: Device,
-        password: str,
+        self, interface: str, native_vlan: int, vlan_list: list[int], device: Device, password: str,
     ) -> dict:
-        """Set *interface* to trunk mode with *native_vlan* (PVID) and
-        *vlan_list* as its allowed VLANs, atomically, on a Cisco IOS
-        device. Same criteria as ``set_access_mode()`` above.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
         vlan_str = self._compress_vlans_cisco(sorted(set(vlan_list)))
-        logger.info(
-            "Cisco: set trunk mode on interface=%s device=%s native_vlan=%d vlans=%s",
-            interface, device.name, native_vlan, vlan_str,
+        return self._aplicar(
+            {
+                "parents": f"interface {interface}",
+                "lines": [
+                    "switchport mode trunk",
+                    f"switchport trunk native vlan {native_vlan}",
+                    f"switchport trunk allowed vlan {vlan_str}",
+                ],
+            },
+            device, password, op_label="set trunk mode",
         )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_SET_TRUNK_MODE,
-                extravars={
-                    "interface": interface,
-                    "native_vlan": int(native_vlan),
-                    "vlan_list": vlan_str,
-                    "device": device.name,
-                },
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Cisco: set trunk mode OK on interface=%s device=%s native_vlan=%d vlans=%s",
-                    interface, device.name, native_vlan, vlan_str,
-                )
-            else:
-                logger.error(
-                    "Cisco: set trunk mode FAILED on interface=%s device=%s native_vlan=%d vlans=%s — %s",
-                    interface, device.name, native_vlan, vlan_str,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [set_trunk_mode interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
-
-    def set_trunk_allowed_vlans(
-        self,
-        interface: str,
-        vlan_list: list[int],
-        device: Device,
-        password: str,
-    ) -> dict:
-        """Set the trunk allowed-VLAN list of *interface* on a Cisco IOS device.
-
-        Runs ``switchport trunk allowed vlan <list>`` inside the interface
-        context.  IOS replaces the current list with the new one in a single
-        atomic command.  ``save_when: always`` persists to startup-config.
-
-        Returns
-        -------
-        dict
-            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
-        """
-        vlan_str = self._compress_vlans_cisco(sorted(set(vlan_list)))
-        logger.info(
-            "Cisco: set trunk VLANs on interface=%s device=%s vlans=%s",
-            interface, device.name, vlan_str,
-        )
-        try:
-            result = ansible_service.run_playbook(
-                playbook=_PLAYBOOK_SET_TRUNK_VLANS,
-                extravars={
-                    "interface": interface,
-                    "vlan_list": vlan_str,
-                    "device": device.name,
-                },
-                inventory=_build_inventory(device, password),
-            )
-            normalized = {**result, "success": result.get("rc", 1) == 0}
-            if normalized["success"]:
-                logger.info(
-                    "Cisco: set trunk VLANs OK on interface=%s device=%s vlans=%s",
-                    interface, device.name, vlan_str,
-                )
-            else:
-                logger.error(
-                    "Cisco: set trunk VLANs FAILED on interface=%s device=%s vlans=%s — %s",
-                    interface, device.name, vlan_str,
-                    result.get("stderr") or result.get("stdout"),
-                )
-            return normalized
-        except Exception as exc:
-            logger.exception(
-                "FULL CISCO TRACEBACK [set_trunk_allowed_vlans interface=%s device=%s]: %s\n%s",
-                interface, device.name, str(exc), traceback.format_exc(),
-            )
-            raise
 
     # ── VLAN list compression (Fase 2, A2 — movida desde validators/port_validator.py,
     # no es validación, es formato de CLI, específico de este vendor) ────────────
-
-    @staticmethod
-    def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:
-        """Collapse *vlans* into (start, end) range tuples."""
-        if not vlans:
-            return []
-        sv = sorted(set(vlans))
-        ranges: list[tuple[int, int]] = []
-        start = sv[0]
-        prev = sv[0]
-        for v in sv[1:]:
-            if v == prev + 1:
-                prev = v
-            else:
-                ranges.append((start, prev))
-                start = v
-                prev = v
-        ranges.append((start, prev))
-        return ranges
 
     def _compress_vlans_cisco(self, vlans: list[int]) -> str:
         """Format a VLAN list into the Cisco IOS trunk-allowed syntax.

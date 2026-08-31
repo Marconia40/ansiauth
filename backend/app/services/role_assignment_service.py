@@ -26,11 +26,9 @@ from app.db.models import (
 from app.db.session import get_session
 from app.models.domain_event import DomainEvent
 from app.repositories.role_assignment_repository import RoleAssignment
-from app.schemas.role_assignment import RoleAssignmentRead
+from app.schemas.role_assignment import _VALID_ASSIGNMENT_ROLES, RoleAssignmentRead
 
 logger = logging.getLogger(__name__)
-
-_VALID_ASSIGNMENT_ROLES = frozenset({"observer", "operator", "admin"})
 
 
 def _to_read(row: RoleAssignmentModel) -> RoleAssignmentRead:

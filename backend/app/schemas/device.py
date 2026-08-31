@@ -48,6 +48,11 @@ class DeviceCreate(BaseModel):
     site_id: int = Field(..., ge=1)
     device_group_id: Optional[int] = Field(default=None, ge=1)
 
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v):
+        return _validate_host(v)
+
 
 class DeviceUpdate(BaseModel):
     """MSP: Phase 4 — ``site_id`` and ``device_group_id`` are no longer
