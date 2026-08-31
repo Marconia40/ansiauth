@@ -1,7 +1,7 @@
 """Tests for SEC-003 — Per-IP and per-user rate limiting."""
 import pytest
 
-from app.core import rate_limit_middleware as rl
+from app.core import rls_middleware as rl
 
 
 @pytest.fixture(autouse=True)

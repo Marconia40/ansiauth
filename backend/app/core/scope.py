@@ -16,9 +16,7 @@ import logging
 from typing import Optional, Tuple
 
 from fastapi import Depends, HTTPException, Request
-from jwt import PyJWTError
 
-from app.core.security import verify_token
 from app.db.models import DeviceGroupModel, DeviceModel, SiteModel, UserModel
 from app.db.session import get_session
 from app.models.visibility_scope import VisibilityScope
@@ -77,37 +75,52 @@ def get_current_user(request: Request) -> dict:
     otherwise. Falls back to the legacy ``role`` claim (``admin`` /
     ``super-admin`` → is_system_admin=True) when the explicit
     ``is_system_admin`` claim is absent — keeps synthetic-JWT test fixtures
-    working alongside real logins."""
-    auth = request.headers.get("Authorization") or ""
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    token = auth.split(" ", 1)[1].strip()
-    try:
-        payload = verify_token(token)
-    except PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    working alongside real logins.
+
+    The decode itself already happened once in ``AuthContextMiddleware``
+    (``core/rls_middleware.py``), which runs before any endpoint dependency
+    and caches the result on ``request.state`` — this reads that instead of
+    decoding a 2nd time. The direct decode below only runs as a defensive
+    fallback for something invoking this dependency outside the normal
+    middleware stack (``request.state.auth_resolved`` unset)."""
+    if getattr(request.state, "auth_resolved", False):
+        payload = request.state.auth_payload
+        error = request.state.auth_error
+    else:
+        from app.core.rls_middleware import decode_bearer
+        payload, error = decode_bearer(request)
+    if payload is None:
+        raise HTTPException(status_code=401, detail=error or "Not authenticated")
     username = payload.get("sub")
-    if not username:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
     is_sys = payload.get("is_system_admin")
     if is_sys is None:
         is_sys = (payload.get("role") or "").lower() in {"admin", "super-admin"}
     return {"username": username, "is_system_admin": bool(is_sys)}
 
 
-def require_authenticated(current: dict = Depends(get_current_user)) -> dict:
+def require_authenticated(
+    current: dict = Depends(get_current_user), request: Request = None,
+) -> dict:
     """Enrich the JWT-derived caller with ``id`` and the DB-backed
     ``is_system_admin`` bit — the JWT claim is trusted only when the row is
-    missing (test/JWT-only fixtures), otherwise the DB is authoritative."""
+    missing (test/JWT-only fixtures), otherwise the DB is authoritative.
+
+    Reads the ``(id, is_active, is_system_admin)`` row that
+    ``AuthContextMiddleware`` already fetched (cached on
+    ``request.state.auth_user_row``) instead of running its own query —
+    same defensive fallback criteria as ``get_current_user()`` above."""
     username = (current.get("username") or "").lower()
     if not username:
         raise HTTPException(status_code=401, detail="Invalid token payload")
-    with get_session() as session:
-        row = (
-            session.query(UserModel.id, UserModel.is_active, UserModel.is_system_admin)
-            .filter(UserModel.username == username)
-            .first()
-        )
+    if request is not None and getattr(request.state, "auth_resolved", False):
+        row = request.state.auth_user_row
+    else:
+        with get_session() as session:
+            row = (
+                session.query(UserModel.id, UserModel.is_active, UserModel.is_system_admin)
+                .filter(UserModel.username == username)
+                .first()
+            )
     if row is None:
         # Fixture or pre-migration token — trust the JWT's claim but leave
         # ``id`` unset so ``effective_role`` returns None on any scoped read.

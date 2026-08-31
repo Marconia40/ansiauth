@@ -252,18 +252,17 @@ def _custom_openapi():
 
 app.openapi = _custom_openapi
 
-from app.core.rate_limit_middleware import RateLimitMiddleware  # noqa: E402
-from app.core.rls_middleware import RLSSessionMiddleware  # noqa: E402
+from app.core.rls_middleware import AuthContextMiddleware  # noqa: E402
 from app.core.tls_middleware import HSTSMiddleware, HTTPSRedirectMiddleware  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
-# MSP: Phase 6 — populate the request-scoped RLS user context before any
-# handler opens a DB session. Added *before* the rate limiter so a 429
-# response path still runs under a well-defined context (rate limiting
-# doesn't hit the DB, but adding audit logging later would).
-app.add_middleware(RLSSessionMiddleware)
-
-app.add_middleware(RateLimitMiddleware)
+# MSP: Phase 6 — populates the request-scoped RLS user context AND enforces
+# the rate limit, in one pass, before any handler opens a DB session.
+# Replaces the old RLSSessionMiddleware + RateLimitMiddleware pair (each
+# used to decode the same JWT and query `users` on its own) — see
+# core/rls_middleware.py's module docstring for why they were merged,
+# including a real middleware-ordering bug the merge fixes as a side effect.
+app.add_middleware(AuthContextMiddleware)
 
 if SSL_CERTFILE:
     app.add_middleware(HTTPSRedirectMiddleware)

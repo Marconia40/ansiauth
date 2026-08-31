@@ -51,7 +51,7 @@ def test_first_five_failures_return_401(unauth_client):
 
 
 def test_sixth_failed_attempt_returns_429(unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
@@ -61,7 +61,7 @@ def test_sixth_failed_attempt_returns_429(unauth_client):
 
 
 def test_429_has_correct_detail(unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
@@ -71,7 +71,7 @@ def test_429_has_correct_detail(unauth_client):
 
 
 def test_account_remains_locked_on_correct_password(unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
@@ -103,7 +103,7 @@ def test_different_ips_share_per_username_counter(unauth_client):
 
 
 def test_successful_login_resets_failure_counter(unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(4):
         _do_failed_login(unauth_client)
 
@@ -156,7 +156,7 @@ def test_expired_ip_failures_do_not_block(unauth_client):
 # ── Admin unlock endpoint ─────────────────────────────────────────────────────
 
 def test_admin_can_unlock_locked_account(admin_client, unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 

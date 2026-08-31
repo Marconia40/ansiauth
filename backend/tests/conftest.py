@@ -126,7 +126,7 @@ def reset_login_attempts():
 
 @pytest.fixture(autouse=True)
 def reset_rate_limit_middleware():
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     rl.reset()
     yield
     rl.reset()

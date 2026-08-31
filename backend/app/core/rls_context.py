@@ -10,7 +10,7 @@ leak across requests or connections in the pool). This module owns the
 plumbing:
 
   1. ``current_user_ctx`` — a ``ContextVar`` populated by the HTTP middleware
-     (``rls_middleware.RLSSessionMiddleware``) or by explicit calls to
+     (``rls_middleware.AuthContextMiddleware``) or by explicit calls to
      :func:`system_context` for internal machinery (bootstrap, Celery tasks).
   2. :func:`system_context` — a context manager that marks the current
      execution scope as "trusted internal" so the ``after_begin`` hook sets
@@ -51,7 +51,7 @@ class UserContext(TypedDict, total=False):
     is_system_admin: bool
 
 
-# Set by ``rls_middleware.RLSSessionMiddleware`` at the start of each request.
+# Set by ``rls_middleware.AuthContextMiddleware`` at the start of each request.
 # Never set outside that middleware or :func:`system_context`. Default {} means
 # "unauthenticated" → the after_begin hook writes (user_id=0, is_system_admin=
 # false), which every RLS policy interprets as deny.
