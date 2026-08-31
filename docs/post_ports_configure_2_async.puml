@@ -1,0 +1,216 @@
+@startuml POST_ports_configure_2_async
+title POST /ports/configure — parte 2/2: worker Celery (Orquestador.ejecutar sobre Puerto, camino composite)
+autonumber
+
+note over Task
+  Continúa post_ports_configure_1_sync.puml -- ese termina justo
+  después de que GroupOperationRunner.encolar() despacha
+  ejecutar_task.delay(...). Separado en 2 archivos por el mismo
+  límite de largo de URL del render público de plantuml.com que ya
+  se documentó en post_vlans_secuencia_real_1_sync.puml -- no es un
+  problema de sintaxis.
+end note
+
+participant "JobQueue" as Queue
+participant "config: Puerto" as PUERTO
+participant "Repository[Device]" as RepoDev
+participant "Repository[Job]" as RepoJob
+participant "ejecutar_task\n(app/tasks.py)" as Task
+participant "Orquestador" as Orq
+participant "RedisCoordinator" as RC
+participant "device: Device" as Dev
+participant "PluginRegistry" as PR
+participant "SecretVault" as SV
+participant "MockVendor\n(VendorDriver)" as Vendor
+participant "Repository[Puerto]" as RepoPuerto
+participant "EventDispatcher" as ED
+participant "AuditListener" as AL
+participant "AuditRepository" as AR
+
+Queue -> Task : ejecutar_task(recurso_dict, "puerto", "switch-A", actor, job_id)
+activate Task
+Task -> PUERTO : Puerto(**recurso_dict)
+activate PUERTO
+PUERTO -> PUERTO : __post_init__()  [reconstrucción, corre de nuevo naturalmente]
+deactivate PUERTO
+Task -> RepoJob : get(job_id)
+activate RepoJob
+RepoJob --> Task : job
+deactivate RepoJob
+
+Task -> Orq : ejecutar(recurso, "switch-A", actor, job)
+activate Orq
+alt job.esta_en_estado_terminal()
+    Orq --> Task : return (no-op, reentrega de Celery)
+end
+
+Orq -> RepoDev : get("switch-A")
+activate RepoDev
+RepoDev --> Orq : device
+deactivate RepoDev
+alt device no existe
+    Orq --> Task : raise NotFoundError
+end
+
+Orq -> PUERTO : recurso.device = "switch-A"
+note right of PUERTO : mismo fix real que VLAN -- ver post_vlans_secuencia_real_2_async.puml
+
+Orq -> Orq : job.marcar_iniciado() -> _transicionar("running")
+Orq -> RepoJob : add(job)
+activate RepoJob
+deactivate RepoJob
+
+Orq -> RC : bloquear("switch-A")
+activate RC
+Orq -> RC : limitar("switch-A")
+
+Orq -> PUERTO : recurso.validar()
+PUERTO -> PUERTO : chequeo campos + reglas cruzadas de _es_composite\n[2da vez -- el router ya lo hizo sobre OTRA instancia\nde Puerto, reconstruida acá desde el dict de Celery]
+
+Orq -> PUERTO : recurso.reconciliar(device)
+activate PUERTO
+PUERTO -> Dev : driver
+activate Dev
+Dev -> PR : obtener("cisco_ios")  [1ra vez, después cacheado]
+activate PR
+PR --> Dev : MockVendor instance
+deactivate PR
+Dev --> PUERTO : driver
+deactivate Dev
+PUERTO -> Dev : password
+activate Dev
+Dev -> SV : decrypt(encrypted_password)  [1ra vez, después cacheado]
+activate SV
+SV --> Dev : password en claro
+deactivate SV
+Dev --> PUERTO : password
+deactivate Dev
+PUERTO -> Vendor : list_ports(device, password)
+activate Vendor
+Vendor --> PUERTO : [Puerto(Gi0/0/1, mode="access", access_vlan=10, description="Workstation-01"), ...]
+deactivate Vendor
+PUERTO -> PUERTO : existente = next(p for p in puertos if p.interface==self.interface)
+PUERTO --> Orq : pre_state = {"existed": True, "actual": Puerto(Gi0/0/1, ...)}
+deactivate PUERTO
+
+Orq -> Orq : primer_intento = True\ndef _aplicar(): ...\nself._ejecutar_con_retry(_aplicar, job, "switch-A")
+note right of Orq
+  Mismo _aplicar() genérico que VLAN (ver
+  post_vlans_secuencia_real_2_async.puml) -- en el 1er intento pasa
+  recurso.aplicar(device, pre_state=pre_state). Para el camino
+  COMPOSITE de este ejemplo no cambia nada en la práctica: esa rama
+  nunca llamó reconciliar() internamente (ver nota de abajo), así
+  que no tenía nada que ahorrarse. Donde SÍ se nota son los 4
+  endpoints de campo único (/description, /admin-state,
+  /access-vlan, /trunk-vlans) -- cada uno de sus _aplicar_*() ahora
+  usa el pre_state pasado en el 1er intento en vez de volver a
+  llamar list_ports(), mismo fix que VLAN.
+end note
+activate Orq
+loop hasta max_retries+1=4 intentos, corta en el primer rc==0
+    Orq -> PUERTO : recurso.aplicar(device, pre_state=pre_state)\n[la rama composite ignora pre_state -- nunca lo\nnecesitó, ver nota abajo]
+    activate PUERTO
+    PUERTO -> PUERTO : campos = self.mutation_fields\n= {"description","mode","access_vlan"}
+    PUERTO -> PUERTO : self._es_composite -> True (len(campos)=3 > 1)
+    note right of PUERTO
+      A diferencia de VLAN.aplicar(), la rama composite de
+      Puerto.aplicar() NO vuelve a llamar reconciliar() -- así que
+      list_ports() se llama UNA sola vez en el camino feliz (el
+      pre_state que ya capturó Orquestador arriba), no dos como en
+      el create de VLAN. Tampoco hay _noop_resultado acá -- el propio
+      código lo documenta como alcance no resuelto (comparar "ya
+      aplicado" contra varios campos a la vez es una pregunta
+      combinatoria distinta).
+    end note
+    PUERTO -> Dev : driver, password  [ya cacheados]
+    activate Dev
+    Dev --> PUERTO : driver, password
+    deactivate Dev
+    PUERTO -> Vendor : configure_port(self, device, password)
+    activate Vendor
+    Vendor -> Vendor : ansible_runner -> playbook -> switch real\n(en mock: rc=0 fijo salvo device.name=="fail_device")
+    Vendor --> PUERTO : {"rc":0, "stdout":"Simulated configure_port applied",\n"stderr":"", "success":true}
+    deactivate Vendor
+    PUERTO --> Orq : {**resultado, "accion":"configurar_puerto"}
+    deactivate PUERTO
+    alt resultado["rc"] != 0
+        Orq -> Orq : self._clasificar_error(resultado) -> RetryDecision
+        alt should_retry y quedan intentos
+            Orq -> Orq : job.registrar_reintento(error_texto)
+            Orq -> RepoJob : add(job)
+            Orq -> Orq : time.sleep(delay)
+        else no reintenta más
+            note right : sale del loop con el último resultado (rc!=0)
+        end
+    end
+end
+Orq --> Orq : (resultado, retry_count)
+deactivate Orq
+
+alt resultado["rc"] != 0
+    Orq -> Orq : raise DeviceExecutionError(stderr o stdout)
+end
+
+Orq -> RC : (fin del "with" externo) libera lock
+deactivate RC
+
+alt resultado["rc"] == 0 -- camino feliz de este ejemplo
+    Orq -> RepoPuerto : add(recurso)\n[PK real = (interface, device), YA coincide con pk_field]
+    activate RepoPuerto
+    deactivate RepoPuerto
+    Orq -> Orq : job.marcar_completado(resultado) -> _transicionar("completed")
+    Orq -> RepoJob : add(job)
+    activate RepoJob
+    deactivate RepoJob
+    Orq -> ED : despachar([DomainEvent("recurso_aplicado", recurso,\ndevice, actor, resultado, exitoso=True)])
+    activate ED
+    ED -> AL : on_event(evento)
+    activate AL
+    AL -> AL : AuditRecord.desde(evento)\n[action=payload["accion"]="configurar_puerto", resource="puerto"]
+    AL -> AR : append(record)
+    activate AR
+    AR -> AR : session.add(row)  [insert-strict, nunca merge]
+    deactivate AR
+    deactivate AL
+    deactivate ED
+else resultado["rc"] != 0 -- camino de error, real pero no ocurre en este ejemplo
+    Orq -> RC : bloquear("switch-A")  [se re-adquiere para el rollback]
+    activate RC
+    Orq -> Orq : self._rollback(recurso, pre_state, device)\n-> _rollback_puerto(puerto, pre_state, device)
+    note right of Orq
+      campos tiene 3 elementos (len>1) -> rama composite de
+      _rollback_puerto(): reconstruye un Puerto "restaurar" solo con
+      description/mode/access_vlan tomados de pre_state["actual"],
+      llama device.driver.configure_port(restaurar, device, password)
+      de nuevo para deshacer, y re-lee list_ports() para verificar
+      campo por campo.
+
+      Hallazgo real (documentado, no corregido): si el Puerto tuviera
+      UN SOLO campo y ese campo fuera "mode" (ej. Puerto(mode="trunk")
+      solo -- _es_composite=True porque "mode" está en mutation_fields,
+      aunque len(campos)==1), _rollback_puerto() decide su rama con
+      `len(campos) > 1` (no con _es_composite) -- cae en la rama de UN
+      campo, cuyo if/elif no tiene caso para "mode", y termina en
+      `else: return False, None`. El rollback de un cambio de mode
+      solo queda como no-op silencioso (rollback_performed=False)
+      aunque aplicar() sí cambió el device.
+    end note
+    Orq -> RC : libera lock
+    deactivate RC
+    Orq -> Orq : job.marcar_fallido(str(error), rb_performed, rb_success)\n-> _transicionar("failed")
+    Orq -> RepoJob : add(job)
+    Orq -> ED : despachar([DomainEvent("recurso_fallido", ...,\nexitoso=False)])
+    activate ED
+    ED -> AL : on_event(evento)
+    AL -> AR : append(record)  [status="failure"]
+    deactivate ED
+    Orq -> Task : raise (se propaga -- Celery sin autoretry_for)
+end
+
+Orq -> Orq : finally: if not job.esta_en_estado_terminal():\n  job.asegurar_estado_final(); self._jobs.add(job)
+note right : no-op en este ejemplo -- el job ya\nquedó terminal en el try/except de arriba.
+
+deactivate Orq
+deactivate Task
+
+@enduml

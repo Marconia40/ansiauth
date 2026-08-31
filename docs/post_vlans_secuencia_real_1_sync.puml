@@ -1,0 +1,149 @@
+@startuml POST_vlans_real
+title POST /vlans — crear VLAN 100 en switch-A y switch-B (post-migración, verificado contra código real)
+autonumber
+
+note over Cliente
+  Reemplaza post_vlans_secuencia.puml (estimativo, escrito antes de
+  migrar). Este diagrama no colapsa nada bajo un participante
+  "Middleware" genérico ni bajo "no diagramado para no saturar" —
+  cada flecha es una función/método real, verificado leyendo
+  api/vlans.py, models/vlan.py, services/orquestador.py,
+  services/group_operation_runner.py, services/redis_coordinator.py,
+  services/job_queue.py, app/tasks.py, core/scope.py,
+  core/rls_middleware.py, core/repository.py,
+  services/plugin_registry.py, services/secret_vault.py,
+  services/vendors/mock.py, services/event_dispatcher.py,
+  services/audit_listener.py, repositories/*_repository.py y
+  composition.py tal como están hoy en el árbol. Cada flecha lleva
+  además "» qué hace" con una glosa corta de una línea sobre el
+  comportamiento real de esa función.
+
+  Actualizado después de unificar RateLimitMiddleware +
+  RLSSessionMiddleware en un solo AuthContextMiddleware
+  (core/rls_middleware.py, único archivo -- antes eran 2). El JWT se
+  decodificaba 3 veces y `users` se consultaba 2 veces por request,
+  cada capa por su cuenta; ahora es 1 decode + 1 query. La unificación
+  también resolvió de paso un bug real de orden entre middlewares
+  (ver el docstring del módulo).
+end note
+
+actor Cliente
+participant "AuthContextMiddleware\n(core/rls_middleware.py)" as AuthCtx
+participant "get_current_user /\nrequire_authenticated\n(core/scope.py)" as Auth
+participant "RoleAssignmentRepository" as RAR
+participant "Router\n(api/vlans.py: create_vlan)" as Router
+participant "vlan: VLAN" as VLAN
+participant "Repository[Device]" as RepoDev
+participant "GroupOperationRunner" as GOR
+participant "Repository[Job]" as RepoJob
+participant "JobQueue\n(services/job_queue.py)" as Queue
+
+Cliente -> AuthCtx : POST /api/v1/vlans/\n{vlan_id:100, name:"MGMT", devices:["switch-A","switch-B"]}\nAuthorization: Bearer <jwt>
+activate AuthCtx
+note right of AuthCtx
+  CORSMiddleware envuelve todo esto por fuera (agregada última en
+  main.py -- "must be outermost") -- puro pass-through para un POST
+  ya autenticado, no se diagrama (no tiene lógica de negocio).
+end note
+
+AuthCtx -> AuthCtx : decode_bearer(request)\n» qué hace: decodifica el JWT UNA sola vez (firma HS256 +\nexpiración) -- antes eran 3 decodes independientes\n(RateLimitMiddleware/RLSSessionMiddleware/get_current_user),\nunificados acá. Nunca lanza -- devuelve (payload, None) o\n(None, motivo) sin cortar el request todavía
+AuthCtx -> AuthCtx : _lookup_user(username)\n» qué hace: UNA sola query bajo system_context() que trae\n(id, is_active, is_system_admin) de una -- antes eran 2 queries\nseparadas (RLSSessionMiddleware solo traía id;\nrequire_authenticated volvía a consultar is_active/is_system_admin)
+AuthCtx -> AuthCtx : request.state.auth_payload = ...\nrequest.state.auth_user_row = (id, is_active, is_system_admin)\n» qué hace: cachea todo en request.state para que\nget_current_user()/require_authenticated() (más abajo) lean\nde acá en vez de repetir el decode/la query
+AuthCtx -> AuthCtx : current_user_ctx.set({"id":..., "is_system_admin":...})\n» qué hace: instala el contexto RLS que el after_begin hook de\nSQLAlchemy lee en cada transacción -- is_system_admin acá sale\ndel CLAIM del JWT, no de la DB (a propósito distinto del valor\nque va a devolver require_authenticated() más abajo)
+AuthCtx -> AuthCtx : bucket_for(request, username) + _check_and_record()\n» qué hace: chequea rate limit reusando el username ya\ndecodificado arriba -- ya no vuelve a tocar el JWT para esto
+alt límite excedido
+    AuthCtx --> Cliente : 429 Too Many Requests
+end
+
+AuthCtx -> Auth : request (auth + RLS context ya instalados)
+deactivate AuthCtx
+activate Auth
+Auth -> Auth : get_current_user(request)\n» qué hace: lee request.state.auth_payload/auth_error -- NO\ndecodifica de nuevo (AuthContextMiddleware ya corrió antes que\ncualquier dependencia de FastAPI; fallback defensivo si no)
+alt payload ausente o inválido
+    Auth --> Cliente : 401 (mensaje exacto según la razón real:\n"Not authenticated" / "Invalid or expired token" /\n"Invalid token payload")
+end
+Auth -> Auth : require_authenticated(current, request)\n» qué hace: lee request.state.auth_user_row -- NO vuelve a\nconsultar la DB. is_active=False -> 401; fila ausente -> confía\nen el claim del JWT (fixture/token pre-migración)
+alt user inactivo
+    Auth --> Cliente : 401
+end
+
+Auth -> RAR : obtener_scope(current)\n-> get_role_assignment_repo().scope_de(current)\n» qué hace: arma el VisibilityScope completo del caller (todos\nsus grants de rol) en una sola query -- se reusa para cada\nchequeo de autorización de este request, sin volver a golpear la DB
+activate RAR
+alt current["is_system_admin"]
+    RAR --> Auth : VisibilityScope(es_system_admin=True, grants=())\n[sin query]
+else
+    RAR -> RAR : query RoleAssignmentModel\nWHERE user_id=... [UNA query, no una por device]
+    RAR --> Auth : VisibilityScope(es_system_admin=False, grants=(...))
+end
+deactivate RAR
+
+Auth -> Router : create_vlan(vlan, current_user, scope)\n[FastAPI ya resolvió Depends(require_authenticated)\ny Depends(obtener_scope) antes de entrar al handler]
+deactivate Auth
+activate Router
+
+Router -> VLAN : VLAN(vlan_id=100, name="MGMT")\n» qué hace: construye la entidad de dominio VLAN a partir\ndel body -- device queda en "" (default), todavía no se sabe\na qué switch va cada copia
+activate VLAN
+VLAN -> VLAN : __post_init__()\n-> _validate_vlan_id_range()\n-> _validate_vlan_not_reserved()\n» qué hace: valida que vlan_id esté en 1-4094 y no sea una\nde las reservadas (1, 1002-1005) -- corre siempre, tanto en\nlectura como en escritura
+alt vlan_id fuera de rango o reservado
+    VLAN --> Router : raise ValueError
+    Router --> Cliente : 400 (ValidationError)
+end
+Router -> VLAN : entidad.validar()
+VLAN -> VLAN : _validate_vlan_name(self.name)\n[self.eliminar=False, no corta acá]\n» qué hace: valida el formato del nombre (charset\nletras/números/._- , máx 32 caracteres)
+note right of VLAN : validación #1 del nombre\n(3 en total antes de llegar al driver -- ver nota más abajo)
+alt nombre inválido
+    VLAN --> Router : raise ValueError
+    Router --> Cliente : 400 (ValidationError)
+end
+deactivate VLAN
+
+loop por cada device en [switch-A, switch-B]
+    Router -> RepoDev : get(dev_name)\n» qué hace: busca el device por nombre (PK de negocio) en\nla tabla devices y lo hidrata a un objeto Device
+    activate RepoDev
+    RepoDev --> Router : device o None
+    deactivate RepoDev
+    alt device no existe
+        Router --> Cliente : 404 (NotFoundError)
+    end
+end
+
+Router -> Router : _authz_devices(scope, ["switch-A","switch-B"], min_role="operator")\n» qué hace: por cada device del pedido, exige que el caller\ntenga rol >= operator sobre el site/grupo de ese device --\nninguno se salta la autorización
+loop por cada device
+    Router -> Router : resolver_site_group(name, "device")\n-> core/scope.py: _lookup_device_scope()\n   [query JOIN devices/device_groups -- 1 por device,\n   no lo evita VisibilityScope, solo evita repetir\n   la resolución de ROL una vez resuelto site/group]\n» qué hace: resuelve a qué (site_id, device_group_id)\npertenece el device
+    Router -> Router : scope.rol_para(site_id, device_group_id)\n[en memoria -- VisibilityScope, sin query]\n» qué hace: busca en los grants ya cargados el rol más\nespecífico del caller para ese (site, grupo) -- grant de\ngrupo gana sobre grant de site-wide
+    alt rol insuficiente
+        Router --> Cliente : 403
+    end
+end
+
+Router -> GOR : encolar(entidad, ["switch-A","switch-B"], current_user["username"])\n» qué hace: crea un Job "pending" por device y despacha cada\nuno a Celery -- retorna al toque, no espera a que ningún\ndevice real termine de aplicarse
+activate GOR
+GOR -> GOR : group_job_id = uuid4()\n» qué hace: genera el id que agrupa los N Job de esta\noperación -- sin fila propia, sin Repository[GroupJob] (tabla\ngroup_jobs fue borrada, ver h2msp7_drop_gj)
+GOR -> GOR : parametros = asdict(recurso)\n» qué hace: serializa el VLAN a dict plano -- se guarda tal\ncual en Job.parameters, JobDetailModal.tsx lo necesita
+
+loop por cada device en [switch-A, switch-B]
+    GOR -> RepoJob : add(Job(operation="vlan", device=device_name,\ngroup_job_id=group_job_id, parameters=parametros))\n» qué hace: persiste un Job nuevo en estado "pending" para\neste device puntual
+    activate RepoJob
+    note right of RepoJob
+      Job.pk_field="job_id" != PK real "id" (autoincrement) ->
+      Repository.add() busca primero por job_id antes de merge()
+      (rama especial de core/repository.py:add()) -- acá no
+      encuentra nada (job nuevo), INSERT liso.
+    end note
+    RepoJob --> GOR : job (status="pending")
+    deactivate RepoJob
+
+    GOR -> Queue : dispatch("orquestador.ejecutar", recurso,\ndevice_name, actor, job.job_id)\n» qué hace: envía el mensaje al broker de Celery para que un\nworker (cualquiera, otro proceso) ejecute la operación sobre\nESTE device puntual
+    activate Queue
+    Queue -> Queue : asdict(recurso)\n[SEGUNDA vez -- GOR ya lo había calculado\narriba para Job.parameters, JobQueue.dispatch()\nlo recalcula para el payload de Celery]\n» qué hace: vuelve a serializar el VLAN a dict -- necesario\nporque Celery no puede pickle-ar el dataclass tal cual,\nnecesita algo JSON-serializable (task_serializer="json")
+    Queue -> Queue : ejecutar_task.delay(recurso_dict, "vlan",\ndevice_name, actor, job_id)\n[Celery -- async, retorna al toque]\n» qué hace: publica la tarea en Redis (broker) y retorna\ninmediatamente -- ningún worker la ejecutó todavía en este punto
+    deactivate Queue
+end
+
+GOR --> Router : (group_job_id, job_entries)
+deactivate GOR
+
+Router --> Cliente : 200 {"success":true, "group_job_id":"...",\n"jobs":[{"device":"switch-A","job_id":"...","status":"pending"}, ...]}
+deactivate Router
+
+@enduml

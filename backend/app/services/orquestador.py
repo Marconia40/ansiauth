@@ -109,8 +109,27 @@ class Orquestador:
                 self._coordinador.limitar(device_name)
                 recurso.validar()
                 pre_state = recurso.reconciliar(device)
+
+                primer_intento = True
+
+                def _aplicar():
+                    # El pre_state de acá arriba solo es seguro reusarlo en
+                    # el primer intento -- corrección real: antes aplicar()
+                    # releía el estado del device en CADA intento, incluido
+                    # el primero, donde nada pudo haber cambiado todavía. A
+                    # partir del 2do intento sí hay que releer de verdad: un
+                    # intento previo puede haber tirado timeout (transitorio)
+                    # pero haberse aplicado igual en el device, y reusar el
+                    # pre_state viejo llevaría a reintentar un create sobre
+                    # algo que ya existe.
+                    nonlocal primer_intento
+                    if primer_intento:
+                        primer_intento = False
+                        return recurso.aplicar(device, pre_state=pre_state)
+                    return recurso.aplicar(device)
+
                 resultado, retry_count = self._ejecutar_con_retry(
-                    lambda: recurso.aplicar(device), job, device_name,
+                    _aplicar, job, device_name,
                 )
                 if resultado.get("rc", 0) != 0:
                     raise DeviceExecutionError(resultado.get("stderr") or resultado.get("stdout") or "Execution failed")

@@ -245,7 +245,7 @@ class Puerto:
         existente = next((p for p in puertos if p.interface == self.interface), None)
         return {"existed": existente is not None, "actual": existente}
 
-    def aplicar(self, device: "Device") -> dict:
+    def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """Mismo criterio que VLAN.aplicar(): el dict devuelto siempre
         incluye "accion", agregado acá, no por el driver — Fase 3
         (AuditListener) lo necesita para RF-AUD-02. `configure_port()`
@@ -260,7 +260,17 @@ class Puerto:
         pura ceremonia. `VendorDriver.configure_port()` pasa a devolver
         `dict` directo, mismo contrato que `create_vlan()`/
         `update_port_description()`/etc -- una excepción menos al patrón ya
-        establecido, no una clase nueva que justificar."""
+        establecido, no una clase nueva que justificar.
+
+        *pre_state* -- igual criterio que VLAN.aplicar(): si viene seteado
+        (``Orquestador.ejecutar()`` se lo pasa en el primer intento, con lo
+        que ya capturó para su propio rollback) las 4 ramas de campo único
+        de abajo lo usan en vez de llamar su propio ``reconciliar()`` de
+        nuevo. En ``None`` (reintentos reales, o default), cada rama relee
+        el estado -- necesario ahí porque el device puede haber cambiado de
+        verdad entre intentos. La rama composite (``configure_port()``) no
+        lo usa -- nunca llamó ``reconciliar()`` acá, no hay nada que
+        ahorrarle."""
         campos = self.mutation_fields
         if self._es_composite:
             # Sin rama no-op acá a propósito -- distinto alcance que las 4
@@ -274,13 +284,13 @@ class Puerto:
             return {**resultado, "accion": "configurar_puerto"}
         campo = next(iter(campos))
         if campo == "description":
-            return self._aplicar_description(device)
+            return self._aplicar_description(device, pre_state)
         if campo == "admin_up":
-            return self._aplicar_admin_up(device)
+            return self._aplicar_admin_up(device, pre_state)
         if campo == "access_vlan":
-            return self._aplicar_access_vlan(device)
+            return self._aplicar_access_vlan(device, pre_state)
         if campo == "allowed_vlans":
-            return self._aplicar_allowed_vlans(device)
+            return self._aplicar_allowed_vlans(device, pre_state)
         raise ValueError(f"Puerto.aplicar(): no hay driver call para el campo {campo!r}")
 
     def _noop_resultado(self, accion: str) -> dict:
@@ -292,38 +302,39 @@ class Puerto:
         al device cada vez."""
         return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": accion}
 
-    def _aplicar_description(self, device: "Device") -> dict:
-        estado = self.reconciliar(device)
+    def _aplicar_description(self, device: "Device", pre_state: "dict | None" = None) -> dict:
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and actual.description == self.description:
             return self._noop_resultado("actualizar_descripcion_puerto")
         resultado = device.driver.update_port_description(self.interface, self.description, device, device.password)
         return {**resultado, "accion": "actualizar_descripcion_puerto"}
 
-    def _aplicar_admin_up(self, device: "Device") -> dict:
+    def _aplicar_admin_up(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         accion = "activar_puerto" if self.admin_up else "desactivar_puerto"
-        estado = self.reconciliar(device)
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and actual.admin_up == self.admin_up:
             return self._noop_resultado(accion)
         resultado = device.driver.set_port_admin_state(self.interface, self.admin_up, device, device.password)
         return {**resultado, "accion": accion}
 
-    def _aplicar_access_vlan(self, device: "Device") -> dict:
+    def _aplicar_access_vlan(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """`access_vlan` en un puerto trunk es el PVID, no el access VLAN --
         corrección real encontrada en Fase 5 (armando `Orquestador._rollback`
         contra `port_execution_service.py: _rollback_access_vlan()`, que sí
         distingue esto): despachar siempre a `set_port_access_vlan` es
         incorrecto sobre un puerto en modo trunk, donde el driver correcto
-        es `set_trunk_pvid_vlan`. Necesita una lectura en vivo del modo
-        actual -- `RecursoGestionable.aplicar()` no recibe el `pre_state`
-        que `Orquestador` ya capturó por separado.
+        es `set_trunk_pvid_vlan`. Necesita el modo actual del puerto -- lo
+        trae *pre_state* (pasado por `Orquestador.ejecutar()` en el primer
+        intento) o, si no vino, una lectura en vivo propia vía
+        `reconciliar()`.
 
         El gate de modo ("access"/"trunk" solamente, rechaza "unknown") es
         otra corrección real encontrada comparando contra el `_validate()`
         real de `run_set_access_vlan_job()` -- sin esto, un puerto en modo
         no reconocido caía silenciosamente en la rama access."""
-        estado = self.reconciliar(device)
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and actual.mode not in ("access", "trunk"):
             raise ValueError(
@@ -339,7 +350,7 @@ class Puerto:
             resultado = device.driver.set_port_access_vlan(self.interface, self.access_vlan, device, device.password)
         return {**resultado, "accion": "asignar_vlan_acceso"}
 
-    def _aplicar_allowed_vlans(self, device: "Device") -> dict:
+    def _aplicar_allowed_vlans(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """`allowed_vlan_operation` ("replace"/"add"/"remove") necesita la
         lista actual del trunk para calcular la lista final -- el driver
         siempre reemplaza completo (`FASE_1.md`: "el driver siempre
@@ -356,7 +367,7 @@ class Puerto:
         sin esto, `allowed_vlans` se podía "aplicar" sobre un puerto en
         modo access, mandando `set_trunk_allowed_vlans` a un puerto que
         nunca va a exponer esa config."""
-        estado = self.reconciliar(device)
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and actual.mode != "trunk":
             raise ValueError(

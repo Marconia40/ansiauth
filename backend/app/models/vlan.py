@@ -126,7 +126,7 @@ class VLAN:
             "name": existente.name if existente is not None else None,
         }
 
-    def aplicar(self, device: "Device") -> dict:
+    def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """Aplica esta VLAN contra *device* — decide sola si es create, update,
         delete o no-op. Reemplaza vlan_execution_service.py: create_vlan_on_device()/
         delete_vlan()/update_vlan_description() (fusionadas: qué hacer lo decide
@@ -137,8 +137,17 @@ class VLAN:
         solo sabe de rc/stdout/stderr), lo agrega este método antes de retornar.
         Fase 3 (AuditListener) lo necesita para no perder la granularidad real
         de RF-AUD-02 detrás del evento genérico "recurso_aplicado" que despacha
-        Orquestador."""
-        pre_state = self.reconciliar(device)
+        Orquestador.
+
+        *pre_state* opcional — permite que el caller (``Orquestador.ejecutar()``,
+        que ya llamó ``reconciliar()`` una vez para su propio pre_state de
+        rollback) se lo pase en el primer intento en vez de que se recalcule
+        acá. En ``None`` (default), lo calcula solo — usado en cada reintento
+        real después del primero, donde el estado del device puede haber
+        cambiado de verdad (ej. un intento previo tiró timeout pero sí llegó a
+        aplicarse) y no es seguro asumir el pre_state ya viejo."""
+        if pre_state is None:
+            pre_state = self.reconciliar(device)
         if self.eliminar:
             if not pre_state["existed"]:
                 return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": "eliminar_vlan"}
@@ -147,10 +156,12 @@ class VLAN:
         if pre_state["existed"] and pre_state["name"] == self.name:
             return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": "crear_vlan"}
         if pre_state["existed"] and pre_state["name"] != self.name:
-            self.validar()
+            # self.validar() NO se llama acá -- Orquestador.ejecutar() ya
+            # valida el nombre antes de entrar al retry loop (corrección
+            # real: antes se validaba de nuevo en cada intento, sobre un
+            # campo que no cambia entre intentos).
             resultado = device.driver.update_vlan(self.vlan_id, self.name, device, device.password)
             return {**resultado, "accion": "actualizar_vlan"}
-        self.validar()
         resultado = device.driver.create_vlan(self.vlan_id, self.name, device, device.password)
         return {**resultado, "accion": "crear_vlan"}
 
