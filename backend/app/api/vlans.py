@@ -3,7 +3,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
-from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
+from app.core.response import ok
+from app.core.scope import authorize_device, obtener_scope, require_authenticated
 from app.models.visibility_scope import VisibilityScope
 from app.models.vlan import VLAN
 from app.schemas.vlan import VLANCreate, VLANDelete, VLANUpdate
@@ -11,26 +12,15 @@ from app.schemas.vlan import VLANCreate, VLANDelete, VLANUpdate
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
-
 
 def _authz_devices(scope: VisibilityScope, device_names, *, min_role: str) -> None:
     """Enforce read/write access to every device in *device_names* against
-    the caller's VisibilityScope. The device→(site, group) lookup still
-    runs once per device, but the role check itself is in memory — the
-    loop no longer fires N SQL queries for authorization."""
-    threshold = _LVL[min_role]
+    the caller's VisibilityScope. A VLAN request can target N devices, so
+    require_scope()'s single-target pre-handler resolution doesn't fit --
+    this loops and calls the shared authorize_device() per device (same
+    helper api/jobs.py/api/ports.py use for their single-device case)."""
     for name in device_names:
-        resolved = resolver_site_group(name, "device")
-        role = scope.rol_para(*resolved) if resolved is not None else None
-        if _LVL.get(role or "", 0) < threshold:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"VLAN op on device '{name}' requires role >= {min_role} "
-                    f"(got {role or 'none'})"
-                ),
-            )
+        authorize_device(scope, name, "vlan_device_op", min_role)
 
 
 def _leer_vlans_en_vivo(device_name: str) -> list[dict]:
@@ -73,7 +63,7 @@ def get_vlans(
     if devices:
         _authz_devices(scope, devices, min_role="observer")
         result = {dev: _leer_vlans_en_vivo(dev) for dev in devices}
-        return {"success": True, "data": result}
+        return ok(result)
 
     if device is None:
         from app.core.config import EXECUTION_MODE
@@ -84,10 +74,10 @@ def get_vlans(
         # alcance de esta migración. Fuente real sin pasar por vlan_service.py
         # (muerto tras esta fase, ver "Callers rotos" de FASE_5.md).
         from app.services.vendors.mock import _mock_vlans
-        return {"success": True, "data": [v.to_dict() for v in _mock_vlans]}
+        return ok([v.to_dict() for v in _mock_vlans])
 
     _authz_devices(scope, [device], min_role="observer")
-    return {"success": True, "data": _leer_vlans_en_vivo(device)}
+    return ok(_leer_vlans_en_vivo(device))
 
 
 @router.post(
@@ -122,7 +112,7 @@ def create_vlan(
     # el rol real por cada device destino, ninguno se salta la autorización.
     _authz_devices(scope, vlan.devices, min_role="operator")
     group_job_id, jobs = group_operation_runner.encolar(entidad, vlan.devices, current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.delete(
@@ -151,7 +141,7 @@ def delete_vlan(
     # admin-only per device.
     _authz_devices(scope, data.devices, min_role="admin")
     group_job_id, jobs = group_operation_runner.encolar(entidad, data.devices, current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.patch(
@@ -180,4 +170,4 @@ def update_vlan(
             raise NotFoundError(f"Device '{dev_name}' not found")
     _authz_devices(scope, data.devices, min_role="operator")
     group_job_id, jobs = group_operation_runner.encolar(entidad, data.devices, current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)

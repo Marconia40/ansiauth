@@ -183,4 +183,3 @@ REDIS_URL = settings.REDIS_URL
 
 ANSIBLE_BASE_PATH = _ANSIBLE_DIR
 INVENTORY_PATH = os.path.join(_ANSIBLE_DIR, "inventory", "inventory.ini")
-PLAYBOOKS_PATH = os.path.join(_ANSIBLE_DIR, "project")

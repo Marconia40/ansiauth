@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 PortMode = Literal["access", "trunk", "unknown"]
-PortConfigMode = Literal["access", "trunk"]
 
 # Interface names on both Huawei and Cisco use letters, digits, slashes,
 # colons, dots, dashes and underscores.  This regex is intentionally a

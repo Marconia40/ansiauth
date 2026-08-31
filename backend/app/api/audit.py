@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.core.config import AUDIT_RETENTION_DAYS
+from app.core.response import ok
 from app.core.scope import obtener_scope, require_authenticated, require_system_admin
 from app.models.visibility_scope import VisibilityScope
 
@@ -28,7 +29,7 @@ def purge_audit_log(
 
     days = retention_days if retention_days is not None else AUDIT_RETENTION_DAYS
     deleted = audit_repository.purge_old(days, triggered_by=current_user["username"])
-    return {"success": True, "data": {"deleted": deleted, "retention_days": days}}
+    return ok({"deleted": deleted, "retention_days": days})
 
 
 @router.get(

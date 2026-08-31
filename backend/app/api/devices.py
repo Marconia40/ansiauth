@@ -1,9 +1,15 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.core.scope import obtener_scope, require_authenticated, require_scope, resolver_site_group
+from app.core.response import ok
+from app.core.scope import (
+    obtener_scope,
+    require_authenticated,
+    require_scope,
+    visible_or_404,
+)
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.device import DeviceCreate, DeviceMove, DevicePublic, DeviceUpdate
 
@@ -40,7 +46,7 @@ def list_devices(
     from app.composition import inventory
 
     devices = inventory.list(scope, site_id=site_id, device_group_id=device_group_id)
-    return {"success": True, "data": [_to_public(d) for d in devices]}
+    return ok([_to_public(d) for d in devices])
 
 
 @router.get(
@@ -58,11 +64,8 @@ def get_device(
     device = inventory.get(name)
     if not device:
         raise NotFoundError(f"Device '{name}' not found")
-    resolved = resolver_site_group(name, "device")
-    role = scope.rol_para(*resolved) if resolved is not None else None
-    if role is None:
-        raise NotFoundError(f"Device '{name}' not found")
-    return {"success": True, "data": _to_public(device)}
+    visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
+    return ok(_to_public(device))
 
 
 @router.post(
@@ -76,22 +79,10 @@ def get_device(
 )
 def create_device(
     data: DeviceCreate,
-    current_user: dict = Depends(require_authenticated),
-    scope: VisibilityScope = Depends(obtener_scope),
+    current_user: dict = Depends(require_scope("register_device")),
 ):
     from app.composition import inventory
 
-    # site_id lives in the body, not the path — the require_scope dep
-    # can't pre-resolve it, so this stays imperative.
-    role = scope.rol_para(data.site_id, None) if data.site_id else None
-    if not current_user.get("is_system_admin") and role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"register_device requires admin on site {data.site_id} "
-                f"(got {role or 'none'})"
-            ),
-        )
     try:
         device = inventory.register(
             name=data.name,
@@ -106,7 +97,7 @@ def create_device(
         )
     except ValueError as e:
         raise ValidationError(str(e))
-    return {"success": True, "data": _to_public(device)}
+    return ok(_to_public(device))
 
 
 @router.put(
@@ -121,8 +112,7 @@ def create_device(
 def update_device(
     name: str,
     data: DeviceUpdate,
-    current_user: dict = Depends(require_authenticated),
-    scope: VisibilityScope = Depends(obtener_scope),
+    current_user: dict = Depends(require_scope("edit_device")),
 ):
     from app.composition import device_repository, event_dispatcher
     from app.models.domain_event import DomainEvent
@@ -131,16 +121,6 @@ def update_device(
     provided = data.model_dump(exclude_unset=True)
     if not provided:
         raise ValidationError("No fields provided for update")
-    resolved = resolver_site_group(name, "device")
-    role = scope.rol_para(*resolved) if resolved is not None else None
-    if not current_user.get("is_system_admin") and role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"edit_device requires admin on device '{name}' "
-                f"(got {role or 'none'})"
-            ),
-        )
     device = device_repository.get(name)
     if device is None:
         raise NotFoundError(f"Device '{name}' not found")
@@ -163,7 +143,7 @@ def update_device(
         "update_device", device, device, current_user["username"],
         {"name": name, "updated_fields": audit_fields},
     )])
-    return {"success": True, "data": _to_public(device)}
+    return ok(_to_public(device))
 
 
 @router.post(
@@ -185,7 +165,7 @@ def move_device(
     from app.composition import inventory
 
     device = inventory.move(name, body.device_group_id, actor=current_user)
-    return {"success": True, "data": _to_public(device)}
+    return ok(_to_public(device))
 
 
 
@@ -196,17 +176,9 @@ def move_device(
 )
 def delete_device(
     name: str,
-    current_user: dict = Depends(require_authenticated),
-    scope: VisibilityScope = Depends(obtener_scope),
+    current_user: dict = Depends(require_scope("delete_device")),
 ):
     from app.composition import inventory
 
-    resolved = resolver_site_group(name, "device")
-    role = scope.rol_para(*resolved) if resolved is not None else None
-    if not current_user.get("is_system_admin") and role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail=f"delete_device requires admin on device '{name}' (got {role or 'none'})",
-        )
     inventory.deregister(name, actor=current_user)
-    return {"success": True, "data": {"name": name}}
+    return ok({"name": name})

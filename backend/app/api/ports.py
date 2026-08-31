@@ -5,7 +5,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
-from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
+from app.core.response import ok
+from app.core.scope import authorize_device, obtener_scope, require_authenticated
 from app.models.port import Puerto
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.port import (
@@ -23,24 +24,14 @@ from app.schemas.port import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
-
-
 def _authz_device(scope: VisibilityScope, device_name: str, *, min_role: str) -> None:
     """Enforce read/write access to *device_name* against the caller's
-    VisibilityScope. ``device`` is a body parameter here — the
-    require_scope() resolver only reads path + body targets, so this
-    imperative check stays (mismo criterio que Fase 5/A6, api/vlans.py)."""
-    resolved = resolver_site_group(device_name, "device")
-    role = scope.rol_para(*resolved) if resolved is not None else None
-    if _LVL.get(role or "", 0) < _LVL[min_role]:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"Port op on device '{device_name}' requires role >= {min_role} "
-                f"(got {role or 'none'})"
-            ),
-        )
+    VisibilityScope. 10 endpoints here each need a different min_role, so
+    a single require_scope() op wouldn't cover the family -- this stays an
+    explicit call, but delegates to the one shared authorize_device()
+    (api/jobs.py/api/vlans.py use the same helper, no more 3 duplicate
+    ranking dicts)."""
+    authorize_device(scope, device_name, "port_device_op", min_role)
 
 
 def _require_port_driver_with(device: "Device", method_name: str):
@@ -136,7 +127,7 @@ def list_ports(
                 for p in puertos
             ],
         }
-        return {"success": True, "data": payload}
+        return ok(payload)
 
     _authz_device(scope, device, min_role="observer")
     dev = device_repository.get(device)
@@ -171,7 +162,7 @@ def list_ports(
             for p in puertos
         ],
     }
-    return {"success": True, "data": payload}
+    return ok(payload)
 
 
 @router.patch(
@@ -211,7 +202,7 @@ def update_port_description(
     _require_port_driver_with(dev, "update_port_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.patch(
@@ -251,7 +242,7 @@ def set_port_admin_state(
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.patch(
@@ -294,7 +285,7 @@ def set_port_access_vlan(
     _require_port_driver_with(dev, "set_port_access_vlan")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.patch(
@@ -344,7 +335,7 @@ def set_trunk_allowed_vlans(
     _require_port_driver_with(dev, "set_trunk_allowed_vlans")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.post(
@@ -386,7 +377,7 @@ def set_port_access_mode(
     _require_port_driver_with(dev, "set_access_mode")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.post(
@@ -434,7 +425,7 @@ def set_port_trunk_mode(
     _require_port_driver_with(dev, "set_trunk_mode")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.post(
@@ -481,7 +472,7 @@ def shutdown_port(
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)
 
 
 @router.post(
@@ -523,4 +514,4 @@ def enable_port(
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return {"success": True, "group_job_id": group_job_id, "jobs": jobs}
+    return ok(group_job_id=group_job_id, jobs=jobs)

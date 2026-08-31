@@ -30,17 +30,6 @@ def _mask_inventory(inv_str: str) -> str:
     return inv_str[:value_start] + "***REDACTED***" + inv_str[value_end:]
 
 
-def validate_inventory(inventory: str) -> None:
-    """Raise ValueError if inventory string is missing required fields."""
-    parts = inventory.split()
-    if not parts:
-        raise ValueError("Inventory string is empty")
-    if not parts[0]:
-        raise ValueError("Inventory hostname is missing")
-    if not any(p.startswith("ansible_host=") for p in parts):
-        raise ValueError("Inventory is missing ansible_host")
-
-
 def run_playbook(
     playbook: str,
     extravars: dict,

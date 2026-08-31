@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.core.config import COOKIE_SAMESITE, COOKIE_SECURE, REFRESH_TOKEN_EXPIRE_MINUTES
+from app.core.response import ok
 from app.core.scope import require_system_admin
 from app.core.security import create_access_token
 from app.models.audit import AuditRecord
@@ -42,6 +43,14 @@ def _clear_refresh_cookie(response: Response) -> None:
     ),
 )
 def login(request: Request, response: Response, form_data: OAuth2PasswordRequestForm = Depends()):
+    """Todas las filas de auditoría de este archivo (login/refresh/unlock)
+    se quedan en el camino directo ``audit_repository.append()``, no pasan
+    por ``EventDispatcher``/``DomainEvent`` -- ``resource="auth"`` es un
+    sentinel que ``AuditRepository._aplicar_scope()`` matchea literal, no
+    corresponde a ninguna clase de dominio real, y varios de estos eventos
+    (login bloqueado/fallido) auditan un request que falló antes de tocar
+    ninguna entidad -- no hay ``recurso`` real que pasarle a
+    ``DomainEvent``. Mismo criterio que ``jobs.py:cancel_job``."""
     ip = request.client.host if request.client else "unknown"
     username = form_data.username
 
@@ -145,7 +154,7 @@ def logout(request: Request, response: Response):
     raw = request.cookies.get("refresh_token")
     revoked = refresh_token_service.revoke(raw) if raw else False
     _clear_refresh_cookie(response)
-    return {"success": True, "data": {"revoked": revoked}}
+    return ok({"revoked": revoked})
 
 
 @router.post(
@@ -173,4 +182,4 @@ def unlock_account(
         details={"username": username, "attempts_cleared": count},
         status="success",
     ))
-    return {"success": True, "data": {"username": username, "attempts_cleared": count}}
+    return ok({"username": username, "attempts_cleared": count})

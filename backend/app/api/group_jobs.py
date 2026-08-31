@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 
 from app.composition import job_repository
 from app.core.exceptions import NotFoundError
+from app.core.response import ok
 from app.core.scope import require_authenticated
 
 logger = logging.getLogger(__name__)
@@ -26,4 +27,4 @@ def get_group_job(
     resumen = job_repository.resumen_de_grupo(group_job_id)
     if resumen is None:
         raise NotFoundError(f"Group job '{group_job_id}' not found")
-    return {"success": True, "data": resumen}
+    return ok(resumen)

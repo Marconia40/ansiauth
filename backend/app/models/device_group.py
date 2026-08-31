@@ -30,6 +30,9 @@ class DeviceGroup:
     es_default: bool = False
     created_at: Optional[datetime] = None
 
+    def repositorio(self) -> str:
+        return "device_group"
+
     def renombrar(self, nuevo_nombre: str) -> None:
         if self.es_default:
             raise DefaultGroupImmutableError(

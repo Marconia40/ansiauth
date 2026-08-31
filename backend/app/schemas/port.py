@@ -61,20 +61,25 @@ class PortRead(BaseModel):
     )
 
 
-class PortDescriptionUpdateRequest(BaseModel):
-    """Request body for ``PATCH /api/v1/ports/description`` (Step 2.1).
+class _PortTargetRequest(BaseModel):
+    """Shared device+interface target for every single-port write request."""
 
-    Single device only — the spec deliberately keeps Step 2.1 narrow.
-    Empty ``description`` is allowed and means "clear the description".
-    """
-
-    device: str = Field(..., min_length=1, description="Target device name (single device only).")
+    device: str = Field(..., min_length=1, description="Target device name.")
     interface: str = Field(
         ...,
         min_length=2,
         max_length=64,
         description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
     )
+
+
+class PortDescriptionUpdateRequest(_PortTargetRequest):
+    """Request body for ``PATCH /api/v1/ports/description`` (Step 2.1).
+
+    Single device only — the spec deliberately keeps Step 2.1 narrow.
+    Empty ``description`` is allowed and means "clear the description".
+    """
+
     description: str = Field(
         default="",
         max_length=200,
@@ -85,7 +90,7 @@ class PortDescriptionUpdateRequest(BaseModel):
     )
 
 
-class PortAdminStateUpdateRequest(BaseModel):
+class PortAdminStateUpdateRequest(_PortTargetRequest):
     """Request body for ``PATCH /api/v1/ports/admin-state`` (Step 2.2).
 
     Single device only.  ``enabled=True`` brings the interface up
@@ -93,20 +98,13 @@ class PortAdminStateUpdateRequest(BaseModel):
     down (``shutdown``).
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
     enabled: bool = Field(
         ...,
         description="Desired admin state — True to enable, False to disable.",
     )
 
 
-class PortAccessVlanUpdateRequest(BaseModel):
+class PortAccessVlanUpdateRequest(_PortTargetRequest):
     """Request body for ``PATCH /api/v1/ports/access-vlan`` (Step 2.3).
 
     Single device only.  Sets the access VLAN on an interface that is
@@ -114,13 +112,6 @@ class PortAccessVlanUpdateRequest(BaseModel):
     mode via pre-state before invoking the driver.
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
     vlan_id: int = Field(
         ...,
         ge=1,
@@ -129,7 +120,7 @@ class PortAccessVlanUpdateRequest(BaseModel):
     )
 
 
-class PortTrunkVlansUpdateRequest(BaseModel):
+class PortTrunkVlansUpdateRequest(_PortTargetRequest):
     """Request body for ``PATCH /api/v1/ports/trunk-vlans`` (Step 2.4).
 
     Single device only.  The port must already be in trunk mode.
@@ -147,13 +138,6 @@ class PortTrunkVlansUpdateRequest(BaseModel):
     the computed list.
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
     mode: Literal["replace", "add", "remove"] = Field(
         ...,
         description=(
@@ -172,7 +156,7 @@ class PortTrunkVlansUpdateRequest(BaseModel):
     )
 
 
-class PortSetAccessModeRequest(BaseModel):
+class PortSetAccessModeRequest(_PortTargetRequest):
     """Request body for ``POST /api/v1/ports/access-mode``.
 
     Sets a single interface to access mode with *access_vlan*, atomically.
@@ -180,13 +164,6 @@ class PortSetAccessModeRequest(BaseModel):
     this specific, well-defined operation.
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
     access_vlan: int = Field(
         ...,
         ge=1,
@@ -195,7 +172,7 @@ class PortSetAccessModeRequest(BaseModel):
     )
 
 
-class PortSetTrunkModeRequest(BaseModel):
+class PortSetTrunkModeRequest(_PortTargetRequest):
     """Request body for ``POST /api/v1/ports/trunk-mode``.
 
     Sets a single interface to trunk mode with *native_vlan* (PVID) and
@@ -206,13 +183,6 @@ class PortSetTrunkModeRequest(BaseModel):
     on a port that's already trunk.
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
     native_vlan: int = Field(
         ...,
         ge=1,
@@ -226,31 +196,15 @@ class PortSetTrunkModeRequest(BaseModel):
     )
 
 
-class PortShutdownRequest(BaseModel):
+class PortShutdownRequest(_PortTargetRequest):
     """Request body for ``POST /api/v1/ports/shutdown`` (Step 3.3).
 
     Administratively disables a single interface (``shutdown`` on the device).
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
 
-
-class PortEnableRequest(BaseModel):
+class PortEnableRequest(_PortTargetRequest):
     """Request body for ``POST /api/v1/ports/enable`` (Step 3.3).
 
     Administratively enables a single interface (``no shutdown`` / ``undo shutdown``).
     """
-
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )

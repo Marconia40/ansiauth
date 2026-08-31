@@ -17,6 +17,7 @@ from typing import Optional, Tuple
 
 from fastapi import Depends, HTTPException, Request
 
+from app.core.exceptions import NotFoundError
 from app.db.models import DeviceGroupModel, DeviceModel, SiteModel, UserModel
 from app.db.session import get_session
 from app.models.visibility_scope import VisibilityScope
@@ -35,8 +36,10 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 OP_MIN_ROLE: dict[str, Tuple[str, str]] = {
     # ── Device reads / writes ─────────────────────────────────────────────
+    # read_device is used by visible_or_404() below, not require_scope() --
+    # GET /devices/{name} hides existence with a 404 rather than confirming
+    # it via a 403, so it can't go through the always-403 require_scope path.
     "read_device":                    ("device",       "observer"),
-    "write_device_config":            ("device",       "operator"),   # VLAN/port ops
     "edit_device":                    ("device",       "admin"),
     "delete_device":                  ("device",       "admin"),
     # register_device is scoped by the target site/group from the request body.
@@ -46,15 +49,19 @@ OP_MIN_ROLE: dict[str, Tuple[str, str]] = {
     # runtime once the source and target sites are known.
     "move_device_same_site":          ("device",       "operator"),
     "move_device_cross_site":         ("site",         "admin"),      # both sides
+    # VLAN/port ops don't fit require_scope() (VLAN targets N devices per
+    # request; ports needs a distinct min_role per one of 10 endpoints) --
+    # they call authorize_device() directly instead, see below.
     # ── Group ─────────────────────────────────────────────────────────────
-    "read_group":                     ("device_group", "observer"),
-    "list_group_devices":             ("device_group", "observer"),
+    "read_group":                     ("device_group", "observer"),   # visible_or_404()
+    "list_group_devices":             ("device_group", "observer"),   # visible_or_404()
     "create_group":                   ("site",         "admin"),
     "edit_group":                     ("device_group", "admin"),
     "delete_group":                   ("device_group", "admin"),
     # ── Site ──────────────────────────────────────────────────────────────
-    "read_site":                      ("site",         "observer"),
+    "read_site":                      ("site",         "observer"),   # visible_or_404()
     "list_site_groups":               ("site",         "observer"),
+    "edit_site":                      ("site",         "admin"),
     # site create/delete + PUT /users/{id}/system-admin use require_system_admin
     # (they are not per-scope), so they intentionally have no entry here.
 }
@@ -460,3 +467,32 @@ def _enforce(role: Optional[str], min_role: str, op: str, scope_kind: str, targe
                 f"'{min_role}' for operation '{op}'"
             ),
         )
+
+
+# ─── Shared checks for callers that can't use require_scope() ──────────────
+
+
+def authorize_device(scope: VisibilityScope, device_name: str, op: str, min_role: str) -> None:
+    """Single-device 403 check for callers whose target can't be resolved by
+    require_scope()'s pre-handler dependency -- VLAN endpoints loop over N
+    devices per request (require_scope() only ever resolves one target), and
+    job endpoints only learn the target device after a DB lookup inside the
+    handler body. Replaces 3 independently-duplicated implementations that
+    used to live in api/jobs.py, api/vlans.py and api/ports.py, each with
+    its own copy of the observer/operator/admin ranking dict."""
+    resolved = resolver_site_group(device_name, "device")
+    role = scope.rol_para(*resolved) if resolved is not None else None
+    _enforce(role, min_role, op, "device", device_name)
+
+
+def visible_or_404(
+    scope: VisibilityScope, target, kind: str, min_role: str, not_found_message: str,
+) -> None:
+    """Like _enforce(), but denies with 404 instead of 403 -- for GETs that
+    deliberately hide a resource's existence from callers without
+    visibility (a 403 would confirm the resource exists), instead of
+    require_scope()'s always-403 behavior."""
+    resolved = resolver_site_group(target, kind)
+    role = scope.rol_para(*resolved) if resolved is not None else None
+    if role is None or _ROLE_LEVEL.get(role, 0) < _ROLE_LEVEL[min_role]:
+        raise NotFoundError(not_found_message)

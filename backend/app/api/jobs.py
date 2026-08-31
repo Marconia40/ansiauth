@@ -5,7 +5,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.exceptions import NotFoundError, TransicionInvalidaError
-from app.core.scope import obtener_scope, require_authenticated, resolver_site_group
+from app.core.response import ok
+from app.core.scope import authorize_device, obtener_scope, require_authenticated
 from app.models.audit import AuditRecord
 from app.models.visibility_scope import VisibilityScope
 
@@ -99,13 +100,7 @@ def list_jobs(
         page=page,
         page_size=page_size,
     )
-    return {
-        "success": True,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "items": [_format_job(j) for j in jobs],
-    }
+    return ok(total=total, page=page, page_size=page_size, items=[_format_job(j) for j in jobs])
 
 
 @router.get(
@@ -125,27 +120,18 @@ def get_job(
         raise NotFoundError(f"Job '{job_id}' not found")
     if job.device:
         _check_device_scope(scope, job.device, min_role="observer")
-    return {"success": True, "data": _format_job(job)}
-
-
-_LVL = {"observer": 1, "operator": 2, "admin": 3, "super-admin": 99}
+    return ok(_format_job(job))
 
 
 def _check_device_scope(
     scope: VisibilityScope, device_name: str, *, min_role: str,
 ) -> None:
-    """Shared authz for job endpoints — reads the caller's role on the
-    device from the pre-resolved VisibilityScope."""
-    resolved = resolver_site_group(device_name, "device")
-    role = scope.rol_para(*resolved) if resolved is not None else None
-    if _LVL.get(role or "", 0) < _LVL[min_role]:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"Job operation on device '{device_name}' requires "
-                f"role >= {min_role} (got {role or 'none'})"
-            ),
-        )
+    """Shared authz for job endpoints — the target device is only known
+    after job_repository.get() runs inside the handler, so it can't use
+    require_scope()'s pre-handler resolution. Thin wrapper around
+    core.scope.authorize_device() (single implementation shared with
+    api/vlans.py/api/ports.py, replacing 3 independent copies)."""
+    authorize_device(scope, device_name, "job_device_op", min_role)
 
 
 @router.post(
@@ -200,4 +186,4 @@ def cancel_job(
         job_id=job_id,
         device=job.device,
     ))
-    return {"success": True, "data": {"job_id": job.job_id, "status": job.status}}
+    return ok({"job_id": job.job_id, "status": job.status})
