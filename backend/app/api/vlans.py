@@ -2,9 +2,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
+from app.core.exceptions import DeviceExecutionError, ValidationError
 from app.core.response import ok
-from app.core.scope import authorize_device, obtener_scope, require_authenticated
+from app.core.scope import authorize_device, obtener_scope, require_authenticated, require_device
 from app.models.visibility_scope import VisibilityScope
 from app.models.vlan import VLAN
 from app.schemas.vlan import VLANCreate, VLANDelete, VLANUpdate
@@ -13,25 +13,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _authz_devices(scope: VisibilityScope, device_names, *, min_role: str) -> None:
+def _authz_devices(scope: VisibilityScope, device_names, *, min_role: str, resolved_by_name=None) -> None:
     """Enforce read/write access to every device in *device_names* against
     the caller's VisibilityScope. A VLAN request can target N devices, so
     require_scope()'s single-target pre-handler resolution doesn't fit --
     this loops and calls the shared authorize_device() per device (same
-    helper api/jobs.py/api/ports.py use for their single-device case)."""
+    helper api/jobs.py/api/ports.py use for their single-device case).
+
+    *resolved_by_name*, when given (``{name: Device}``, from callers that
+    already ran require_device() on every name), lets each
+    authorize_device() call skip its own JOIN query -- duplication found
+    in a code review: create_vlan()/delete_vlan()/update_vlan() already
+    fetch every device once (for the existence check) before this runs."""
     for name in device_names:
-        authorize_device(scope, name, "vlan_device_op", min_role)
+        dev = resolved_by_name.get(name) if resolved_by_name else None
+        resolved = (dev.site_id, dev.device_group_id) if dev is not None else None
+        authorize_device(scope, name, "vlan_device_op", min_role, resolved=resolved)
 
 
 def _leer_vlans_en_vivo(device_name: str) -> list[dict]:
     """FINAL_ARCHITECTURE.md §4 — GET /vlans lee en vivo, no de
     Repository[VLAN]. RedisCoordinator en vez de device_locks.acquire()
     directo (FASE_1.md, caller roto documentado)."""
-    from app.composition import device_repository, redis_coordinator
+    from app.composition import redis_coordinator
 
-    device = device_repository.get(device_name)
-    if device is None:
-        raise NotFoundError(f"Device '{device_name}' not found")
+    device = require_device(device_name)
     try:
         with redis_coordinator.bloquear(device_name, timeout=10):
             vlans = device.driver.get_vlans(device, device.password)
@@ -95,22 +101,29 @@ def create_vlan(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
-    entidad = VLAN(vlan_id=vlan.vlan_id, name=vlan.name)  # __post_init__ valida vlan_id
     try:
+        # VLAN(...) tiene que ir DENTRO del try -- bug real encontrado en
+        # una revisión de código: __post_init__ ya valida vlan_id (rango/
+        # reservado) y antes se construía la entidad afuera del try,
+        # así que un vlan_id reservado (1, 1002-1005) o fuera de rango
+        # tiraba un ValueError sin capturar -> 500 en vez del 400 que
+        # ValidationError da. update_vlan(), más abajo, ya lo hacía bien.
+        entidad = VLAN(vlan_id=vlan.vlan_id, name=vlan.name)
         entidad.validar()  # __post_init__ NO valida name (Fase 2) -- corrección
         # real: el snippet canónico de esta fase no lo llamaba, un nombre
         # inválido pasaría con 200 y recién fallaría adentro del job en vez
         # del 400 inmediato que ya da el código actual.
     except ValueError as e:
         raise ValidationError(str(e))
-    for dev_name in vlan.devices:
-        if device_repository.get(dev_name) is None:
-            raise NotFoundError(f"Device '{dev_name}' not found")
+    devices_by_name = {name: require_device(name) for name in vlan.devices}
     # require_authenticated/obtener_scope arriba autentican -- acá se chequea
     # el rol real por cada device destino, ninguno se salta la autorización.
-    _authz_devices(scope, vlan.devices, min_role="operator")
+    # resolved_by_name reusa los Device ya buscados arriba -- evita repetir
+    # el mismo JOIN 2 veces por device (duplicación encontrada en una
+    # revisión de código).
+    _authz_devices(scope, vlan.devices, min_role="operator", resolved_by_name=devices_by_name)
     group_job_id, jobs = group_operation_runner.encolar(entidad, vlan.devices, current_user["username"])
     return ok(group_job_id=group_job_id, jobs=jobs)
 
@@ -130,16 +143,21 @@ def delete_vlan(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
-    entidad = VLAN(vlan_id=vlan_id, eliminar=True)  # __post_init__ valida vlan_id
-    for dev_name in data.devices:
-        if device_repository.get(dev_name) is None:
-            raise NotFoundError(f"Device '{dev_name}' not found")
+    try:
+        # Mismo bug que create_vlan() -- ver esa nota. VLAN(...) sin try
+        # acá dejaba un vlan_id reservado/fuera de rango tirar 500, a
+        # pesar de que la propia descripción del endpoint dice "Reserved
+        # VLANs (1, 1002-1005) cannot be deleted" como si diera un 400.
+        entidad = VLAN(vlan_id=vlan_id, eliminar=True)
+    except ValueError as e:
+        raise ValidationError(str(e))
+    devices_by_name = {name: require_device(name) for name in data.devices}
     # Legacy delete_vlan required admin; ESC-3 keeps that gate — DELETE is
     # coarser-grained than create/update (harder to reverse) so it stays
     # admin-only per device.
-    _authz_devices(scope, data.devices, min_role="admin")
+    _authz_devices(scope, data.devices, min_role="admin", resolved_by_name=devices_by_name)
     group_job_id, jobs = group_operation_runner.encolar(entidad, data.devices, current_user["username"])
     return ok(group_job_id=group_job_id, jobs=jobs)
 
@@ -158,16 +176,14 @@ def update_vlan(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = VLAN(vlan_id=vlan_id, name=data.description)  # __post_init__ valida vlan_id
         entidad.validar()  # name -- __post_init__ no lo valida (Fase 2), ver nota en create_vlan()
     except ValueError as e:
         raise ValidationError(str(e))
-    for dev_name in data.devices:
-        if device_repository.get(dev_name) is None:
-            raise NotFoundError(f"Device '{dev_name}' not found")
-    _authz_devices(scope, data.devices, min_role="operator")
+    devices_by_name = {name: require_device(name) for name in data.devices}
+    _authz_devices(scope, data.devices, min_role="operator", resolved_by_name=devices_by_name)
     group_job_id, jobs = group_operation_runner.encolar(entidad, data.devices, current_user["username"])
     return ok(group_job_id=group_job_id, jobs=jobs)

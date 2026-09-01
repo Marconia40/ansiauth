@@ -21,13 +21,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _to_read(site) -> dict:
+_UNSET = object()
+
+
+def _to_read(site, *, device_count=_UNSET) -> dict:
+    """*device_count*, when given, skips this function's own per-item
+    count query -- list_sites() batches it across every site in one pass
+    instead of paying for it once per row (N+1 real, found in a code
+    review). Single-item callers (get_site(), create_site(), etc.) don't
+    pass it, so they still get the same 1 query as before."""
     from app.composition import site_repository
 
+    if device_count is _UNSET:
+        device_count = site_repository.contar_devices(site.id)
     return SiteRead(
         id=site.id, name=site.name, description=site.description,
         created_at=site.created_at, updated_at=site.updated_at,
-        device_count=site_repository.contar_devices(site.id),
+        device_count=device_count,
     ).model_dump()
 
 
@@ -95,7 +105,8 @@ def list_sites(
     from app.composition import site_repository
 
     sites = site_repository.visibles(scope)
-    return ok([_to_read(s) for s in sites])
+    device_counts = site_repository.contar_devices_batch([s.id for s in sites])
+    return ok([_to_read(s, device_count=device_counts.get(s.id, 0)) for s in sites])
 
 
 @router.get(
@@ -137,7 +148,16 @@ def list_groups_for_site(
     if site is None:
         raise NotFoundError(f"Site {site_id} not found")
     groups = device_group_repository.en_site(site_id)
-    return ok([_group_to_read(g) for g in groups])
+    # site_name=site.name reusa el site ya buscado arriba en vez de que
+    # _to_read() lo vuelva a pedir por cada grupo (redundante -- el caller
+    # ya lo tiene, todos los grupos son del mismo site_id por construcción
+    # de en_site()); member_count batcheado igual que list_groups().
+    # N+1 real, encontrado en una revisión de código.
+    member_counts = device_group_repository.contar_miembros_batch([g.id for g in groups])
+    return ok([
+        _group_to_read(g, member_count=member_counts.get(g.id, 0), site_name=site.name)
+        for g in groups
+    ])
 
 
 @router.put(

@@ -68,20 +68,26 @@ def get_audit_log(
     if from_date is not None and to_date is not None and from_date > to_date:
         raise HTTPException(status_code=422, detail="from_date must not be after to_date")
 
-    # Acepta 2 formatos de paginación (skip/limit y page/page_size) -- mismo
-    # cálculo real que el endpoint viejo, AuditRepository.query() solo habla
-    # page/page_size (Fase 3).
+    # Acepta 2 formatos de paginación (skip/limit y page/page_size).
+    # skip/limit pasa a AuditRepository.query() como offset= directo --
+    # bug real corregido acá: convertir skip a page vía (skip // limit) + 1
+    # solo da el offset exacto cuando skip es múltiplo de limit, cualquier
+    # otro valor perdía el resto en silencio (ej. skip=5,limit=100 daba
+    # page=1 -> offset 0, no 5).
     if page is not None or page_size is not None:
         effective_page = page if page is not None else 1
         effective_page_size = page_size if page_size is not None else limit
+        effective_offset = None
     else:
-        effective_page = (skip // limit) + 1 if limit else 1
+        effective_page = 1
         effective_page_size = limit
+        effective_offset = skip
 
     records, total = audit_repository.query(
         user=user, action=action, resource=resource, status=status,
         from_date=from_date, to_date=to_date, device_id=device_id, site_id=site_id,
         scope=scope, page=effective_page, page_size=effective_page_size,
+        offset=effective_offset,
     )
     response.headers["X-Total-Count"] = str(total)
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"

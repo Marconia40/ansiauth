@@ -4,9 +4,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.exceptions import DeviceExecutionError, NotFoundError, ValidationError
+from app.core.exceptions import DeviceExecutionError, ValidationError
 from app.core.response import ok
-from app.core.scope import authorize_device, obtener_scope, require_authenticated
+from app.core.scope import authorize_device, obtener_scope, require_authenticated, require_device
 from app.models.port import Puerto
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.port import (
@@ -24,14 +24,23 @@ from app.schemas.port import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-def _authz_device(scope: VisibilityScope, device_name: str, *, min_role: str) -> None:
+def _authz_device(
+    scope: VisibilityScope, device_name: str, *, min_role: str, device: "Device | None" = None,
+) -> None:
     """Enforce read/write access to *device_name* against the caller's
     VisibilityScope. 10 endpoints here each need a different min_role, so
     a single require_scope() op wouldn't cover the family -- this stays an
     explicit call, but delegates to the one shared authorize_device()
     (api/jobs.py/api/vlans.py use the same helper, no more 3 duplicate
-    ranking dicts)."""
-    authorize_device(scope, device_name, "port_device_op", min_role)
+    ranking dicts).
+
+    *device*, when the caller already fetched it via require_device(),
+    lets authorize_device() skip its own JOIN query -- (site_id,
+    device_group_id) are already populated on the domain object.
+    Duplication found in a code review: every write endpoint here already
+    has the Device in hand by the time this runs."""
+    resolved = (device.site_id, device.device_group_id) if device is not None else None
+    authorize_device(scope, device_name, "port_device_op", min_role, resolved=resolved)
 
 
 def _require_port_driver_with(device: "Device", method_name: str):
@@ -105,7 +114,7 @@ def list_ports(
     (FASE_5.md A6/A7). ``PortRead`` usa ``name``, ``Puerto`` usa
     ``interface`` — la traducción es explícita acá (FASE_5.md A7).
     """
-    from app.composition import device_repository, redis_coordinator
+    from app.composition import redis_coordinator
 
     if device is None:
         from app.core.config import EXECUTION_MODE
@@ -130,9 +139,7 @@ def list_ports(
         return ok(payload)
 
     _authz_device(scope, device, min_role="observer")
-    dev = device_repository.get(device)
-    if dev is None:
-        raise NotFoundError(f"Device '{device}' not found")
+    dev = require_device(device)
     try:
         with redis_coordinator.bloquear(device, timeout=10):
             puertos = dev.driver.list_ports(dev, dev.password)
@@ -186,7 +193,7 @@ def update_port_description(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = Puerto(interface=data.interface, description=data.description)
@@ -194,10 +201,8 @@ def update_port_description(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = device_repository.get(data.device)
-    if dev is None:
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "update_port_description")
 
@@ -226,7 +231,7 @@ def set_port_admin_state(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = Puerto(interface=data.interface, admin_up=data.enabled)
@@ -234,10 +239,8 @@ def set_port_admin_state(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = device_repository.get(data.device)
-    if dev is None:
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_port_admin_state")
 
@@ -269,7 +272,7 @@ def set_port_access_vlan(
     """No setea ``mode`` en el ``Puerto`` a propósito -- ``Puerto.aplicar()``
     lee el modo en vivo del device (FASE_5.md A7, corrección
     ``_aplicar_access_vlan``/``Puerto.validar()``)."""
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = Puerto(interface=data.interface, access_vlan=data.vlan_id)
@@ -277,12 +280,19 @@ def set_port_access_vlan(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = device_repository.get(data.device)
-    if dev is None:
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_port_access_vlan")
+    # Puerto._aplicar_access_vlan() despacha a set_trunk_pvid_vlan() en vez
+    # de acá cuando el puerto resulta estar en modo trunk (access_vlan es
+    # el PVID en ese caso) -- bug real encontrado en una revisión de
+    # código: este gate solo chequeaba el método que NO se termina
+    # llamando en ese escenario. Un driver que implemente uno sin el otro
+    # pasaba el gate (200, job encolado) y explotaba después con
+    # NotImplementedError crudo adentro del worker en vez del 501 limpio
+    # que este chequeo existe para dar.
+    _require_port_driver_with(dev, "set_trunk_pvid_vlan")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return ok(group_job_id=group_job_id, jobs=jobs)
@@ -315,7 +325,7 @@ def set_trunk_allowed_vlans(
     """``data.mode`` ("replace"/"add"/"remove") es
     ``Puerto.allowed_vlan_operation``, no ``Puerto.mode`` (switchport
     mode) -- mismo nombre, dos conceptos distintos (FASE_5.md A7)."""
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = Puerto(
@@ -327,10 +337,8 @@ def set_trunk_allowed_vlans(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = device_repository.get(data.device)
-    if dev is None:
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_trunk_allowed_vlans")
 
@@ -361,7 +369,7 @@ def set_port_access_mode(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = Puerto(interface=data.interface, mode="access", access_vlan=data.access_vlan)
@@ -369,10 +377,8 @@ def set_port_access_mode(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = device_repository.get(data.device)
-    if dev is None:
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_access_mode")
 
@@ -406,7 +412,7 @@ def set_port_trunk_mode(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = Puerto(
@@ -417,10 +423,8 @@ def set_port_trunk_mode(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = device_repository.get(data.device)
-    if dev is None:
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_trunk_mode")
 
@@ -456,7 +460,7 @@ def shutdown_port(
     -- corrección real encontrada acá: chequear el nombre del endpoint
     viejo hubiera devuelto 501 siempre, ya que ningún driver sobreescribe
     ese stub (FASE_5.md A7)."""
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = Puerto(interface=data.interface, admin_up=False)
@@ -464,10 +468,8 @@ def shutdown_port(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = device_repository.get(data.device)
-    if dev is None:
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_port_admin_state")
 
@@ -498,7 +500,7 @@ def enable_port(
 ):
     """Wrapper semántico de ``admin_up=True`` -- ver nota en
     ``shutdown_port()``."""
-    from app.composition import device_repository, group_operation_runner
+    from app.composition import group_operation_runner
 
     try:
         entidad = Puerto(interface=data.interface, admin_up=True)
@@ -506,10 +508,8 @@ def enable_port(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = device_repository.get(data.device)
-    if dev is None:
-        raise NotFoundError(f"Device '{data.device}' not found")
-    _authz_device(scope, data.device, min_role="operator")
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_port_admin_state")
 

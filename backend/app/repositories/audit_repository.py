@@ -97,7 +97,15 @@ class AuditRepository(Repository):
         scope: VisibilityScope,
         page: int = 1,
         page_size: int = 100,
+        offset: Optional[int] = None,
     ) -> tuple[list[AuditRecord], int]:
+        """``offset``, cuando viene, gana sobre ``page`` para el cálculo de
+        SQL OFFSET -- necesario para el modo ``skip``/``limit`` (raw
+        offsets) de ``GET /audit``: convertir un ``skip`` arbitrario a
+        ``page`` vía ``(skip // page_size) + 1`` solo da el offset exacto
+        cuando ``skip`` es múltiplo de ``page_size`` -- cualquier otro
+        valor perdía el resto en silencio (bug real encontrado en una
+        revisión de código)."""
         with get_session() as session:
             q = session.query(AuditLogModel).order_by(AuditLogModel.timestamp.desc())
             q = self._aplicar_filtros(
@@ -108,7 +116,8 @@ class AuditRepository(Repository):
             )
             q = self._aplicar_scope(q, session, scope)
             total = q.count()
-            rows = q.offset((page - 1) * page_size).limit(page_size).all()
+            real_offset = offset if offset is not None else (page - 1) * page_size
+            rows = q.offset(real_offset).limit(page_size).all()
             return [_to_domain(r) for r in rows], total
 
     def count(

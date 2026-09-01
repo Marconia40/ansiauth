@@ -103,6 +103,28 @@ class DeviceGroupRepository(Repository):
         with get_session() as session:
             return session.query(DeviceModel).filter_by(device_group_id=group_id).count()
 
+    def contar_miembros_batch(self, group_ids: list[int]) -> dict[int, int]:
+        """Mismo conteo que ``contar_miembros()``, para varios grupos en 1
+        sola query (GROUP BY) en vez de N -- ``list_groups()``/
+        ``list_groups_for_site()`` hacían 1 query de conteo por grupo
+        devuelto (N+1 real, encontrado en una revisión de código). Grupos
+        sin ningún device no aparecen en el resultado -- el caller debe
+        usar ``.get(group_id, 0)``."""
+        from sqlalchemy import func
+
+        from app.db.models import DeviceModel
+
+        if not group_ids:
+            return {}
+        with get_session() as session:
+            rows = (
+                session.query(DeviceModel.device_group_id, func.count(DeviceModel.id))
+                .filter(DeviceModel.device_group_id.in_(group_ids))
+                .group_by(DeviceModel.device_group_id)
+                .all()
+            )
+            return {group_id: count for group_id, count in rows}
+
     def en_site(self, site_id: int) -> list[DeviceGroup]:
         with get_session() as session:
             rows = (

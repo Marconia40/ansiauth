@@ -172,6 +172,41 @@ class SiteRepository(Repository):
     def tiene_devices(self, site_id: int) -> bool:
         return self.contar_devices(site_id) > 0
 
+    def contar_devices_batch(self, site_ids: list[int]) -> dict[int, int]:
+        """Mismo conteo que ``contar_devices()``, para varios sites en 1
+        sola query en vez de N -- ``list_sites()`` hacía 1 query de conteo
+        por site devuelto (N+1 real, encontrado en una revisión de
+        código). Sites sin ningún device no aparecen en el resultado --
+        el caller debe usar ``.get(site_id, 0)``."""
+        from sqlalchemy import func
+
+        if not site_ids:
+            return {}
+        with get_session() as session:
+            rows = (
+                session.query(DeviceGroupModel.site_id, func.count(DeviceModel.id))
+                .join(DeviceModel, DeviceModel.device_group_id == DeviceGroupModel.id)
+                .filter(DeviceGroupModel.site_id.in_(site_ids))
+                .group_by(DeviceGroupModel.site_id)
+                .all()
+            )
+            return {site_id: count for site_id, count in rows}
+
+    def nombres_por_id(self, site_ids: list[int]) -> dict[int, str]:
+        """Nombre de cada site en *site_ids*, en 1 sola query -- reemplaza
+        N llamadas a ``get(site_id).name`` (N+1 real, encontrado en una
+        revisión de código; usado por ``device_groups.py:list_groups()``
+        para no pedir el site de cada grupo por separado)."""
+        if not site_ids:
+            return {}
+        with get_session() as session:
+            rows = (
+                session.query(SiteModel.id, SiteModel.name)
+                .filter(SiteModel.id.in_(site_ids))
+                .all()
+            )
+            return {site_id: name for site_id, name in rows}
+
     def eliminar(self, site_id: int) -> bool:
         """Copia site_service.py: delete_site() tal cual -- el orden de
         operaciones (null default_group_id -> borrar grupos -> borrar site)
@@ -184,12 +219,9 @@ class SiteRepository(Repository):
                 raise ValueError(
                     "The Base-Infrastructure site is system-managed and cannot be deleted"
                 )
-            device_count = (
-                session.query(DeviceModel)
-                .join(DeviceGroupModel, DeviceModel.device_group_id == DeviceGroupModel.id)
-                .filter(DeviceGroupModel.site_id == site_id)
-                .count()
-            )
+            # Reusa contar_devices() en vez de reimplementar el mismo JOIN a
+            # mano -- duplicación real encontrada en una revisión de código.
+            device_count = self.contar_devices(site_id)
             if device_count > 0:
                 raise SiteHasDevicesError(site_id, device_count)
             row.default_group_id = None

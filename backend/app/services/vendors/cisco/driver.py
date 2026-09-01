@@ -115,8 +115,7 @@ class CiscoVendor(VendorDriver):
     # ── Port mutation operations ──────────────────────────────────────────────
 
     def update_port_description(self, interface: str, description: str, device: Device, password: str) -> dict:
-        is_empty = not bool(description and description.strip())
-        line = "no description" if is_empty else f"description {description}"
+        line = "no description" if self._is_description_empty(description) else f"description {description}"
         return self._aplicar(
             {"parents": f"interface {interface}", "lines": [line]},
             device, password, op_label="update port description",

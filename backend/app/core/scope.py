@@ -472,15 +472,42 @@ def _enforce(role: Optional[str], min_role: str, op: str, scope_kind: str, targe
 # ─── Shared checks for callers that can't use require_scope() ──────────────
 
 
-def authorize_device(scope: VisibilityScope, device_name: str, op: str, min_role: str) -> None:
+def require_device(name: str):
+    """Fetch a Device by name or raise NotFoundError.
+
+    Shared by api/ports.py (9 call sites) and api/vlans.py (4) -- each
+    used to repeat ``device_repository.get(name); if ... is None: raise
+    NotFoundError(...)`` verbatim (13 copies total, duplication found in
+    a code review)."""
+    from app.composition import device_repository
+
+    device = device_repository.get(name)
+    if device is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    return device
+
+
+def authorize_device(
+    scope: VisibilityScope, device_name: str, op: str, min_role: str,
+    resolved: "Tuple[int, Optional[int]] | None" = None,
+) -> None:
     """Single-device 403 check for callers whose target can't be resolved by
     require_scope()'s pre-handler dependency -- VLAN endpoints loop over N
     devices per request (require_scope() only ever resolves one target), and
     job endpoints only learn the target device after a DB lookup inside the
     handler body. Replaces 3 independently-duplicated implementations that
     used to live in api/jobs.py, api/vlans.py and api/ports.py, each with
-    its own copy of the observer/operator/admin ranking dict."""
-    resolved = resolver_site_group(device_name, "device")
+    its own copy of the observer/operator/admin ranking dict.
+
+    *resolved*, when given, skips the internal resolver_site_group() JOIN
+    query -- callers that already fetched the Device (its (site_id,
+    device_group_id) are populated on the domain object, no extra query
+    needed) can pass those straight through instead of paying for the
+    exact same JOIN twice in one request. Found duplicated in a code
+    review: every write endpoint in api/ports.py already does
+    ``dev = require_device(name)`` before calling this."""
+    if resolved is None:
+        resolved = resolver_site_group(device_name, "device")
     role = scope.rol_para(*resolved) if resolved is not None else None
     _enforce(role, min_role, op, "device", device_name)
 

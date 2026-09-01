@@ -14,16 +14,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _to_read(group: DeviceGroup) -> dict:
+_UNSET = object()
+
+
+def _to_read(group: DeviceGroup, *, member_count=_UNSET, site_name=_UNSET) -> dict:
+    """*member_count*/*site_name*, when given, skip this function's own
+    per-item queries -- list_groups() batches both across every group in
+    one pass instead of paying for them once per row (N+1 real, found in
+    a code review). Single-item callers (get_group(), create_group())
+    don't pass them, so they still get the same 2 queries as before."""
     from app.composition import device_group_repository, site_repository
 
-    site = site_repository.get(group.site_id) if group.site_id else None
+    if member_count is _UNSET:
+        member_count = device_group_repository.contar_miembros(group.id)
+    if site_name is _UNSET:
+        site = site_repository.get(group.site_id) if group.site_id else None
+        site_name = site.name if site is not None else None
     return DeviceGroupRead(
         id=group.id, name=group.name, description=group.description,
         created_at=group.created_at,
-        member_count=device_group_repository.contar_miembros(group.id),
+        member_count=member_count,
         site_id=group.site_id,
-        site_name=site.name if site is not None else None,
+        site_name=site_name,
     ).model_dump()
 
 
@@ -86,10 +98,20 @@ def list_groups(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_group_repository
+    from app.composition import device_group_repository, site_repository
 
     groups = device_group_repository.visibles_para_usuario(scope)
-    return ok([_to_read(g) for g in groups])
+    member_counts = device_group_repository.contar_miembros_batch([g.id for g in groups])
+    site_ids = {g.site_id for g in groups if g.site_id}
+    site_names = site_repository.nombres_por_id(list(site_ids))
+    return ok([
+        _to_read(
+            g,
+            member_count=member_counts.get(g.id, 0),
+            site_name=site_names.get(g.site_id) if g.site_id else None,
+        )
+        for g in groups
+    ])
 
 
 @router.get(

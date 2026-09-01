@@ -27,6 +27,6 @@ class GroupOperationRunner:
                 group_job_id=group_job_id, parameters=parametros,
             )
             self._jobs.add(job)
-            self._job_queue.dispatch("orquestador.ejecutar", recurso, device_name, actor, job.job_id)
+            self._job_queue.dispatch(recurso, device_name, actor, job.job_id)
             job_entries.append({"device": device_name, "job_id": job.job_id, "status": job.status})
         return group_job_id, job_entries

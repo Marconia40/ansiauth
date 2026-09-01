@@ -163,6 +163,17 @@ class VendorDriver(ABC):
         ranges.append((start, prev))
         return ranges
 
+    @staticmethod
+    def _is_description_empty(description: str) -> bool:
+        """True when *description* should clear the port description
+        (``no description``/``undo description``) instead of setting it.
+
+        Was duplicated byte-for-byte in both concrete drivers'
+        ``update_port_description()`` -- only the negation keyword
+        differs per vendor, so that's the only part that stays local to
+        each driver."""
+        return not bool(description and description.strip())
+
     # ── VLAN mutation operations (must be implemented by every driver) ───────
 
     @abstractmethod
@@ -641,28 +652,4 @@ class VendorDriver(ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement set_trunk_mode yet"
-        )
-
-    def get_port(self, name: str, device: Device, password: str) -> Puerto | None:
-        """Return the ``Puerto`` for *name* on *device*, or ``None`` if absent.
-
-        Default implementation performs a full ``list_ports()`` scan.
-        Drivers that support a more efficient single-port fetch may override.
-
-        Parameters
-        ----------
-        name:
-            Interface identifier (e.g. ``"GigabitEthernet0/0/1"``).
-        device:
-            Domain device object.
-        password:
-            Plaintext device password.
-
-        Returns
-        -------
-        Puerto | None
-        """
-        return next(
-            (p for p in self.list_ports(device, password) if p.interface == name),
-            None,
         )

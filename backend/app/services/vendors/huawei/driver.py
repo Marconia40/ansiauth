@@ -104,8 +104,7 @@ class HuaweiVendor(VendorDriver):
     # ── Port mutation operations ──────────────────────────────────────────────
 
     def update_port_description(self, interface: str, description: str, device: Device, password: str) -> dict:
-        is_empty = not bool(description and description.strip())
-        line = "undo description" if is_empty else f"description {description}"
+        line = "undo description" if self._is_description_empty(description) else f"description {description}"
         block = f"system-view\ninterface {interface}\n{line}\ncommit\nquit\nquit"
         return self._aplicar({"command_block": block}, device, password, op_label="update port description")
 

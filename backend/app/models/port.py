@@ -384,8 +384,24 @@ class Puerto:
             )
         actuales = actual.allowed_vlans if actual is not None else None
 
-        if self.allowed_vlan_operation == "replace" or actuales is None:
+        # Bug real encontrado en una revisión de código: `actuales is None`
+        # (el puerto no se pudo leer -- timing, nombre de interfaz que el
+        # parser no reconoce, etc.) caía en la misma rama que
+        # `allowed_vlan_operation == "replace"`, sin importar si se había
+        # pedido "add" o "remove" -- un remove sobre un estado no-leído
+        # terminaba reemplazando el trunk entero por *solo* la lista que se
+        # quería sacar, en vez de fallar loud. "replace" sigue siendo válido
+        # sin estado previo (mismo criterio que _aplicar_modo_trunk, que
+        # tampoco exige leer el estado antes de reemplazar); "add"/"remove"
+        # ahora rechazan explícitamente cuando no hay lista actual con la
+        # que calcular el delta.
+        if self.allowed_vlan_operation == "replace":
             deseados = sorted(set(self.allowed_vlans))
+        elif actuales is None:
+            raise ValueError(
+                f"no se pudo leer la lista de VLANs actual del puerto {self.interface} "
+                f"-- no se puede calcular '{self.allowed_vlan_operation}' sin ese estado"
+            )
         elif self.allowed_vlan_operation == "add":
             deseados = sorted(set(actuales) | set(self.allowed_vlans))
         elif self.allowed_vlan_operation == "remove":

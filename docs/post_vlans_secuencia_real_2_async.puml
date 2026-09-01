@@ -114,7 +114,19 @@ deactivate Vendor
 VLAN --> Orq : pre_state = {"existed": False, "name": None}
 deactivate VLAN
 
-Orq -> Orq : primer_intento = True\ndef _aplicar(): ...\nself._ejecutar_con_retry(_aplicar, job, "switch-A")
+Orq -> Orq : job.pre_state = _pre_state_json_safe(pre_state)
+note right of Orq
+  Bug real corregido esta sesión (otra sesión, no la que agregó la
+  nota de abajo): ``pre_state`` se calculaba acá arriba y se usaba
+  para el rollback, pero nunca se escribía de vuelta al ``Job`` --
+  ``GET /jobs/{job_id}`` siempre devolvía ``pre_state: null``. Para
+  VLAN, ``_pre_state_json_safe()`` es un no-op real (este pre_state
+  ya es JSON-safe de por sí) -- el caso que sí necesita conversión es
+  Puerto (``pre_state["actual"]`` es un ``Puerto``, no serializable
+  tal cual), ver post_ports_trunk_mode_2_async.puml.
+end note
+
+Orq -> Orq : primer_intento = True\ndef _aplicar(): ...\nself._ejecutar_con_retry(_aplicar, job, "switch-A",\nmax_retries=job.max_retries)
 note right of Orq
   Corrección real de esta sesión: _aplicar() ya no es un lambda
   plano. En el 1er intento pasa el pre_state que ya se calculó
@@ -127,9 +139,13 @@ note right of Orq
   aplicó en el device: el reintento detecta el estado real y hace
   noop en vez de reintentar un create que fallaría con
   "VLAN already exists".
+
+  ``max_retries=job.max_retries`` (bug real corregido esta sesión,
+  aparte): antes _ejecutar_con_retry() ignoraba job.max_retries y
+  usaba siempre su propio default hardcodeado de 3.
 end note
 activate Orq
-loop hasta max_retries+1=4 intentos, corta en el primer rc==0
+loop hasta job.max_retries+1=4 intentos, corta en el primer rc==0
     Orq -> VLAN : recurso.aplicar(device, pre_state=pre_state)\n[pre_state pasado directo en el 1er intento --\nNO llama reconciliar()/get_vlans() de nuevo acá]
     activate VLAN
     alt pre_state["existed"] and pre_state["name"] == self.name
