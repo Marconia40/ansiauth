@@ -190,6 +190,39 @@ class MockVendor(VendorDriver):
         )
         return {"rc": 0, "stdout": "Simulated trunk VLANs applied", "stderr": "", "success": True}
 
+    def set_port_poe(
+        self, interface: str, enabled: bool, device: "Device", password: str
+    ) -> dict:
+        if device.name == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: set PoE on interface=%s device=%s enabled=%s",
+            interface, device.name, enabled,
+        )
+        return {"rc": 0, "stdout": "Simulated PoE state applied", "stderr": "", "success": True}
+
+    def set_storm_control(
+        self, interface: str, enabled: bool, threshold: "float | None", device: "Device", password: str
+    ) -> dict:
+        if device.name == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: set storm-control on interface=%s device=%s enabled=%s threshold=%s",
+            interface, device.name, enabled, threshold,
+        )
+        return {"rc": 0, "stdout": "Simulated storm-control applied", "stderr": "", "success": True}
+
+    def reset_port(
+        self, interface: str, device: "Device", password: str
+    ) -> dict:
+        if device.name == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: reset port to defaults on interface=%s device=%s",
+            interface, device.name,
+        )
+        return {"rc": 0, "stdout": "Simulated port reset applied", "stderr": "", "success": True}
+
     def set_access_mode(
         self, interface: str, vlan_id: int, device: "Device", password: str
     ) -> dict:

@@ -565,6 +565,89 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement set_trunk_allowed_vlans yet"
         )
 
+    def set_port_poe(
+        self,
+        interface: str,
+        enabled: bool,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """RF-PUERTO-09 — enable/disable Power-over-Ethernet on *interface*.
+
+        Vendor mapping:
+            * Cisco IOS  — ``power inline auto`` (enable) / ``power inline
+              never`` (disable) inside ``interface <name>`` parent context.
+            * Huawei VRP — ``poe enable`` / ``poe disable`` inside
+              ``interface <name>`` context.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_port_poe yet"
+        )
+
+    def set_storm_control(
+        self,
+        interface: str,
+        enabled: bool,
+        threshold: "float | None",
+        device: Device,
+        password: str,
+    ) -> dict:
+        """RF-PUERTO-07 — enable/disable broadcast storm-control on
+        *interface*, with a single percentage threshold (0-100). Simplified
+        scope decided with the user: one enabled flag + one threshold, not
+        the 3 traffic types (broadcast/multicast/unicast) real hardware
+        actually exposes separately.
+
+        *threshold* is required (non-``None``) when *enabled* is ``True`` —
+        enforced by ``Puerto.validar()`` before this is ever called.
+
+        Vendor mapping:
+            * Cisco IOS  — ``storm-control broadcast level <threshold>`` to
+              enable+set in one line, ``no storm-control broadcast level``
+              to disable.
+            * Huawei VRP — syntax varies by platform family, verify against
+              the real device (``storm-control ?`` / ``storm suppression
+              ?`` in interface view) before finalizing.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_storm_control yet"
+        )
+
+    def reset_port(
+        self,
+        interface: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """RF-PUERTO-10 — reset *interface* to its factory-default
+        configuration. Decided with the user: "delete port config" means
+        reset to defaults, not a selective per-field undo.
+
+        Vendor mapping:
+            * Cisco IOS  — ``default interface <name>`` (global-level
+              command, no ``interface`` parent context).
+            * Huawei VRP — ``clear configuration interface <name>`` inside
+              ``system-view``.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement reset_port yet"
+        )
+
     def set_access_mode(
         self,
         interface: str,

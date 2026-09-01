@@ -147,6 +147,28 @@ class CiscoVendor(VendorDriver):
             device, password, op_label="set trunk allowed VLANs",
         )
 
+    def set_port_poe(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
+        line = "power inline auto" if enabled else "power inline never"
+        return self._aplicar(
+            {"parents": f"interface {interface}", "lines": [line]},
+            device, password, op_label=f"set PoE enabled={enabled}",
+        )
+
+    def set_storm_control(
+        self, interface: str, enabled: bool, threshold: "float | None", device: Device, password: str,
+    ) -> dict:
+        line = f"storm-control broadcast level {threshold}" if enabled else "no storm-control broadcast level"
+        return self._aplicar(
+            {"parents": f"interface {interface}", "lines": [line]},
+            device, password, op_label=f"set storm-control enabled={enabled}",
+        )
+
+    def reset_port(self, interface: str, device: Device, password: str) -> dict:
+        return self._aplicar(
+            {"lines": [f"default interface {interface}"]},
+            device, password, op_label="reset port to defaults",
+        )
+
     def set_access_mode(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
         return self._aplicar(
             {

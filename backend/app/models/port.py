@@ -169,6 +169,12 @@ class Puerto:
     allowed_vlans: list[int] | None = None
     allowed_vlan_operation: str = "add"
     poe_enabled: bool | None = None
+    storm_control_enabled: bool | None = None
+    storm_control_threshold: float | None = None
+    # RF-PUERTO-10 -- marcador de intención "reset a defaults", mismo
+    # criterio que VLAN.eliminar: no es un campo de mutación más, es un
+    # discriminador que aplicar()/validar() chequean primero y cortan ahí.
+    reset: bool = False
     # -- solo lectura, el device las reporta, aplicar() nunca las mira --
     operational_up: bool | None = None
     speed: str | None = None
@@ -180,7 +186,8 @@ class Puerto:
     @property
     def mutation_fields(self) -> set[str]:
         campos = ("description", "admin_up", "mode", "access_vlan",
-                  "allowed_vlans", "poe_enabled")
+                  "allowed_vlans", "poe_enabled", "storm_control_enabled",
+                  "storm_control_threshold")
         return {c for c in campos if getattr(self, c) is not None}
 
     def validar(self) -> None:
@@ -204,12 +211,23 @@ class Puerto:
         mutación" a pesar de tener uno seteado. Hoy `poe_enabled` no es
         escribible por ningún endpoint real (solo aparece en `PortRead`,
         de solo lectura) así que era inalcanzable, pero las 2 listas podían
-        desalinearse sin que nada lo notara -- ahora hay una sola."""
+        desalinearse sin que nada lo notara -- ahora hay una sola.
+
+        ``self.reset`` corta antes que todo lo demás -- mismo criterio que
+        ``VLAN.validar()`` con ``self.eliminar``: un reset a defaults no
+        necesita (ni debe validar) ningún otro campo, los ignora todos."""
+        if self.reset:
+            return
         if not self.mutation_fields:
             raise ValueError(
                 "at least one mutation field must be provided "
-                "(description, admin_up, mode, access_vlan, allowed_vlans, or poe_enabled)"
+                "(description, admin_up, mode, access_vlan, allowed_vlans, "
+                "poe_enabled, storm_control_enabled, or reset)"
             )
+        if self.storm_control_enabled is True and self.storm_control_threshold is None:
+            raise ValueError("storm_control_enabled=True requires 'storm_control_threshold' to be set")
+        if self.storm_control_threshold is not None and not (0 <= self.storm_control_threshold <= 100):
+            raise ValueError("storm_control_threshold must be between 0 and 100")
         if self.mode == "access" and self.access_vlan is None:
             raise ValueError("mode='access' requires 'access_vlan' to be set")
         if self.mode == "trunk":
@@ -256,18 +274,31 @@ class Puerto:
         nuevo. En ``None`` (reintentos reales, o default), cada rama relee
         el estado -- necesario ahí porque el device puede haber cambiado de
         verdad entre intentos. Las 2 ramas de modo no lo usan -- igual que
-        el viejo camino compuesto, nunca llamaron ``reconciliar()`` acá."""
+        el viejo camino compuesto, nunca llamaron ``reconciliar()`` acá.
+
+        ``self.reset`` y storm-control se chequean antes que ``self.mode``
+        -- ``reset`` es exclusivo con cualquier otro campo (RF-PUERTO-10,
+        mismo nivel que ``VLAN.eliminar``). Storm-control es un par de
+        campos (``storm_control_enabled`` + ``storm_control_threshold``),
+        no encaja en el branch de "exactamente 1 campo" de abajo -- mismo
+        motivo por el que ``mode`` tiene su propio branch en vez de contar
+        como campo de mutación."""
+        if self.reset:
+            return self._aplicar_reset(device)
         if self.mode == "access":
             return self._aplicar_modo_access(device)
         if self.mode == "trunk":
             return self._aplicar_modo_trunk(device)
         campos = self.mutation_fields
+        if "storm_control_enabled" in campos:
+            return self._aplicar_storm_control(device, pre_state)
         if len(campos) != 1:
             raise ValueError(
                 f"Puerto.aplicar(): sin mode seteado se espera exactamente "
                 f"1 campo de mutación (se recibieron {sorted(campos)}) -- "
                 f"las únicas combinaciones válidas de 2+ campos son "
-                f"mode='access'+access_vlan o mode='trunk'+allowed_vlans"
+                f"mode='access'+access_vlan, mode='trunk'+allowed_vlans, o "
+                f"storm_control_enabled(+storm_control_threshold)"
             )
         campo = next(iter(campos))
         if campo == "description":
@@ -278,6 +309,8 @@ class Puerto:
             return self._aplicar_access_vlan(device, pre_state)
         if campo == "allowed_vlans":
             return self._aplicar_allowed_vlans(device, pre_state)
+        if campo == "poe_enabled":
+            return self._aplicar_poe(device, pre_state)
         raise ValueError(f"Puerto.aplicar(): no hay driver call para el campo {campo!r}")
 
     def _aplicar_modo_access(self, device: "Device") -> dict:
@@ -324,6 +357,21 @@ class Puerto:
         if actual is not None and actual.admin_up == self.admin_up:
             return self._noop_resultado(accion)
         resultado = device.driver.set_port_admin_state(self.interface, self.admin_up, device, device.password)
+        return {**resultado, "accion": accion}
+
+    def _aplicar_poe(self, device: "Device", pre_state: "dict | None" = None) -> dict:
+        """RF-PUERTO-09. Mismo shape que ``_aplicar_admin_up()`` -- no-op si
+        ya está en el estado pedido. La lectura de ``poe_enabled`` sigue
+        siendo ``None`` en ambos parsers (no se agregó un 4to comando de
+        lectura en esta pasada), así que ``actual.poe_enabled`` va a ser
+        ``None`` casi siempre en la práctica -- el no-op solo dispara si el
+        device en algún momento sí lo reporta."""
+        accion = "activar_poe" if self.poe_enabled else "desactivar_poe"
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
+        actual = estado.get("actual")
+        if actual is not None and actual.poe_enabled == self.poe_enabled:
+            return self._noop_resultado(accion)
+        resultado = device.driver.set_port_poe(self.interface, self.poe_enabled, device, device.password)
         return {**resultado, "accion": accion}
 
     def _aplicar_access_vlan(self, device: "Device", pre_state: "dict | None" = None) -> dict:
@@ -427,6 +475,28 @@ class Puerto:
         resultado = device.driver.set_trunk_allowed_vlans(self.interface, deseados, device, device.password)
         return {**resultado, "accion": "configurar_trunk_vlans"}
 
+    def _aplicar_storm_control(self, device: "Device", pre_state: "dict | None" = None) -> dict:
+        """RF-PUERTO-07, alcance simple (decisión con el usuario): un
+        booleano + 1 threshold global (%), no los 3 tipos de tráfico
+        (broadcast/multicast/unicast) por separado. Sin no-op -- igual que
+        el modo, la lectura no expone storm-control hoy, así que no hay
+        estado previo confiable contra el que comparar."""
+        accion = "activar_storm_control" if self.storm_control_enabled else "desactivar_storm_control"
+        resultado = device.driver.set_storm_control(
+            self.interface, self.storm_control_enabled, self.storm_control_threshold, device, device.password,
+        )
+        return {**resultado, "accion": accion}
+
+    def _aplicar_reset(self, device: "Device") -> dict:
+        """RF-PUERTO-10, decisión con el usuario: "eliminar configuración
+        del puerto" = reset a defaults (``default interface`` en Cisco,
+        ``clear configuration interface`` en Huawei), no un borrado
+        selectivo campo por campo. Sin pre_state/no-op a propósito -- mismo
+        criterio que los 2 branches de modo: no vale la pena detectar "ya
+        está en default" antes de mandar el comando."""
+        resultado = device.driver.reset_port(self.interface, device, device.password)
+        return {**resultado, "accion": "resetear_puerto"}
+
     def repositorio(self) -> str:
         return "puerto"
 
@@ -444,6 +514,9 @@ class Puerto:
             "allowed_vlans": list(self.allowed_vlans) if self.allowed_vlans is not None else None,
             "allowed_vlan_operation": self.allowed_vlan_operation,
             "poe_enabled": self.poe_enabled,
+            "storm_control_enabled": self.storm_control_enabled,
+            "storm_control_threshold": self.storm_control_threshold,
+            "reset": self.reset,
             "operational_up": self.operational_up,
             "speed": self.speed,
             "duplex": self.duplex,
@@ -465,6 +538,9 @@ class Puerto:
             allowed_vlans=list(allowed) if allowed is not None else None,
             allowed_vlan_operation=data.get("allowed_vlan_operation", "add"),
             poe_enabled=data.get("poe_enabled"),
+            storm_control_enabled=data.get("storm_control_enabled"),
+            storm_control_threshold=data.get("storm_control_threshold"),
+            reset=data.get("reset", False),
             operational_up=data.get("operational_up"),
             speed=data.get("speed"),
             duplex=data.get("duplex"),

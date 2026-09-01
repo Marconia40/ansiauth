@@ -130,6 +130,30 @@ class HuaweiVendor(VendorDriver):
         )
         return self._aplicar({"command_block": block}, device, password, op_label="set trunk allowed VLANs")
 
+    def set_port_poe(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
+        line = "poe enable" if enabled else "poe disable"
+        block = f"system-view\ninterface {interface}\n{line}\ncommit\nquit\nquit"
+        return self._aplicar({"command_block": block}, device, password, op_label=f"set PoE enabled={enabled}")
+
+    def set_storm_control(
+        self, interface: str, enabled: bool, threshold: "float | None", device: Device, password: str,
+    ) -> dict:
+        # Sintaxis pendiente de verificar contra el device real (varía por
+        # familia de plataforma VRP) -- ver base.py:set_storm_control().
+        line = f"storm-control broadcast {threshold}" if enabled else "undo storm-control broadcast"
+        block = f"system-view\ninterface {interface}\n{line}\ncommit\nquit\nquit"
+        return self._aplicar({"command_block": block}, device, password, op_label=f"set storm-control enabled={enabled}")
+
+    def reset_port(self, interface: str, device: Device, password: str) -> dict:
+        # "clear configuration interface" pide confirmación interactiva
+        # ("Warning: ... Continue? [Y/N]") y se aplica de inmediato -- no
+        # es un comando de candidate-config como el resto, no lleva
+        # "commit" después. Confirmado contra el device real: con "commit"
+        # en la línea siguiente, el device interpretaba eso como respuesta
+        # inválida al prompt Y/N y quedaba reintentando hasta timeout.
+        block = f"system-view\nclear configuration interface {interface}\ny\nquit"
+        return self._aplicar({"command_block": block}, device, password, op_label="reset port to defaults")
+
     # ── Mode-change operations ────────────────────────────────────────────────
 
     def set_access_mode(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:

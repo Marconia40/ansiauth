@@ -77,6 +77,31 @@ export interface PortSetTrunkModeRequest {
   allowed_vlans: number[];
 }
 
+// Body for PATCH /api/v1/ports/poe (RF-PUERTO-09).
+// enabled=true → `power inline auto` / `poe enable`; enabled=false → `power inline never` / `poe disable`.
+export interface PortPoeUpdateRequest {
+  device: string;
+  interface: string;
+  enabled: boolean;
+}
+
+// Body for PATCH /api/v1/ports/storm-control (RF-PUERTO-07). Simplified scope:
+// one enable flag + one global percentage threshold, not the 3 traffic types
+// real hardware exposes separately. threshold_percent is required when enabled=true.
+export interface PortStormControlUpdateRequest {
+  device: string;
+  interface: string;
+  enabled: boolean;
+  threshold_percent?: number | null;
+}
+
+// Body for POST /api/v1/ports/reset (RF-PUERTO-10). Resets the interface to
+// its factory-default configuration — no extra fields beyond device+interface.
+export interface PortResetRequest {
+  device: string;
+  interface: string;
+}
+
 // Response shape — matches the orchestration envelope used by VLAN endpoints,
 // so the existing JobNotificationContext can track these jobs unchanged.
 export interface PortJobResult {
