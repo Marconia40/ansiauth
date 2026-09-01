@@ -33,6 +33,16 @@ class CiscoVendor(VendorDriver):
     run-playbook/normalize/log boilerplate; this class only builds each
     operation's command content.
 
+    The actual CLI command text lives in ``commands.yaml`` (next to this
+    module), not here — real Cisco platforms vary in syntax (e.g. some
+    need ``switchport trunk encapsulation dot1q`` before ``trunk`` mode,
+    others reject that command outright), and editing a YAML to add a
+    variant is a lot cheaper than editing this class and rebuilding.  Each
+    method here only computes the substitution values (``vars``) and, for
+    binary operations, which named variant to request —
+    ``VendorDriver._aplicar_desde_template()`` does the rest (render,
+    execute, retry known-error alternatives).
+
     Normalized API
     --------------
     Mutation methods return:
@@ -58,21 +68,16 @@ class CiscoVendor(VendorDriver):
     # ── VLAN mutation operations ──────────────────────────────────────────────
 
     def create_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
-        return self._aplicar(
-            {"parents": f"vlan {vlan_id}", "lines": [f"name {name}"]},
-            device, password, op_label=f"create VLAN {vlan_id}",
+        return self._aplicar_desde_template(
+            "create_vlan", {"vlan_id": vlan_id, "name": name}, device, password,
         )
 
     def delete_vlan(self, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar(
-            {"lines": [f"no vlan {vlan_id}"]},
-            device, password, op_label=f"delete VLAN {vlan_id}",
-        )
+        return self._aplicar_desde_template("delete_vlan", {"vlan_id": vlan_id}, device, password)
 
     def update_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
-        return self._aplicar(
-            {"parents": f"vlan {vlan_id}", "lines": [f"name {name}"]},
-            device, password, op_label=f"update VLAN {vlan_id}",
+        return self._aplicar_desde_template(
+            "update_vlan", {"vlan_id": vlan_id, "name": name}, device, password,
         )
 
     def save_config(self, device: Device, password: str) -> dict:
@@ -82,12 +87,13 @@ class CiscoVendor(VendorDriver):
         Explicit operation only — never invoked automatically by any
         mutation method in this class.
         """
-        return self._aplicar({"commands": ["write"]}, device, password, op_label="save config")
+        return self._aplicar_desde_template("save_config", {}, device, password)
 
     # ── VLAN query operations ─────────────────────────────────────────────────
 
     def list_vlans(self, device: Device, password: str) -> list[VLAN]:
-        stdouts = self._leer(["show vlan brief"], device, password)
+        commands = self._cargar_comandos()["list_vlans"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
         from app.services.parsers.vlan_parser import parse_vlan_brief
         vlans = parse_vlan_brief(stdouts[0])
         return vlans
@@ -99,10 +105,8 @@ class CiscoVendor(VendorDriver):
     # ── Port query operation ──────────────────────────────────────────────────
 
     def list_ports(self, device: Device, password: str) -> list[Puerto]:
-        stdouts = self._leer(
-            ["show interfaces status", "show interfaces description", "show interfaces switchport"],
-            device, password,
-        )
+        commands = self._cargar_comandos()["list_ports"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
         status = stdouts[_STATUS_INDEX] if len(stdouts) > _STATUS_INDEX else ""
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         switchport = stdouts[_SWITCHPORT_INDEX] if len(stdouts) > _SWITCHPORT_INDEX else ""
@@ -115,83 +119,64 @@ class CiscoVendor(VendorDriver):
     # ── Port mutation operations ──────────────────────────────────────────────
 
     def update_port_description(self, interface: str, description: str, device: Device, password: str) -> dict:
-        line = "no description" if self._is_description_empty(description) else f"description {description}"
-        return self._aplicar(
-            {"parents": f"interface {interface}", "lines": [line]},
-            device, password, op_label="update port description",
+        variant = "clear" if self._is_description_empty(description) else "set"
+        return self._aplicar_desde_template(
+            "update_port_description", {"interface": interface, "description": description},
+            device, password, variant=variant,
         )
 
     def set_port_admin_state(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
-        line = "no shutdown" if enabled else "shutdown"
-        return self._aplicar(
-            {"parents": f"interface {interface}", "lines": [line]},
-            device, password, op_label=f"set admin state enabled={enabled}",
+        variant = "enabled" if enabled else "disabled"
+        return self._aplicar_desde_template(
+            "set_port_admin_state", {"interface": interface}, device, password, variant=variant,
         )
 
     def set_port_access_vlan(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar(
-            {"parents": f"interface {interface}", "lines": [f"switchport access vlan {vlan_id}"]},
-            device, password, op_label="set access VLAN",
+        return self._aplicar_desde_template(
+            "set_port_access_vlan", {"interface": interface, "vlan_id": vlan_id}, device, password,
         )
 
     def set_trunk_pvid_vlan(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar(
-            {"parents": f"interface {interface}", "lines": [f"switchport trunk native vlan {vlan_id}"]},
-            device, password, op_label="set trunk native VLAN",
+        return self._aplicar_desde_template(
+            "set_trunk_pvid_vlan", {"interface": interface, "vlan_id": vlan_id}, device, password,
         )
 
     def set_trunk_allowed_vlans(self, interface: str, vlan_list: list[int], device: Device, password: str) -> dict:
         vlan_str = self._compress_vlans_cisco(sorted(set(vlan_list)))
-        return self._aplicar(
-            {"parents": f"interface {interface}", "lines": [f"switchport trunk allowed vlan {vlan_str}"]},
-            device, password, op_label="set trunk allowed VLANs",
+        return self._aplicar_desde_template(
+            "set_trunk_allowed_vlans", {"interface": interface, "allowed_vlans": vlan_str}, device, password,
         )
 
     def set_port_poe(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
-        line = "power inline auto" if enabled else "power inline never"
-        return self._aplicar(
-            {"parents": f"interface {interface}", "lines": [line]},
-            device, password, op_label=f"set PoE enabled={enabled}",
+        variant = "enabled" if enabled else "disabled"
+        return self._aplicar_desde_template(
+            "set_port_poe", {"interface": interface}, device, password, variant=variant,
         )
 
     def set_storm_control(
         self, interface: str, enabled: bool, threshold: "float | None", device: Device, password: str,
     ) -> dict:
-        line = f"storm-control broadcast level {threshold}" if enabled else "no storm-control broadcast level"
-        return self._aplicar(
-            {"parents": f"interface {interface}", "lines": [line]},
-            device, password, op_label=f"set storm-control enabled={enabled}",
+        variant = "enabled" if enabled else "disabled"
+        return self._aplicar_desde_template(
+            "set_storm_control", {"interface": interface, "threshold": threshold}, device, password, variant=variant,
         )
 
     def reset_port(self, interface: str, device: Device, password: str) -> dict:
-        return self._aplicar(
-            {"lines": [f"default interface {interface}"]},
-            device, password, op_label="reset port to defaults",
-        )
+        return self._aplicar_desde_template("reset_port", {"interface": interface}, device, password)
 
     def set_access_mode(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar(
-            {
-                "parents": f"interface {interface}",
-                "lines": ["switchport mode access", f"switchport access vlan {vlan_id}"],
-            },
-            device, password, op_label="set access mode",
+        return self._aplicar_desde_template(
+            "set_access_mode", {"interface": interface, "vlan_id": vlan_id}, device, password,
         )
 
     def set_trunk_mode(
         self, interface: str, native_vlan: int, vlan_list: list[int], device: Device, password: str,
     ) -> dict:
         vlan_str = self._compress_vlans_cisco(sorted(set(vlan_list)))
-        return self._aplicar(
-            {
-                "parents": f"interface {interface}",
-                "lines": [
-                    "switchport mode trunk",
-                    f"switchport trunk native vlan {native_vlan}",
-                    f"switchport trunk allowed vlan {vlan_str}",
-                ],
-            },
-            device, password, op_label="set trunk mode",
+        return self._aplicar_desde_template(
+            "set_trunk_mode",
+            {"interface": interface, "native_vlan": native_vlan, "allowed_vlans": vlan_str},
+            device, password,
         )
 
     # ── VLAN list compression (Fase 2, A2 — movida desde validators/port_validator.py,

@@ -1,0 +1,210 @@
+# Comandos CLI de Huawei VRP por operación. Editar acá para agregar una
+# variación descubierta contra un device/modelo real -- no hace falta tocar
+# driver.py ni reconstruir el playbook. Cada operación tiene un "primary" y,
+# opcionalmente, "alternatives": cada alternativa lleva "triggered_by_error"
+# (regex contra stderr+stdout del intento primario) -- si matchea, se
+# reintenta una vez con esa alternativa antes de devolver el error real.
+#
+# "block" es la única forma que usa este vendor (ansible.netcommon.cli_command,
+# un solo comando/bloque multi-línea) -- las líneas se unen con "\n" y se
+# mandan como una sesión completa (system-view/.../commit/quit según haga
+# falta). "y" como línea propia contesta un prompt [Y/N] (ver reset_port).
+#
+# Placeholders disponibles por operación: ver el método correspondiente en
+# driver.py (arma el dict "vars" antes de llamar a _aplicar_desde_template()).
+
+create_vlan:
+  primary:
+    block:
+      - "system-view"
+      - "vlan {vlan_id}"
+      - "description {name}"
+      - "quit"
+      - "commit"
+      - "quit"
+
+delete_vlan:
+  primary:
+    block:
+      - "system-view"
+      - "undo vlan {vlan_id}"
+      - "commit"
+      - "quit"
+
+update_vlan:
+  primary:
+    block:
+      - "system-view"
+      - "vlan {vlan_id}"
+      - "description {name}"
+      - "quit"
+      - "commit"
+      - "quit"
+
+save_config:
+  primary:
+    block: ["save force"]
+
+list_vlans:
+  primary:
+    commands: ["display vlan"]
+
+list_ports:
+  primary:
+    commands:
+      - "display interface brief"
+      - "display interface description"
+      - "display port vlan"
+
+update_port_description:
+  set:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "description {description}"
+        - "commit"
+        - "quit"
+        - "quit"
+  clear:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "undo description"
+        - "commit"
+        - "quit"
+        - "quit"
+
+set_port_admin_state:
+  enabled:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "undo shutdown"
+        - "commit"
+        - "quit"
+        - "quit"
+  disabled:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "shutdown"
+        - "commit"
+        - "quit"
+        - "quit"
+
+set_port_access_vlan:
+  primary:
+    block:
+      - "system-view"
+      - "interface {interface}"
+      - "port default vlan {vlan_id}"
+      - "commit"
+      - "quit"
+      - "quit"
+
+set_trunk_pvid_vlan:
+  primary:
+    block:
+      - "system-view"
+      - "interface {interface}"
+      - "port trunk pvid vlan {vlan_id}"
+      - "commit"
+      - "quit"
+      - "quit"
+
+set_trunk_allowed_vlans:
+  primary:
+    block:
+      - "system-view"
+      - "interface {interface}"
+      - "undo port trunk allow-pass vlan all"
+      - "port trunk allow-pass vlan {allowed_vlans}"
+      - "commit"
+      - "quit"
+      - "quit"
+
+set_port_poe:
+  enabled:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "poe enable"
+        - "commit"
+        - "quit"
+        - "quit"
+  disabled:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "poe disable"
+        - "commit"
+        - "quit"
+        - "quit"
+
+# Sintaxis pendiente de verificar contra el device real -- confirmado
+# "Unrecognized command" en el CE12800 de lab (ver commit que agregó estos
+# métodos). Varía por familia de plataforma VRP; agregar la variante real
+# como alternativa (o reemplazar el primary) cuando se confirme con
+# `poe ?`/`storm-control ?` en la consola del device.
+set_storm_control:
+  enabled:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "storm-control broadcast {threshold}"
+        - "commit"
+        - "quit"
+        - "quit"
+  disabled:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "undo storm-control broadcast"
+        - "commit"
+        - "quit"
+        - "quit"
+
+reset_port:
+  primary:
+    # "clear configuration interface" pide confirmación interactiva
+    # ("Warning: ... Continue? [Y/N]") y se aplica de inmediato -- no lleva
+    # "commit" después. Confirmado contra el device real: con "commit" en
+    # la línea siguiente, el device lo interpretaba como respuesta
+    # inválida al prompt Y/N y quedaba reintentando hasta timeout.
+    block:
+      - "system-view"
+      - "clear configuration interface {interface}"
+      - "y"
+      - "quit"
+
+set_access_mode:
+  primary:
+    block:
+      - "system-view"
+      - "interface {interface}"
+      - "port link-type access"
+      - "port default vlan {vlan_id}"
+      - "commit"
+      - "quit"
+      - "quit"
+
+set_trunk_mode:
+  primary:
+    block:
+      - "system-view"
+      - "interface {interface}"
+      - "port link-type trunk"
+      - "port trunk pvid vlan {native_vlan}"
+      - "undo port trunk allow-pass vlan all"
+      - "port trunk allow-pass vlan {allowed_vlans}"
+      - "commit"
+      - "quit"
+      - "quit"

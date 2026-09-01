@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import logging
+import re
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -138,6 +141,67 @@ class VendorDriver(ABC):
         if not stdouts:
             raise RuntimeError(f"Cannot read state on device '{device.name}': no command output returned")
         return stdouts
+
+    _commands_cache: dict | None = None
+
+    @classmethod
+    def _cargar_comandos(cls) -> dict:
+        """Carga y cachea (una vez por clase) ``commands.yaml`` ubicado
+        junto al módulo del driver concreto -- ``CiscoVendor``/
+        ``HuaweiVendor`` no declaran la ruta, se resuelve sola desde dónde
+        vive la clase real, así una 3ra clase concreta futura solo necesita
+        poner su propio ``commands.yaml`` al lado del archivo, sin tocar
+        esto."""
+        if cls._commands_cache is None:
+            import yaml
+            path = Path(inspect.getfile(cls)).parent / "commands.yaml"
+            with open(path, encoding="utf-8") as f:
+                cls._commands_cache = yaml.safe_load(f)
+        return cls._commands_cache
+
+    def _ejecutar_paso(self, step: dict, vars: dict, device: Device, password: str, *, op_label: str) -> dict:
+        """Renderiza un paso del YAML (``lines``[+``parents``], ``block``, o
+        ``commands`` -- se infiere de qué clave está presente, no hace
+        falta declarar el modo aparte) sustituyendo *vars* con
+        ``str.format()``, arma el extravars shape que ``run.yml`` de este
+        vendor entiende, y corre ``_aplicar()`` (sin tocar)."""
+        if "commands" in step:
+            extravars = {"commands": [c.format(**vars) for c in step["commands"]]}
+        elif "block" in step:
+            extravars = {"command_block": "\n".join(c.format(**vars) for c in step["block"])}
+        else:
+            extravars = {"lines": [c.format(**vars) for c in step["lines"]]}
+            if "parents" in step:
+                extravars["parents"] = step["parents"].format(**vars)
+        return self._aplicar(extravars, device, password, op_label=op_label)
+
+    def _aplicar_desde_template(
+        self, op_key: str, vars: dict, device: Device, password: str, *, variant: str | None = None,
+    ) -> dict:
+        """Busca *op_key* (y *variant* si se pasa -- operaciones binarias
+        como PoE/storm-control/admin-state usan 2 sub-claves nombradas en
+        vez de que Python arme el texto condicional) en
+        ``self._cargar_comandos()``, corre ``primary``. Si falla, recorre
+        ``alternatives`` en orden y compara ``triggered_by_error`` (regex)
+        contra ``stderr+stdout`` del resultado -- la primera que matchea se
+        reintenta una vez. Si ninguna matchea (o no hay alternativas), se
+        devuelve el resultado original con el error real, sin ocultarlo --
+        mismo criterio que ya sigue el resto del pipeline de errores."""
+        entry = self._cargar_comandos()[op_key]
+        if variant is not None:
+            entry = entry[variant]
+        resultado = self._ejecutar_paso(entry["primary"], vars, device, password, op_label=op_key)
+        if resultado["success"]:
+            return resultado
+        error_text = (resultado.get("stderr") or "") + (resultado.get("stdout") or "")
+        for alt in entry.get("alternatives", []):
+            if re.search(alt["triggered_by_error"], error_text):
+                logger.info(
+                    "%s: %s primary failed, retrying with known alternative on device=%s",
+                    type(self).__name__, op_key, device.name,
+                )
+                return self._ejecutar_paso(alt, vars, device, password, op_label=f"{op_key} (alt)")
+        return resultado
 
     @staticmethod
     def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:

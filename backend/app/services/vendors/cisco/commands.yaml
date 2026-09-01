@@ -1,0 +1,129 @@
+# Comandos CLI de Cisco IOS por operación. Editar acá para agregar una
+# variación descubierta contra un device/modelo real -- no hace falta tocar
+# driver.py ni reconstruir el playbook. Cada operación tiene un "primary" y,
+# opcionalmente, "alternatives": cada alternativa lleva "triggered_by_error"
+# (regex contra stderr+stdout del intento primario) -- si matchea, se
+# reintenta una vez con esa alternativa antes de devolver el error real.
+#
+# Formas válidas para "primary"/cada alternativa (se infiere de qué clave
+# está presente):
+#   lines: [...] + parents: "..."  (opcional)  -> cisco.ios.ios_config
+#   commands: [...]                            -> cisco.ios.ios_command
+#
+# Placeholders disponibles por operación: ver el método correspondiente en
+# driver.py (arma el dict "vars" antes de llamar a _aplicar_desde_template()).
+
+create_vlan:
+  primary:
+    parents: "vlan {vlan_id}"
+    lines: ["name {name}"]
+
+delete_vlan:
+  primary:
+    lines: ["no vlan {vlan_id}"]
+
+update_vlan:
+  primary:
+    parents: "vlan {vlan_id}"
+    lines: ["name {name}"]
+
+save_config:
+  primary:
+    commands: ["write"]
+
+list_vlans:
+  primary:
+    commands: ["show vlan brief"]
+
+list_ports:
+  primary:
+    commands:
+      - "show interfaces status"
+      - "show interfaces description"
+      - "show interfaces switchport"
+
+update_port_description:
+  set:
+    primary:
+      parents: "interface {interface}"
+      lines: ["description {description}"]
+  clear:
+    primary:
+      parents: "interface {interface}"
+      lines: ["no description"]
+
+set_port_admin_state:
+  enabled:
+    primary:
+      parents: "interface {interface}"
+      lines: ["no shutdown"]
+  disabled:
+    primary:
+      parents: "interface {interface}"
+      lines: ["shutdown"]
+
+set_port_access_vlan:
+  primary:
+    parents: "interface {interface}"
+    lines: ["switchport access vlan {vlan_id}"]
+
+set_trunk_pvid_vlan:
+  primary:
+    parents: "interface {interface}"
+    lines: ["switchport trunk native vlan {vlan_id}"]
+
+set_trunk_allowed_vlans:
+  primary:
+    parents: "interface {interface}"
+    lines: ["switchport trunk allowed vlan {allowed_vlans}"]
+
+set_port_poe:
+  enabled:
+    primary:
+      parents: "interface {interface}"
+      lines: ["power inline auto"]
+  disabled:
+    primary:
+      parents: "interface {interface}"
+      lines: ["power inline never"]
+
+set_storm_control:
+  enabled:
+    primary:
+      parents: "interface {interface}"
+      lines: ["storm-control broadcast level {threshold}"]
+  disabled:
+    primary:
+      parents: "interface {interface}"
+      lines: ["no storm-control broadcast level"]
+
+reset_port:
+  primary:
+    lines: ["default interface {interface}"]
+
+set_access_mode:
+  primary:
+    parents: "interface {interface}"
+    lines:
+      - "switchport mode access"
+      - "switchport access vlan {vlan_id}"
+
+set_trunk_mode:
+  primary:
+    parents: "interface {interface}"
+    lines:
+      - "switchport mode trunk"
+      - "switchport trunk native vlan {native_vlan}"
+      - "switchport trunk allowed vlan {allowed_vlans}"
+  # Ejemplo de formato para una alternativa real (switches con soporte dual
+  # ISL/dot1q traen la encapsulación en "Auto" y algunos IOS exigen fijarla
+  # antes de poder pasar a trunk) -- no cargada todavía, agregar cuando se
+  # confirme contra un device real que lo necesite.
+  # alternatives:
+  #   - triggered_by_error: 'trunk encapsulation is .Auto.'
+  #     parents: "interface {interface}"
+  #     lines:
+  #       - "switchport trunk encapsulation dot1q"
+  #       - "switchport mode trunk"
+  #       - "switchport trunk native vlan {native_vlan}"
+  #       - "switchport trunk allowed vlan {allowed_vlans}"
