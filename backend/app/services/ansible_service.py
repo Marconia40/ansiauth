@@ -270,12 +270,37 @@ def _extract_failure_reason(r) -> str:
     ios_config and other modules store the error in event_data.res.msg.
     This is checked before ios_command output so actual errors aren't masked
     by a successful earlier task's stdout.
-    """
+
+    Bug real de producción encontrado con un fallo real (Huawei list_vlans
+    devolviendo "Cannot read state on device '...': One or more items
+    failed" -- inútil para diagnosticar nada): para una task con ``loop:``
+    (huawei/run.yml's "Run read commands", agregada en la unificación de
+    drivers de esta sesión -- Cisco no tiene este problema, su equivalente
+    no usa loop), ``res.msg`` en el evento ``runner_on_failed`` es SIEMPRE
+    el resumen genérico de Ansible ``"One or more items failed"`` -- el
+    error real de CADA item vive en ``res["results"]`` (una lista, un dict
+    por iteración del loop), nunca antes revisado acá. Verificado con un
+    playbook local real (loop de 2 comandos, uno falla) reproduciendo el
+    evento exacto: ``res == {"results": [...], "msg": "One or more items
+    failed", ...}``, con el item fallido en ``results[i]`` cargando su
+    propio ``msg``/``stdout``/``stderr`` reales."""
     try:
         for event in r.events:
             if event.get("event") == "runner_on_failed":
                 data = event.get("event_data", {})
                 res = data.get("res", {})
+                results = res.get("results")
+                if isinstance(results, list):
+                    for item in results:
+                        if isinstance(item, dict) and item.get("failed"):
+                            item_msg = (
+                                item.get("msg") or item.get("stderr") or item.get("stdout")
+                            )
+                            if item_msg:
+                                item_label = item.get("item", "")
+                                combined = f"[{item_label}] {item_msg}" if item_label else str(item_msg)
+                                logger.debug("Extracted per-item failure reason from loop results: %s", combined[:200])
+                                return combined
                 msg = res.get("msg") or res.get("stdout") or data.get("task", "")
                 if msg:
                     logger.debug("Extracted failure reason from events: %s", str(msg)[:200])
