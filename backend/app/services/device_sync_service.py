@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import update
 
@@ -113,6 +113,35 @@ class DeviceSyncService:
             "sync_ports OK device=%s persisted=%d removed=%d",
             device.name, len(nuevos), len(existentes_ifs - nuevos_ifs),
         )
+
+    def metadata(
+        self, device_name: str, scope: str,
+    ) -> tuple[Optional[datetime], Optional[str]]:
+        """Return ``(synced_at, sync_error)`` para *scope* ∈ {"vlans","ports"}.
+
+        Consultado por los GET cache-first para poblar el envelope
+        ``{data, synced_at, sync_error, sync_in_progress}`` sin que el
+        endpoint tenga que hacer una query manual al ``DeviceModel``.
+        Si el device no existe devuelve ``(None, None)`` -- el endpoint
+        ya validó la existencia con ``require_device()`` antes de llegar
+        acá, así que ese caso no debería ocurrir en el camino normal.
+        """
+        cols = {
+            "vlans": (DeviceModel.vlans_synced_at, DeviceModel.vlans_sync_error),
+            "ports": (DeviceModel.ports_synced_at, DeviceModel.ports_sync_error),
+        }
+        if scope not in cols:
+            raise ValueError(
+                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports)"
+            )
+        col_ts, col_err = cols[scope]
+        with get_session() as session:
+            row = (
+                session.query(col_ts, col_err)
+                .filter(DeviceModel.name == device_name)
+                .first()
+            )
+            return (row[0], row[1]) if row else (None, None)
 
     def _marcar_ok(self, device_name: str, ts_field: str, err_field: str) -> None:
         now = datetime.now(timezone.utc)

@@ -4,11 +4,12 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.exceptions import DeviceExecutionError, ValidationError
+from app.core.exceptions import ValidationError
 from app.core.response import ok
 from app.core.scope import authorize_device, obtener_scope, require_authenticated, require_device
 from app.models.port import Puerto
 from app.models.visibility_scope import VisibilityScope
+from app.schemas.device_sync import SyncedResource
 from app.schemas.port import (
     PortAccessVlanUpdateRequest,
     PortAdminStateUpdateRequest,
@@ -107,14 +108,18 @@ def list_ports(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Return the port inventory of *device*.
+    """Return the port inventory of *device* -- cache-first.
 
-    Read-only. Lee en vivo (``device.driver.list_ports``), no de
-    ``Repository[Puerto]`` — mismo criterio que ``GET /vlans``
-    (FASE_5.md A6/A7). ``PortRead`` usa ``name``, ``Puerto`` usa
-    ``interface`` — la traducción es explícita acá (FASE_5.md A7).
+    Lee de ``Repository[Puerto]`` (populated por ``sync_device_task``,
+    disparado en el alta / por refresh manual / post-escritura), no en
+    vivo del equipo. Responde instantáneo aún si el equipo está apagado;
+    para forzar una sync fresca ver ``POST /devices/{name}/ports/refresh``.
+
+    La respuesta viaja envuelta en ``SyncedResource`` con
+    ``synced_at`` / ``sync_error`` / ``sync_in_progress`` para que la
+    UI pueda mostrar "última sync hace X min" y decidir cuándo refrescar.
     """
-    from app.composition import redis_coordinator
+    from app.composition import device_sync_service, puerto_repository, redis_coordinator
 
     if device is None:
         from app.core.config import EXECUTION_MODE
@@ -136,25 +141,14 @@ def list_ports(
                 for p in puertos
             ],
         }
-        return ok(payload)
+        envelope = SyncedResource(
+            data=payload, synced_at=None, sync_error=None, sync_in_progress=False,
+        ).model_dump(mode="json")
+        return ok(envelope)
 
     _authz_device(scope, device, min_role="observer")
     dev = require_device(device)
-    try:
-        with redis_coordinator.bloquear(device, timeout=10):
-            puertos = dev.driver.list_ports(dev, dev.password)
-    except TimeoutError:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "status": "device_busy",
-                "device": device,
-                "message": "Device is busy with another operation, retry shortly",
-            },
-        )
-    except RuntimeError as exc:
-        raise DeviceExecutionError(str(exc))
-
+    puertos = puerto_repository.list(device=device)
     payload = {
         "device": dev.name,
         "vendor": dev.vendor,
@@ -169,7 +163,14 @@ def list_ports(
             for p in puertos
         ],
     }
-    return ok(payload)
+    synced_at, sync_error = device_sync_service.metadata(device, "ports")
+    envelope = SyncedResource(
+        data=payload,
+        synced_at=synced_at,
+        sync_error=sync_error,
+        sync_in_progress=redis_coordinator.esta_ocupado(device),
+    ).model_dump(mode="json")
+    return ok(envelope)
 
 
 @router.patch(
