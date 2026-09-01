@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.core.exceptions import NotFoundError, ValidationError
+from app.core.response import ok
 from app.core.scope import (
     require_authenticated,
     require_system_admin,
@@ -11,12 +12,21 @@ from app.schemas.role_assignment import (
     RoleAssignmentCreate,
     SystemAdminUpdate,
 )
-from app.schemas.user import UserCreate, UserUpdate
-from app.services import audit_service, user_service
+from app.models.domain_event import DomainEvent
+from app.models.user import User
+from app.schemas.user import UserCreate, UserRead, UserUpdate
 from app.services.role_assignment_service import RoleAssignmentService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _to_read(user: User) -> dict:
+    return UserRead(
+        id=user.id, username=user.username, email=user.email,
+        is_active=user.is_active, is_system_admin=user.is_system_admin,
+        created_at=user.created_at, updated_at=user.updated_at,
+    ).model_dump()
 
 
 @router.post(
@@ -27,24 +37,21 @@ router = APIRouter()
         "Passwords are hashed with PBKDF2-SHA256 and never returned in responses."
     ),
 )
-def create_user(data: UserCreate, current_user: dict = Depends(require_authenticated)):
-    if not current_user.get("is_system_admin"):
-        raise HTTPException(
-            status_code=403,
-            detail="create_user requires system-admin",
-        )
+def create_user(data: UserCreate, current_user: dict = Depends(require_system_admin)):
+    from app.composition import event_dispatcher, user_repository
+
     try:
-        user = user_service.create_user(data)
+        user = user_repository.crear(
+            username=data.username, password=data.password,
+            email=data.email, is_system_admin=data.is_system_admin,
+        )
     except ValueError as e:
         raise ValidationError(str(e))
-    audit_service.log_action(
-        user=current_user["username"],
-        action="create_user",
-        resource="user",
-        resource_id=str(user.id),
-        details={"username": user.username},
-    )
-    return {"success": True, "data": user.model_dump()}
+    event_dispatcher.despachar([DomainEvent(
+        "create_user", user, None, current_user["username"],
+        {"resource_id": user.id, "username": user.username},
+    )])
+    return ok(_to_read(user))
 
 
 @router.get(
@@ -57,26 +64,20 @@ def create_user(data: UserCreate, current_user: dict = Depends(require_authentic
     ),
 )
 def list_users(
-    current_user: dict = Depends(require_authenticated),
+    current_user: dict = Depends(require_system_admin),
     include_inactive: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
 ):
-    if not current_user.get("is_system_admin"):
-        raise HTTPException(
-            status_code=403,
-            detail="list_users requires system-admin",
-        )
-    all_users = user_service.list_users(include_inactive=include_inactive)
+    from app.composition import user_repository
+
+    all_users = user_repository.listar(incluir_inactivos=include_inactive)
     total = len(all_users)
     start = (page - 1) * page_size
-    return {
-        "success": True,
-        "data": [u.model_dump() for u in all_users[start : start + page_size]],
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-    }
+    return ok(
+        [_to_read(u) for u in all_users[start : start + page_size]],
+        total=total, page=page, page_size=page_size,
+    )
 
 
 @router.get(
@@ -90,10 +91,12 @@ def get_user(user_id: int, current_user: dict = Depends(require_authenticated)):
             status_code=403,
             detail="get_user requires system-admin or self",
         )
-    user = user_service.get_by_id(user_id)
+    from app.composition import user_repository
+
+    user = user_repository.get(user_id)
     if user is None:
         raise NotFoundError(f"User {user_id} not found")
-    return {"success": True, "data": user.model_dump()}
+    return ok(_to_read(user))
 
 
 @router.put(
@@ -108,28 +111,39 @@ def get_user(user_id: int, current_user: dict = Depends(require_authenticated)):
 def update_user(
     user_id: int,
     data: UserUpdate,
-    current_user: dict = Depends(require_authenticated),
+    current_user: dict = Depends(require_system_admin),
 ):
-    if not current_user.get("is_system_admin"):
-        raise HTTPException(
-            status_code=403,
-            detail="update_user requires system-admin",
-        )
+    from app.composition import event_dispatcher, user_repository
+
+    user = user_repository.get(user_id)
+    if user is None:
+        raise NotFoundError(f"User {user_id} not found")
     try:
-        user = user_service.update_user(user_id, data)
+        if data.email is not None:
+            email_norm = data.email.lower()
+            clash = [u for u in user_repository.listar(incluir_inactivos=True) if u.email == email_norm]
+            if clash and clash[0].id != user_id:
+                raise ValidationError(f"Email '{email_norm}' is already registered")
+            user.actualizar(email=data.email)
+        if data.password is not None:
+            user.actualizar(password=data.password)
+        if data.is_active is False:
+            if user_repository.es_ultimo_admin_activo(user_id):
+                raise ValidationError("Cannot deactivate the last active system-admin account")
+            user.desactivar()
+        elif data.is_active is True:
+            user.activar()
     except ValueError as e:
         raise ValidationError(str(e))
+    user = user_repository.add(user)
     audit_fields = {k: v for k, v in data.model_dump(exclude_none=True).items() if k != "password"}
     if data.password is not None:
         audit_fields["password_changed"] = True
-    audit_service.log_action(
-        user=current_user["username"],
-        action="update_user",
-        resource="user",
-        resource_id=str(user_id),
-        details={"updated_fields": audit_fields},
-    )
-    return {"success": True, "data": user.model_dump()}
+    event_dispatcher.despachar([DomainEvent(
+        "update_user", user, None, current_user["username"],
+        {"resource_id": user_id, "updated_fields": audit_fields},
+    )])
+    return ok(_to_read(user))
 
 
 @router.delete(
@@ -141,24 +155,21 @@ def update_user(
         "system-admin."
     ),
 )
-def deactivate_user(user_id: int, current_user: dict = Depends(require_authenticated)):
-    if not current_user.get("is_system_admin"):
-        raise HTTPException(
-            status_code=403,
-            detail="deactivate_user requires system-admin",
-        )
-    try:
-        user = user_service.deactivate_user(user_id)
-    except ValueError as e:
-        raise ValidationError(str(e))
-    audit_service.log_action(
-        user=current_user["username"],
-        action="deactivate_user",
-        resource="user",
-        resource_id=str(user_id),
-        details={"username": user.username},
-    )
-    return {"success": True, "data": {"id": user_id, "is_active": False}}
+def deactivate_user(user_id: int, current_user: dict = Depends(require_system_admin)):
+    from app.composition import event_dispatcher, user_repository
+
+    user = user_repository.get(user_id)
+    if user is None:
+        raise NotFoundError(f"User {user_id} not found")
+    if user_repository.es_ultimo_admin_activo(user_id):
+        raise ValidationError("Cannot deactivate the last active system-admin account")
+    user.desactivar()
+    user = user_repository.add(user)
+    event_dispatcher.despachar([DomainEvent(
+        "deactivate_user", user, None, current_user["username"],
+        {"resource_id": user_id, "username": user.username},
+    )])
+    return ok({"id": user_id, "is_active": False})
 
 
 # ─── MSP: grants / system-admin ─────────────────────────────────────────────
@@ -188,7 +199,7 @@ def create_grant(
         )
     except ValueError as exc:
         raise ValidationError(str(exc))
-    return {"success": True, "data": record.model_dump()}
+    return ok(record.model_dump())
 
 
 @router.get(
@@ -202,7 +213,7 @@ def create_grant(
 )
 def list_grants(user_id: int, current_user: dict = Depends(require_authenticated)):
     records = RoleAssignmentService().list_for_user(user_id, viewer=current_user)
-    return {"success": True, "data": [r.model_dump() for r in records]}
+    return ok([r.model_dump() for r in records])
 
 
 @router.delete(
@@ -238,7 +249,4 @@ def set_system_admin(
         is_system_admin=body.is_system_admin,
         actor=current_user,
     )
-    return {
-        "success": True,
-        "data": {"id": user_id, "is_system_admin": body.is_system_admin},
-    }
+    return ok({"id": user_id, "is_system_admin": body.is_system_admin})

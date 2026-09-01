@@ -8,11 +8,13 @@ import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
 import {
-  configurePort,
   getDevices,
   getPorts,
   getSites,
+  setPortAccessMode,
   setPortAccessVlan,
+  setPortAdminState,
+  setPortTrunkMode,
   setTrunkAllowedVlans,
   updatePortDescription,
 } from '@/services/api';
@@ -85,7 +87,6 @@ export default function PortsPage() {
   const [modeEditMode, setModeEditMode] = useState<'access' | 'trunk'>('access');
   const [modeEditAccessVlan, setModeEditAccessVlan] = useState('');
   const [modeEditTrunkVlans, setModeEditTrunkVlans] = useState('');
-  const [modeEditVlanOp, setModeEditVlanOp] = useState<TrunkVlanMode>('add');
   const [savingModePort, setSavingModePort] = useState<string | null>(null);
   const [modeErrorPort, setModeErrorPort] = useState<PortError>(null);
 
@@ -268,9 +269,9 @@ export default function PortsPage() {
       setTogglingPort(port.name);
       setAdminErrorPort(null);
       try {
-        const result = await configurePort({
+        const result = await setPortAdminState({
           device: effectiveSelectedDevice,
-          port_name: port.name,
+          interface: port.name,
           enabled: nextEnabled,
         });
         const job = result.jobs[0];
@@ -398,6 +399,13 @@ export default function PortsPage() {
   };
 
   // ── Editor: mode + VLAN composite ──────────────────────────────────────────
+  // Routes to setPortAccessMode() (access) / setPortTrunkMode() (trunk) --
+  // 2 named endpoints instead of the old generic configurePort()/
+  // /ports/configure. Trunk mode now requires BOTH native_vlan (PVID) and
+  // allowed_vlans explicitly -- no more optional allowed-VLANs / add-remove
+  // operation for a genuine mode change (that stays available via the
+  // separate access-vlan/trunk-vlans editors for a port that's already in
+  // the target mode).
   const modeEditor: ModeEditor = {
     editingPort: editingModePort,
     mode: modeEditMode,
@@ -406,8 +414,6 @@ export default function PortsPage() {
     setAccessVlan: setModeEditAccessVlan,
     trunkVlans: modeEditTrunkVlans,
     setTrunkVlans: setModeEditTrunkVlans,
-    vlanOp: modeEditVlanOp,
-    setVlanOp: setModeEditVlanOp,
     setError: setModeErrorPort,
     savingPort: savingModePort,
     errorPort: modeErrorPort,
@@ -416,7 +422,6 @@ export default function PortsPage() {
       setModeEditMode(port.mode === 'trunk' ? 'trunk' : 'access');
       setModeEditAccessVlan(port.access_vlan != null ? String(port.access_vlan) : '');
       setModeEditTrunkVlans(formatVlanList(port.allowed_vlans) === DASH ? '' : formatVlanList(port.allowed_vlans));
-      setModeEditVlanOp('add');
       setModeErrorPort(null);
     },
     cancel: () => {
@@ -424,7 +429,6 @@ export default function PortsPage() {
       setModeEditMode('access');
       setModeEditAccessVlan('');
       setModeEditTrunkVlans('');
-      setModeEditVlanOp('add');
       setModeErrorPort(null);
     },
     save: async (port) => {
@@ -446,8 +450,12 @@ export default function PortsPage() {
         return;
       }
 
-      let allowedVlans: number[] | undefined;
-      if (modeEditMode === 'trunk' && modeEditTrunkVlans.trim()) {
+      let allowedVlans: number[] = [];
+      if (modeEditMode === 'trunk') {
+        if (!modeEditTrunkVlans.trim()) {
+          setModeErrorPort({ port: port.name, message: 'Allowed VLANs are required for trunk mode' });
+          return;
+        }
         const { vlans, error } = parseVlanInput(modeEditTrunkVlans);
         if (error) {
           setModeErrorPort({ port: port.name, message: error });
@@ -459,14 +467,18 @@ export default function PortsPage() {
       setSavingModePort(port.name);
       setModeErrorPort(null);
       try {
-        const result = await configurePort({
-          device: effectiveSelectedDevice,
-          port_name: port.name,
-          mode: modeEditMode,
-          access_vlan: vlanNum,
-          allowed_vlans: allowedVlans,
-          allowed_vlan_operation: modeEditMode === 'trunk' ? modeEditVlanOp : undefined,
-        });
+        const result = modeEditMode === 'trunk'
+          ? await setPortTrunkMode({
+              device: effectiveSelectedDevice,
+              interface: port.name,
+              native_vlan: vlanNum,
+              allowed_vlans: allowedVlans,
+            })
+          : await setPortAccessMode({
+              device: effectiveSelectedDevice,
+              interface: port.name,
+              access_vlan: vlanNum,
+            });
         const job = result.jobs[0];
         if (job) trackJob(job.job_id, `Set mode ${modeEditMode} on ${port.name}`, job.device);
         modeEditor.cancel();
@@ -504,13 +516,9 @@ export default function PortsPage() {
       const errors: string[] = [];
       for (const portName of Array.from(selectedPorts)) {
         try {
-          const result = await configurePort(
-            action === 'enable'
-              ? { device: effectiveSelectedDevice, port_name: portName, enabled: true }
-              : action === 'disable'
-              ? { device: effectiveSelectedDevice, port_name: portName, enabled: false }
-              : { device: effectiveSelectedDevice, port_name: portName, description: '' },
-          );
+          const result = action === 'clear-description'
+            ? await updatePortDescription({ device: effectiveSelectedDevice, interface: portName, description: '' })
+            : await setPortAdminState({ device: effectiveSelectedDevice, interface: portName, enabled: action === 'enable' });
           const job = result.jobs[0];
           if (job) {
             const label = action === 'enable' ? 'Enable' : action === 'disable' ? 'Disable' : 'Clear description on';
@@ -546,10 +554,9 @@ export default function PortsPage() {
       const errors: string[] = [];
       for (const portName of Array.from(selectedPorts)) {
         try {
-          const result = await configurePort({
+          const result = await setPortAccessMode({
             device: effectiveSelectedDevice,
-            port_name: portName,
-            mode: 'access',
+            interface: portName,
             access_vlan: n,
           });
           const job = result.jobs[0];

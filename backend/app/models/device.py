@@ -6,15 +6,29 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from app.models.port import PortConfigRequest, PortConfigResult, PortInfo
-    from app.models.vlan import VLAN
-    from app.services.vendors.base import BaseVendorDriver
-    from app.services.vendors.port_driver_base import BasePortDriver
+    from app.services.vendors.base import VendorDriver
+
+# Duplicado hoy en device_service.py y inventory_service.py -- Fase 6 (A5)
+# lo centraliza acá, el único lugar que le queda una vez que Inventory deja
+# de tener su propio chequeo suelto.
+#
+# Debe coincidir exactamente con las claves que composition.py registra en
+# PluginRegistry ("cisco_ios"/"huawei_vrp") -- bug real encontrado en una
+# revisión de código: este set aceptaba "cisco"/"huawei" (sin driver
+# registrado bajo esas claves -- Device.driver crasheaba con ValueError sin
+# capturar, 500, la primera vez que se tocaba) y rechazaba "huawei_vrp" (la
+# única clave que sí tiene un driver Huawei real). "cisco"/"huawei" ya no se
+# aceptan -- si hace falta un alias corto en el futuro, tiene que traducirse
+# a la clave real acá mismo, no vivir como 2 nombres que resuelven distinto
+# según a qué capa se le pregunte.
+_VALID_VENDORS = {"cisco_ios", "huawei_vrp"}
 
 
 @dataclass
 class Device:
-    """Domain model for a managed network device."""
+    """Identidad de un device administrado (site, grupo, credenciales) —
+    expone su driver de vendor y su password resueltos y cacheados, no
+    ejecuta nada por sí mismo."""
     name: str
     host: str
     vendor: str
@@ -33,74 +47,64 @@ class Device:
     device_group_name: Optional[str] = None
 
     # Lazily-resolved collaborators — not persisted, not part of __init__.
-    _vlan_driver: "BaseVendorDriver | None" = field(default=None, repr=False, compare=False, init=False)
-    _port_driver: "BasePortDriver | None" = field(default=None, repr=False, compare=False, init=False)
+    _driver: "VendorDriver | None" = field(default=None, repr=False, compare=False, init=False)
     _password: "str | None" = field(default=None, repr=False, compare=False, init=False)
 
-    # ── driver/password resolution — internal, lazy, cached after first call ──
-    def _get_vlan_driver(self) -> "BaseVendorDriver":
-        if self._vlan_driver is None:
-            from app.core.config import EXECUTION_MODE
-            if EXECUTION_MODE == "mock":
-                from app.services.vendors.mock import MockVlanDriver
-                self._vlan_driver = MockVlanDriver()
-            else:
-                from app.services.vendors.dispatcher import get_driver
-                self._vlan_driver = get_driver(self)
-        return self._vlan_driver
+    @classmethod
+    def nuevo(
+        cls, name: str, host: str, vendor: str, platform: str, username: str,
+        encrypted_password: str, device_group_id: int,
+    ) -> "Device":
+        """Fábrica para Inventory.register() (Fase 6, A5) -- valida el vendor
+        acá, en vez de un ``if vendor not in _VALID_VENDORS`` suelto en el
+        caller (antes duplicado en device_service.py/inventory_service.py)."""
+        if vendor not in _VALID_VENDORS:
+            raise ValueError(
+                f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}"
+            )
+        return cls(
+            name=name, host=host, vendor=vendor, platform=platform,
+            username=username, encrypted_password=encrypted_password,
+            device_group_id=device_group_id,
+        )
 
-    def _get_port_driver(self) -> "BasePortDriver":
-        if self._port_driver is None:
-            from app.core.config import EXECUTION_MODE
-            if EXECUTION_MODE == "mock":
-                from app.services.vendors.mock import MockPortDriver
-                self._port_driver = MockPortDriver()
-            else:
-                from app.services.vendors.dispatcher import get_port_driver
-                self._port_driver = get_port_driver(self)
-        return self._port_driver
+    @property
+    def driver(self) -> "VendorDriver":
+        if self._driver is None:
+            from app.composition import plugin_registry  # import local -- ver FASE_1.md A3
+            self._driver = plugin_registry.obtener(self.vendor)
+        return self._driver
 
-    def _get_password(self) -> "str | None":
+    @property
+    def password(self) -> str:
         if self._password is None:
-            from app.core.config import EXECUTION_MODE
-            if EXECUTION_MODE != "mock":
-                from app.services.secret_service import vault
-                self._password = vault.decrypt(self.encrypted_password)
+            from app.composition import secret_vault  # import local -- ver FASE_1.md A3
+            self._password = secret_vault.decrypt(self.encrypted_password)
         return self._password
 
-    # ── VLAN ──
-    def create_vlan(self, vlan: "VLAN") -> dict:
-        vlan.validate_name()
-        return self._get_vlan_driver().create_vlan(vlan.vlan_id, vlan.name, self, self._get_password())
-
-    def delete_vlan(self, vlan: "VLAN") -> dict:
-        return self._get_vlan_driver().delete_vlan(vlan.vlan_id, self, self._get_password())
-
-    def update_vlan_description(self, vlan: "VLAN") -> dict:
-        vlan.validate_name()
-        return self._get_vlan_driver().update_vlan(vlan.vlan_id, vlan.name, self, self._get_password())
-
-    def list_vlans(self) -> "list[VLAN]":
-        return self._get_vlan_driver().list_vlans(self, self._get_password())
-
-    def save_config(self) -> dict:
-        return self._get_vlan_driver().save_config(self, self._get_password())
-
-    # ── Port ──
-    def configure_port(self, config: "PortConfigRequest") -> "PortConfigResult":
-        return self._get_port_driver().configure_port(config, self, self._get_password())
-
-    def set_port_admin_state(self, interface: str, enabled: bool) -> dict:
-        return self._get_port_driver().set_port_admin_state(interface, enabled, self, self._get_password())
-
-    def set_port_access_vlan(self, interface: str, vlan_id: int) -> dict:
-        return self._get_port_driver().set_port_access_vlan(interface, vlan_id, self, self._get_password())
-
-    def set_trunk_allowed_vlans(self, interface: str, vlan_ids: "list[int]") -> dict:
-        return self._get_port_driver().set_trunk_allowed_vlans(interface, vlan_ids, self, self._get_password())
-
-    def update_port_description(self, interface: str, description: str) -> dict:
-        return self._get_port_driver().update_port_description(interface, description, self, self._get_password())
-
-    def list_ports(self) -> "list[PortInfo]":
-        return self._get_port_driver().list_ports(self, self._get_password())
+    def actualizar(
+        self, *, host: str | None = None, vendor: str | None = None,
+        platform: str | None = None, username: str | None = None,
+        password: str | None = None, vault=None,
+    ) -> None:
+        """Reemplaza device_service.update_device() (Fase 6, A6) -- no encaja
+        en ninguno de los 5 métodos de Inventory (no es create/list/get/move/
+        delete), pasa a vivir acá. El grupo/site de un device se cambia vía
+        POST /devices/{name}/move (Inventory.move()), nunca acá."""
+        if host is not None:
+            self.host = host
+        if vendor is not None:
+            if vendor not in _VALID_VENDORS:
+                raise ValueError(
+                    f"Vendor '{vendor}' not supported. Valid values: {', '.join(sorted(_VALID_VENDORS))}"
+                )
+            self.vendor = vendor
+        if platform is not None:
+            self.platform = platform
+        if username is not None:
+            self.username = username
+        if password is not None:
+            if vault is None:
+                raise ValueError("actualizar(): password nuevo requiere vault")
+            self.encrypted_password = vault.encrypt(password)
+            self._password = None  # invalida el cache de Device.password

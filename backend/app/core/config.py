@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     # Days of ansible-runner artifact directories to keep on disk.
     ARTIFACT_RETENTION_DAYS: int = Field(default=30, ge=1)
     # Days of login_attempts rows to keep (only affects historical rows; the
-    # lockout window is governed by login_attempt_service constants).
+    # lockout window is governed by login_attempt_repository constants).
     LOGIN_ATTEMPT_RETENTION_DAYS: int = Field(default=7, ge=1)
 
     # ── Observability ─────────────────────────────────────────────────────────
@@ -183,4 +183,3 @@ REDIS_URL = settings.REDIS_URL
 
 ANSIBLE_BASE_PATH = _ANSIBLE_DIR
 INVENTORY_PATH = os.path.join(_ANSIBLE_DIR, "inventory", "inventory.ini")
-PLAYBOOKS_PATH = os.path.join(_ANSIBLE_DIR, "project")

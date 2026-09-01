@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.device import Device
+    from app.models.port import Puerto
     from app.models.vlan import VLAN
 
+logger = logging.getLogger(__name__)
 
-class BaseVendorDriver(ABC):
-    """Abstract base class that every vendor VLAN driver must implement.
 
-    All concrete drivers must satisfy this interface so that callers in
-    vlan_service and vlan_execution_service can remain fully vendor-agnostic.
+class VendorDriver(ABC):
+    """Abstract base class every vendor driver must implement — VLAN and
+    port operations fused into one contract (FINAL_ARCHITECTURE.md §1.6:
+    ``Device.driver`` is a single property returning a single object, so a
+    vendor can no longer be split across separate VLAN/port driver classes).
 
-    Return-value contracts
-    ----------------------
+    All concrete drivers must satisfy this interface so that callers can
+    remain fully vendor-agnostic.
+
+    VLAN return-value contracts
+    ----------------------------
     Mutation operations (create / update / delete / save_config):
         dict with keys:
             rc      – int  : Ansible return code (0 = success, non-zero = failure)
@@ -26,9 +33,148 @@ class BaseVendorDriver(ABC):
     Query operations (list_vlans / get_vlans / get_vlan):
         list_vlans / get_vlans → list[VLAN]
         get_vlan               → VLAN | None
+
+    Port query-operation contract
+    ------------------------------
+    ``list_ports(device, password)`` must return a normalized
+    ``list[Puerto]``.  Implementations must:
+
+    * filter out pseudo-interfaces (SVIs, loopbacks, NULL, ...);
+    * never invent values — missing fields become ``None``;
+    * raise ``RuntimeError`` if the playbook fails or returns unparseable
+      output (callers convert this to a 502/500 at the API boundary).
+
+    Port mutation operations default to raising ``NotImplementedError`` so
+    vendors that haven't wired a given operation yet are explicit about the
+    gap — the orchestration layer converts this into a controlled
+    ``UnsupportedVendorError``/501 for the API client.
+
+    Shared execution helpers
+    -------------------------
+    Concrete drivers used to each reimplement "build extravars, run the
+    playbook, normalize the result, log" for every single operation --
+    8 of ~14 methods were identical Python across ``CiscoVendor``/
+    ``HuaweiVendor``, differing only in which playbook they called. That
+    boilerplate now lives once, here, as ``_aplicar()``/``_leer()``.
+    Concrete drivers only need to declare 3 class attributes
+    (``_PLAYBOOK``, ``_NETWORK_OS``, ``_CONNECTION``) and, per operation,
+    build the small vendor-specific ``extravars`` dict the one shared
+    playbook understands -- that command construction is the one thing
+    that's genuinely different per vendor (``switchport access vlan X``
+    vs. ``port default vlan X``), everything around it is not.
     """
 
-    # ── Mutation operations (must be implemented by every driver) ────────────
+    _PLAYBOOK: str
+    _NETWORK_OS: str
+    _CONNECTION: str = "network_cli"
+
+    def _build_inventory(self, device: Device, password: str) -> dict:
+        from app.services import ansible_service
+        return ansible_service.build_inventory(
+            device.name, device.host, device.username, password,
+            network_os=self._NETWORK_OS, connection=self._CONNECTION,
+        )
+
+    def _aplicar(self, extravars: dict, device: Device, password: str, *, op_label: str) -> dict:
+        """Run this driver's single playbook with *extravars* and normalize
+        the result to ``{"rc", "stdout", "stderr", "success"}``.
+
+        Shared by every mutation method (and ``save_config()``) across both
+        concrete drivers -- what varies per call is only the shape of
+        *extravars* (``{"lines":..., "parents":...}`` for Cisco,
+        ``{"command_block":...}`` for Huawei, or ``{"commands":[...]}`` for
+        either vendor's "run a bare exec command" case, e.g. Cisco's
+        ``write``).
+        """
+        import traceback
+
+        from app.services import ansible_service
+
+        logger.info("%s: %s on device=%s", type(self).__name__, op_label, device.name)
+        try:
+            result = ansible_service.run_playbook(
+                playbook=self._PLAYBOOK,
+                extravars={**extravars, "device": device.name},
+                inventory=self._build_inventory(device, password),
+            )
+            normalized = {**result, "success": result.get("rc", 1) == 0}
+            if normalized["success"]:
+                logger.info("%s: %s OK on device=%s", type(self).__name__, op_label, device.name)
+            else:
+                logger.error(
+                    "%s: %s FAILED on device=%s — %s",
+                    type(self).__name__, op_label, device.name,
+                    result.get("stderr") or result.get("stdout"),
+                )
+            return normalized
+        except Exception as exc:
+            logger.exception(
+                "FULL %s TRACEBACK [%s device=%s]: %s\n%s",
+                type(self).__name__.upper(), op_label, device.name, str(exc), traceback.format_exc(),
+            )
+            raise
+
+    def _leer(self, commands: list[str], device: Device, password: str) -> list[str]:
+        """Run this driver's single playbook in "read" mode (``commands``)
+        and return every command's stdout, in execution order.
+
+        Raises ``RuntimeError`` on a non-zero rc or empty output -- callers
+        (``list_vlans``/``list_ports``) hand the returned strings to their
+        vendor-specific parser, unchanged.
+        """
+        from app.services import ansible_service
+
+        logger.info("%s: run %d command(s) on device=%s", type(self).__name__, len(commands), device.name)
+        result = ansible_service.run_playbook(
+            playbook=self._PLAYBOOK,
+            extravars={"commands": commands, "device": device.name},
+            inventory=self._build_inventory(device, password),
+        )
+        if result["rc"] != 0:
+            error = result.get("stderr") or result.get("stdout") or "playbook exited non-zero"
+            logger.error("%s: read failed on device=%s — %s", type(self).__name__, device.name, error)
+            raise RuntimeError(f"Cannot read state on device '{device.name}': {error}")
+        stdouts = result.get("stdouts") or []
+        if not stdouts:
+            raise RuntimeError(f"Cannot read state on device '{device.name}': no command output returned")
+        return stdouts
+
+    @staticmethod
+    def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:
+        """Collapse *vlans* into (start, end) range tuples.
+
+        Shared by both concrete drivers' VLAN-list formatting -- was
+        duplicated byte-for-byte in each (``_compress_vlans_cisco``/
+        ``_compress_vlans_huawei`` only differ in the join format).
+        """
+        if not vlans:
+            return []
+        sv = sorted(set(vlans))
+        ranges: list[tuple[int, int]] = []
+        start = sv[0]
+        prev = sv[0]
+        for v in sv[1:]:
+            if v == prev + 1:
+                prev = v
+            else:
+                ranges.append((start, prev))
+                start = v
+                prev = v
+        ranges.append((start, prev))
+        return ranges
+
+    @staticmethod
+    def _is_description_empty(description: str) -> bool:
+        """True when *description* should clear the port description
+        (``no description``/``undo description``) instead of setting it.
+
+        Was duplicated byte-for-byte in both concrete drivers'
+        ``update_port_description()`` -- only the negation keyword
+        differs per vendor, so that's the only part that stays local to
+        each driver."""
+        return not bool(description and description.strip())
+
+    # ── VLAN mutation operations (must be implemented by every driver) ───────
 
     @abstractmethod
     def create_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
@@ -112,7 +258,7 @@ class BaseVendorDriver(ABC):
             ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``
         """
 
-    # ── Query operations (abstract core + concrete normalized surface) ────────
+    # ── VLAN query operations (abstract core + concrete normalized surface) ──
 
     @abstractmethod
     def get_vlans(self, device: Device, password: str) -> list[VLAN]:
@@ -190,4 +336,320 @@ class BaseVendorDriver(ABC):
         return next(
             (v for v in self.list_vlans(device, password) if v.vlan_id == vlan_id),
             None,
+        )
+
+    # ── Port query operation (must be implemented by every driver) ───────────
+
+    @abstractmethod
+    def list_ports(self, device: Device, password: str) -> list[Puerto]:
+        """Return the physical-port inventory of *device* as ``Puerto`` objects.
+
+        Parameters
+        ----------
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller before
+            passing in).
+
+        Returns
+        -------
+        list[Puerto]
+            Normalized port entries, sorted by interface name.  Empty list
+            when the device reports no physical interfaces.
+
+        Raises
+        ------
+        RuntimeError
+            If the underlying playbook fails or returns output that cannot
+            be parsed.
+        """
+
+    # ── Port mutation operations (default: NotImplementedError stub) ─────────
+
+    def update_port_description(
+        self,
+        interface: str,
+        description: str,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the description of *interface* on *device*.
+
+        Concrete drivers should override this; the default implementation
+        raises ``NotImplementedError`` so vendors that haven't been wired
+        yet are explicit about the gap. The orchestration layer converts
+        this into a clean ``UnsupportedVendorError`` for the API client.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        description:
+            New description text.  An empty string requests the driver to
+            clear the description (``undo description`` on Huawei VRP,
+            ``no description`` on Cisco IOS).
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            Normalized Ansible result:
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement update_port_description yet"
+        )
+
+    def set_port_admin_state(
+        self,
+        interface: str,
+        enabled: bool,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Administratively enable or disable *interface* on *device*.
+
+        Concrete drivers should override this; the default implementation
+        raises ``NotImplementedError`` so vendors that haven't been wired
+        yet are explicit about the gap, and the API layer can present a
+        clean ``VENDOR_NOT_SUPPORTED`` 501 instead of leaking the stub.
+
+        Vendor mapping:
+            * Huawei VRP — ``undo shutdown`` (enable) / ``shutdown`` (disable)
+              inside the interface view, followed by ``commit``.
+            * Cisco IOS  — ``no shutdown`` / ``shutdown`` inside
+              ``interface <name>`` parent context.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        enabled:
+            ``True``  → bring the interface up (``undo shutdown`` /
+            ``no shutdown``).
+            ``False`` → bring the interface down (``shutdown``).
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            Normalized Ansible result:
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_port_admin_state yet"
+        )
+
+    def set_port_access_vlan(
+        self,
+        interface: str,
+        vlan_id: int,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Assign *vlan_id* as the access VLAN on *interface*.
+
+        Concrete drivers should override this; the default raises
+        ``NotImplementedError`` so the API layer returns a controlled 501.
+
+        **Pre-conditions are the caller's responsibility:** the
+        orchestration layer must verify the port is in access mode and
+        the VLAN id is valid *before* invoking this method.  Drivers
+        execute the change directly without checking mode — they trust
+        the caller's pre-state validation.
+
+        Vendor mapping:
+            * Huawei VRP — ``port default vlan <id>`` inside the
+              interface view, followed by ``commit``.
+            * Cisco IOS  — ``switchport access vlan <id>`` inside
+              ``interface <name>`` parent context.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        vlan_id:
+            New access VLAN identifier (1–4094, excluding 1002–1005).
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_port_access_vlan yet"
+        )
+
+    def set_trunk_pvid_vlan(
+        self,
+        interface: str,
+        vlan_id: int,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the trunk native VLAN (PVID) of *interface* on *device*.
+
+        Used when the port is in trunk mode to set the untagged/native VLAN.
+        The orchestration layer guarantees the port is in trunk mode before
+        invoking this method.
+
+        Vendor mapping:
+            * Huawei VRP — ``port trunk pvid vlan <id>`` inside the interface
+              view, followed by ``commit``.
+            * Cisco IOS  — ``switchport trunk native vlan <id>`` inside
+              ``interface <name>`` parent context.
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_trunk_pvid_vlan yet"
+        )
+
+    def set_trunk_allowed_vlans(
+        self,
+        interface: str,
+        vlan_list: list[int],
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set the trunk allowed-VLAN list of *interface* to exactly *vlan_list*.
+
+        The driver always performs a full replace (clear existing + set
+        desired), not a delta.  The orchestration layer is responsible for
+        computing the desired list from the requested mode (replace / add /
+        remove) and the pre-state — the driver receives only the final list.
+
+        **Pre-conditions are the caller's responsibility:** the orchestration
+        layer must verify the port is in trunk mode and *vlan_list* is valid
+        before invoking this method.
+
+        Vendor mapping:
+            * Huawei VRP — ``undo port trunk allow-pass vlan all`` followed by
+              ``port trunk allow-pass vlan <list>`` inside the interface view,
+              then ``commit``.
+            * Cisco IOS  — ``switchport trunk allowed vlan <list>`` inside
+              ``interface <name>`` parent context with ``save_when: always``.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name.
+        vlan_list:
+            Sorted, deduplicated list of VLAN IDs to allow on the trunk.
+            Must be non-empty and validated by the caller.
+        device:
+            Domain device object.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_trunk_allowed_vlans yet"
+        )
+
+    def set_access_mode(
+        self,
+        interface: str,
+        vlan_id: int,
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set *interface* to access mode with *vlan_id* as its access VLAN,
+        atomically (mode + VLAN in the same device interaction).
+
+        Replaces the old generic ``configure_port()`` composite call for
+        this one well-defined operation — a real "switch to access mode"
+        request always carries the target VLAN with it, there's no
+        meaningful "just change mode, keep whatever VLAN was there" case.
+
+        Concrete drivers should override this; the default raises
+        ``NotImplementedError`` so vendors without an implementation surface
+        a controlled ``VENDOR_NOT_SUPPORTED`` 501 rather than a bare
+        exception.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name (e.g. ``"GigabitEthernet1/0/1"``).
+        vlan_id:
+            Access VLAN to assign (1–4094, excluding 1002–1005).
+        device:
+            Domain device object exposing ``.name``, ``.host``, ``.username``.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_access_mode yet"
+        )
+
+    def set_trunk_mode(
+        self,
+        interface: str,
+        native_vlan: int,
+        vlan_list: list[int],
+        device: Device,
+        password: str,
+    ) -> dict:
+        """Set *interface* to trunk mode with *native_vlan* (PVID) and
+        *vlan_list* as its allowed VLANs, atomically (mode + both VLAN
+        dimensions in the same device interaction).
+
+        Replaces the old generic ``configure_port()`` composite call for
+        this operation. Distinct from ``set_trunk_allowed_vlans()``/
+        ``set_trunk_pvid_vlan()`` (which assume the port is *already*
+        trunk and only change one dimension) — this one is a mode change,
+        so both *native_vlan* and *vlan_list* always fully replace
+        whatever the port had before, there is no add/remove semantics
+        here (the port may be coming from access mode with no prior trunk
+        config at all).
+
+        Concrete drivers should override this; the default raises
+        ``NotImplementedError`` so vendors without an implementation surface
+        a controlled ``VENDOR_NOT_SUPPORTED`` 501 rather than a bare
+        exception.
+
+        Parameters
+        ----------
+        interface:
+            Vendor-native interface name.
+        native_vlan:
+            Native VLAN / PVID for the trunk (1–4094).
+        vlan_list:
+            VLAN IDs to allow on the trunk (non-empty, validated by the
+            caller).
+        device:
+            Domain device object.
+        password:
+            Plaintext device password (decrypted by the caller).
+
+        Returns
+        -------
+        dict
+            ``{"rc": int, "stdout": str, "stderr": str, "success": bool}``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_trunk_mode yet"
         )

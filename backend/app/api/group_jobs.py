@@ -2,27 +2,13 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from app.core.dependencies import get_current_user
+from app.composition import job_repository
 from app.core.exceptions import NotFoundError
-from app.services import group_job_service
+from app.core.response import ok
+from app.core.scope import require_authenticated
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def _format_group_job(gj) -> dict:
-    return {
-        "group_job_id": gj.group_job_id,
-        "status": gj.status,
-        "operation": gj.operation,
-        "playbook": gj.playbook,
-        "parameters": gj.parameters,
-        "created_at": gj.created_at.isoformat() if gj.created_at else None,
-        "started_at": gj.started_at.isoformat() if gj.started_at else None,
-        "finished_at": gj.finished_at.isoformat() if gj.finished_at else None,
-        "execution_summary": gj.execution_summary(),
-        "device_results": [r.to_dict() for r in gj.device_results],
-    }
 
 
 @router.get(
@@ -36,9 +22,9 @@ def _format_group_job(gj) -> dict:
 )
 def get_group_job(
     group_job_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_authenticated),
 ):
-    gj = group_job_service.get_group_job(group_job_id)
-    if not gj:
+    resumen = job_repository.resumen_de_grupo(group_job_id)
+    if resumen is None:
         raise NotFoundError(f"Group job '{group_job_id}' not found")
-    return {"success": True, "data": _format_group_job(gj)}
+    return ok(resumen)

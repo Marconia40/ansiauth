@@ -1,0 +1,182 @@
+@startuml POST_ports_trunk_mode_1_sync
+title POST /ports/trunk-mode — parte 1/2: request HTTP hasta despachar a Celery (verificado contra código real)
+autonumber
+
+note over Cliente
+  Reemplaza post_ports_configure_1_sync.puml -- POST /ports/configure
+  (endpoint genérico, cualquier combinación de campos) se retiró
+  entero. En su lugar hay 2 endpoints con nombre: POST /ports/access-mode
+  y este, POST /ports/trunk-mode -- Puerto ya no se construye nunca más
+  con una combinación arbitraria de campos. Mismo criterio que
+  post_vlans_secuencia_real_*.puml -- cada flecha es una función/método
+  real, verificado leyendo api/ports.py, models/port.py, schemas/port.py,
+  services/vendors/*, services/group_operation_runner.py,
+  services/job_queue.py y composition.py tal como están hoy.
+end note
+
+actor Cliente
+participant "AuthContextMiddleware\n(core/rls_middleware.py)" as AuthCtx
+participant "get_current_user /\nrequire_authenticated\n(core/scope.py)" as Auth
+participant "RoleAssignmentRepository" as RAR
+participant "Router\n(api/ports.py: set_port_trunk_mode)" as Router
+participant "entidad: Puerto" as PUERTO
+participant "Repository[Device]" as RepoDev
+participant "RedisCoordinator" as RC
+participant "GroupOperationRunner" as GOR
+participant "Repository[Job]" as RepoJob
+participant "JobQueue" as Queue
+
+Cliente -> AuthCtx : POST /api/v1/ports/trunk-mode\n{device:"switch-A", interface:"Gi0/0/1",\nnative_vlan:1, allowed_vlans:[10,20,30]}\nAuthorization: Bearer <jwt>
+activate AuthCtx
+AuthCtx -> AuthCtx : decode_bearer(request)  [1 solo decode -- ver\npost_vlans_secuencia_real_1_sync.puml]
+AuthCtx -> AuthCtx : _lookup_user(username)  [1 sola query]
+AuthCtx -> AuthCtx : request.state.auth_payload/auth_user_row = ...
+AuthCtx -> AuthCtx : current_user_ctx.set({"id":..., "is_system_admin":...})
+AuthCtx -> AuthCtx : bucket_for(request, username) + _check_and_record()
+alt límite excedido
+    AuthCtx --> Cliente : 429 Too Many Requests
+end
+AuthCtx -> Auth : request (auth + RLS context ya instalados)
+deactivate AuthCtx
+activate Auth
+Auth -> Auth : get_current_user(request)  [lee request.state]
+alt payload ausente o inválido
+    Auth --> Cliente : 401
+end
+Auth -> Auth : require_authenticated(current, request)
+alt user inactivo
+    Auth --> Cliente : 401
+end
+Auth -> RAR : obtener_scope(current) -> scope_de(current)
+activate RAR
+alt current["is_system_admin"]
+    RAR --> Auth : VisibilityScope(es_system_admin=True, grants=())
+else
+    RAR -> RAR : query RoleAssignmentModel WHERE user_id=...
+    RAR --> Auth : VisibilityScope(es_system_admin=False, grants=(...))
+end
+deactivate RAR
+Auth -> Router : set_port_trunk_mode(data, current_user, scope)
+deactivate Auth
+activate Router
+
+Router -> PUERTO : Puerto(interface="Gi0/0/1", mode="trunk",\naccess_vlan=1, allowed_vlans=[10,20,30])
+activate PUERTO
+note right of PUERTO
+  ``access_vlan`` es el campo dual-purpose de siempre (VLAN de acceso
+  en modo access, PVID/native VLAN en modo trunk -- mismo campo, no
+  uno nuevo) -- acá lo llena ``data.native_vlan``, requerido por el
+  schema nuevo ``PortSetTrunkModeRequest`` (antes ``allowed_vlan_operation``
+  también existía -- se sacó, este endpoint siempre reemplaza, no
+  hace add/remove relativo a un trunk que ya existía).
+end note
+PUERTO -> PUERTO : __post_init__() -> _validate_interface_name(self.interface)
+alt interface inválida
+    PUERTO --> Router : raise ValueError
+    Router --> Cliente : 400 (ValidationError)
+end
+Router -> PUERTO : entidad.validar()
+PUERTO -> PUERTO : mode=="trunk": access_vlan is None?\n[no -- 1 seteado] / not allowed_vlans?\n[no -- 3 VLANs seteadas]
+note right of PUERTO
+  Reemplaza ``_es_composite`` (borrada junto con el ``configure_port()``
+  genérico) -- la regla cruzada cuelga directo de ``self.mode`` ahora,
+  no de "cuántos campos hay seteados".
+end note
+PUERTO -> PUERTO : _validate_access_vlan_id(1)\nPUERTO -> PUERTO : _validate_trunk_vlan_list([10,20,30])
+alt algún campo inválido
+    PUERTO --> Router : raise ValueError
+    Router --> Cliente : 400 (ValidationError)
+end
+deactivate PUERTO
+
+Router -> RepoDev : require_device("switch-A")\n-> device_repository.get("switch-A")\n[core/scope.py -- helper único compartido con\napi/ports.py (9 call sites)/api/vlans.py (4), ver nota en\npost_vlans_secuencia_real_1_sync.puml]
+activate RepoDev
+RepoDev --> Router : dev
+deactivate RepoDev
+alt device no existe
+    Router --> Cliente : 404 (NotFoundError, tirado por require_device())
+end
+
+Router -> Router : _authz_device(scope, "switch-A", min_role="operator",\ndevice=dev)\n-> authorize_device(scope, "switch-A", "port_device_op",\nmin_role, resolved=(dev.site_id, dev.device_group_id))\n[core/scope.py]
+note right of Router
+  Ya no llama a ``resolver_site_group()``/hace su propio JOIN --
+  corrección real de esta sesión: ``dev`` (recién obtenido arriba)
+  ya trae ``site_id``/``device_group_id`` resueltos, así que
+  ``authorize_device()`` los reusa directo en vez de repetir la
+  misma query Device+DeviceGroup dos veces en el mismo request
+  (duplicación encontrada en una revisión de código).
+end note
+Router -> Router : scope.rol_para(dev.site_id, dev.device_group_id)\n[en memoria]
+alt rol insuficiente
+    Router --> Cliente : 403
+end
+
+Router -> RC : _check_device_not_locked("switch-A")\n-> redis_coordinator.esta_ocupado("switch-A")
+activate RC
+note right of RC
+  Corrección real de esta sesión -- antes SOLO lo llamaban
+  configure_port/shutdown/enable (3 de 6 endpoints de escritura de
+  ports.py). Ahora se agregó también a los 4 PATCH de campo único
+  (/description, /admin-state, /access-vlan, /trunk-vlans) -- parejo
+  en los 6, no 3 de 6.
+end note
+RC --> Router : bool
+deactivate RC
+alt device ocupado
+    Router --> Cliente : 409 {"error_code":"DEVICE_LOCKED"}
+end
+
+Router -> Router : _require_port_driver_with(dev, "set_trunk_mode")
+note right of Router
+  Bug real encontrado y corregido en una sesión anterior: el método con
+  nombre viejo que este reemplaza (``configure_port``) era un stub
+  ``NotImplementedError`` fijo para Cisco -- SIN playbook siquiera --
+  así que cualquier cambio de modo vía el endpoint genérico fallaba
+  siempre para devices Cisco (Huawei sí funcionaba). ``set_trunk_mode``
+  tiene una implementación Cisco real desde entonces.
+
+  Actualizado en esta sesión: ``CiscoVendor``/``HuaweiVendor`` se
+  unificaron sobre una base compartida (``VendorDriver``) -- los 26
+  playbooks por-operación (uno por método, por vendor, incluido el
+  ``set_trunk_mode.yml`` que mencionaba la nota vieja acá) colapsaron a
+  2 archivos totales: ``cisco/run.yml``/``huawei/run.yml``, cada uno con
+  2 tasks condicionales según qué variable llega. Ver
+  post_ports_trunk_mode_2_async.puml para el detalle del lado del
+  worker, donde corre la llamada real al driver.
+end note
+alt driver no sobreescribe set_trunk_mode
+    Router --> Cliente : 501 {"error_code":"VENDOR_NOT_SUPPORTED"}
+end
+
+Router -> GOR : encolar(entidad, ["switch-A"], current_user["username"])
+activate GOR
+GOR -> GOR : group_job_id = uuid4()
+GOR -> GOR : parametros = asdict(recurso)
+GOR -> RepoJob : add(Job(operation="puerto", device="switch-A",\ngroup_job_id=group_job_id, parameters=parametros))
+activate RepoJob
+RepoJob --> GOR : job (status="pending")
+deactivate RepoJob
+GOR -> Queue : dispatch(recurso, "switch-A", actor, job.job_id)
+note right of Queue
+  Ya no toma ``nombre_task`` -- bug real corregido esta sesión: el
+  parámetro existía pero el cuerpo nunca lo usaba (importaba
+  ``ejecutar_task`` directo y llamaba ``.delay()``), y el string que
+  le pasaba este caller (``"orquestador.ejecutar"``) ni siquiera
+  coincidía con el nombre real registrado en Celery
+  (``"ansiauth.orquestador.ejecutar"``, ``app/tasks.py``). El
+  ruteo por nombre ya lo resuelve el decorator
+  ``@celery_app.task(name=...)``, no hacía falta que este wrapper
+  también lo supiera.
+end note
+activate Queue
+Queue -> Queue : asdict(recurso)  [2da vez -- ver nota en\npost_vlans_secuencia_real_1_sync.puml]
+Queue -> Queue : ejecutar_task.delay(recurso_dict, "puerto",\n"switch-A", actor, job_id)
+deactivate Queue
+GOR --> Router : (group_job_id, job_entries)
+deactivate GOR
+
+Router --> Cliente : 200 {"success":true, "group_job_id":"...",\n"jobs":[{"device":"switch-A","job_id":"...","status":"pending"}]}
+note right of Router : armado con core/response.py:ok() desde esta sesión --\nmismo shape, ver nota en post_vlans_secuencia_real_1_sync.puml
+deactivate Router
+
+@enduml

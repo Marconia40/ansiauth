@@ -1,0 +1,261 @@
+@startuml POST_vlans_real_2_async
+title POST /vlans — parte 2/2: worker Celery (Orquestador.ejecutar, switch-A) — verificado contra código real
+autonumber
+
+note over Task
+  Continúa post_vlans_secuencia_real_1_sync.puml -- ese termina justo
+  después de GroupOperationRunner.encolar() despachar
+  ejecutar_task.delay(...) por Celery. Separado en un segundo
+  archivo porque el diagrama completo (síncrono + async) supera
+  el límite de largo de URL del render público de plantuml.com
+  (confirmado empíricamente -- no es un problema de sintaxis).
+end note
+
+participant "JobQueue\n(services/job_queue.py)" as Queue
+participant "vlan: VLAN" as VLAN
+participant "Repository[Device]" as RepoDev
+participant "Repository[Job]" as RepoJob
+participant "ejecutar_task\n(app/tasks.py)" as Task
+participant "Orquestador" as Orq
+participant "RedisCoordinator" as RC
+participant "device: Device" as Dev
+participant "PluginRegistry" as PR
+participant "SecretVault" as SV
+participant "MockVendor\n(VendorDriver)" as Vendor
+participant "Repository[VLAN]" as RepoVlan
+participant "EventDispatcher" as ED
+participant "AuditListener" as AL
+participant "AuditRepository" as AR
+
+Queue -> Task : ejecutar_task(recurso_dict, "vlan", "switch-A", actor, job_id)\n[worker_process_init ya corrió install_worker_system_context()\n-- este proceso no tiene JWT, RLS lo trata como trusted]
+activate Task
+Task -> VLAN : VLAN(**recurso_dict)
+activate VLAN
+VLAN -> VLAN : __post_init__()\n[corre de nuevo naturalmente -- reconstrucción,\nno es Orquestador "revalidando" un objeto ya existente]
+deactivate VLAN
+Task -> RepoJob : get(job_id)
+activate RepoJob
+RepoJob --> Task : job
+deactivate RepoJob
+
+Task -> Orq : ejecutar(recurso, "switch-A", actor, job)
+activate Orq
+
+alt job.esta_en_estado_terminal()
+    Orq --> Task : return (no-op)
+    note right : reentrega de Celery ("al menos una vez")\nsobre un Job ya terminal
+end
+
+Orq -> RepoDev : get("switch-A")
+activate RepoDev
+RepoDev --> Orq : device
+deactivate RepoDev
+alt device no existe
+    Orq --> Task : raise NotFoundError
+end
+
+Orq -> VLAN : recurso.device = "switch-A"
+note right of VLAN
+  Bug real encontrado y corregido en esta sesión: esta línea NO
+  existía antes -- recurso.device se quedaba en "" (default),
+  y como device_vlans tiene PK compuesta (vlan_id, device),
+  toda VLAN con el mismo vlan_id en CUALQUIER device colapsaba
+  en una sola fila con device="". Confirmado con test real
+  (2 devices, mismo vlan_id, 1 encolar() -> vlan_repository.list()
+  devolvía 1 fila, no 2) antes y después del fix.
+end note
+
+Orq -> Orq : job.marcar_iniciado()\n-> _transicionar("running")
+Orq -> RepoJob : add(job)
+activate RepoJob
+deactivate RepoJob
+
+Orq -> RC : bloquear("switch-A")
+activate RC
+note right : Redis lock si hay Redis alcanzable,\nsi no threading.Lock in-process (contextmanager)
+Orq -> RC : limitar("switch-A")
+note right : RedisCoordinator.limitar() -- diseñado en Fase 1,\nrecién conectado acá en Fase 7. MAX_JOBS_PER_WINDOW=30/60s\n(subido de 5 tras colgar un test real 2+ min con el valor original)
+
+Orq -> VLAN : recurso.validar()
+VLAN -> VLAN : _validate_vlan_name(self.name)
+note right of VLAN
+  validación #2 (y última) del nombre -- el router ya llamó
+  entidad.validar() en el proceso síncrono, pero `recurso` acá
+  es OTRA instancia de VLAN (reconstruida desde el dict que
+  cruzó por Celery), así que Orquestador no puede asumir que ya
+  fue validada -- este chequeo SÍ tiene sentido (cruza un límite
+  real de proceso/instancia). Ya no hay una 3ra validación
+  adentro de aplicar() -- se sacó (ver más abajo): el nombre no
+  cambia entre intentos, a diferencia del estado del device.
+end note
+
+Orq -> VLAN : recurso.reconciliar(device)
+activate VLAN
+VLAN -> Dev : driver
+activate Dev
+Dev -> PR : obtener("cisco_ios")\n[solo 1ra vez -- después cacheado en Device._driver]
+activate PR
+PR --> Dev : MockVendor instance
+deactivate PR
+Dev --> VLAN : driver
+deactivate Dev
+VLAN -> Dev : password
+activate Dev
+Dev -> SV : decrypt(encrypted_password)\n[solo 1ra vez -- después cacheado en Device._password]
+activate SV
+SV --> Dev : password en claro
+deactivate SV
+Dev --> VLAN : password
+deactivate Dev
+VLAN -> Vendor : get_vlans(device, password)
+activate Vendor
+Vendor --> VLAN : [VLAN(10,"MGMT"), VLAN(20,"DATA"), VLAN(30,"VOICE")]
+deactivate Vendor
+VLAN --> Orq : pre_state = {"existed": False, "name": None}
+deactivate VLAN
+
+Orq -> Orq : job.pre_state = _pre_state_json_safe(pre_state)
+note right of Orq
+  Bug real corregido esta sesión (otra sesión, no la que agregó la
+  nota de abajo): ``pre_state`` se calculaba acá arriba y se usaba
+  para el rollback, pero nunca se escribía de vuelta al ``Job`` --
+  ``GET /jobs/{job_id}`` siempre devolvía ``pre_state: null``. Para
+  VLAN, ``_pre_state_json_safe()`` es un no-op real (este pre_state
+  ya es JSON-safe de por sí) -- el caso que sí necesita conversión es
+  Puerto (``pre_state["actual"]`` es un ``Puerto``, no serializable
+  tal cual), ver post_ports_trunk_mode_2_async.puml.
+end note
+
+Orq -> Orq : primer_intento = True\ndef _aplicar(): ...\nself._ejecutar_con_retry(_aplicar, job, "switch-A",\nmax_retries=job.max_retries)
+note right of Orq
+  Corrección real de esta sesión: _aplicar() ya no es un lambda
+  plano. En el 1er intento pasa el pre_state que ya se calculó
+  arriba (recurso.aplicar(device, pre_state=pre_state)) -- antes
+  aplicar() releía el estado del device en TODOS los intentos,
+  incluido el primero, donde nada pudo haber cambiado todavía.
+  A partir del 2do intento (reintento real) llama aplicar() SIN
+  pre_state, para que sí vuelva a leer el estado real -- probado
+  con un test que simula un 1er intento con timeout que igual se
+  aplicó en el device: el reintento detecta el estado real y hace
+  noop en vez de reintentar un create que fallaría con
+  "VLAN already exists".
+
+  ``max_retries=job.max_retries`` (bug real corregido esta sesión,
+  aparte): antes _ejecutar_con_retry() ignoraba job.max_retries y
+  usaba siempre su propio default hardcodeado de 3.
+end note
+activate Orq
+loop hasta job.max_retries+1=4 intentos, corta en el primer rc==0
+    Orq -> VLAN : recurso.aplicar(device, pre_state=pre_state)\n[pre_state pasado directo en el 1er intento --\nNO llama reconciliar()/get_vlans() de nuevo acá]
+    activate VLAN
+    alt pre_state["existed"] and pre_state["name"] == self.name
+        VLAN -> VLAN : return {"noop": True, "accion": "crear_vlan"}
+    else pre_state["existed"] and pre_state["name"] != self.name
+        VLAN -> Vendor : update_vlan(vlan_id, name, device, password)
+        Vendor --> VLAN : resultado
+    else no existe -- caso de este ejemplo
+        VLAN -> Dev : driver, password\n[ya cacheados -- no vuelven a pasar\npor PluginRegistry/SecretVault]
+        activate Dev
+        Dev --> VLAN : driver, password
+        deactivate Dev
+        VLAN -> Vendor : create_vlan(100, "MGMT", device, password)
+        activate Vendor
+        Vendor -> Vendor : ansible_runner -> playbook -> switch real\n(en mock: rc=0 fijo salvo device.name=="fail_device")
+        Vendor --> VLAN : {"rc":0, "stdout":"Simulated VLAN 100 created", "stderr":""}
+        deactivate Vendor
+        VLAN --> Orq : {**resultado, "accion":"crear_vlan"}
+    end
+    note right of VLAN
+      self.validar() YA NO se llama acá adentro (corrección real
+      de esta sesión) -- Orquestador.ejecutar() ya validó el
+      nombre una sola vez, antes del loop. El nombre no cambia
+      entre intentos (a diferencia del estado del device), así
+      que no había necesidad real de revalidarlo en cada aplicar().
+    end note
+    deactivate VLAN
+    alt resultado["rc"] != 0
+        Orq -> Orq : self._clasificar_error(resultado)\n-> RetryDecision (rc/texto contra\n_PATRONES_TRANSITORIOS/_PATRONES_PERMANENTES)
+        alt should_retry y quedan intentos
+            Orq -> Orq : job.registrar_reintento(error_texto)
+            Orq -> RepoJob : add(job)
+            Orq -> Orq : time.sleep(delay)  [backoff exponencial, tope 5s]
+            note right : el PRÓXIMO intento (vuelve al tope del\nloop) ya NO es el primero -- _aplicar() llama\nrecurso.aplicar(device) sin pre_state, que sí\nvuelve a leer el estado real vía reconciliar()\n(driver/password ya cacheados, get_vlans() real)
+        else no reintenta más
+            note right : sale del loop con el último resultado (rc!=0)
+        end
+    end
+end
+Orq --> Orq : (resultado, retry_count)
+deactivate Orq
+
+alt resultado["rc"] != 0
+    Orq -> Orq : raise DeviceExecutionError(stderr o stdout)
+end
+
+Orq -> RC : (fin del "with" externo) libera lock
+deactivate RC
+
+alt resultado["rc"] == 0 -- camino feliz de este ejemplo
+    Orq -> RepoVlan : add(recurso)\n[PK real = (vlan_id, device), YA coincide con pk_field\n-- no dispara la rama de búsqueda-por-PK-de-negocio\nde core/repository.py:add()]
+    activate RepoVlan
+    deactivate RepoVlan
+    Orq -> Orq : job.marcar_completado(resultado)\n-> _transicionar("completed")
+    Orq -> RepoJob : add(job)
+    activate RepoJob
+    deactivate RepoJob
+    Orq -> ED : despachar([DomainEvent("recurso_aplicado", recurso,\ndevice, actor, resultado, exitoso=True)])
+    activate ED
+    ED -> AL : on_event(evento)
+    activate AL
+    AL -> AL : AuditRecord.desde(evento)\n[action=payload["accion"]="crear_vlan",\nresource="vlan", device="switch-A"]
+    AL -> AR : append(record)
+    activate AR
+    AR -> AR : session.add(row)  [insert-strict,\nnunca merge -- ver app/db/audit_guard.py]
+    deactivate AR
+    deactivate AL
+    deactivate ED
+else resultado["rc"] != 0 -- camino de error, no ocurre en este ejemplo\n  pero es real y está siempre presente en el código
+    Orq -> RC : bloquear("switch-A")  [se re-adquiere para el rollback]
+    activate RC
+    Orq -> Orq : self._rollback(recurso, pre_state, device)\n-> _rollback_vlan(recurso, pre_state, device)
+    note right of Orq
+      pre_state.existed=False acá -> rama "no existía" ->
+      device.driver.delete_vlan(...) para deshacer la creación
+      parcial, después re-lee get_vlans() para verificar
+      (rollback_success tri-estado: True/False/None).
+    end note
+    Orq -> RC : libera lock
+    deactivate RC
+    Orq -> Orq : job.marcar_fallido(str(error), rb_performed, rb_success)\n-> _transicionar("failed")
+    Orq -> RepoJob : add(job)
+    Orq -> ED : despachar([DomainEvent("recurso_fallido", ...,\nexitoso=False)])
+    activate ED
+    ED -> AL : on_event(evento)
+    AL -> AR : append(record)  [status="failure" -- la falla\ntambién deja rastro, no solo el éxito]
+    deactivate ED
+    Orq -> Task : raise (se propaga -- Celery no tiene\nautoretry_for configurado en worker.py,\nasí que el task simplemente queda failed)
+end
+
+Orq -> Orq : finally: if not job.esta_en_estado_terminal():\n  job.asegurar_estado_final(); self._jobs.add(job)
+note right : no-op en este ejemplo -- el job ya\nquedó terminal en el try/except de arriba.\nCubre solo el caso de crash real del proceso.
+
+deactivate Orq
+deactivate Task
+
+note over Queue, AR
+  switch-B corre este mismo bloque completo en paralelo, en otro
+  worker, totalmente aislado (RNF-RES-02) -- mismas funciones
+  reales, misma 1 validación de nombre en Orquestador (más la del
+  router, en el proceso síncrono), y 1 sola llamada real a
+  get_vlans() en este camino feliz (antes eran 2 -- ver las notas
+  de arriba). Si switch-B falla, su rollback no toca lo ya
+  aplicado en switch-A.
+
+  GET /group-jobs/{id} no tiene listener ni tabla propia que
+  actualizar: JobRepository.resumen_de_grupo(group_job_id) agrega
+  los Job reales (WHERE group_job_id=...) al vuelo cada vez que se
+  pide -- no puede desincronizarse porque no hay estado derivado
+  que mantener.
+end note
+
+@enduml

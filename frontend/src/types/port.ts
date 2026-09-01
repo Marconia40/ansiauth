@@ -57,6 +57,26 @@ export interface PortTrunkVlansUpdateRequest {
   vlans: number[];
 }
 
+// Body for POST /api/v1/ports/access-mode. Replaces the old generic
+// /ports/configure for this specific, well-defined operation.
+export interface PortSetAccessModeRequest {
+  device: string;
+  interface: string;
+  access_vlan: number;
+}
+
+// Body for POST /api/v1/ports/trunk-mode. native_vlan (PVID) and
+// allowed_vlans always fully replace whatever the port had before (mode
+// change, not add/remove — use PortAccessVlanUpdateRequest/
+// PortTrunkVlansUpdateRequest to adjust either individually on a port
+// that's already trunk).
+export interface PortSetTrunkModeRequest {
+  device: string;
+  interface: string;
+  native_vlan: number;
+  allowed_vlans: number[];
+}
+
 // Response shape — matches the orchestration envelope used by VLAN endpoints,
 // so the existing JobNotificationContext can track these jobs unchanged.
 export interface PortJobResult {

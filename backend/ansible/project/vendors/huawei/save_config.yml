@@ -1,9 +1,0 @@
----
-- name: Save configuration on Huawei VRP device
-  hosts: all
-  gather_facts: no
-
-  tasks:
-    - name: Persist running config to flash
-      ansible.netcommon.cli_command:
-        command: save force

@@ -88,12 +88,56 @@ class DeviceModel(Base):
     __table_args__ = (UniqueConstraint("name", name="uq_device_name"),)
 
 
+class DeviceVlanModel(Base):
+    """MSP: Fase 2 de la migración a FINAL_ARCHITECTURE.md — Repository[VLAN].
+
+    PK compuesta real (``vlan_id``, ``device``), sin ``id`` autoincrement
+    separado: la identidad real de una VLAN persistida es (vlan_id, device),
+    no vlan_id solo (switch-A y switch-B pueden tener cada uno su propia VLAN
+    100). Necesario para que ``session.merge()`` reconozca la fila existente
+    de forma nativa en ``Repository[T].add()`` — ver FASE_1.md, Repository[T].
+    """
+
+    __tablename__ = "device_vlans"
+
+    vlan_id = Column(Integer, primary_key=True)
+    device = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+
+
+class DevicePortModel(Base):
+    """MSP: Fase 2 de la migración a FINAL_ARCHITECTURE.md — Repository[Puerto].
+
+    PK compuesta real (``interface``, ``device``), mismo criterio que
+    ``DeviceVlanModel``. Guarda el estado deseado/aplicado — no
+    ``operational_up``/``speed``/``duplex`` (solo lectura, vienen del device
+    en cada ``reconciliar()``) ni ``allowed_vlan_operation`` (instrucción de
+    la llamada, no atributo persistente del puerto).
+    """
+
+    __tablename__ = "device_ports"
+
+    interface = Column(String, primary_key=True)
+    device = Column(String, primary_key=True)
+    description = Column(String, nullable=True)
+    admin_up = Column(Boolean, nullable=True)
+    mode = Column(String, nullable=True)
+    access_vlan = Column(Integer, nullable=True)
+    allowed_vlans = Column(JSON, nullable=True)  # lista de int
+    poe_enabled = Column(Boolean, nullable=True)
+
+
 class JobModel(Base):
     __tablename__ = "jobs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     job_id = Column(String, nullable=False, unique=True, index=True)
     status = Column(String, nullable=False, default="pending", index=True)
+    # MSP: Fase 4 de la migración a FINAL_ARCHITECTURE.md -- GroupJob.operation
+    # (ej. "create_vlan") es un dato real que GET /group-jobs/{id} expone hoy;
+    # sin esta columna, JobRepository.resumen_de_grupo() (Fase 4 A3) no tiene
+    # de dónde sacarlo al eliminar GroupJob (A2).
+    operation = Column(String, nullable=True)
     playbook = Column(String, nullable=True)
     device = Column(String, nullable=True)
     parameters = Column(JSON, nullable=True)
@@ -114,21 +158,6 @@ class JobModel(Base):
     __table_args__ = (
         Index("ix_jobs_status_created_at", "status", "created_at"),
     )
-
-
-class GroupJobModel(Base):
-    __tablename__ = "group_jobs"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    group_job_id = Column(String, nullable=False, unique=True, index=True)
-    status = Column(String, nullable=False, default="pending", index=True)
-    operation = Column(String, nullable=True)
-    playbook = Column(String, nullable=True)
-    parameters = Column(JSON, nullable=True)
-    device_results = Column(JSON, nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False)
-    started_at = Column(DateTime(timezone=True), nullable=True)
-    finished_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class RefreshTokenModel(Base):

@@ -1,0 +1,228 @@
+@startuml POST_ports_trunk_mode_2_async
+title POST /ports/trunk-mode — parte 2/2: worker Celery (Orquestador.ejecutar, rollback nombrado corregido)
+autonumber
+
+note over Task
+  Continúa post_ports_trunk_mode_1_sync.puml. Reemplaza
+  post_ports_configure_2_async.puml -- muestra el fix real del
+  hallazgo que ese diagrama dejó documentado sin corregir:
+  Orquestador._rollback_puerto() decidía su rama con
+  `len(campos) > 1`, mientras Puerto._es_composite (ya borrada)
+  decidía con `len(campos) > 1 or "mode" in campos` -- un
+  Puerto(mode="trunk") de un solo campo cambiado cae en la rama de
+  UN campo, sin caso para "mode", y el rollback quedaba como no-op
+  silencioso. Ahora ambos lados miran `puerto.mode` directo, sin
+  heurística que pueda desalinearse.
+end note
+
+participant "JobQueue" as Queue
+participant "entidad: Puerto" as PUERTO
+participant "Repository[Device]" as RepoDev
+participant "Repository[Job]" as RepoJob
+participant "ejecutar_task\n(app/tasks.py)" as Task
+participant "Orquestador" as Orq
+participant "RedisCoordinator" as RC
+participant "device: Device" as Dev
+participant "PluginRegistry" as PR
+participant "SecretVault" as SV
+participant "CiscoVendor\n(VendorDriver)" as Vendor
+participant "Repository[Puerto]" as RepoPuerto
+participant "EventDispatcher" as ED
+participant "AuditListener" as AL
+participant "AuditRepository" as AR
+
+Queue -> Task : ejecutar_task(recurso_dict, "puerto", "switch-A", actor, job_id)
+activate Task
+Task -> PUERTO : Puerto(**recurso_dict)
+activate PUERTO
+PUERTO -> PUERTO : __post_init__()  [reconstrucción]
+deactivate PUERTO
+Task -> RepoJob : get(job_id)
+activate RepoJob
+RepoJob --> Task : job
+deactivate RepoJob
+
+Task -> Orq : ejecutar(recurso, "switch-A", actor, job)
+activate Orq
+alt job.esta_en_estado_terminal()
+    Orq --> Task : return (no-op, reentrega de Celery)
+end
+
+Orq -> RepoDev : get("switch-A")
+activate RepoDev
+RepoDev --> Orq : device
+deactivate RepoDev
+alt device no existe
+    Orq --> Task : raise NotFoundError
+end
+
+Orq -> PUERTO : recurso.device = "switch-A"
+note right of PUERTO : mismo fix real que VLAN -- ver post_vlans_secuencia_real_2_async.puml
+
+Orq -> Orq : job.marcar_iniciado() -> _transicionar("running")
+Orq -> RepoJob : add(job)
+activate RepoJob
+deactivate RepoJob
+
+Orq -> RC : bloquear("switch-A")
+activate RC
+Orq -> RC : limitar("switch-A")
+
+Orq -> PUERTO : recurso.validar()
+PUERTO -> PUERTO : mode=="trunk": access_vlan/allowed_vlans seteados?\n[2da vez -- otra instancia, reconstruida desde Celery]
+
+Orq -> PUERTO : recurso.reconciliar(device)
+activate PUERTO
+PUERTO -> Dev : driver, password
+activate Dev
+Dev -> PR : obtener("cisco_ios")  [1ra vez, cacheado]
+activate PR
+PR --> Dev : CiscoVendor instance
+deactivate PR
+Dev -> SV : decrypt(encrypted_password)  [1ra vez, cacheado]
+activate SV
+SV --> Dev : password en claro
+deactivate SV
+Dev --> PUERTO : driver, password
+deactivate Dev
+PUERTO -> Vendor : list_ports(device, password)
+activate Vendor
+Vendor --> PUERTO : [Puerto(Gi0/0/1, mode="access", access_vlan=10, ...)]
+deactivate Vendor
+PUERTO --> Orq : pre_state = {"existed": True,\n"actual": Puerto(Gi0/0/1, mode="access", access_vlan=10)}
+note right of PUERTO : el puerto está en ACCESS hoy -- este trunk-mode\nes un cambio de modo real, no un re-aplicar sobre un\nport que ya era trunk (importa para el rollback, abajo)
+deactivate PUERTO
+
+Orq -> Orq : job.pre_state = _pre_state_json_safe(pre_state)
+note right of Orq
+  Bug real corregido esta sesión: antes ``pre_state`` se calculaba
+  acá arriba y se usaba para el rollback (ver el ``alt`` de error
+  más abajo), pero nunca se escribía de vuelta al ``Job`` --
+  ``GET /jobs/{job_id}`` siempre devolvía ``pre_state: null``, a
+  pesar de que el endpoint dice "Pre-state is captured for
+  rollback". ``_pre_state_json_safe()`` reemplaza el ``Puerto``
+  anidado en ``"actual"`` (no serializable tal cual a JSON) por su
+  ``asdict()`` antes de guardarlo -- justo el caso que este mismo
+  diagrama ejemplifica (VLAN.reconciliar() ya era JSON-safe de por
+  sí, la conversión ahí es un no-op).
+end note
+
+Orq -> Orq : primer_intento = True\ndef _aplicar(): ...\nself._ejecutar_con_retry(_aplicar, job, "switch-A",\nmax_retries=job.max_retries)
+note right of Orq : max_retries ahora se pasa de verdad (bug real corregido\nesta sesión) -- antes _ejecutar_con_retry() usaba siempre su\npropio default hardcodeado de 3, sin importar job.max_retries.\nMismo número en este ejemplo (nadie setea max_retries todavía\na otro valor), pero antes el campo no tenía ningún efecto real.
+activate Orq
+loop hasta job.max_retries+1=4 intentos, corta en el primer rc==0
+    Orq -> PUERTO : recurso.aplicar(device, pre_state=pre_state)\n[1er intento -- pasado directo, sin reconciliar() de nuevo]
+    activate PUERTO
+    PUERTO -> PUERTO : self.mode == "trunk" -> _aplicar_modo_trunk(device)
+    note right of PUERTO
+      Ya no hay `_es_composite`/dispatch genérico -- `aplicar()` mira
+      `self.mode` primero. `_aplicar_modo_trunk()` no usa `pre_state`
+      (igual que la vieja rama compuesta) ni tiene `_noop_resultado()`
+      (documentado como alcance separado, sin cambios acá).
+    end note
+    PUERTO -> Vendor : set_trunk_mode("Gi0/0/1", 1, [10,20,30], device, password)
+    activate Vendor
+    Vendor -> Vendor : self._aplicar(\n  {"parents":"interface Gi0/0/1",\n   "lines":["switchport mode trunk",\n            "switchport trunk native vlan 1",\n            "switchport trunk allowed vlan 10,20,30"]},\n  device, password, op_label="set trunk mode")\n[VendorDriver._aplicar() -- helper concreto compartido\ncon HuaweiVendor y con los otros 7 métodos de mutación\nde este driver, ver nota abajo]
+    note right of Vendor
+      Antes de una sesión anterior: `configure_port(self, ...)` -- stub
+      `NotImplementedError` para Cisco, SIN playbook. Desde entonces,
+      `set_trunk_mode()` tenía una implementación Cisco real propia,
+      con su propio playbook `set_trunk_mode.yml`.
+
+      Actualizado en esta sesión: ese playbook (y los otros 11 de Cisco)
+      se retiraron. `CiscoVendor`/`HuaweiVendor` tenían 8 de ~14 métodos
+      idénticos en Python -- armar extravars, correr el playbook,
+      normalizar, loguear -- y solo cambiaba qué `.yml` invocaban.
+      `VendorDriver._aplicar()` (concreto, no abstracto, en la base) hace
+      eso una sola vez ahora; este método solo arma `lines`/`parents` y
+      llama `self._aplicar(...)`, que corre `vendors/cisco/run.yml`
+      (único playbook Cisco -- 2 tasks condicionales: `lines`+`parents`
+      -> `cisco.ios.ios_config`, `commands` -> `cisco.ios.ios_command`,
+      este último también usado por `save_config()`, ahora una operación
+      real y explícita -- `write` -- que antes no existía para Cisco).
+    end note
+    Vendor -> Vendor : ansible_runner -> playbook -> switch real\n(en mock: rc=0 fijo salvo device.name=="fail_device")
+    Vendor --> PUERTO : {"rc":0, "stdout":"...", "stderr":"", "success":true}
+    deactivate Vendor
+    PUERTO --> Orq : {**resultado, "accion":"configurar_modo_trunk"}
+    deactivate PUERTO
+    alt resultado["rc"] != 0
+        Orq -> Orq : self._clasificar_error(resultado) -> RetryDecision
+        alt should_retry y quedan intentos
+            Orq -> Orq : job.registrar_reintento(error_texto)
+            Orq -> RepoJob : add(job)
+            Orq -> Orq : time.sleep(delay)
+        else no reintenta más
+            note right : sale del loop con el último resultado (rc!=0)
+        end
+    end
+end
+Orq --> Orq : (resultado, retry_count)
+deactivate Orq
+
+alt resultado["rc"] != 0
+    Orq -> Orq : raise DeviceExecutionError(stderr o stdout)
+end
+
+Orq -> RC : (fin del "with" externo) libera lock
+deactivate RC
+
+alt resultado["rc"] == 0 -- camino feliz de este ejemplo
+    Orq -> RepoPuerto : add(recurso)\n[PK real = (interface, device), coincide con pk_field]
+    activate RepoPuerto
+    deactivate RepoPuerto
+    Orq -> Orq : job.marcar_completado(resultado) -> _transicionar("completed")
+    Orq -> RepoJob : add(job)
+    activate RepoJob
+    deactivate RepoJob
+    Orq -> ED : despachar([DomainEvent("recurso_aplicado", recurso,\ndevice, actor, resultado, exitoso=True)])
+    activate ED
+    ED -> AL : on_event(evento)
+    activate AL
+    AL -> AL : AuditRecord.desde(evento)\n[action="configurar_modo_trunk", resource="puerto"]
+    AL -> AR : append(record)
+    activate AR
+    AR -> AR : session.add(row)  [insert-strict, nunca merge]
+    deactivate AR
+    deactivate AL
+    deactivate ED
+else resultado["rc"] != 0 -- camino de error, real pero no ocurre en este ejemplo
+    Orq -> RC : bloquear("switch-A")  [se re-adquiere para el rollback]
+    activate RC
+    Orq -> Orq : self._rollback(recurso, pre_state, device)\n-> _rollback_puerto(puerto, pre_state, device)
+    note right of Orq
+      **Corregido en esta sesión.** `puerto.mode in ("access","trunk")`
+      -> True acá (mismo chequeo que usa `aplicar()`, no más
+      `len(campos) > 1`). Mira `anterior.mode` (el modo ANTES de este
+      cambio, "access" en este ejemplo -- ver pre_state arriba):
+        anterior.mode=="access" -> restaura con
+          `driver.set_access_mode(interface, anterior.access_vlan=10, ...)`
+        anterior.mode=="trunk"  -> restauraría con
+          `driver.set_trunk_mode(interface, anterior.access_vlan,
+          anterior.allowed_vlans, ...)`
+      Antes de esta sesión: un Puerto(mode="trunk") de un solo campo
+      caía en la rama de UN campo (sin caso para "mode") y
+      `rollback_performed` quedaba en `False` silencioso aunque
+      `aplicar()` sí había cambiado el device -- confirmado con un
+      test real (driver fake que "falla" después de aplicar): ahora
+      `rollback_performed=True`.
+    end note
+    Orq -> RC : libera lock
+    deactivate RC
+    Orq -> Orq : job.marcar_fallido(str(error), rb_performed, rb_success)\n-> _transicionar("failed")
+    Orq -> RepoJob : add(job)
+    Orq -> ED : despachar([DomainEvent("recurso_fallido", ...,\nexitoso=False)])
+    activate ED
+    ED -> AL : on_event(evento)
+    AL -> AR : append(record)  [status="failure"]
+    deactivate ED
+    Orq -> Task : raise (se propaga -- Celery sin autoretry_for)
+end
+
+Orq -> Orq : finally: if not job.esta_en_estado_terminal():\n  job.asegurar_estado_final(); self._jobs.add(job)
+note right : no-op en este ejemplo -- el job ya\nquedó terminal en el try/except de arriba.
+
+deactivate Orq
+deactivate Task
+
+@enduml

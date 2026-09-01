@@ -27,7 +27,7 @@ class DeviceCreate(BaseModel):
         "example": {
             "name": "switch-01",
             "host": "192.168.1.10",
-            "vendor": "cisco",
+            "vendor": "cisco_ios",
             "platform": "ios",
             "username": "admin",
             "password": "s3cr3tpass",
@@ -47,6 +47,11 @@ class DeviceCreate(BaseModel):
     # rejects (400) if the group's site_id != site_id.
     site_id: int = Field(..., ge=1)
     device_group_id: Optional[int] = Field(default=None, ge=1)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v):
+        return _validate_host(v)
 
 
 class DeviceUpdate(BaseModel):

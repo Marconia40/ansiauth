@@ -64,11 +64,11 @@ logger.info("Database ready: %s", DATABASE_URL)
 
 from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.core.rls_context import system_context  # noqa: E402
-from app.services import audit_service, job_service, site_service, user_service  # noqa: E402
-from app.schemas.user import UserCreate  # noqa: E402
+from app.models.audit import AuditRecord  # noqa: E402
 
 with system_context():
-    job_service.mark_orphaned_jobs_failed()
+    from app.composition import job_repository
+    job_repository.recuperar_huerfanos()
 
 
 def _bootstrap_admin() -> None:
@@ -101,21 +101,21 @@ def _bootstrap_admin() -> None:
             "BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters"
         )
 
-    user = user_service.create_user(
-        UserCreate(
-            username=BOOTSTRAP_ADMIN_USER,
-            password=BOOTSTRAP_ADMIN_PASSWORD,
-            is_system_admin=True,
-        )
+    from app.composition import audit_repository, user_repository
+
+    user = user_repository.crear(
+        username=BOOTSTRAP_ADMIN_USER,
+        password=BOOTSTRAP_ADMIN_PASSWORD,
+        is_system_admin=True,
     )
-    audit_service.log_action(
+    audit_repository.append(AuditRecord(
         user="system",
         action="bootstrap_admin",
         resource="user",
         resource_id=str(user.id),
         details={"username": user.username},
         status="success",
-    )
+    ))
     logger.info("Bootstrap: created system-admin user '%s' (id=%d)", user.username, user.id)
 
 
@@ -125,21 +125,26 @@ with system_context():
     _bootstrap_admin()
     # MSP: Phase 1 — idempotent bootstrap of the mandatory Base-Infrastructure
     # Site + its Default DeviceGroup. Safe to call every boot.
-    site_service.ensure_base_infrastructure()
+    from app.composition import site_repository
+    from app.repositories.site_repository import BASE_INFRA_SITE_KIND
+
+    site_repository.crear_con_grupo_default(
+        "Base Infrastructure", "System-managed base infrastructure site.",
+        kind=BASE_INFRA_SITE_KIND,
+    )
 
 
 def _make_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
-    from app.services import audit_service as _audit
-    from app.services import cleanup_service as _cleanup
+    from app.composition import audit_repository, cleanup_scheduler
 
     def _purge_with_system_ctx():
         with system_context():
-            _audit.purge_old_records(AUDIT_RETENTION_DAYS, triggered_by="scheduler")
+            audit_repository.purge_old(AUDIT_RETENTION_DAYS, triggered_by="scheduler")
 
     def _cleanup_with_system_ctx():
         with system_context():
-            _cleanup.run_all(
+            cleanup_scheduler.ejecutar_todo(
                 artifact_retention_days=ARTIFACT_RETENTION_DAYS,
                 login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
             )
@@ -165,12 +170,12 @@ def _make_scheduler():
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    from app.services import cleanup_service as _cleanup
+    from app.composition import cleanup_scheduler
 
     # Single startup pass so a long-running deployment doesn't have to wait a
     # full interval before unbounded tables are pruned for the first time.
     with system_context():
-        _cleanup.run_all(
+        cleanup_scheduler.ejecutar_todo(
             artifact_retention_days=ARTIFACT_RETENTION_DAYS,
             login_attempt_retention_days=LOGIN_ATTEMPT_RETENTION_DAYS,
         )
@@ -247,18 +252,17 @@ def _custom_openapi():
 
 app.openapi = _custom_openapi
 
-from app.core.rate_limit_middleware import RateLimitMiddleware  # noqa: E402
-from app.core.rls_middleware import RLSSessionMiddleware  # noqa: E402
+from app.core.rls_middleware import AuthContextMiddleware  # noqa: E402
 from app.core.tls_middleware import HSTSMiddleware, HTTPSRedirectMiddleware  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
-# MSP: Phase 6 — populate the request-scoped RLS user context before any
-# handler opens a DB session. Added *before* the rate limiter so a 429
-# response path still runs under a well-defined context (rate limiting
-# doesn't hit the DB, but adding audit logging later would).
-app.add_middleware(RLSSessionMiddleware)
-
-app.add_middleware(RateLimitMiddleware)
+# MSP: Phase 6 — populates the request-scoped RLS user context AND enforces
+# the rate limit, in one pass, before any handler opens a DB session.
+# Replaces the old RLSSessionMiddleware + RateLimitMiddleware pair (each
+# used to decode the same JWT and query `users` on its own) — see
+# core/rls_middleware.py's module docstring for why they were merged,
+# including a real middleware-ordering bug the merge fixes as a side effect.
+app.add_middleware(AuthContextMiddleware)
 
 if SSL_CERTFILE:
     app.add_middleware(HTTPSRedirectMiddleware)
@@ -316,13 +320,14 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
     except Exception:
         body_data = None
 
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user="anonymous",
         action="validation_error",
         resource="request",
         status="failure",
         details={"errors": errors_data, "body": body_data},
-    )
+    ))
     return JSONResponse(
         status_code=422,
         content=make_error(422, "Request validation failed", "VALIDATION_ERROR", {"errors": errors_data}),

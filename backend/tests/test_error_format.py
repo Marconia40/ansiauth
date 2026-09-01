@@ -83,7 +83,7 @@ def test_400_app_validation_error_has_standard_format(client, monkeypatch):
 # ── 429 Rate Limit ────────────────────────────────────────────────────────────
 
 def test_429_rate_limit_has_standard_format(unauth_client, monkeypatch):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     monkeypatch.setattr(rl, "RATE_LIMIT_PER_IP_RPM", 1)
     rl.reset()
     unauth_client.get("/")

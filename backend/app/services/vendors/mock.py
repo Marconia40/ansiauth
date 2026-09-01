@@ -3,14 +3,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from app.models.port import PortConfigResult, PortInfo
+from app.models.port import Puerto
 from app.models.vlan import VLAN
-from app.services.vendors.base import BaseVendorDriver
-from app.services.vendors.port_driver_base import BasePortDriver
+from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.port import PortConfigRequest
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +36,54 @@ def reset_mock_vlans() -> None:
     )
 
 
-class MockVlanDriver(BaseVendorDriver):
-    """Mock VLAN driver used when ``EXECUTION_MODE == "mock"``.
+_INITIAL_MOCK_PORTS: list[Puerto] = [
+    Puerto(
+        interface="GigabitEthernet0/0/1",
+        description="Workstation-01",
+        admin_up=True,
+        operational_up=True,
+        mode="access",
+        access_vlan=10,
+        allowed_vlans=None,
+    ),
+    Puerto(
+        interface="GigabitEthernet0/0/2",
+        description="Workstation-02",
+        admin_up=True,
+        operational_up=False,
+        mode="access",
+        access_vlan=20,
+        allowed_vlans=None,
+    ),
+    Puerto(
+        interface="GigabitEthernet0/0/24",
+        description="Uplink to core",
+        admin_up=True,
+        operational_up=True,
+        mode="trunk",
+        access_vlan=1,
+        allowed_vlans=[10, 20, 30],
+    ),
+]
 
-    Mirrors vlan_service.py's ``_mock_create_vlan``/``_mock_delete_vlan``/
-    ``_mock_update_vlan`` module-level functions. A device named
-    ``"fail_device"`` simulates an Ansible failure, matching the legacy
-    free-function behavior exactly.
+
+class MockVendor(VendorDriver):
+    """Mock driver used when ``EXECUTION_MODE == "mock"`` — VLAN + port
+    operations fused into one class (FINAL_ARCHITECTURE.md §1.6;
+    ``Device.driver`` is a single property, ver
+    `docs/migracion-final-architecture/FASE_1.md` A2).
+
+    VLAN methods mirror vlan_service.py's ``_mock_create_vlan``/
+    ``_mock_delete_vlan``/``_mock_update_vlan`` module-level functions. A
+    device named ``"fail_device"`` simulates an Ansible failure, matching
+    the legacy free-function behavior exactly.
+
+    Port methods mirror port_service.py's ``_mock_list_ports`` and the
+    mock-mode branches of its mutation functions. Only the 7 operations
+    ``Device`` exposes (§6.1 of docs/DEVICE_IMPLEMENTATION_PLAN.md, plus
+    ``set_trunk_pvid_vlan`` — added in Fase 5/A7, ver nota abajo) are
+    overridden; the rest keep ``VendorDriver``'s ``NotImplementedError``
+    defaults since ``Device`` never calls them.
     """
 
     def create_vlan(self, vlan_id: int, name: str, device: "Device", password: str) -> dict:
@@ -80,55 +119,13 @@ class MockVlanDriver(BaseVendorDriver):
         logger.info("Mock: returning hardcoded VLAN list")
         return list(_mock_vlans)
 
-
-_INITIAL_MOCK_PORTS: list[PortInfo] = [
-    PortInfo(
-        name="GigabitEthernet0/0/1",
-        description="Workstation-01",
-        admin_up=True,
-        operational_up=True,
-        mode="access",
-        access_vlan=10,
-        allowed_vlans=None,
-    ),
-    PortInfo(
-        name="GigabitEthernet0/0/2",
-        description="Workstation-02",
-        admin_up=True,
-        operational_up=False,
-        mode="access",
-        access_vlan=20,
-        allowed_vlans=None,
-    ),
-    PortInfo(
-        name="GigabitEthernet0/0/24",
-        description="Uplink to core",
-        admin_up=True,
-        operational_up=True,
-        mode="trunk",
-        access_vlan=1,
-        allowed_vlans=[10, 20, 30],
-    ),
-]
-
-
-class MockPortDriver(BasePortDriver):
-    """Mock port driver used when ``EXECUTION_MODE == "mock"``.
-
-    Mirrors port_service.py's ``_mock_list_ports`` and the mock-mode branches
-    of its mutation functions. Only the 6 operations ``Device`` exposes
-    (§6.1 of docs/DEVICE_IMPLEMENTATION_PLAN.md) are overridden; the rest
-    keep ``BasePortDriver``'s ``NotImplementedError`` defaults since
-    ``Device`` never calls them.
-    """
-
-    def list_ports(self, device: "Device", password: str) -> list["PortInfo"]:
+    def list_ports(self, device: "Device", password: str) -> list["Puerto"]:
         if device.name == "fail_device":
             raise RuntimeError(f"Simulated port listing failure on device '{device.name}'")
         logger.info(
             "Mock: returning %d ports for device=%s", len(_INITIAL_MOCK_PORTS), device.name
         )
-        return [PortInfo.from_dict(p.to_dict()) for p in _INITIAL_MOCK_PORTS]
+        return [Puerto.from_dict(p.to_dict()) for p in _INITIAL_MOCK_PORTS]
 
     def update_port_description(
         self, interface: str, description: str, device: "Device", password: str
@@ -163,6 +160,25 @@ class MockPortDriver(BasePortDriver):
         )
         return {"rc": 0, "stdout": "Simulated access VLAN applied", "stderr": "", "success": True}
 
+    def set_trunk_pvid_vlan(
+        self, interface: str, vlan_id: int, device: "Device", password: str
+    ) -> dict:
+        """Agregado en Fase 5/A7 — corrección real: ``Puerto._aplicar_access_vlan()``
+        despacha acá para puertos en modo trunk (GigabitEthernet0/0/24 en
+        ``_INITIAL_MOCK_PORTS`` es trunk), pero ``MockVendor`` nunca lo
+        implementaba — heredaba el ``NotImplementedError`` default de
+        ``VendorDriver`` porque, antes de esta fase, ese camino era
+        inalcanzable (docstring de la clase decía "``Device`` never calls
+        them", cierto en ese momento). Confirmado con
+        ``test_puerto_trunk.py``/``test_api_ports.py``."""
+        if device.name == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: set trunk PVID on interface=%s device=%s vlan_id=%d",
+            interface, device.name, vlan_id,
+        )
+        return {"rc": 0, "stdout": "Simulated trunk PVID applied", "stderr": "", "success": True}
+
     def set_trunk_allowed_vlans(
         self, interface: str, vlan_list: list[int], device: "Device", password: str
     ) -> dict:
@@ -174,22 +190,24 @@ class MockPortDriver(BasePortDriver):
         )
         return {"rc": 0, "stdout": "Simulated trunk VLANs applied", "stderr": "", "success": True}
 
-    def configure_port(
-        self, config: "PortConfigRequest", device: "Device", password: str
-    ) -> PortConfigResult:
+    def set_access_mode(
+        self, interface: str, vlan_id: int, device: "Device", password: str
+    ) -> dict:
         if device.name == "fail_device":
-            logger.info(
-                "Mock: configure_port FAILED on interface=%s device=%s",
-                config.interface, device.name,
-            )
-            return PortConfigResult(
-                success=False, changed=False, interface=config.interface, vendor="mock"
-            )
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
         logger.info(
-            "Mock: configure_port on interface=%s device=%s fields=%s",
-            config.interface, device.name, config.mutation_fields,
+            "Mock: set access mode on interface=%s device=%s vlan_id=%d",
+            interface, device.name, vlan_id,
         )
-        return PortConfigResult(
-            success=True, changed=True, interface=config.interface,
-            vendor="mock", execution_time_ms=1.0,
+        return {"rc": 0, "stdout": "Simulated access mode applied", "stderr": "", "success": True}
+
+    def set_trunk_mode(
+        self, interface: str, native_vlan: int, vlan_list: list[int], device: "Device", password: str
+    ) -> dict:
+        if device.name == "fail_device":
+            return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
+        logger.info(
+            "Mock: set trunk mode on interface=%s device=%s native_vlan=%d vlans=%s",
+            interface, device.name, native_vlan, vlan_list,
         )
+        return {"rc": 0, "stdout": "Simulated trunk mode applied", "stderr": "", "success": True}

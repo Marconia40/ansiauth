@@ -66,8 +66,6 @@ export interface ModeEditor {
   setAccessVlan: (v: string) => void;
   trunkVlans: string;
   setTrunkVlans: (v: string) => void;
-  vlanOp: TrunkVlanMode;
-  setVlanOp: (op: TrunkVlanMode) => void;
   setError: (e: PortError) => void;
   savingPort: string | null;
   errorPort: PortError;

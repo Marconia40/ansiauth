@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 PortMode = Literal["access", "trunk", "unknown"]
 
@@ -61,20 +61,25 @@ class PortRead(BaseModel):
     )
 
 
-class PortDescriptionUpdateRequest(BaseModel):
-    """Request body for ``PATCH /api/v1/ports/description`` (Step 2.1).
+class _PortTargetRequest(BaseModel):
+    """Shared device+interface target for every single-port write request."""
 
-    Single device only — the spec deliberately keeps Step 2.1 narrow.
-    Empty ``description`` is allowed and means "clear the description".
-    """
-
-    device: str = Field(..., min_length=1, description="Target device name (single device only).")
+    device: str = Field(..., min_length=1, description="Target device name.")
     interface: str = Field(
         ...,
         min_length=2,
         max_length=64,
         description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
     )
+
+
+class PortDescriptionUpdateRequest(_PortTargetRequest):
+    """Request body for ``PATCH /api/v1/ports/description`` (Step 2.1).
+
+    Single device only — the spec deliberately keeps Step 2.1 narrow.
+    Empty ``description`` is allowed and means "clear the description".
+    """
+
     description: str = Field(
         default="",
         max_length=200,
@@ -85,7 +90,7 @@ class PortDescriptionUpdateRequest(BaseModel):
     )
 
 
-class PortAdminStateUpdateRequest(BaseModel):
+class PortAdminStateUpdateRequest(_PortTargetRequest):
     """Request body for ``PATCH /api/v1/ports/admin-state`` (Step 2.2).
 
     Single device only.  ``enabled=True`` brings the interface up
@@ -93,20 +98,13 @@ class PortAdminStateUpdateRequest(BaseModel):
     down (``shutdown``).
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
     enabled: bool = Field(
         ...,
         description="Desired admin state — True to enable, False to disable.",
     )
 
 
-class PortAccessVlanUpdateRequest(BaseModel):
+class PortAccessVlanUpdateRequest(_PortTargetRequest):
     """Request body for ``PATCH /api/v1/ports/access-vlan`` (Step 2.3).
 
     Single device only.  Sets the access VLAN on an interface that is
@@ -114,13 +112,6 @@ class PortAccessVlanUpdateRequest(BaseModel):
     mode via pre-state before invoking the driver.
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
     vlan_id: int = Field(
         ...,
         ge=1,
@@ -129,7 +120,7 @@ class PortAccessVlanUpdateRequest(BaseModel):
     )
 
 
-class PortTrunkVlansUpdateRequest(BaseModel):
+class PortTrunkVlansUpdateRequest(_PortTargetRequest):
     """Request body for ``PATCH /api/v1/ports/trunk-vlans`` (Step 2.4).
 
     Single device only.  The port must already be in trunk mode.
@@ -147,13 +138,6 @@ class PortTrunkVlansUpdateRequest(BaseModel):
     the computed list.
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
     mode: Literal["replace", "add", "remove"] = Field(
         ...,
         description=(
@@ -172,131 +156,55 @@ class PortTrunkVlansUpdateRequest(BaseModel):
     )
 
 
-class PortConfigureRequest(BaseModel):
-    """Request body for ``PATCH /api/v1/ports/configure`` (Step 3.3).
+class PortSetAccessModeRequest(_PortTargetRequest):
+    """Request body for ``POST /api/v1/ports/access-mode``.
 
-    Applies one or more port configuration fields in a single driver call.
-    At least one mutation field must be non-``None``.
-
-    Cross-field constraints (mirroring ``PortConfigRequest`` domain model):
-    * ``access_vlan`` is only valid when ``mode='access'``.
-    * ``allowed_vlans`` is only valid when ``mode='trunk'``.
+    Sets a single interface to access mode with *access_vlan*, atomically.
+    Replaces the old generic ``PortConfigureRequest``/``/configure`` for
+    this specific, well-defined operation.
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
+    access_vlan: int = Field(
         ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
-    description: Optional[str] = Field(
-        None,
-        max_length=200,
-        description=(
-            "New description. Empty string clears it. "
-            "``None`` leaves the description unchanged."
-        ),
-    )
-    admin_enabled: Optional[bool] = Field(
-        None,
-        description="True to enable, False to disable. None = do not change.",
-    )
-    mode: Optional[Literal["access", "trunk"]] = Field(
-        None,
-        description="Switchport mode. None = do not change.",
-    )
-    access_vlan: Optional[int] = Field(
-        None,
         ge=1,
         le=4094,
-        description="Access VLAN ID (1-4094). Only valid when mode='access'.",
+        description="Access VLAN ID to assign (1-4094).",
     )
-    allowed_vlans: Optional[list[int]] = Field(
-        None,
+
+
+class PortSetTrunkModeRequest(_PortTargetRequest):
+    """Request body for ``POST /api/v1/ports/trunk-mode``.
+
+    Sets a single interface to trunk mode with *native_vlan* (PVID) and
+    *allowed_vlans*, atomically. Both always fully replace whatever the
+    port had before — this is a mode change, not an add/remove relative
+    to an existing trunk. Use ``PATCH /ports/access-vlan``/
+    ``PATCH /ports/trunk-vlans`` to adjust either dimension individually
+    on a port that's already trunk.
+    """
+
+    native_vlan: int = Field(
+        ...,
+        ge=1,
+        le=4094,
+        description="Native VLAN (PVID) for the trunk.",
+    )
+    allowed_vlans: list[int] = Field(
+        ...,
         min_length=1,
-        description="Trunk allowed VLANs. Only valid when mode='trunk'.",
-    )
-    allowed_vlan_operation: Literal["replace", "add", "remove"] = Field(
-        "add",
-        description=(
-            "How allowed_vlans is applied to the current trunk config when mode='trunk'. "
-            "'replace' sets the list exactly (clears existing first); "
-            "'add' appends without removing existing; "
-            "'remove' removes only the specified VLANs. "
-            "Default: 'add'. Ignored when allowed_vlans is None."
-        ),
+        description="Trunk allowed VLANs (non-empty).",
     )
 
-    @model_validator(mode="after")
-    def _validate_fields(self) -> "PortConfigureRequest":
-        mutation_fields = [
-            self.description, self.admin_enabled, self.mode,
-            self.access_vlan, self.allowed_vlans,
-        ]
-        if all(v is None for v in mutation_fields):
-            raise ValueError(
-                "at least one mutation field must be provided "
-                "(description, admin_enabled, mode, access_vlan, or allowed_vlans)"
-            )
-        if self.access_vlan is not None and self.mode not in ("access", "trunk"):
-            raise ValueError(
-                f"'access_vlan' (PVID) may only be set when mode='access' or mode='trunk' "
-                f"(got mode={self.mode!r})"
-            )
-        if self.allowed_vlans is not None and self.mode != "trunk":
-            raise ValueError(
-                f"'allowed_vlans' may only be set when mode='trunk' "
-                f"(got mode={self.mode!r})"
-            )
-        return self
 
-
-class PortShutdownRequest(BaseModel):
+class PortShutdownRequest(_PortTargetRequest):
     """Request body for ``POST /api/v1/ports/shutdown`` (Step 3.3).
 
     Administratively disables a single interface (``shutdown`` on the device).
     """
 
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
 
-
-class PortEnableRequest(BaseModel):
+class PortEnableRequest(_PortTargetRequest):
     """Request body for ``POST /api/v1/ports/enable`` (Step 3.3).
 
     Administratively enables a single interface (``no shutdown`` / ``undo shutdown``).
     """
-
-    device: str = Field(..., min_length=1, description="Target device name.")
-    interface: str = Field(
-        ...,
-        min_length=2,
-        max_length=64,
-        description="Vendor-native interface name (e.g. 'GigabitEthernet1/0/1').",
-    )
-
-
-class PortListResponseBody(BaseModel):
-    """Envelope returned by ``GET /api/v1/ports/?device=...``.
-
-    Wraps the port list so consumers receive provenance (device + vendor)
-    alongside the data, matching the shape produced by
-    ``port_service.list_ports``.
-    """
-
-    device: str = Field(..., description="Device name the ports belong to.")
-    vendor: Optional[str] = Field(
-        None,
-        description=(
-            "Vendor identifier the driver belongs to (e.g. 'huawei_vrp'). "
-            "'mock' when the backend is running in EXECUTION_MODE=mock."
-        ),
-    )
-    count: int = Field(..., description="Number of physical ports returned.")
-    ports: list[PortRead] = Field(default_factory=list, description="Normalized port entries.")

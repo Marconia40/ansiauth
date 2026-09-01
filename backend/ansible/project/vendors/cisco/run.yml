@@ -1,0 +1,32 @@
+---
+# Single generic playbook for every Cisco IOS operation — mutations run
+# through `lines`/`parents` (cisco.ios.ios_config), reads and bare exec
+# commands (including `write`, used by save_config()) run through
+# `commands` (cisco.ios.ios_command). Replaces the 12 near-identical
+# per-operation playbooks this used to be split across — the only thing
+# that varied between them was the content of `lines`/`commands`, which
+# now lives in the Python driver instead.
+#
+# Vars expected (mutually exclusive):
+#   parents (str, optional) — config-mode parent context, e.g.
+#     "interface GigabitEthernet0/0/1" or "vlan 100". Omitted for
+#     global-level lines (e.g. "no vlan 100").
+#   lines   (list[str]) — config lines to apply.
+#   commands (list[str]) — exec-mode commands to run (reads, or `write`).
+#   device  (str) — diagnostic only.
+
+- name: Cisco IOS device operation
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Apply config lines
+      when: lines is defined
+      cisco.ios.ios_config:
+        parents: "{{ parents | default(omit) }}"
+        lines: "{{ lines }}"
+
+    - name: Run commands
+      when: commands is defined
+      cisco.ios.ios_command:
+        commands: "{{ commands }}"

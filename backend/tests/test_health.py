@@ -80,7 +80,7 @@ def test_health_503_still_returns_json(unauth_client, monkeypatch):
 
 def test_health_not_rate_limited(unauth_client, monkeypatch):
     """Health endpoint is excluded from the per-IP rate limiter."""
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     monkeypatch.setattr(rl, "RATE_LIMIT_PER_IP_RPM", 1)
     rl.reset()
 

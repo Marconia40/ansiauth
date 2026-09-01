@@ -4,7 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from app.models.port import PortInfo, PortMode
+from app.models.port import Puerto, PortMode
 
 logger = logging.getLogger(__name__)
 
@@ -349,7 +349,7 @@ def parse_vrp_ports(
     brief_output: str,
     description_output: str,
     port_vlan_output: str,
-) -> list[PortInfo]:
+) -> list[Puerto]:
     """Combine three VRP read commands into a normalized port inventory.
 
     The three inputs are independent — any of them may be empty or missing
@@ -370,7 +370,7 @@ def parse_vrp_ports(
 
     Returns
     -------
-    list[PortInfo]
+    list[Puerto]
         One entry per physical switchport, sorted by interface name.
         Pseudo-interfaces (SVIs, loopbacks, NULL0, ...) are filtered out.
     """
@@ -381,15 +381,15 @@ def parse_vrp_ports(
     # Union of port names seen in any of the three sources.
     names = set(brief_rows) | set(desc_rows) | set(vlan_rows)
 
-    ports: list[PortInfo] = []
+    ports: list[Puerto] = []
     for name in sorted(names):
         brief = brief_rows.get(name)
         vlan = vlan_rows.get(name)
         description = desc_rows.get(name)
 
         ports.append(
-            PortInfo(
-                name=name,
+            Puerto(
+                interface=name,
                 description=description,
                 admin_up=brief.admin_up if brief else None,
                 operational_up=brief.operational_up if brief else None,

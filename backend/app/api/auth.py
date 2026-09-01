@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.core.config import COOKIE_SAMESITE, COOKIE_SECURE, REFRESH_TOKEN_EXPIRE_MINUTES
+from app.core.response import ok
 from app.core.scope import require_system_admin
 from app.core.security import create_access_token
+from app.models.audit import AuditRecord
 from app.schemas.auth import TokenResponse
-from app.services import audit_service, login_attempt_service, refresh_token_service
+from app.services import refresh_token_service
 from app.services.auth_service import authenticate_user
 
 router = APIRouter()
@@ -41,54 +43,64 @@ def _clear_refresh_cookie(response: Response) -> None:
     ),
 )
 def login(request: Request, response: Response, form_data: OAuth2PasswordRequestForm = Depends()):
+    """Todas las filas de auditoría de este archivo (login/refresh/unlock)
+    se quedan en el camino directo ``audit_repository.append()``, no pasan
+    por ``EventDispatcher``/``DomainEvent`` -- ``resource="auth"`` es un
+    sentinel que ``AuditRepository._aplicar_scope()`` matchea literal, no
+    corresponde a ninguna clase de dominio real, y varios de estos eventos
+    (login bloqueado/fallido) auditan un request que falló antes de tocar
+    ninguna entidad -- no hay ``recurso`` real que pasarle a
+    ``DomainEvent``. Mismo criterio que ``jobs.py:cancel_job``."""
     ip = request.client.host if request.client else "unknown"
     username = form_data.username
 
-    if login_attempt_service.is_ip_blocked(ip):
-        audit_service.log_action(
+    from app.composition import audit_repository, login_attempt_repository
+
+    if login_attempt_repository.ip_bloqueada(ip):
+        audit_repository.append(AuditRecord(
             user=username,
             action="login",
             resource="auth",
             details={"username": username, "reason": "ip_blocked"},
             status="blocked",
-        )
+        ))
         raise HTTPException(status_code=429, detail="Too many requests")
 
-    if login_attempt_service.is_username_locked(username):
-        login_attempt_service.record_attempt(username, ip, succeeded=False)
-        audit_service.log_action(
+    if login_attempt_repository.esta_bloqueado(username):
+        login_attempt_repository.registrar_intento(username, ip, exitoso=False)
+        audit_repository.append(AuditRecord(
             user=username,
             action="login",
             resource="auth",
             details={"username": username, "reason": "account_locked"},
             status="blocked",
-        )
+        ))
         raise HTTPException(status_code=429, detail="Too many requests")
 
     user = authenticate_user(username, form_data.password)
 
     if not user:
-        login_attempt_service.record_attempt(username, ip, succeeded=False)
-        audit_service.log_action(
+        login_attempt_repository.registrar_intento(username, ip, exitoso=False)
+        audit_repository.append(AuditRecord(
             user=username,
             action="login",
             resource="auth",
             details={"username": username},
             status="failed",
-        )
+        ))
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    login_attempt_service.record_attempt(username, ip, succeeded=True)
-    login_attempt_service.reset_username_failures(username)
+    login_attempt_repository.registrar_intento(username, ip, exitoso=True)
+    login_attempt_repository.resetear(username)
     access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
     refresh_token = refresh_token_service.create(user.username)
-    audit_service.log_action(
+    audit_repository.append(AuditRecord(
         user=user.username,
         action="login",
         resource="auth",
         details={"username": user.username},
         status="success",
-    )
+    ))
     _set_refresh_cookie(response, refresh_token)
     return {"access_token": access_token, "token_type": "bearer", "refresh_token": refresh_token}
 
@@ -113,20 +125,21 @@ def refresh(request: Request, response: Response):
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail=str(exc))
 
-    from app.services import user_service
-    user = user_service.get_by_username(username)
+    from app.composition import user_repository
+    user = user_repository.obtener_por_username(username)
     if user is None or not user.is_active:
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
-    audit_service.log_action(
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
         user=user.username,
         action="token_refresh",
         resource="auth",
         details={"username": user.username},
         status="success",
-    )
+    ))
     _set_refresh_cookie(response, new_refresh_token)
     return {"access_token": access_token, "token_type": "bearer", "refresh_token": new_refresh_token}
 
@@ -141,7 +154,7 @@ def logout(request: Request, response: Response):
     raw = request.cookies.get("refresh_token")
     revoked = refresh_token_service.revoke(raw) if raw else False
     _clear_refresh_cookie(response)
-    return {"success": True, "data": {"revoked": revoked}}
+    return ok({"revoked": revoked})
 
 
 @router.post(
@@ -159,12 +172,14 @@ def unlock_account(
     username: str,
     current_user: dict = Depends(require_system_admin),
 ):
-    count = login_attempt_service.unlock_username(username)
-    audit_service.log_action(
+    from app.composition import audit_repository, login_attempt_repository
+
+    count = login_attempt_repository.resetear(username)
+    audit_repository.append(AuditRecord(
         user=current_user["username"],
         action="unlock_account",
         resource="auth",
         details={"username": username, "attempts_cleared": count},
         status="success",
-    )
-    return {"success": True, "data": {"username": username, "attempts_cleared": count}}
+    ))
+    return ok({"username": username, "attempts_cleared": count})

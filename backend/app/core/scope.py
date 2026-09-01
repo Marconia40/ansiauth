@@ -16,12 +16,12 @@ import logging
 from typing import Optional, Tuple
 
 from fastapi import Depends, HTTPException, Request
-from jwt import PyJWTError
 
-from app.core.security import verify_token
+from app.core.exceptions import NotFoundError
 from app.db.models import DeviceGroupModel, DeviceModel, SiteModel, UserModel
 from app.db.session import get_session
-from app.services.effective_role import effective_role
+from app.models.visibility_scope import VisibilityScope
+from app.repositories.role_assignment_repository import RoleAssignmentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +36,10 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 OP_MIN_ROLE: dict[str, Tuple[str, str]] = {
     # ── Device reads / writes ─────────────────────────────────────────────
+    # read_device is used by visible_or_404() below, not require_scope() --
+    # GET /devices/{name} hides existence with a 404 rather than confirming
+    # it via a 403, so it can't go through the always-403 require_scope path.
     "read_device":                    ("device",       "observer"),
-    "write_device_config":            ("device",       "operator"),   # VLAN/port ops
     "edit_device":                    ("device",       "admin"),
     "delete_device":                  ("device",       "admin"),
     # register_device is scoped by the target site/group from the request body.
@@ -47,15 +49,19 @@ OP_MIN_ROLE: dict[str, Tuple[str, str]] = {
     # runtime once the source and target sites are known.
     "move_device_same_site":          ("device",       "operator"),
     "move_device_cross_site":         ("site",         "admin"),      # both sides
+    # VLAN/port ops don't fit require_scope() (VLAN targets N devices per
+    # request; ports needs a distinct min_role per one of 10 endpoints) --
+    # they call authorize_device() directly instead, see below.
     # ── Group ─────────────────────────────────────────────────────────────
-    "read_group":                     ("device_group", "observer"),
-    "list_group_devices":             ("device_group", "observer"),
+    "read_group":                     ("device_group", "observer"),   # visible_or_404()
+    "list_group_devices":             ("device_group", "observer"),   # visible_or_404()
     "create_group":                   ("site",         "admin"),
     "edit_group":                     ("device_group", "admin"),
     "delete_group":                   ("device_group", "admin"),
     # ── Site ──────────────────────────────────────────────────────────────
-    "read_site":                      ("site",         "observer"),
+    "read_site":                      ("site",         "observer"),   # visible_or_404()
     "list_site_groups":               ("site",         "observer"),
+    "edit_site":                      ("site",         "admin"),
     # site create/delete + PUT /users/{id}/system-admin use require_system_admin
     # (they are not per-scope), so they intentionally have no entry here.
 }
@@ -76,37 +82,52 @@ def get_current_user(request: Request) -> dict:
     otherwise. Falls back to the legacy ``role`` claim (``admin`` /
     ``super-admin`` → is_system_admin=True) when the explicit
     ``is_system_admin`` claim is absent — keeps synthetic-JWT test fixtures
-    working alongside real logins."""
-    auth = request.headers.get("Authorization") or ""
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    token = auth.split(" ", 1)[1].strip()
-    try:
-        payload = verify_token(token)
-    except PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    working alongside real logins.
+
+    The decode itself already happened once in ``AuthContextMiddleware``
+    (``core/rls_middleware.py``), which runs before any endpoint dependency
+    and caches the result on ``request.state`` — this reads that instead of
+    decoding a 2nd time. The direct decode below only runs as a defensive
+    fallback for something invoking this dependency outside the normal
+    middleware stack (``request.state.auth_resolved`` unset)."""
+    if getattr(request.state, "auth_resolved", False):
+        payload = request.state.auth_payload
+        error = request.state.auth_error
+    else:
+        from app.core.rls_middleware import decode_bearer
+        payload, error = decode_bearer(request)
+    if payload is None:
+        raise HTTPException(status_code=401, detail=error or "Not authenticated")
     username = payload.get("sub")
-    if not username:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
     is_sys = payload.get("is_system_admin")
     if is_sys is None:
         is_sys = (payload.get("role") or "").lower() in {"admin", "super-admin"}
     return {"username": username, "is_system_admin": bool(is_sys)}
 
 
-def require_authenticated(current: dict = Depends(get_current_user)) -> dict:
+def require_authenticated(
+    current: dict = Depends(get_current_user), request: Request = None,
+) -> dict:
     """Enrich the JWT-derived caller with ``id`` and the DB-backed
     ``is_system_admin`` bit — the JWT claim is trusted only when the row is
-    missing (test/JWT-only fixtures), otherwise the DB is authoritative."""
+    missing (test/JWT-only fixtures), otherwise the DB is authoritative.
+
+    Reads the ``(id, is_active, is_system_admin)`` row that
+    ``AuthContextMiddleware`` already fetched (cached on
+    ``request.state.auth_user_row``) instead of running its own query —
+    same defensive fallback criteria as ``get_current_user()`` above."""
     username = (current.get("username") or "").lower()
     if not username:
         raise HTTPException(status_code=401, detail="Invalid token payload")
-    with get_session() as session:
-        row = (
-            session.query(UserModel.id, UserModel.is_active, UserModel.is_system_admin)
-            .filter(UserModel.username == username)
-            .first()
-        )
+    if request is not None and getattr(request.state, "auth_resolved", False):
+        row = request.state.auth_user_row
+    else:
+        with get_session() as session:
+            row = (
+                session.query(UserModel.id, UserModel.is_active, UserModel.is_system_admin)
+                .filter(UserModel.username == username)
+                .first()
+            )
     if row is None:
         # Fixture or pre-migration token — trust the JWT's claim but leave
         # ``id`` unset so ``effective_role`` returns None on any scoped read.
@@ -128,6 +149,25 @@ def require_system_admin(current: dict = Depends(require_authenticated)) -> dict
 
 # ─── Scope dependency ───────────────────────────────────────────────────────
 
+def obtener_scope(
+    current: dict = Depends(require_authenticated),
+) -> VisibilityScope:
+    """Resolve the caller's full VisibilityScope once per request.
+
+    FastAPI caches dependency results within a single request, so every
+    ``require_scope``-guarded endpoint shares the one scope built here —
+    no matter how many per-resource checks the handler runs.
+
+    The repository is fetched via the composition-layer factory so tests
+    can inject a fake through ``app.dependency_overrides`` without
+    reaching for module-level singletons.
+    """
+    from app.composition import get_role_assignment_repo
+
+    repo: RoleAssignmentRepository = get_role_assignment_repo()
+    return repo.scope_de(current)
+
+
 def require_scope(op: str):
     """FastAPI dependency factory for per-scope authorization.
 
@@ -145,9 +185,10 @@ def require_scope(op: str):
     async def dep(
         request: Request,
         current: dict = Depends(require_authenticated),
+        scope: VisibilityScope = Depends(obtener_scope),
     ) -> dict:
         if op == "move_device":
-            await _authorize_move_device(request, current)
+            await _authorize_move_device(request, current, scope)
             return current
 
         cfg = OP_MIN_ROLE.get(op)
@@ -166,9 +207,8 @@ def require_scope(op: str):
                 ),
             )
 
-        with get_session() as session:
-            role = effective_role(session, current, scope_kind, target)
-
+        resolved = resolver_site_group(target, scope_kind)
+        role = scope.rol_para(*resolved) if resolved is not None else None
         _enforce(role, min_role, op, scope_kind, target)
         return current
 
@@ -177,7 +217,9 @@ def require_scope(op: str):
 
 # ─── Move-device dispatcher ─────────────────────────────────────────────────
 
-async def _authorize_move_device(request: Request, current: dict) -> None:
+async def _authorize_move_device(
+    request: Request, current: dict, scope: VisibilityScope,
+) -> None:
     """Dispatch ``move_device`` to same-site vs cross-site and enforce.
 
     Called only for ``POST /devices/{name}/move``. Semantics:
@@ -200,7 +242,7 @@ async def _authorize_move_device(request: Request, current: dict) -> None:
             # Device not found or not placed in a valid group yet. Let the
             # handler surface 404; deny here so we don't leak existence.
             raise HTTPException(status_code=404, detail=f"Device '{name}' not found")
-        src_site_id, _src_group_id = source
+        src_site_id, src_group_id = source
 
         if body_group_id is None:
             # D8: null → current site's Default group. Guaranteed to exist
@@ -227,23 +269,23 @@ async def _authorize_move_device(request: Request, current: dict) -> None:
                 )
             target_site_id = row[0]
 
-        same_site = target_site_id == src_site_id
+    same_site = target_site_id == src_site_id
 
-        if same_site:
-            role = effective_role(session, current, "device", name)
+    if same_site:
+        role = scope.rol_para(src_site_id, src_group_id)
+        _enforce(
+            role, "operator", "move_device_same_site", "device", name,
+        )
+    else:
+        # Cross-site: caller must be admin on BOTH source group's site and
+        # target site (D16 — take the min of the two effective roles).
+        src_role = scope.rol_para(src_site_id, src_group_id)
+        dst_role = scope.rol_para(target_site_id, None)
+        for label, role in (("source", src_role), ("target", dst_role)):
             _enforce(
-                role, "operator", "move_device_same_site", "device", name,
+                role, "admin", "move_device_cross_site",
+                "site", target_site_id if label == "target" else src_site_id,
             )
-        else:
-            # Cross-site: caller must be admin on BOTH source group's site and
-            # target site (D16 — take the min of the two effective roles).
-            src_role = effective_role(session, current, "device", name)
-            dst_role = effective_role(session, current, "site", target_site_id)
-            for label, role in (("source", src_role), ("target", dst_role)):
-                _enforce(
-                    role, "admin", "move_device_cross_site",
-                    "site", target_site_id if label == "target" else src_site_id,
-                )
 
 
 # ─── Resource-resolution helpers ────────────────────────────────────────────
@@ -338,6 +380,46 @@ async def _peek_json_body(request: Request) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def resolver_site_group(
+    target, scope_kind: str,
+) -> Optional[Tuple[int, Optional[int]]]:
+    """Resolve a target into ``(site_id, device_group_id | None)`` — the
+    coordinates ``VisibilityScope.rol_para()`` needs to answer in memory.
+
+    Absorbs the SQL side of the old ``effective_role`` path: site targets
+    need no query, device_group targets need one JOIN-less lookup, and
+    device targets defer to ``_lookup_device_scope`` (which stays put
+    because ``_authorize_move_device`` also needs it directly for the
+    move dispatcher).
+
+    Returns ``None`` when the target does not exist — the caller turns
+    that into a 403 via ``_enforce(role=None, ...)``.
+    """
+    if scope_kind == "site":
+        try:
+            return (int(target), None)
+        except (TypeError, ValueError):
+            return None
+    if scope_kind == "device_group":
+        try:
+            group_id = int(target)
+        except (TypeError, ValueError):
+            return None
+        with get_session() as session:
+            row = (
+                session.query(DeviceGroupModel.site_id)
+                .filter(DeviceGroupModel.id == group_id)
+                .first()
+            )
+        if row is None or row[0] is None:
+            return None
+        return (int(row[0]), group_id)
+    if scope_kind == "device":
+        with get_session() as session:
+            return _lookup_device_scope(session, str(target))
+    raise ValueError(f"unknown scope_kind: {scope_kind!r}")
+
+
 def _lookup_device_scope(session, name: str) -> Optional[Tuple[int, Optional[int]]]:
     """Return ``(site_id, device_group_id)`` for a device or None if missing.
 
@@ -385,3 +467,59 @@ def _enforce(role: Optional[str], min_role: str, op: str, scope_kind: str, targe
                 f"'{min_role}' for operation '{op}'"
             ),
         )
+
+
+# ─── Shared checks for callers that can't use require_scope() ──────────────
+
+
+def require_device(name: str):
+    """Fetch a Device by name or raise NotFoundError.
+
+    Shared by api/ports.py (9 call sites) and api/vlans.py (4) -- each
+    used to repeat ``device_repository.get(name); if ... is None: raise
+    NotFoundError(...)`` verbatim (13 copies total, duplication found in
+    a code review)."""
+    from app.composition import device_repository
+
+    device = device_repository.get(name)
+    if device is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    return device
+
+
+def authorize_device(
+    scope: VisibilityScope, device_name: str, op: str, min_role: str,
+    resolved: "Tuple[int, Optional[int]] | None" = None,
+) -> None:
+    """Single-device 403 check for callers whose target can't be resolved by
+    require_scope()'s pre-handler dependency -- VLAN endpoints loop over N
+    devices per request (require_scope() only ever resolves one target), and
+    job endpoints only learn the target device after a DB lookup inside the
+    handler body. Replaces 3 independently-duplicated implementations that
+    used to live in api/jobs.py, api/vlans.py and api/ports.py, each with
+    its own copy of the observer/operator/admin ranking dict.
+
+    *resolved*, when given, skips the internal resolver_site_group() JOIN
+    query -- callers that already fetched the Device (its (site_id,
+    device_group_id) are populated on the domain object, no extra query
+    needed) can pass those straight through instead of paying for the
+    exact same JOIN twice in one request. Found duplicated in a code
+    review: every write endpoint in api/ports.py already does
+    ``dev = require_device(name)`` before calling this."""
+    if resolved is None:
+        resolved = resolver_site_group(device_name, "device")
+    role = scope.rol_para(*resolved) if resolved is not None else None
+    _enforce(role, min_role, op, "device", device_name)
+
+
+def visible_or_404(
+    scope: VisibilityScope, target, kind: str, min_role: str, not_found_message: str,
+) -> None:
+    """Like _enforce(), but denies with 404 instead of 403 -- for GETs that
+    deliberately hide a resource's existence from callers without
+    visibility (a 403 would confirm the resource exists), instead of
+    require_scope()'s always-403 behavior."""
+    resolved = resolver_site_group(target, kind)
+    role = scope.rol_para(*resolved) if resolved is not None else None
+    if role is None or _ROLE_LEVEL.get(role, 0) < _ROLE_LEVEL[min_role]:
+        raise NotFoundError(not_found_message)

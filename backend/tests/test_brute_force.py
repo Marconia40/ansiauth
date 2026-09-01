@@ -5,7 +5,8 @@ import pytest
 from app.db.models import LoginAttemptModel
 from app.db.session import get_session
 from app.schemas.user import UserCreate
-from app.services import login_attempt_service, user_service
+from app.composition import login_attempt_repository
+from app.services import user_service
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ def test_first_five_failures_return_401(unauth_client):
 
 
 def test_sixth_failed_attempt_returns_429(unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
@@ -61,7 +62,7 @@ def test_sixth_failed_attempt_returns_429(unauth_client):
 
 
 def test_429_has_correct_detail(unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
@@ -71,7 +72,7 @@ def test_429_has_correct_detail(unauth_client):
 
 
 def test_account_remains_locked_on_correct_password(unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
@@ -103,7 +104,7 @@ def test_different_ips_share_per_username_counter(unauth_client):
 
 
 def test_successful_login_resets_failure_counter(unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(4):
         _do_failed_login(unauth_client)
 
@@ -138,7 +139,7 @@ def test_ip_block_does_not_affect_different_ip(unauth_client, monkeypatch):
     _seed_failed_attempts("other_user", "testclient", count=20, age_minutes=0)
 
     # Requests from a different IP should still work
-    monkeypatch.setattr(login_attempt_service, "is_ip_blocked", lambda ip: ip == "testclient")
+    monkeypatch.setattr(login_attempt_repository, "ip_bloqueada", lambda ip: ip == "testclient")
     r = unauth_client.post("/api/v1/auth/login", data={"username": "brute_user", "password": "correct_password_123"})
     # This comes from "testclient" so it still gets blocked via the monkeypatched check
     assert r.status_code == 429
@@ -156,7 +157,7 @@ def test_expired_ip_failures_do_not_block(unauth_client):
 # ── Admin unlock endpoint ─────────────────────────────────────────────────────
 
 def test_admin_can_unlock_locked_account(admin_client, unauth_client):
-    from app.core import rate_limit_middleware as rl
+    from app.core import rls_middleware as rl
     for _ in range(5):
         _do_failed_login(unauth_client)
 
@@ -195,25 +196,25 @@ def test_observer_cannot_unlock(observer_client):
 # ── Service-level unit tests ──────────────────────────────────────────────────
 
 def test_is_username_locked_false_when_no_attempts():
-    assert login_attempt_service.is_username_locked("nobody") is False
+    assert login_attempt_repository.esta_bloqueado("nobody") is False
 
 
 def test_is_username_locked_true_after_five_failures():
     _seed_failed_attempts("brute_user", "1.2.3.4", count=5, age_minutes=1)
-    assert login_attempt_service.is_username_locked("brute_user") is True
+    assert login_attempt_repository.esta_bloqueado("brute_user") is True
 
 
 def test_is_username_locked_false_after_success_resets():
     _seed_failed_attempts("brute_user", "1.2.3.4", count=5, age_minutes=1)
-    login_attempt_service.reset_username_failures("brute_user")
-    assert login_attempt_service.is_username_locked("brute_user") is False
+    login_attempt_repository.resetear("brute_user")
+    assert login_attempt_repository.esta_bloqueado("brute_user") is False
 
 
 def test_is_ip_blocked_false_when_below_limit():
     _seed_failed_attempts("brute_user", "5.5.5.5", count=19, age_minutes=1)
-    assert login_attempt_service.is_ip_blocked("5.5.5.5") is False
+    assert login_attempt_repository.ip_bloqueada("5.5.5.5") is False
 
 
 def test_is_ip_blocked_true_at_limit():
     _seed_failed_attempts("brute_user", "5.5.5.5", count=20, age_minutes=1)
-    assert login_attempt_service.is_ip_blocked("5.5.5.5") is True
+    assert login_attempt_repository.ip_bloqueada("5.5.5.5") is True
