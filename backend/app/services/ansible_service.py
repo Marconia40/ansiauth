@@ -111,6 +111,22 @@ def run_playbook(
             inventory=inv,
             extravars=extravars,
             quiet=True,
+            # ansible_runner.dump_artifacts() only writes env/extravars (and
+            # envvars/passwords/settings) when the file doesn't already
+            # exist under private_data_dir -- and since this call always
+            # reuses the same private_data_dir across every invocation,
+            # whatever the FIRST call ever wrote there gets referenced via
+            # `-e @env/extravars` on every later call, forever, for any key
+            # the current call doesn't happen to override. Bug real
+            # encontrado verificando otro fix: un env/extravars viejo
+            # (device="sw-review", commands=["show vlan brief"]) quedó
+            # pegado desde una corrida anterior y se coló en llamadas
+            # posteriores que no pasaban "commands" -- una escritura de VLAN
+            # sin ese extravar terminaba igual corriendo ese "show vlan
+            # brief" de más contra el device real, sin loguear nada raro.
+            # suppress_env_files=True hace que extravars se pase siempre
+            # inline (-e '{...}'), nunca por archivo compartido.
+            suppress_env_files=True,
             envvars={
                 "ANSIBLE_TIMEOUT": _ANSIBLE_TIMEOUT,
                 "ANSIBLE_PERSISTENT_COMMAND_TIMEOUT": _ANSIBLE_PERSISTENT_COMMAND_TIMEOUT,
@@ -251,6 +267,21 @@ def _extract_all_command_outputs(r) -> list[str]:
             if event.get("event") != "runner_on_ok":
                 continue
             res = event.get("event_data", {}).get("res", {})
+            # Looped task (e.g. huawei/run.yml's "Run read commands", one
+            # cli_command per item): the aggregate runner_on_ok event has no
+            # top-level "stdout" at all -- each item's own stdout lives in
+            # its own dict under res["results"] instead. Same event shape
+            # that _extract_failure_reason() already accounts for on the
+            # failure side.
+            results = res.get("results")
+            if isinstance(results, list):
+                for item in results:
+                    if not isinstance(item, dict):
+                        continue
+                    item_stdout = item.get("stdout")
+                    if isinstance(item_stdout, str) and item_stdout:
+                        outputs.append(item_stdout)
+                continue
             stdout_val = res.get("stdout")
             if isinstance(stdout_val, list):
                 for entry in stdout_val:
