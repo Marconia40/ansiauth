@@ -1,9 +1,12 @@
+import logging
 import time
 from dataclasses import asdict, is_dataclass
 
 from app.core.exceptions import DeviceExecutionError, NotFoundError
 from app.models.domain_event import DomainEvent
 from app.models.retry_decision import RetryDecision
+
+logger = logging.getLogger(__name__)
 
 # retry_policy.py:15-61, verbatim -- absorbido acá como constantes de módulo.
 # Permanent patterns are checked FIRST -- a device that says "authentication
@@ -175,10 +178,44 @@ class Orquestador:
             )])
             raise
         else:
-            self._repos[recurso.repositorio()].add(recurso)
+            # Bug real de producción encontrado con un log real (creación de
+            # VLAN sobre un device real, Postgres): self._repos[...].add()
+            # tiraba psycopg.errors.UndefinedTable porque device_vlans no
+            # tenía migración Alembic (arreglado en i3msp8_device_vlans_ports).
+            # Pero la causa de fondo era más grave que la tabla faltante: acá
+            # abajo estaba `self._repos[...].add(recurso)` sin try propio,
+            # así que esa excepción escapaba de este `else:` SIN pasar por el
+            # `except Exception as error:` de arriba -- Python no cubre el
+            # cuerpo de `else:` con el `except` del mismo try/except/else, son
+            # 2 cosas distintas. Resultado real: nada de rollback, nada de
+            # `job.marcar_fallido()`, nada de evento de auditoría de fallo --
+            # el job quedaba "running" hasta que el `finally` de abajo lo
+            # cerraba con el genérico "Unexpected termination", perdiendo el
+            # error real. Encapsular acá para que un fallo de bookkeeping
+            # (tracking row / evento) no tire por la borda un cambio que sí
+            # se aplicó de verdad en el device -- a diferencia de una falla
+            # real de Ansible, ACÁ no corresponde rollback (deshacer un
+            # cambio exitoso en el device por un problema de guardado local
+            # sería peor que el problema original).
+            try:
+                self._repos[recurso.repositorio()].add(recurso)
+            except Exception:
+                logger.exception(
+                    "Tracking write failed for %s on device=%s after the device "
+                    "change already succeeded -- NOT rolled back (the change is "
+                    "real and wanted), only the local tracking row failed to save.",
+                    recurso.repositorio(), device_name,
+                )
             job.marcar_completado(resultado)
             self._jobs.add(job)
-            self._eventos.despachar([DomainEvent("recurso_aplicado", recurso, device, actor, resultado)])
+            try:
+                self._eventos.despachar([DomainEvent("recurso_aplicado", recurso, device, actor, resultado)])
+            except Exception:
+                logger.exception(
+                    "Failed to dispatch recurso_aplicado event for %s on device=%s -- "
+                    "audit trail for this successful change may be incomplete.",
+                    recurso.repositorio(), device_name,
+                )
         finally:
             if not job.esta_en_estado_terminal():
                 job.asegurar_estado_final()
