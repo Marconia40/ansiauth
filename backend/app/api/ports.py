@@ -14,10 +14,13 @@ from app.schemas.port import (
     PortAdminStateUpdateRequest,
     PortDescriptionUpdateRequest,
     PortEnableRequest,
+    PortPoeUpdateRequest,
     PortRead,
+    PortResetRequest,
     PortSetAccessModeRequest,
     PortSetTrunkModeRequest,
     PortShutdownRequest,
+    PortStormControlUpdateRequest,
     PortTrunkVlansUpdateRequest,
 )
 
@@ -512,6 +515,116 @@ def enable_port(
     _authz_device(scope, data.device, min_role="operator", device=dev)
     _check_device_not_locked(data.device)
     _require_port_driver_with(dev, "set_port_admin_state")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
+    return ok(group_job_id=group_job_id, jobs=jobs)
+
+
+@router.patch(
+    "/poe",
+    summary="Set port PoE state",
+    description=(
+        "Enable or disable Power-over-Ethernet on a single interface "
+        "(RF-PUERTO-09).  ``enabled=true`` runs ``power inline auto`` "
+        "(Cisco) / ``poe enable`` (Huawei); ``enabled=false`` runs "
+        "``power inline never`` / ``poe disable``.  Executed asynchronously: "
+        "the response carries a ``group_job_id`` and per-device job entry "
+        "the frontend can poll via ``GET /api/v1/jobs/{job_id}`` and "
+        "``GET /api/v1/group-jobs/{id}``.  Requires operator role or "
+        "higher; site-scoped users may only target devices in their "
+        "allowed sites."
+    ),
+)
+def set_port_poe(
+    data: PortPoeUpdateRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    try:
+        entidad = Puerto(interface=data.interface, poe_enabled=data.enabled)
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
+    _check_device_not_locked(data.device)
+    _require_port_driver_with(dev, "set_port_poe")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
+    return ok(group_job_id=group_job_id, jobs=jobs)
+
+
+@router.patch(
+    "/storm-control",
+    summary="Set port storm-control state",
+    description=(
+        "Enable or disable broadcast storm-control on a single interface, "
+        "with a single percentage threshold (RF-PUERTO-07, simplified "
+        "scope — one enable flag + one global threshold, not the 3 traffic "
+        "types real hardware exposes separately).  ``threshold_percent`` is "
+        "required when ``enabled=true``.  Executed asynchronously: the "
+        "response carries a ``group_job_id`` and per-device job entry.  "
+        "Requires operator role or higher; site-scoped users may only "
+        "target devices in their allowed sites."
+    ),
+)
+def set_port_storm_control(
+    data: PortStormControlUpdateRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    try:
+        entidad = Puerto(
+            interface=data.interface,
+            storm_control_enabled=data.enabled,
+            storm_control_threshold=data.threshold_percent,
+        )
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
+    _check_device_not_locked(data.device)
+    _require_port_driver_with(dev, "set_storm_control")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
+    return ok(group_job_id=group_job_id, jobs=jobs)
+
+
+@router.post(
+    "/reset",
+    summary="Reset port to defaults",
+    description=(
+        "Reset a single interface to its factory-default configuration "
+        "(RF-PUERTO-10 — ``default interface`` on Cisco, ``clear "
+        "configuration interface`` on Huawei).  Clears VLAN assignment, "
+        "description, PoE, storm-control and admin state back to device "
+        "defaults.  Executed asynchronously: the response carries a "
+        "``group_job_id`` and per-device job entry.  Requires operator "
+        "role or higher; site-scoped users may only target devices in "
+        "their allowed sites."
+    ),
+)
+def reset_port(
+    data: PortResetRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = Puerto(interface=data.interface, reset=True)
+    entidad.validar()
+
+    dev = require_device(data.device)
+    _authz_device(scope, data.device, min_role="operator", device=dev)
+    _check_device_not_locked(data.device)
+    _require_port_driver_with(dev, "reset_port")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
     return ok(group_job_id=group_job_id, jobs=jobs)

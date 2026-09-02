@@ -208,3 +208,50 @@ class PortEnableRequest(_PortTargetRequest):
 
     Administratively enables a single interface (``no shutdown`` / ``undo shutdown``).
     """
+
+
+class PortPoeUpdateRequest(_PortTargetRequest):
+    """Request body for ``PATCH /api/v1/ports/poe`` (RF-PUERTO-09).
+
+    ``enabled=True`` turns Power-over-Ethernet on (``power inline auto`` /
+    ``poe enable``); ``enabled=False`` turns it off (``power inline never``
+    / ``poe disable``).
+    """
+
+    enabled: bool = Field(
+        ...,
+        description="Desired PoE state — True to enable, False to disable.",
+    )
+
+
+class PortStormControlUpdateRequest(_PortTargetRequest):
+    """Request body for ``PATCH /api/v1/ports/storm-control`` (RF-PUERTO-07).
+
+    Simplified scope (decided with the user): a single enable flag + one
+    global percentage threshold, not the 3 traffic types (broadcast/
+    multicast/unicast) real hardware exposes separately.
+    ``threshold_percent`` is required when ``enabled=True`` — enforced by
+    ``Puerto.validar()``, not duplicated here.
+    """
+
+    enabled: bool = Field(
+        ...,
+        description="Desired storm-control state — True to enable, False to disable.",
+    )
+    threshold_percent: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Broadcast threshold as a percentage of bandwidth (0-100). Required when enabled=True.",
+    )
+
+
+class PortResetRequest(_PortTargetRequest):
+    """Request body for ``POST /api/v1/ports/reset`` (RF-PUERTO-10).
+
+    Resets a single interface to its factory-default configuration
+    (``default interface`` on Cisco, ``clear configuration interface`` on
+    Huawei). Decided with the user: "delete port config" means reset to
+    defaults, not a selective per-field undo. No extra fields beyond the
+    shared device+interface target.
+    """

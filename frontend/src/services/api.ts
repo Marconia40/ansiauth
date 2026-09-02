@@ -18,8 +18,11 @@ import type {
   PortDescriptionUpdateRequest,
   PortListResponse,
   PortOperationResult,
+  PortPoeUpdateRequest,
+  PortResetRequest,
   PortSetAccessModeRequest,
   PortSetTrunkModeRequest,
+  PortStormControlUpdateRequest,
   PortTrunkVlansUpdateRequest,
 } from '@/types/port';
 
@@ -385,6 +388,27 @@ export async function setPortTrunkMode(
   body: PortSetTrunkModeRequest,
 ): Promise<PortOperationResult> {
   const { data } = await client.post<PortJobRawResponse>('/ports/trunk-mode', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setPortPoe(
+  body: PortPoeUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/poe', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setPortStormControl(
+  body: PortStormControlUpdateRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.patch<PortJobRawResponse>('/ports/storm-control', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function resetPort(
+  body: PortResetRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.post<PortJobRawResponse>('/ports/reset', body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
