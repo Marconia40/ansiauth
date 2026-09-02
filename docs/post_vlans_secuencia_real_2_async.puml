@@ -26,6 +26,9 @@ participant "Repository[VLAN]" as RepoVlan
 participant "EventDispatcher" as ED
 participant "AuditListener" as AL
 participant "AuditRepository" as AR
+participant "sync_device_task\n(app/tasks.py)" as SyncTask
+participant "DeviceSyncService" as Sync
+database "devices\n(DeviceModel)" as DevTable
 
 Queue -> Task : ejecutar_task(recurso_dict, "vlan", "switch-A", actor, job_id)\n[worker_process_init ya corrió install_worker_system_context()\n-- este proceso no tiene JWT, RLS lo trata como trusted]
 activate Task
@@ -214,6 +217,35 @@ alt resultado["rc"] == 0 -- camino feliz de este ejemplo
     deactivate AR
     deactivate AL
     deactivate ED
+
+    == post-write cache refresh (coalescing) ==
+    Orq -> Orq : _SCOPE_POR_REPO = {"vlan":"vlans", "puerto":"ports"}\nsync_scope = _SCOPE_POR_REPO.get(recurso.repositorio())\n» qué hace: mapea el "recurso" al scope de sync correspondiente\n-- "vlan" -> "vlans" acá; para Puerto sería "ports"
+    Orq -> RepoJob : hay_otros_activos("switch-A", "vlan", job.job_id)
+    activate RepoJob
+    RepoJob -> RepoJob : SELECT 1 FROM jobs WHERE device="switch-A"\nAND operation="vlan" AND status IN ("pending","running")\nAND job_id != <este_job_id> LIMIT 1\n» qué hace: pregunta si queda algún OTRO Job pending/running\nsobre el mismo (device, operation) -- esta transición se hace\ndespués de job.marcar_completado(), así que el Job actual ya\nno cuenta (status="completed"); el `!=` es defensivo
+    note right of RepoJob
+      Los Jobs sobre el mismo device se serializan por el lock Redis
+      de arriba (RC.bloquear), así que "el último del burst" está bien
+      definido -- si el user disparó create-VLAN + delete-VLAN
+      consecutivos, corren uno tras otro, no en paralelo, y sólo el
+      último ve la lista vacía acá.
+    end note
+    alt hay otro Job pending/running (no somos el último)
+        RepoJob --> Orq : True
+        Orq -> Orq : logger.debug("skipping post-write sync for\ndevice=switch-A scope=vlans -- another job on same\n(device, scope) is still active")
+        note right : NO se enqueue nada -- el último Job del burst\ndispara el único refresh y captura el estado\nresultante de TODAS las escrituras.\nAhorro: N escrituras -> 1 sync en vez de N.
+    else somos el último (o el único)
+        RepoJob --> Orq : False
+        deactivate RepoJob
+        Orq -> Queue : sync_device_task.delay("switch-A", "vlans")\n» qué hace: publica la tarea de sync en el broker (Celery)\n-- fire-and-forget, la escritura ya fue exitosa; si el\nbroker no responde queda logged como warning y sólo se\npierde la actualización proactiva de caché (el user puede\nforzar con POST /devices/{name}/vlans/refresh)
+        note right of Queue
+          El sync corre en un WORKER DISTINTO (otro proceso Celery)
+          -- no bloquea el return de este ejecutar_task. La secuencia
+          de abajo ("worker de sync ...") es asíncrona respecto de
+          este flujo; puede correr al toque si hay workers libres,
+          o quedar en cola si no.
+        end note
+    end
 else resultado["rc"] != 0 -- camino de error, no ocurre en este ejemplo\n  pero es real y está siempre presente en el código
     Orq -> RC : bloquear("switch-A")  [se re-adquiere para el rollback]
     activate RC
@@ -242,20 +274,115 @@ note right : no-op en este ejemplo -- el job ya\nquedó terminal en el try/excep
 deactivate Orq
 deactivate Task
 
-note over Queue, AR
+== worker de sync (proceso Celery separado, sólo si arriba se hizo el .delay) ==
+
+Queue -> SyncTask : sync_device_task("switch-A", "vlans")\n[Celery task registrada como\n"ansiauth.device.sync" -- app/tasks.py]
+activate SyncTask
+SyncTask -> RepoDev : device_repository.get("switch-A")
+activate RepoDev
+RepoDev --> SyncTask : device
+deactivate RepoDev
+alt device no existe (borrado entre el .delay() y el pickup del worker)
+    SyncTask -> SyncTask : logger.warning + return\n» qué hace: no es un fallo, no hay nada que sincronizar --\nalta seguida de baja rápida, o refresh sobre device eliminado\nconcurrentemente
+end
+
+SyncTask -> Sync : sync_vlans(device)
+activate Sync
+Sync -> RC : bloquear("switch-A", timeout=30.0)
+activate RC
+note right of RC
+  timeout=30s (_LOCK_TIMEOUT_S) -- coherente con el rate limiter
+  (MAX_JOBS_PER_WINDOW=30/60s). Si otra operación tiene el device,
+  esperar 30s es razonable; más allá conviene devolver el error,
+  dejar que la próxima refresh reintente y liberar el worker
+  Celery en vez de dejarlo colgado (ver device_sync_service.py).
+end note
+Sync -> Dev : device.driver.get_vlans(device, device.password)
+activate Dev
+Dev -> PR : obtener(vendor)\n[cachedo en Device._driver si ya se resolvió antes\nen este mismo proceso worker]
+activate PR
+PR --> Dev : Vendor instance
+deactivate PR
+Dev -> SV : decrypt(encrypted_password)\n[cachedo en Device._password ídem]
+activate SV
+SV --> Dev : password en claro
+deactivate SV
+Dev -> Vendor : get_vlans(device, password)
+activate Vendor
+Vendor -> Vendor : ansible_runner -> playbook get_vlans -> switch real\n(en mock: lista fija; en real: SSH + parse de show vlan)
+Vendor --> Dev : [VLAN(10,"MGMT"), VLAN(20,"DATA"), VLAN(100,"MGMT"), ...]
+deactivate Vendor
+Dev --> Sync : nuevos = lista actual del equipo
+deactivate Dev
+Sync -> RC : (fin del "with") libera lock
+deactivate RC
+
+Sync -> RepoVlan : list(device="switch-A")
+activate RepoVlan
+RepoVlan --> Sync : existentes (cache actual en device_vlans)
+deactivate RepoVlan
+Sync -> Sync : existentes_ids = {v.vlan_id for v in existentes}\nnuevos_ids = {v.vlan_id for v in nuevos}\n» qué hace: prepara los sets para el diff
+
+loop por cada vlan_id en (existentes_ids - nuevos_ids)
+    Sync -> RepoVlan : remove((vlan_id, "switch-A"))\n» qué hace: borra de la caché las VLANs que ya no están\nen el equipo -- necesario para que un delete-VLAN aplicado\nen consola directa desaparezca del GET cache-first
+    activate RepoVlan
+    deactivate RepoVlan
+end
+loop por cada VLAN v en nuevos
+    Sync -> RepoVlan : v.device = "switch-A"; add(v)\n[add() es upsert vía session.merge()\n-- las que ya existían pero cambiaron\nde nombre quedan actualizadas]
+    activate RepoVlan
+    deactivate RepoVlan
+end
+
+Sync -> DevTable : UPDATE devices SET vlans_synced_at=now(),\nvlans_sync_error=NULL WHERE name="switch-A"
+activate DevTable
+deactivate DevTable
+note right of Sync
+  _marcar_ok() actualiza sólo el timestamp del scope tocado.
+  En caso de fallo, en cambio, _marcar_error() setea
+  vlans_sync_error con el mensaje truncado a 2000 chars y NO
+  toca vlans_synced_at ni la tabla device_vlans -- la UI sigue
+  mostrando la última data conocida + banner "last sync failed".
+end note
+
+Sync -> Sync : logger.info("sync_vlans OK device=switch-A\npersisted=... removed=...")
+deactivate Sync
+deactivate SyncTask
+
+note over Queue, DevTable
   switch-B corre este mismo bloque completo en paralelo, en otro
   worker, totalmente aislado (RNF-RES-02) -- mismas funciones
   reales, misma 1 validación de nombre en Orquestador (más la del
   router, en el proceso síncrono), y 1 sola llamada real a
-  get_vlans() en este camino feliz (antes eran 2 -- ver las notas
-  de arriba). Si switch-B falla, su rollback no toca lo ya
-  aplicado en switch-A.
+  get_vlans() en el camino feliz de la ESCRITURA (antes eran 2 --
+  ver las notas de arriba). Si switch-B falla, su rollback no
+  toca lo ya aplicado en switch-A.
+
+  Coalescing entre devices distintos: el chequeo
+  hay_otros_activos(device, ...) es POR DEVICE. Si switch-A y
+  switch-B corren en paralelo, cada uno consulta sólo Jobs sobre
+  SU propio device -- ambos ven la lista vacía y ambos disparan
+  su sync_device_task. Correcto: son 2 equipos distintos, cada
+  uno necesita su propio refresh.
+
+  Coalescing dentro del mismo device: si el user hace create-VLAN
+  seguido de delete-VLAN sobre switch-A antes de que termine el
+  primero, los 2 Jobs se serializan por el lock Redis y sólo el
+  segundo (el último pending/running al momento del chequeo)
+  dispara sync_device_task -- N escrituras generan 1 sync, no N
+  (bug de tráfico SSH innecesario detectado testeando con burst
+  reales, corregido en esta sesión).
 
   GET /group-jobs/{id} no tiene listener ni tabla propia que
   actualizar: JobRepository.resumen_de_grupo(group_job_id) agrega
   los Job reales (WHERE group_job_id=...) al vuelo cada vez que se
   pide -- no puede desincronizarse porque no hay estado derivado
   que mantener.
+
+  GET /vlans?device=switch-A ahora lee de device_vlans (poblado
+  por este mismo sync_device_task) + metadata de freshness --
+  cero SSH en el hot path del read. Ver
+  get_vlans_secuencia_real.puml.
 end note
 
 @enduml

@@ -309,11 +309,15 @@ export async function logout(): Promise<void> {
 // ── VLANs ─────────────────────────────────────────────────────────────────────
 
 export async function getVlans(device?: string): Promise<VlanEntry[]> {
-  return unwrap(
-    client.get<ApiResponse<VlanEntry[]>>('/vlans/', {
+  // Backend now returns a SyncedResource envelope: { data, synced_at, sync_error, sync_in_progress }.
+  // Drop the freshness metadata here to keep the current UI shape; the upcoming
+  // frontend rewrite will consume the envelope directly.
+  const envelope = await unwrap<{ data: VlanEntry[] }>(
+    client.get<ApiResponse<{ data: VlanEntry[] }>>('/vlans/', {
       params: device ? { device } : {},
     }),
   );
+  return envelope.data;
 }
 
 type VlanRawResponse = { success: boolean; group_job_id: string; jobs: { device: string; job_id: string }[] };
@@ -336,11 +340,15 @@ export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<Vlan
 // ── Ports ─────────────────────────────────────────────────────────────────────
 
 export async function getPorts(device: string): Promise<PortListResponse> {
-  return unwrap(
-    client.get<ApiResponse<PortListResponse>>('/ports/', {
+  // Backend now returns a SyncedResource envelope wrapping the port payload.
+  // Drop the freshness metadata here; the upcoming frontend rewrite will
+  // consume the envelope directly.
+  const envelope = await unwrap<{ data: PortListResponse }>(
+    client.get<ApiResponse<{ data: PortListResponse }>>('/ports/', {
       params: { device },
     }),
   );
+  return envelope.data;
 }
 
 type PortJobRawResponse = {

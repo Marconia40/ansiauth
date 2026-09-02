@@ -78,6 +78,17 @@ class DeviceModel(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+    # Cache-first read model: los GET de VLAN/ports leen de
+    # device_vlans/device_ports en vez de golpear el equipo cada vez. Estas
+    # 4 columnas son la metadata "cuándo fue la última sync exitosa" y
+    # "el último intento falló con esto" por-recurso (separados porque
+    # VLAN y ports se sincronizan por caminos distintos). Nullable: un
+    # device recién dado de alta arranca en NULL hasta que sync_device_task
+    # completa.
+    vlans_synced_at = Column(DateTime(timezone=True), nullable=True)
+    vlans_sync_error = Column(Text, nullable=True)
+    ports_synced_at = Column(DateTime(timezone=True), nullable=True)
+    ports_sync_error = Column(Text, nullable=True)
 
     device_group = relationship(
         "DeviceGroupModel",
@@ -109,10 +120,12 @@ class DevicePortModel(Base):
     """MSP: Fase 2 de la migración a FINAL_ARCHITECTURE.md — Repository[Puerto].
 
     PK compuesta real (``interface``, ``device``), mismo criterio que
-    ``DeviceVlanModel``. Guarda el estado deseado/aplicado — no
-    ``operational_up``/``speed``/``duplex`` (solo lectura, vienen del device
-    en cada ``reconciliar()``) ni ``allowed_vlan_operation`` (instrucción de
-    la llamada, no atributo persistente del puerto).
+    ``DeviceVlanModel``. Guarda el estado del puerto -- tanto el
+    deseado/aplicado (description, admin_up, mode, access_vlan, allowed_vlans,
+    poe_enabled) como el observado read-only (operational_up, speed, duplex)
+    para que los GET cache-first no pierdan esa info entre refresh y refresh.
+    ``allowed_vlan_operation`` sigue afuera: es instrucción de la llamada,
+    no atributo persistente del puerto.
     """
 
     __tablename__ = "device_ports"
@@ -125,6 +138,10 @@ class DevicePortModel(Base):
     access_vlan = Column(Integer, nullable=True)
     allowed_vlans = Column(JSON, nullable=True)  # lista de int
     poe_enabled = Column(Boolean, nullable=True)
+    # Read-only, provienen del getter del driver, no de escrituras del usuario.
+    operational_up = Column(Boolean, nullable=True)
+    speed = Column(String, nullable=True)
+    duplex = Column(String, nullable=True)
 
 
 class JobModel(Base):

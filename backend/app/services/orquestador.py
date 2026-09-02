@@ -216,6 +216,42 @@ class Orquestador:
                     "audit trail for this successful change may be incomplete.",
                     recurso.repositorio(), device_name,
                 )
+            # Cache-first coherence: el ``_repos[...].add(recurso)`` de arriba
+            # ya actualizó la fila puntual del recurso tocado, pero el
+            # ``synced_at`` del device no cambió y cualquier drift real del
+            # equipo (ej. otra VLAN aparecida por consola directa) sigue sin
+            # detectarse hasta el próximo refresh manual. Un sync full del
+            # scope tocado resuelve las dos cosas. Fire-and-forget: si el
+            # broker no está, la escritura ya fue exitosa, sólo perdemos la
+            # actualización proactiva de cache -- el usuario puede darle
+            # refresh manual desde POST /devices/{name}/{vlans,ports}/refresh.
+            _SCOPE_POR_REPO = {"vlan": "vlans", "puerto": "ports"}
+            sync_scope = _SCOPE_POR_REPO.get(recurso.repositorio())
+            if sync_scope is not None:
+                # Coalesce del sync post-write cuando llega un burst de N jobs
+                # sobre el mismo (device, scope): sólo el último dispara el
+                # refresh, los previos se saltean. Los jobs sobre el mismo
+                # device se serializan por el lock Redis, así que "el último"
+                # está bien definido -- job.marcar_completado() de arriba ya
+                # sacó al actual del set pending/running.
+                if self._jobs.hay_otros_activos(device_name, recurso.repositorio(), job.job_id):
+                    logger.debug(
+                        "Orquestador.ejecutar: skipping post-write sync for "
+                        "device=%s scope=%s -- another job on same (device, scope) "
+                        "is still active; the last one of the burst will refresh",
+                        device_name, sync_scope,
+                    )
+                else:
+                    try:
+                        from app.tasks import sync_device_task
+                        sync_device_task.delay(device_name, sync_scope)
+                    except Exception as exc:
+                        logger.warning(
+                            "Orquestador.ejecutar: post-write sync enqueue failed for "
+                            "device=%s scope=%s (%s) -- cache will stay at previous "
+                            "synced_at until a manual refresh",
+                            device_name, sync_scope, exc,
+                        )
         finally:
             if not job.esta_en_estado_terminal():
                 job.asegurar_estado_final()

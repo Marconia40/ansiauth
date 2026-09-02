@@ -66,6 +66,26 @@ class JobRepository(Repository):
             )
             return existe is not None
 
+    def hay_otros_activos(self, device: str, operation: str, excluir_job_id: str) -> bool:
+        """¿Hay otro Job pending/running para el mismo (device, operation),
+        excluyendo *excluir_job_id*? Usado por Orquestador para coalescer el
+        sync post-write: si otro job del mismo scope todavía va a correr sobre
+        este device, el refresh actual se saltea y el último job del burst
+        dispara el único sync (los jobs sobre el mismo device se serializan
+        por el lock Redis, así que "el último" está bien definido)."""
+        with get_session() as session:
+            existe = (
+                session.query(JobModel)
+                .filter(
+                    JobModel.device == device,
+                    JobModel.operation == operation,
+                    JobModel.status.in_(("pending", "running")),
+                    JobModel.job_id != excluir_job_id,
+                )
+                .first()
+            )
+            return existe is not None
+
     def recuperar_huerfanos(self) -> int:
         """Reemplaza job_service.py: mark_orphaned_jobs_failed() -- copia la
         lógica tal cual, usando Job.asegurar_estado_final() en vez de mutar

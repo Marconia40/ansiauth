@@ -121,6 +121,22 @@ class Inventory:
         self._auditor.despachar([DomainEvent(
             "device_registrado", device, device, actor["username"], {"site_id": site_id},
         )])
+        # Cache-first read model: disparo el sync inicial (VLAN + ports) en el
+        # worker Celery. Fire-and-forget -- el POST vuelve al toque con el
+        # device creado, y la UI muestra "sincronizando..." hasta que
+        # devices.{vlans,ports}_synced_at se poblen. Si Redis/broker no está
+        # disponible el .delay() puede tirar; en ese caso el alta ya se
+        # persistió, así que sólo logueamos y dejamos que el usuario haga
+        # refresh manual (paso 4) cuando el broker vuelva.
+        try:
+            from app.tasks import sync_device_task
+            sync_device_task.delay(device.name, "all")
+        except Exception as exc:
+            logger.warning(
+                "Inventory.register: sync task enqueue failed for %s (%s) — "
+                "device registered without initial sync; refresh manually",
+                device.name, exc,
+            )
         logger.info("Inventory.register: %s → group=%s site=%s", name, group.id, site_id)
         return device
 

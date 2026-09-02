@@ -1,12 +1,13 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
-from app.core.exceptions import DeviceExecutionError, ValidationError
+from app.core.exceptions import ValidationError
 from app.core.response import ok
 from app.core.scope import authorize_device, obtener_scope, require_authenticated, require_device
 from app.models.visibility_scope import VisibilityScope
 from app.models.vlan import VLAN
+from app.schemas.device_sync import SyncedResource
 from app.schemas.vlan import VLANCreate, VLANDelete, VLANUpdate
 
 logger = logging.getLogger(__name__)
@@ -31,24 +32,31 @@ def _authz_devices(scope: VisibilityScope, device_names, *, min_role: str, resol
         authorize_device(scope, name, "vlan_device_op", min_role, resolved=resolved)
 
 
-def _leer_vlans_en_vivo(device_name: str) -> list[dict]:
-    """FINAL_ARCHITECTURE.md §4 — GET /vlans lee en vivo, no de
-    Repository[VLAN]. RedisCoordinator en vez de device_locks.acquire()
-    directo (FASE_1.md, caller roto documentado)."""
-    from app.composition import redis_coordinator
+def _leer_vlans_cache(device_name: str) -> dict:
+    """Cache-first read del estado de VLANs -- reemplaza el GET live
+    (``_leer_vlans_en_vivo``) que hacía SSH cada vez.
 
-    device = require_device(device_name)
-    try:
-        with redis_coordinator.bloquear(device_name, timeout=10):
-            vlans = device.driver.get_vlans(device, device.password)
-    except TimeoutError:
-        raise HTTPException(
-            status_code=503,
-            detail={"status": "device_busy", "device": device_name, "message": "Device is busy with another operation, retry shortly"},
-        )
-    except RuntimeError as e:
-        raise DeviceExecutionError(str(e))
-    return [v.to_dict() for v in vlans]
+    El SSH al equipo ya no vive acá: lo dispara ``sync_device_task``
+    (Celery) desde el alta (``Inventory.register``), el endpoint de
+    refresh (``POST /devices/{name}/vlans/refresh``) o después de una
+    escritura exitosa. Este endpoint sólo lee ``device_vlans`` +
+    metadata de freshness del ``DeviceModel``, así que responde
+    instantáneo aún si el equipo está apagado.
+
+    Devuelve el envelope ``SyncedResource`` para que la UI pueda
+    mostrar "última sync hace X min" y decidir cuándo pedir refresh.
+    """
+    from app.composition import device_sync_service, redis_coordinator, vlan_repository
+
+    require_device(device_name)  # 404 si no existe / raise
+    vlans = vlan_repository.list(device=device_name)
+    synced_at, sync_error = device_sync_service.metadata(device_name, "vlans")
+    return SyncedResource(
+        data=[v.to_dict() for v in vlans],
+        synced_at=synced_at,
+        sync_error=sync_error,
+        sync_in_progress=redis_coordinator.esta_ocupado(device_name),
+    ).model_dump(mode="json")
 
 
 @router.get(
@@ -68,22 +76,28 @@ def get_vlans(
 ):
     if devices:
         _authz_devices(scope, devices, min_role="observer")
-        result = {dev: _leer_vlans_en_vivo(dev) for dev in devices}
+        # Multi-device: un envelope por device -- el shape del value
+        # cambió de ``list[dict]`` (live) a ``SyncedResource`` (cache),
+        # así el frontend obtiene freshness metadata por cada device.
+        result = {dev: _leer_vlans_cache(dev) for dev in devices}
         return ok(result)
 
     if device is None:
         from app.core.config import EXECUTION_MODE
         if EXECUTION_MODE != "mock":
             raise ValidationError("'device' query parameter is required")
-        # Atajo de API para "no especifiqué device" en modo mock -- no es una
-        # decisión de driver, FINAL_ARCHITECTURE.md ya lo marcó fuera de
-        # alcance de esta migración. Fuente real sin pasar por vlan_service.py
-        # (muerto tras esta fase, ver "Callers rotos" de FASE_5.md).
+        # Atajo de API para "no especifiqué device" en modo mock -- data
+        # sintética envuelta en el mismo SyncedResource para no romper el
+        # shape del endpoint. synced_at=None marca "sin sync real".
         from app.services.vendors.mock import _mock_vlans
-        return ok([v.to_dict() for v in _mock_vlans])
+        envelope = SyncedResource(
+            data=[v.to_dict() for v in _mock_vlans],
+            synced_at=None, sync_error=None, sync_in_progress=False,
+        ).model_dump(mode="json")
+        return ok(envelope)
 
     _authz_devices(scope, [device], min_role="observer")
-    return ok(_leer_vlans_en_vivo(device))
+    return ok(_leer_vlans_cache(device))
 
 
 @router.post(

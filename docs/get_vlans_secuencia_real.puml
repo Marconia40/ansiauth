@@ -1,0 +1,196 @@
+@startuml GET_vlans_real
+title GET /vlans?device=switch-A — read model cache-first (post-migración, verificado contra código real)
+autonumber
+
+note over Cliente
+  Diagrama nuevo, complementa post_vlans_secuencia_real_1_sync.puml y
+  post_vlans_secuencia_real_2_async.puml. Antes de la migración del
+  read model a "cache-first" (esta sesión), este endpoint hacía SSH
+  contra el equipo en cada request vía _leer_vlans_en_vivo() -- ahora
+  lee de device_vlans (poblado por sync_device_task, ver
+  post_vlans_secuencia_real_2_async.puml sección "worker de sync") +
+  metadata de freshness del DeviceModel. Cero SSH en el hot path del
+  read: la respuesta es instantánea aún si el equipo está apagado o
+  inalcanzable.
+
+  Cada flecha es una función/método real, verificado leyendo
+  api/vlans.py, core/scope.py, core/rls_middleware.py,
+  services/device_sync_service.py, services/redis_coordinator.py,
+  repositories/vlan_repository.py, schemas/device_sync.py y
+  composition.py tal como están hoy.
+
+  El shape del wire format cambió: antes era ApiResponse<VLANEntry[]>;
+  ahora es ApiResponse<SyncedResource> con
+  {data:VLANEntry[], synced_at, sync_error, sync_in_progress}. El
+  frontend se adaptó en un solo lugar (services/api.ts:getVlans() que
+  desenvuelve el envelope y devuelve la lista al UI -- ver esa
+  función).
+end note
+
+actor Cliente
+participant "AuthContextMiddleware\n(core/rls_middleware.py)" as AuthCtx
+participant "get_current_user /\nrequire_authenticated\n(core/scope.py)" as Auth
+participant "RoleAssignmentRepository" as RAR
+participant "Router\n(api/vlans.py: get_vlans\n+ _leer_vlans_cache)" as Router
+participant "Repository[Device]" as RepoDev
+participant "Repository[VLAN]" as RepoVlan
+participant "DeviceSyncService" as Sync
+database "devices\n(DeviceModel)" as DevTable
+participant "RedisCoordinator" as RC
+participant "SyncedResource\n(schemas/device_sync.py)" as Envelope
+
+Cliente -> AuthCtx : GET /api/v1/vlans/?device=switch-A\nAuthorization: Bearer <jwt>
+activate AuthCtx
+note right of AuthCtx
+  Mismo bloque exacto que en post_vlans_secuencia_real_1_sync.puml
+  (decode 1 vez del JWT + 1 query a users + rate-limit + instalación
+  del RLS context) -- se condensa acá porque el POST ya lo diagrama
+  paso por paso.
+end note
+AuthCtx -> AuthCtx : decode_bearer(request) + _lookup_user(username)\n+ request.state.auth_* + current_user_ctx.set(...)\n+ bucket_for(request) + _check_and_record()
+alt límite excedido o token inválido
+    AuthCtx --> Cliente : 429 / 401 (según el caso)
+end
+AuthCtx -> Auth : request (auth + RLS context ya instalados)
+deactivate AuthCtx
+activate Auth
+Auth -> Auth : get_current_user(request) + require_authenticated(current, request)\n» qué hace: lee request.state.auth_payload/auth_user_row --\nNO decodifica de nuevo ni vuelve a consultar la DB
+Auth -> RAR : obtener_scope(current)\n-> get_role_assignment_repo().scope_de(current)
+activate RAR
+alt current["is_system_admin"]
+    RAR --> Auth : VisibilityScope(es_system_admin=True, grants=())\n[sin query]
+else
+    RAR -> RAR : query RoleAssignmentModel WHERE user_id=...\n[UNA sola query -- se reusa para toda la request]
+    RAR --> Auth : VisibilityScope(es_system_admin=False, grants=(...))
+end
+deactivate RAR
+
+Auth -> Router : get_vlans(device="switch-A", devices=None,\ncurrent_user, scope)\n[FastAPI ya resolvió Depends()]
+deactivate Auth
+activate Router
+
+alt devices (query param plural) presente
+    note right of Router
+      Ruta multi-device: _authz_devices(scope, devices, min_role="observer")
+      + loop llamando _leer_vlans_cache(dev) por cada uno.
+      El return es dict[device -> SyncedResource]. En este diagrama
+      seguimos el caso single-device (query param "device") que es el
+      camino más usado; el multi-device sólo cambia el envelope de
+      salida (dict de envelopes) sin cambiar la lógica por device.
+    end note
+end
+alt ni "device" ni "devices" y EXECUTION_MODE != "mock"
+    Router --> Cliente : 400 ("'device' query parameter is required")
+end
+alt sin "device" pero EXECUTION_MODE == "mock"
+    Router -> Router : atajo de dev/testing: devuelve _mock_vlans envueltos\nen SyncedResource(synced_at=None, sync_error=None,\nsync_in_progress=False) -- no toca DB, no toca driver
+    Router --> Cliente : 200 {"success":true, "data":{...}}
+end
+
+Router -> Router : _authz_devices(scope, ["switch-A"], min_role="observer")\n-> authorize_device(scope, "switch-A", "vlan_device_op", "observer")\n» qué hace: exige que el caller tenga rol >= observer sobre el\nsite/grupo del device -- observer es el mínimo para lectura
+Router -> Router : scope.rol_para(site_id, device_group_id)\n[en memoria -- sin query]\n» qué hace: busca en los grants ya cargados el rol más específico\ndel caller para ese (site, grupo)
+alt rol insuficiente
+    Router --> Cliente : 403
+end
+
+Router -> Router : _leer_vlans_cache("switch-A")\n» qué hace: helper interno que arma el envelope SyncedResource --\nreemplaza al viejo _leer_vlans_en_vivo() que hacía SSH cada vez
+
+Router -> RepoDev : require_device("switch-A")\n-> device_repository.get("switch-A")\n[helper único compartido -- core/scope.py]
+activate RepoDev
+RepoDev --> Router : device (o NotFoundError)
+deactivate RepoDev
+alt device no existe
+    Router --> Cliente : 404 (NotFoundError)
+end
+
+Router -> RepoVlan : list(device="switch-A")
+activate RepoVlan
+RepoVlan -> RepoVlan : SELECT * FROM device_vlans\nWHERE device="switch-A"\n[bajo el RLS context ya instalado\npor AuthContextMiddleware arriba]
+RepoVlan --> Router : vlans = [VLAN(10,"MGMT"), VLAN(20,"DATA"), ...]
+deactivate RepoVlan
+note right of RepoVlan
+  Lee de la CACHÉ (tabla device_vlans, poblada por
+  sync_device_task en el worker Celery -- ver
+  post_vlans_secuencia_real_2_async.puml sección "worker de sync").
+  Cero SSH acá: la respuesta es instantánea aún si el equipo está
+  apagado. Si el equipo cambió por consola directa y todavía no
+  corrió un sync, esta lista muestra la data previa al cambio --
+  el frontend usa synced_at (más abajo) para saber cuán vieja es
+  y decidir si vale la pena mostrar el banner "última sync hace
+  X min, refrescar".
+end note
+
+Router -> Sync : device_sync_service.metadata("switch-A", "vlans")
+activate Sync
+Sync -> DevTable : SELECT vlans_synced_at, vlans_sync_error\nFROM devices WHERE name="switch-A"
+activate DevTable
+DevTable --> Sync : (timestamp | None, error_msg | None)
+deactivate DevTable
+Sync --> Router : (synced_at, sync_error)
+deactivate Sync
+note right of Sync
+  metadata() delega en el DeviceModel para no tener que hacer una
+  2da query manual desde el router -- 1 sola query, devuelve None
+  en cada campo si el device nunca sincronizó (alta reciente cuya
+  task todavía está corriendo) o si el último sync fue OK. Si el
+  último sync falló, sync_error trae el mensaje truncado a 2000
+  chars y la UI muestra "last sync failed" sobre la data vieja
+  (nunca se vacía la tabla device_vlans al fallar, por diseño --
+  ver device_sync_service.py:_marcar_error()).
+end note
+
+Router -> RC : redis_coordinator.esta_ocupado("switch-A")
+activate RC
+RC -> RC : r.exists("device_lock:switch-A")\n[si Redis alcanzable; si no, chequeo\nno-bloqueante contra threading.Lock in-process]
+RC --> Router : True si hay lock activo, False si no
+deactivate RC
+note right of RC
+  esta_ocupado() detecta cualquier operación en curso sobre el
+  device -- tanto un sync corriendo (sync_device_task acaba de
+  tomar el lock) como una escritura (Orquestador.ejecutar en el
+  medio del apply). Eso es intencional: mientras algo esté
+  tocando al equipo, la caché puede estar desactualizada o a
+  punto de cambiar, y el frontend tiene que mostrar un spinner
+  "syncing..." en vez del estado dormido.
+end note
+
+Router -> Envelope : SyncedResource(data=[v.to_dict() for v in vlans],\nsynced_at=synced_at,\nsync_error=sync_error,\nsync_in_progress=<esta_ocupado>).model_dump(mode="json")
+activate Envelope
+Envelope --> Router : dict serializado\n{data:[...], synced_at:"...", sync_error:null,\nsync_in_progress:false}
+deactivate Envelope
+
+Router --> Cliente : 200 {"success":true, "data": <envelope>}
+note right of Router
+  Envelope armado con core/response.py:ok(envelope). El frontend
+  (services/api.ts:getVlans) desenvuelve un nivel más y devuelve
+  envelope.data al UI -- correción mínima de una función mientras
+  no se rehaga la vista. La metadata (synced_at, sync_error,
+  sync_in_progress) hoy se descarta en el front; queda disponible
+  en el envelope para el rewrite del frontend que las va a mostrar
+  como banner + botón "refresh" (POST /devices/{name}/vlans/refresh,
+  que dispara sync_device_task manualmente).
+end note
+deactivate Router
+
+note over Cliente, Envelope
+  Diferencias respecto del viejo _leer_vlans_en_vivo() (pre-esta-sesión):
+    * Hot path sin SSH: ni require_device ni list() ni metadata() ni
+      esta_ocupado() tocan el equipo. Respuesta en milisegundos.
+    * Wire format cambió (envelope). Un solo call site en el frontend
+      necesitó adaptarse (services/api.ts).
+    * Comportamiento con equipo apagado: antes devolvía 502/timeout;
+      ahora devuelve la última data conocida + sync_error="..." si
+      el último intento de sync falló.
+    * Comportamiento con cambios por consola directa: antes se veían
+      al toque; ahora se ven después del próximo sync
+      (sync_device_task disparado por escritura vía API, por
+      POST /devices/{name}/vlans/refresh manual, o por el alta
+      inicial en Inventory.register).
+
+  El sync que popula device_vlans corre EXCLUSIVAMENTE desde el
+  worker Celery (sync_device_task) -- este endpoint nunca lo dispara.
+  Cortar el hot path del read en la caché es lo que hace que el GET
+  no dependa de la disponibilidad del equipo.
+end note
+
+@enduml
