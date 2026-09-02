@@ -4,6 +4,8 @@
 # opcionalmente, "alternatives": cada alternativa lleva "triggered_by_error"
 # (regex contra stderr+stdout del intento primario) -- si matchea, se
 # reintenta una vez con esa alternativa antes de devolver el error real.
+# "alternatives" es una lista -- se pueden apilar varias para la misma
+# operación, se prueban en orden hasta que una matchee.
 #
 # "block" es la única forma que usa este vendor (ansible.netcommon.cli_command,
 # un solo comando/bloque multi-línea) -- las líneas se unen con "\n" y se
@@ -12,6 +14,19 @@
 #
 # Placeholders disponibles por operación: ver el método correspondiente en
 # driver.py (arma el dict "vars" antes de llamar a _aplicar_desde_template()).
+#
+# Trigger _NO_COMMIT (reutilizado en varias operaciones abajo): confirmado
+# contra un device real de lab (prompt "[rou-aulascomunes-a1]", otra
+# familia de plataforma VRP que no usa candidate-config/commit) --
+# "commit" mismo sale rechazado con:
+#   [prompt]commit
+#                ^
+#   Error: Unrecognized command found at '^' position.
+# El regex ancla específicamente en que la palabra ecoada antes del "^" sea
+# "commit" -- no un "Unrecognized command" genérico, que podría venir de
+# cualquier otra línea del bloque fallando por una razón totalmente
+# distinta (ya nos pasó con PoE/storm-control en el CE12800, que no tiene
+# nada que ver con esto). Probado: no matchea esos otros casos.
 
 create_vlan:
   primary:
@@ -22,6 +37,14 @@ create_vlan:
       - "quit"
       - "commit"
       - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "vlan {vlan_id}"
+        - "description {name}"
+        - "quit"
+        - "quit"
 
 delete_vlan:
   primary:
@@ -30,6 +53,12 @@ delete_vlan:
       - "undo vlan {vlan_id}"
       - "commit"
       - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo vlan {vlan_id}"
+        - "quit"
 
 update_vlan:
   primary:
@@ -40,6 +69,14 @@ update_vlan:
       - "quit"
       - "commit"
       - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "vlan {vlan_id}"
+        - "description {name}"
+        - "quit"
+        - "quit"
 
 save_config:
   primary:
@@ -66,6 +103,14 @@ update_port_description:
         - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "description {description}"
+          - "quit"
+          - "quit"
   clear:
     primary:
       block:
@@ -75,6 +120,14 @@ update_port_description:
         - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "undo description"
+          - "quit"
+          - "quit"
 
 set_port_admin_state:
   enabled:
@@ -86,6 +139,14 @@ set_port_admin_state:
         - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "undo shutdown"
+          - "quit"
+          - "quit"
   disabled:
     primary:
       block:
@@ -95,6 +156,14 @@ set_port_admin_state:
         - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "shutdown"
+          - "quit"
+          - "quit"
 
 set_port_access_vlan:
   primary:
@@ -105,6 +174,14 @@ set_port_access_vlan:
       - "commit"
       - "quit"
       - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "port default vlan {vlan_id}"
+        - "quit"
+        - "quit"
 
 set_trunk_pvid_vlan:
   primary:
@@ -115,6 +192,14 @@ set_trunk_pvid_vlan:
       - "commit"
       - "quit"
       - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "port trunk pvid vlan {vlan_id}"
+        - "quit"
+        - "quit"
 
 set_trunk_allowed_vlans:
   primary:
@@ -126,6 +211,15 @@ set_trunk_allowed_vlans:
       - "commit"
       - "quit"
       - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "undo port trunk allow-pass vlan all"
+        - "port trunk allow-pass vlan {allowed_vlans}"
+        - "quit"
+        - "quit"
 
 set_port_poe:
   enabled:
@@ -137,6 +231,14 @@ set_port_poe:
         - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "poe enable"
+          - "quit"
+          - "quit"
   disabled:
     primary:
       block:
@@ -146,31 +248,98 @@ set_port_poe:
         - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "poe disable"
+          - "quit"
+          - "quit"
 
-# Sintaxis pendiente de verificar contra el device real -- confirmado
-# "Unrecognized command" en el CE12800 de lab (ver commit que agregó estos
-# métodos). Varía por familia de plataforma VRP; agregar la variante real
-# como alternativa (o reemplazar el primary) cuando se confirme con
-# `poe ?`/`storm-control ?` en la consola del device.
+# Sintaxis confirmada contra un device real (no el CE12800 de lab): usa
+# min-rate/max-rate por tipo de tráfico, no un único "level" como Cisco --
+# {threshold} se sustituye en las 4 posiciones numéricas (broadcast +
+# multicast, min y max iguales). "storm-control action block" +
+# "storm-control enable trap" son fijas, sin placeholder.
+#
+# 2 variaciones reales conocidas, cada una con su propia alternativa:
+#   - Algunos Huawei no soportan la línea de multicast (rechazan
+#     "storm-control multicast..." como comando no reconocido) --
+#     alternativa: mismo bloque sin esa línea.
+#   - Los mismos Huawei "sin commit" ya vistos en el resto de este archivo
+#     también aplican acá -- alternativa: mismo bloque (con multicast) sin
+#     "commit".
+# Si algún device necesitara las 2 variaciones a la vez, agregar una 3ra
+# alternativa combinada cuando se confirme ese caso real -- no
+# precombinado a ciegas.
 set_storm_control:
   enabled:
     primary:
       block:
         - "system-view"
         - "interface {interface}"
-        - "storm-control broadcast {threshold}"
+        - "storm-control broadcast min-rate percent {threshold} max-rate percent {threshold}"
+        - "storm-control multicast min-rate percent {threshold} max-rate percent {threshold}"
+        - "storm-control action block"
+        - "storm-control enable trap"
         - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      - triggered_by_error: 'storm-control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "storm-control broadcast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm-control action block"
+          - "storm-control enable trap"
+          - "commit"
+          - "quit"
+          - "quit"
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "storm-control broadcast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm-control multicast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm-control action block"
+          - "storm-control enable trap"
+          - "quit"
+          - "quit"
   disabled:
     primary:
       block:
         - "system-view"
         - "interface {interface}"
         - "undo storm-control broadcast"
+        - "undo storm-control multicast"
+        - "undo storm-control action"
+        - "undo storm-control enable trap"
         - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      - triggered_by_error: 'storm-control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "undo storm-control broadcast"
+          - "undo storm-control action"
+          - "undo storm-control enable trap"
+          - "commit"
+          - "quit"
+          - "quit"
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "undo storm-control broadcast"
+          - "undo storm-control multicast"
+          - "undo storm-control action"
+          - "undo storm-control enable trap"
+          - "quit"
+          - "quit"
 
 reset_port:
   primary:
@@ -195,6 +364,15 @@ set_access_mode:
       - "commit"
       - "quit"
       - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "port link-type access"
+        - "port default vlan {vlan_id}"
+        - "quit"
+        - "quit"
 
 set_trunk_mode:
   primary:
@@ -208,3 +386,14 @@ set_trunk_mode:
       - "commit"
       - "quit"
       - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "port link-type trunk"
+        - "port trunk pvid vlan {native_vlan}"
+        - "undo port trunk allow-pass vlan all"
+        - "port trunk allow-pass vlan {allowed_vlans}"
+        - "quit"
+        - "quit"

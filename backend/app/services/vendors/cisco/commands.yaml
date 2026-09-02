@@ -115,15 +115,17 @@ set_trunk_mode:
       - "switchport mode trunk"
       - "switchport trunk native vlan {native_vlan}"
       - "switchport trunk allowed vlan {allowed_vlans}"
-  # Ejemplo de formato para una alternativa real (switches con soporte dual
-  # ISL/dot1q traen la encapsulación en "Auto" y algunos IOS exigen fijarla
-  # antes de poder pasar a trunk) -- no cargada todavía, agregar cuando se
-  # confirme contra un device real que lo necesite.
-  # alternatives:
-  #   - triggered_by_error: 'trunk encapsulation is .Auto.'
-  #     parents: "interface {interface}"
-  #     lines:
-  #       - "switchport trunk encapsulation dot1q"
-  #       - "switchport mode trunk"
-  #       - "switchport trunk native vlan {native_vlan}"
-  #       - "switchport trunk allowed vlan {allowed_vlans}"
+  # Switches con soporte dual ISL/dot1q traen la encapsulación en "Auto" y
+  # algunos IOS exigen fijarla antes de poder pasar a trunk -- confirmado
+  # contra un device real de lab. "no negotiation auto" NO es el fix (esa
+  # es otra feature de IOS, negociación de velocidad/DTP, no toca la
+  # encapsulación) -- el comando real es "switchport trunk encapsulation
+  # dot1q", que fija la encapsulación antes de reintentar "mode trunk".
+  alternatives:
+    - triggered_by_error: 'trunk encapsulation is .Auto.'
+      parents: "interface {interface}"
+      lines:
+        - "switchport trunk encapsulation dot1q"
+        - "switchport mode trunk"
+        - "switchport trunk native vlan {native_vlan}"
+        - "switchport trunk allowed vlan {allowed_vlans}"

@@ -152,10 +152,15 @@ class HuaweiVendor(VendorDriver):
     def set_storm_control(
         self, interface: str, enabled: bool, threshold: "float | None", device: Device, password: str,
     ) -> dict:
+        # "percent {threshold}" en VRP espera un entero -- confirmado
+        # contra un device real: mandarlo como float de Python (ej. "1.0")
+        # rompe el comando ("Unrecognized command" con basura de escape de
+        # terminal en el medio). Cisco sí acepta decimales reales
+        # (storm-control broadcast level 80.00), por eso esta conversión
+        # queda acá y no en el modelo/schema compartido.
         variant = "enabled" if enabled else "disabled"
-        return self._aplicar_desde_template(
-            "set_storm_control", {"interface": interface, "threshold": threshold}, device, password, variant=variant,
-        )
+        vars = {"interface": interface, "threshold": int(threshold) if threshold is not None else None}
+        return self._aplicar_desde_template("set_storm_control", vars, device, password, variant=variant)
 
     def reset_port(self, interface: str, device: Device, password: str) -> dict:
         return self._aplicar_desde_template("reset_port", {"interface": interface}, device, password)

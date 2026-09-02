@@ -194,6 +194,15 @@ class VendorDriver(ABC):
         if resultado["success"]:
             return resultado
         error_text = (resultado.get("stderr") or "") + (resultado.get("stdout") or "")
+        # Bug real encontrado contra un device real: ansible.netcommon.cli_command
+        # arma su mensaje de fallo con str() sobre los bytes crudos del device
+        # (confirmado -- "Task failed: b'...'"), lo que deja "\r\n" como texto
+        # literal (4 caracteres: \, r, \, n) en vez de los bytes de control
+        # reales -- ningún trigger con \r?\n matcheaba nunca, la alternativa no
+        # se disparaba jamás. Normalizar de vuelta a bytes de control reales acá,
+        # una sola vez, arregla todos los triggers existentes y futuros sin
+        # tocar cada regex.
+        error_text = error_text.replace("\\r\\n", "\r\n").replace("\\r", "\r").replace("\\n", "\n")
         for alt in entry.get("alternatives", []):
             if re.search(alt["triggered_by_error"], error_text):
                 logger.info(
