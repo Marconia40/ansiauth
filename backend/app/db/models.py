@@ -89,6 +89,8 @@ class DeviceModel(Base):
     vlans_sync_error = Column(Text, nullable=True)
     ports_synced_at = Column(DateTime(timezone=True), nullable=True)
     ports_sync_error = Column(Text, nullable=True)
+    interfaces_virtuales_synced_at = Column(DateTime(timezone=True), nullable=True)
+    interfaces_virtuales_sync_error = Column(Text, nullable=True)
 
     device_group = relationship(
         "DeviceGroupModel",
@@ -142,6 +144,29 @@ class DevicePortModel(Base):
     operational_up = Column(Boolean, nullable=True)
     speed = Column(String, nullable=True)
     duplex = Column(String, nullable=True)
+
+
+class DeviceInterfazVirtualModel(Base):
+    """RF-INTERV-* — Repository[InterfazVirtual]. PK compuesta real
+    (``vlan_id``, ``device``), mismo criterio que ``DeviceVlanModel``/
+    ``DevicePortModel``. Doble función igual que esas 2 tablas: destino del
+    tracking-write de Orquestador tras una escritura exitosa, y cache que
+    sirve ``GET /interfaces-virtuales`` (front-data, cache-first)."""
+
+    __tablename__ = "device_interfaces_virtuales"
+
+    vlan_id = Column(Integer, primary_key=True)
+    device = Column(String, primary_key=True)
+    description = Column(String, nullable=True)
+    admin_up = Column(Boolean, nullable=True)
+    ipv4_address = Column(String, nullable=True)
+    ipv4_address_secondary = Column(String, nullable=True)
+    ipv6_address = Column(String, nullable=True)
+    acl_in = Column(String, nullable=True)
+    acl_out = Column(String, nullable=True)
+    dhcp_relay_servers = Column(JSON, nullable=True)  # lista de str
+    # Read-only, viene del getter del driver.
+    operational_up = Column(Boolean, nullable=True)
 
 
 class JobModel(Base):

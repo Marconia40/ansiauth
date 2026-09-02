@@ -413,3 +413,112 @@ set_trunk_mode:
         - "port trunk allow-pass vlan {allowed_vlans}"
         - "quit"
         - "quit"
+
+# ── Interfaces virtuales (SVI), RF-INTERV-* ─────────────────────────────────
+# "interface Vlanif{vlan_id}". No repite el trigger de "sin commit" en cada
+# operación (a diferencia de VLAN/puerto) para no duplicar 8 veces algo
+# todavía no confirmado en este dominio puntual -- si un device real lo
+# necesita acá también, agregar la alternativa igual que en el resto del
+# archivo.
+
+create_interfaz_virtual:
+  primary:
+    block: ["system-view", "interface Vlanif{vlan_id}", "undo shutdown", "commit", "quit", "quit"]
+
+delete_interfaz_virtual:
+  primary:
+    block: ["system-view", "undo interface Vlanif{vlan_id}", "commit", "quit"]
+
+set_interfaz_admin_state:
+  enabled:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo shutdown", "commit", "quit", "quit"]
+  disabled:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "shutdown", "commit", "quit", "quit"]
+
+set_interfaz_description:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "description {description}", "commit", "quit", "quit"]
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo description", "commit", "quit", "quit"]
+
+# Confirmado contra el device real de lab (running-config visto esta
+# sesión: "interface Vlanif10 / ip address 10.10.10.10 255.255.255.0").
+# {ipv4_addr}/{ipv4_mask} ya vienen separados (máscara punteada) -- la
+# conversión CIDR->máscara es cómputo real, la hace el driver en Python.
+set_interfaz_ipv4:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "ip address {ipv4_addr} {ipv4_mask}", "commit", "quit", "quit"]
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo ip address", "commit", "quit", "quit"]
+
+# RF-INTERV-03: IP secundaria -- VRP llama "sub" a esto (no confirmado
+# contra device real, forma probable). Requiere primaria existente (lo
+# valida InterfazVirtual antes de llegar acá).
+set_interfaz_ipv4_secondary:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "ip address {ipv4_addr} {ipv4_mask} sub", "commit", "quit", "quit"]
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo ip address {ipv4_addr} {ipv4_mask} sub", "commit", "quit", "quit"]
+
+# Sintaxis pendiente de verificar contra device real -- VRP necesita
+# "ipv6 enable" en la interfaz antes de poder asignar la dirección (a
+# diferencia de Cisco, donde alcanza con "ipv6 unicast-routing" global).
+# {ipv6_addr}/{ipv6_prefix} separados, mismo criterio que IPv4.
+set_interfaz_ipv6:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "ipv6 enable", "ipv6 address {ipv6_addr} {ipv6_prefix}", "commit", "quit", "quit"]
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo ipv6 address", "commit", "quit", "quit"]
+
+# Sintaxis pendiente de verificar contra device real -- forma probable
+# ("traffic-filter", no "access-group" como Cisco), no confirmada. Asigna
+# una ACL que ya existe en el device, no la crea (RF-GLOBAL-04, aparte).
+set_interfaz_acl:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "traffic-filter {direction}bound acl {acl_name}", "commit", "quit", "quit"]
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo traffic-filter {direction}bound", "commit", "quit", "quit"]
+
+# set_interfaz_dhcp_relay NO tiene entrada acá a propósito, mismo motivo
+# que en cisco/commands.yaml (lista de N servers, este motor no soporta un
+# número variable de líneas por YAML) -- el driver arma el command_block
+# en Python. Además es la pieza más incierta de las 9: VRP típicamente
+# necesita "dhcp select relay" + declarar el server aparte, no es un
+# comando por IP como el "ip helper-address" de Cisco -- confirmar con
+# "dhcp ?" en la consola real antes de confiar en lo que arme driver.py.
+
+# RF-INTERV-04's "ACL previamente creada... e identificador válido" --
+# "Total nonempty ACL number is 0" confirmado contra el device real de lab
+# (estado vacío). El formato de encabezado con ACLs reales configuradas
+# ("Basic/Advanced ACL <num-o-nombre>, N rule(s)") es la forma documentada
+# de VRP, NO confirmada contra una instancia real con ACLs -- un intento de
+# crear una ACL de prueba en este device de lab quedó bloqueado en un
+# prompt de commit inconsistente (a veces lo pide, a veces no), así que se
+# dejó sin forzar para no dejar estado a medio commitear. Confirmar el
+# parseo del caso "con ACLs" cuando se pueda probar con seguridad.
+list_acls:
+  primary:
+    commands:
+      - "display acl all"
+
+# get_interfaces_virtuales NO tiene entrada acá a propósito -- confirmado
+# contra el device real de lab que "display current-configuration
+# interface Vlanif" sin número es rechazado ("Error: Wrong parameter
+# found at '^' position"), a diferencia de Cisco. driver.py arma los
+# comandos en Python: primero "display ip interface brief" para
+# descubrir qué Vlanif existen, después "display current-configuration
+# interface Vlanif{id}" (confirmado que esta forma con número sí
+# funciona) por cada una -- mismo criterio de bypass de YAML que
+# set_interfaz_dhcp_relay (número de comandos dinámico).

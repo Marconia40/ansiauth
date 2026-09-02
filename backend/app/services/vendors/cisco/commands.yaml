@@ -148,3 +148,124 @@ set_trunk_mode:
         - "switchport mode trunk"
         - "switchport trunk native vlan {native_vlan}"
         - "switchport trunk allowed vlan {allowed_vlans}"
+
+# ── Interfaces virtuales (SVI), RF-INTERV-* ─────────────────────────────────
+# "interface Vlan{vlan_id}" -- crear = entrar a la interfaz (IOS la crea
+# sola si la VLAN existe; eso se valida antes en el endpoint, no acá).
+
+create_interfaz_virtual:
+  primary:
+    lines: ["interface Vlan{vlan_id}", "no shutdown"]
+
+delete_interfaz_virtual:
+  primary:
+    lines: ["no interface Vlan{vlan_id}"]
+
+set_interfaz_admin_state:
+  enabled:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["no shutdown"]
+  disabled:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["shutdown"]
+
+set_interfaz_description:
+  set:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["description {description}"]
+  clear:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["no description"]
+
+# {ipv4_addr}/{ipv4_mask} ya vienen separados (máscara punteada, no CIDR) --
+# la conversión CIDR->máscara es cómputo real, la hace el driver en Python,
+# no este YAML.
+set_interfaz_ipv4:
+  set:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["ip address {ipv4_addr} {ipv4_mask}"]
+  clear:
+    # Sin argumentos -- "no ip address" a secas borra cualquier dirección
+    # configurada, no hace falta (ni se puede, si no la conocemos) repetir
+    # la IP actual.
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["no ip address"]
+
+# RF-INTERV-03: IP secundaria (requiere que ya haya una primaria -- lo
+# valida InterfazVirtual antes de llegar acá). A diferencia de la primaria,
+# limpiar necesita repetir la dirección exacta -- "no ip address" a secas
+# borraría la primaria Y todas las secundarias, no solo esta.
+set_interfaz_ipv4_secondary:
+  set:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["ip address {ipv4_addr} {ipv4_mask} secondary"]
+  clear:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["no ip address {ipv4_addr} {ipv4_mask} secondary"]
+
+# Cisco sí acepta CIDR directo para IPv6 (a diferencia de IPv4). Precondición
+# de device, no manejada acá: requiere "ipv6 unicast-routing" habilitado
+# globalmente -- confirmar que ya está antes de asumir que esto va a andar.
+set_interfaz_ipv6:
+  set:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["ipv6 address {ipv6_address}"]
+  clear:
+    # Mismo criterio que IPv4: "no ipv6 address" a secas borra todas las
+    # direcciones IPv6 de la interfaz.
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["no ipv6 address"]
+
+# {direction} = "in" | "out". Asigna una ACL que ya existe en el device, no
+# la crea (eso es RF-GLOBAL-04, aparte).
+set_interfaz_acl:
+  set:
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["ip access-group {acl_name} {direction}"]
+  clear:
+    # Solo 1 ACL por sentido puede estar asignada a la vez -- alcanza con
+    # el sentido para sacarla, no hace falta repetir el nombre.
+    primary:
+      parents: "interface Vlan{vlan_id}"
+      lines: ["no ip access-group {direction}"]
+
+# set_interfaz_dhcp_relay NO tiene entrada acá a propósito -- es una lista
+# de N servers (RF-INTERV-06, "asignar o eliminar", full-replace), y este
+# motor de templates arma listas de líneas FIJAS por diseño (no soporta un
+# número variable de líneas por YAML). El driver construye el "ip
+# helper-address {ip}" por cada server directo en Python y llama
+# self._aplicar() -- mismo criterio que "el cómputo no va en el YAML",
+# llevado al límite cuando el cómputo es "cuántas líneas mandar", no solo
+# "qué valor va en el placeholder". Ver driver.py.
+
+# 2 comandos: el running-config de cada interfaz Vlan (tiene ip/ipv6
+# address, description, access-group, helper-address) + el estado
+# admin/protocolo (running-config no lo expone). Parseo en
+# services/parsers/interfaz_virtual_parser.py -- igual que el resto de los
+# parsers, esto necesita confirmarse contra output real de un device antes
+# de darlo por bueno a ciegas.
+get_interfaces_virtuales:
+  primary:
+    commands:
+      - "show running-config | section ^interface Vlan"
+      - "show ip interface brief | include Vlan"
+
+# RF-INTERV-04's "ACL previamente creada... e identificador válido" --
+# confirmado contra el device real de lab: "Standard/Extended IP access
+# list <nombre-o-número>" por cada ACL configurada. Parseo en
+# services/parsers/interfaz_virtual_parser.py.
+list_acls:
+  primary:
+    commands:
+      - "show access-lists"

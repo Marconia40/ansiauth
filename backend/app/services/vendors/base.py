@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.device import Device
+    from app.models.interfaz_virtual import InterfazVirtual
     from app.models.port import Puerto
     from app.models.vlan import VLAN
 
@@ -808,4 +809,107 @@ class VendorDriver(ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement set_trunk_mode yet"
+        )
+
+    # ── Virtual interface (SVI) operations, RF-INTERV-* ───────────────────────
+    # interface Vlan{id} en Cisco, interface Vlanif{id} en Huawei. La
+    # identidad de la interfaz ES el vlan_id -- no hay "reasignar a otra
+    # VLAN" (RF-INTERV-9), eso es borrar y crear de nuevo.
+
+    def create_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
+        """Create the SVI for *vlan_id* (assumes the VLAN itself already
+        exists -- validated by the caller before this runs)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement create_interfaz_virtual yet"
+        )
+
+    def delete_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement delete_interfaz_virtual yet"
+        )
+
+    def set_interfaz_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_interfaz_admin_state yet"
+        )
+
+    def set_interfaz_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_interfaz_description yet"
+        )
+
+    def set_interfaz_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
+        """*ipv4_address* is CIDR (``"10.10.10.11/24"``) or ``""``/``None``
+        to clear. CIDR→dotted-mask conversion (needed by Cisco) is real
+        computation, done by the concrete driver -- not sintaxis, doesn't
+        belong in the YAML template."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_interfaz_ipv4 yet"
+        )
+
+    def set_interfaz_ipv4_secondary(
+        self, vlan_id: int, ipv4_address: "str | None", previous_ipv4_address: "str | None",
+        device: Device, password: str,
+    ) -> dict:
+        """Same contract as ``set_interfaz_ipv4()`` but for the secondary
+        IPv4 address (RF-INTERV-03) -- caller (``InterfazVirtual``) already
+        checked a primary exists before calling this.
+
+        Unlike the primary address, clearing a secondary needs to name the
+        exact address being removed (``no ip address <addr> <mask>
+        secondary`` on IOS -- a bare ``no ip address`` wipes the primary
+        *and* every secondary). *previous_ipv4_address* is the currently
+        configured secondary (CIDR), passed by the caller from its
+        pre-state read -- only present when *ipv4_address* is falsy
+        (clearing); the caller guarantees it's non-None whenever a clear
+        actually reaches the driver (a clear with nothing configured is a
+        no-op handled before this is called)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_interfaz_ipv4_secondary yet"
+        )
+
+    def set_interfaz_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
+        """*ipv6_address* is CIDR (``"2001:db8::1/64"``) or ``""``/``None``
+        to clear. Precondition (not managed by this call): Cisco needs
+        ``ipv6 unicast-routing`` enabled globally; Huawei needs ``ipv6
+        enable`` on the interface first."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_interfaz_ipv6 yet"
+        )
+
+    def set_interfaz_acl(
+        self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
+    ) -> dict:
+        """Bind (or clear, if *acl_name* is ``""``/``None``) an ACL that
+        already exists on the device to *direction* (``"in"``/``"out"``).
+        Does not create the ACL itself -- that's RF-GLOBAL-04, out of scope
+        here."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_interfaz_acl yet"
+        )
+
+    def list_acl_names(self, device: Device, password: str) -> list[str]:
+        """Names/numbers of every ACL configured on the device -- used by
+        the API layer (RF-INTERV-04's "ACL previamente creada... e
+        identificador válido" precondition) to reject binding an ACL that
+        doesn't exist, before enqueueing the job. Minimal read, not the
+        full RF-GLOBAL-04 (details of each ACL's rules) -- out of scope
+        here."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement list_acl_names yet"
+        )
+
+    def set_interfaz_dhcp_relay(
+        self, vlan_id: int, servers: list[str], device: Device, password: str,
+    ) -> dict:
+        """Set the DHCP relay/helper server list to exactly *servers*
+        (empty list clears it) -- full replace, same convention as
+        ``set_trunk_allowed_vlans``."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_interfaz_dhcp_relay yet"
+        )
+
+    def get_interfaces_virtuales(self, device: Device, password: str) -> list[InterfazVirtual]:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_interfaces_virtuales yet"
         )

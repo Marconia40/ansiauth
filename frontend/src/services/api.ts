@@ -25,6 +25,18 @@ import type {
   PortStormControlUpdateRequest,
   PortTrunkVlansUpdateRequest,
 } from '@/types/port';
+import type {
+  InterfazVirtualAclUpdateRequest,
+  InterfazVirtualAdminStateUpdateRequest,
+  InterfazVirtualCreateRequest,
+  InterfazVirtualDeleteRequest,
+  InterfazVirtualDescriptionUpdateRequest,
+  InterfazVirtualDhcpRelayUpdateRequest,
+  InterfazVirtualIpv4UpdateRequest,
+  InterfazVirtualIpv6UpdateRequest,
+  InterfazVirtualListResponse,
+  InterfazVirtualOperationResult,
+} from '@/types/interfaz-virtual';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -417,6 +429,80 @@ export async function resetPort(
   body: PortResetRequest,
 ): Promise<PortOperationResult> {
   const { data } = await client.post<PortJobRawResponse>('/ports/reset', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+// ── Virtual interfaces (SVI) ─────────────────────────────────────────────────
+
+export async function getInterfacesVirtuales(device: string): Promise<InterfazVirtualListResponse> {
+  // Cache-first, same SyncedResource envelope as getPorts()/getVlans().
+  const envelope = await unwrap<{ data: InterfazVirtualListResponse }>(
+    client.get<ApiResponse<{ data: InterfazVirtualListResponse }>>('/interfaces-virtuales/', {
+      params: { device },
+    }),
+  );
+  return envelope.data;
+}
+
+type InterfazVirtualJobRawResponse = {
+  success: boolean;
+  group_job_id: string;
+  jobs: { device: string; job_id: string; status?: string }[];
+};
+
+export async function createInterfazVirtual(
+  body: InterfazVirtualCreateRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.post<InterfazVirtualJobRawResponse>('/interfaces-virtuales/', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function deleteInterfazVirtual(
+  body: InterfazVirtualDeleteRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.post<InterfazVirtualJobRawResponse>('/interfaces-virtuales/delete', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setInterfazAdminState(
+  body: InterfazVirtualAdminStateUpdateRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/admin-state', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setInterfazDescription(
+  body: InterfazVirtualDescriptionUpdateRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/description', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setInterfazIpv4(
+  body: InterfazVirtualIpv4UpdateRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/ipv4', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setInterfazIpv6(
+  body: InterfazVirtualIpv6UpdateRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/ipv6', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setInterfazAcl(
+  body: InterfazVirtualAclUpdateRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/acl', body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function setInterfazDhcpRelay(
+  body: InterfazVirtualDhcpRelayUpdateRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/dhcp-relay', body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 

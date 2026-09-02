@@ -223,6 +223,33 @@ def refresh_device_ports(
     return ok({"device": name, "scope": "ports", "task_id": result.id})
 
 
+@router.post(
+    "/{name}/interfaces-virtuales/refresh",
+    summary="Refresh device virtual interface cache",
+    description=(
+        "Trigger a background sync of *device*'s virtual interface (SVI) "
+        "cache from the equipment. Returns immediately with the task id; "
+        "the frontend polls `GET /api/v1/interfaces-virtuales?device={name}` "
+        "and watches `synced_at` / `sync_in_progress` to detect completion. "
+        "Requires observer role or higher on the device — same criterion as "
+        "reading the virtual interface list."
+    ),
+)
+def refresh_device_interfaces_virtuales(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import inventory
+    from app.tasks import sync_device_task
+
+    if inventory.get(name) is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
+    result = sync_device_task.delay(name, "interfaces_virtuales")
+    return ok({"device": name, "scope": "interfaces_virtuales", "task_id": result.id})
+
+
 @router.delete(
     "/{name}",
     summary="Delete device",

@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 init_db(DATABASE_URL)
 logger.info("Database ready: %s", DATABASE_URL)
 
-from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, device_groups, devices, group_jobs, health, interfaces_virtuales, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.core.rls_context import system_context  # noqa: E402
 from app.models.audit import AuditRecord  # noqa: E402
 
@@ -388,6 +388,7 @@ _err = {s: {"model": ErrorResponse} for s in (400, 401, 403, 404, 409, 422, 429,
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], responses=_err)
 app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"], responses=_err)
 app.include_router(ports.router, prefix="/api/v1/ports", tags=["ports"], responses=_err)
+app.include_router(interfaces_virtuales.router, prefix="/api/v1/interfaces-virtuales", tags=["interfaces-virtuales"], responses=_err)
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"], responses=_err)
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], responses=_err)
 app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)

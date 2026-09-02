@@ -41,10 +41,11 @@ _MAX_ERROR_LEN = 2000
 
 
 class DeviceSyncService:
-    def __init__(self, vlan_repo, puerto_repo, coordinator):
-        self._vlans = vlan_repo          # Repository[VLAN]
-        self._ports = puerto_repo        # Repository[Puerto]
-        self._coordinator = coordinator  # RedisCoordinator
+    def __init__(self, vlan_repo, puerto_repo, interfaz_virtual_repo, coordinator):
+        self._vlans = vlan_repo                        # Repository[VLAN]
+        self._ports = puerto_repo                      # Repository[Puerto]
+        self._interfaces = interfaz_virtual_repo        # Repository[InterfazVirtual]
+        self._coordinator = coordinator                # RedisCoordinator
 
     def sync_vlans(self, device: "Device") -> None:
         """Full-refresh de las VLANs de *device* desde el equipo hacia
@@ -114,10 +115,40 @@ class DeviceSyncService:
             device.name, len(nuevos), len(existentes_ifs - nuevos_ifs),
         )
 
+    def sync_interfaces_virtuales(self, device: "Device") -> None:
+        """Full-refresh de las interfaces virtuales de *device* desde el
+        equipo hacia ``device_interfaces_virtuales``. Misma semántica que
+        ``sync_vlans``/``sync_ports``: reemplaza la lista completa y no
+        vacía la tabla en fallo.
+        """
+        try:
+            with self._coordinator.bloquear(device.name, timeout=_LOCK_TIMEOUT_S):
+                nuevas = device.driver.get_interfaces_virtuales(device, device.password)
+        except Exception as exc:
+            logger.exception("sync_interfaces_virtuales failed device=%s", device.name)
+            self._marcar_error(device.name, "interfaces_virtuales_sync_error", str(exc))
+            raise
+
+        existentes = self._interfaces.list(device=device.name)
+        existentes_ids = {i.vlan_id for i in existentes}
+        nuevas_ids = {i.vlan_id for i in nuevas}
+        for vlan_id in existentes_ids - nuevas_ids:
+            self._interfaces.remove((vlan_id, device.name))
+        for i in nuevas:
+            i.device = device.name
+            self._interfaces.add(i)
+
+        self._marcar_ok(device.name, "interfaces_virtuales_synced_at", "interfaces_virtuales_sync_error")
+        logger.info(
+            "sync_interfaces_virtuales OK device=%s persisted=%d removed=%d",
+            device.name, len(nuevas), len(existentes_ids - nuevas_ids),
+        )
+
     def metadata(
         self, device_name: str, scope: str,
     ) -> tuple[Optional[datetime], Optional[str]]:
-        """Return ``(synced_at, sync_error)`` para *scope* ∈ {"vlans","ports"}.
+        """Return ``(synced_at, sync_error)`` para *scope* ∈
+        {"vlans","ports","interfaces_virtuales"}.
 
         Consultado por los GET cache-first para poblar el envelope
         ``{data, synced_at, sync_error, sync_in_progress}`` sin que el
@@ -129,10 +160,14 @@ class DeviceSyncService:
         cols = {
             "vlans": (DeviceModel.vlans_synced_at, DeviceModel.vlans_sync_error),
             "ports": (DeviceModel.ports_synced_at, DeviceModel.ports_sync_error),
+            "interfaces_virtuales": (
+                DeviceModel.interfaces_virtuales_synced_at,
+                DeviceModel.interfaces_virtuales_sync_error,
+            ),
         }
         if scope not in cols:
             raise ValueError(
-                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports)"
+                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports / interfaces_virtuales)"
             )
         col_ts, col_err = cols[scope]
         with get_session() as session:

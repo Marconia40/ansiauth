@@ -10,7 +10,7 @@ etc.) — no hace falta anticipar esas partes acá, cada fase agrega lo suyo.
 from __future__ import annotations
 
 from app.core.repository import Repository
-from app.db.models import DeviceVlanModel, DevicePortModel
+from app.db.models import DeviceVlanModel, DevicePortModel, DeviceInterfazVirtualModel
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.device_group_repository import DeviceGroupRepository
 from app.repositories.device_repository import DeviceRepository
@@ -90,6 +90,33 @@ puerto_repository = Repository(
     DevicePortModel, _puerto_to_domain, _puerto_to_orm, pk_field=("interface", "device"),
 )
 
+
+def _interfaz_virtual_to_orm(i: "InterfazVirtual"):
+    return DeviceInterfazVirtualModel(
+        vlan_id=i.vlan_id, device=i.device, description=i.description,
+        admin_up=i.admin_up, ipv4_address=i.ipv4_address,
+        ipv4_address_secondary=i.ipv4_address_secondary, ipv6_address=i.ipv6_address,
+        acl_in=i.acl_in, acl_out=i.acl_out, dhcp_relay_servers=i.dhcp_relay_servers,
+        operational_up=i.operational_up,
+    )
+
+
+def _interfaz_virtual_to_domain(row) -> "InterfazVirtual":
+    from app.models.interfaz_virtual import InterfazVirtual
+    return InterfazVirtual(
+        vlan_id=row.vlan_id, device=row.device, description=row.description,
+        admin_up=row.admin_up, ipv4_address=row.ipv4_address,
+        ipv4_address_secondary=row.ipv4_address_secondary, ipv6_address=row.ipv6_address,
+        acl_in=row.acl_in, acl_out=row.acl_out, dhcp_relay_servers=row.dhcp_relay_servers,
+        operational_up=row.operational_up,
+    )
+
+
+interfaz_virtual_repository = Repository(
+    DeviceInterfazVirtualModel, _interfaz_virtual_to_domain, _interfaz_virtual_to_orm,
+    pk_field=("vlan_id", "device"),
+)
+
 job_repository = JobRepository()
 
 role_assignment_repository = RoleAssignmentRepository()
@@ -119,7 +146,8 @@ event_dispatcher = EventDispatcher()
 event_dispatcher.suscribir(AuditListener(audit_repository))
 
 orquestador = Orquestador(
-    device_repository, {"vlan": vlan_repository, "puerto": puerto_repository},
+    device_repository,
+    {"vlan": vlan_repository, "puerto": puerto_repository, "interfaz_virtual": interfaz_virtual_repository},
     job_repository, event_dispatcher, redis_coordinator,
 )
 
@@ -133,5 +161,5 @@ inventory = Inventory(
 )
 
 device_sync_service = DeviceSyncService(
-    vlan_repository, puerto_repository, redis_coordinator,
+    vlan_repository, puerto_repository, interfaz_virtual_repository, redis_coordinator,
 )

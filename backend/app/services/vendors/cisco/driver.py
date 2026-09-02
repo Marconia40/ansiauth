@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import TYPE_CHECKING
 
 from app.services.parsers.cisco_port_parser import parse_ios_ports
@@ -7,6 +8,7 @@ from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
+    from app.models.interfaz_virtual import InterfazVirtual
     from app.models.port import Puerto
     from app.models.vlan import VLAN
 
@@ -191,3 +193,127 @@ class CiscoVendor(VendorDriver):
         for s, e in self._compress_to_ranges(vlans):
             parts.append(f"{s}-{e}" if s != e else str(s))
         return ",".join(parts)
+
+    # ── Virtual interface (SVI) operations, RF-INTERV-* ───────────────────────
+
+    def create_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("create_interfaz_virtual", {"vlan_id": vlan_id}, device, password)
+
+    def delete_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("delete_interfaz_virtual", {"vlan_id": vlan_id}, device, password)
+
+    def set_interfaz_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
+        variant = "enabled" if enabled else "disabled"
+        return self._aplicar_desde_template(
+            "set_interfaz_admin_state", {"vlan_id": vlan_id}, device, password, variant=variant,
+        )
+
+    def set_interfaz_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
+        variant = "clear" if self._is_description_empty(description) else "set"
+        return self._aplicar_desde_template(
+            "set_interfaz_description", {"vlan_id": vlan_id, "description": description},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
+        """*ipv4_address* llega en CIDR (``"10.10.10.11/24"``) o ``""``/
+        ``None`` para limpiar -- la conversión a máscara punteada (lo que
+        IOS realmente espera) es cómputo real, se hace acá, no en el YAML."""
+        variant = "clear" if not ipv4_address else "set"
+        addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address)
+        return self._aplicar_desde_template(
+            "set_interfaz_ipv4", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_ipv4_secondary(
+        self, vlan_id: int, ipv4_address: "str | None", previous_ipv4_address: "str | None",
+        device: Device, password: str,
+    ) -> dict:
+        """Misma conversión CIDR->máscara que set_interfaz_ipv4() -- IOS
+        pide "ip address {addr} {mask} secondary", y para limpiar hace
+        falta repetir la dirección secundaria actual con "no" (a diferencia
+        de la primaria, "no ip address" a secas borra TODO, no solo la
+        secundaria) -- por eso el clear usa *previous_ipv4_address*, no
+        *ipv4_address* (que viene vacío en ese caso)."""
+        variant = "clear" if not ipv4_address else "set"
+        addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address if ipv4_address else previous_ipv4_address)
+        return self._aplicar_desde_template(
+            "set_interfaz_ipv4_secondary", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
+        """Cisco sí acepta CIDR directo para IPv6 -- no hace falta separar
+        dirección/prefix como en IPv4."""
+        variant = "clear" if not ipv6_address else "set"
+        return self._aplicar_desde_template(
+            "set_interfaz_ipv6", {"vlan_id": vlan_id, "ipv6_address": ipv6_address or ""},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_acl(
+        self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
+    ) -> dict:
+        variant = "clear" if not acl_name else "set"
+        return self._aplicar_desde_template(
+            "set_interfaz_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_dhcp_relay(
+        self, vlan_id: int, servers: list[str], device: Device, password: str,
+    ) -> dict:
+        """Full-replace de la lista de relay servers -- número variable de
+        líneas ("ip helper-address {ip}" por cada server), el motor de
+        templates de YAML arma listas fijas por diseño, así que este caso
+        puntual arma el extravars acá y llama _aplicar() directo (mismo
+        _aplicar() que ya usa _ejecutar_paso() por debajo, sin pasar por
+        _aplicar_desde_template()/alternatives -- no hay ningún error
+        conocido todavía para esta operación puntual).
+
+        "match": "none" es necesario acá -- bug real encontrado contra el
+        device de lab: el diffing por default de ios_config ("match: line")
+        compara contra una foto de la running-config tomada ANTES del
+        batch, así que "saltea" reenviar una "ip helper-address X" que ya
+        ve configurada, sin darse cuenta de que el "no ip helper-address"
+        de esta misma llamada la va a borrar -- el resultado real era que
+        solo sobrevivía el último server agregado, no el full-replace
+        completo (ver comentario en run.yml)."""
+        lines = ["no ip helper-address"] + [f"ip helper-address {ip}" for ip in servers]
+        return self._aplicar(
+            {"parents": f"interface Vlan{vlan_id}", "lines": lines, "match": "none"},
+            device, password, op_label="set interfaz DHCP relay",
+        )
+
+    def get_interfaces_virtuales(self, device: Device, password: str) -> list[InterfazVirtual]:
+        commands = self._cargar_comandos()["get_interfaces_virtuales"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        from app.services.parsers.interfaz_virtual_parser import parse_ios_interfaces_virtuales
+        running_config = stdouts[0] if len(stdouts) > 0 else ""
+        brief = stdouts[1] if len(stdouts) > 1 else ""
+        return parse_ios_interfaces_virtuales(running_config, brief)
+
+    def list_acl_names(self, device: Device, password: str) -> list[str]:
+        """Confirmado contra el device real de lab con ACLs configuradas.
+        Caso "0 ACLs" NO probado -- a diferencia de VRP (que sí imprime
+        algo, "Total nonempty ACL number is 0", incluso vacío), no hay
+        confirmación de si ``show access-lists`` en un device sin ninguna
+        ACL devuelve stdout vacío (lo que ``_leer()`` trata como error de
+        lectura, no como "0 ACLs") -- confirmar antes de asumir."""
+        commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        from app.services.parsers.interfaz_virtual_parser import parse_ios_acl_names
+        return parse_ios_acl_names(stdouts[0] if stdouts else "")
+
+    @staticmethod
+    def _cidr_a_direccion_y_mascara(cidr: "str | None") -> tuple[str, str]:
+        """``"10.10.10.11/24"`` → ``("10.10.10.11", "255.255.255.0")`` --
+        IOS espera máscara punteada, no CIDR, para ``ip address``. Con
+        ``cidr`` vacío/``None`` (caso "limpiar") devuelve ``("", "")`` --
+        el vendedor de la operación decide igual qué línea mandar según
+        el variant, no según estos valores."""
+        if not cidr:
+            return "", ""
+        interfaz = ipaddress.ip_interface(cidr)
+        return str(interfaz.ip), str(interfaz.netmask)

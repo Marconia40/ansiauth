@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import re
 from typing import TYPE_CHECKING
 
 from app.services.parsers.port_parser import parse_vrp_ports
@@ -7,6 +9,7 @@ from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
+    from app.models.interfaz_virtual import InterfazVirtual
     from app.models.port import Puerto
     from app.models.vlan import VLAN
 
@@ -201,3 +204,136 @@ class HuaweiVendor(VendorDriver):
         for s, e in self._compress_to_ranges(vlans):
             parts.append(f"{s} to {e}" if s != e else str(s))
         return " ".join(parts)
+
+    # ── Virtual interface (SVI) operations, RF-INTERV-* ───────────────────────
+
+    def create_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("create_interfaz_virtual", {"vlan_id": vlan_id}, device, password)
+
+    def delete_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("delete_interfaz_virtual", {"vlan_id": vlan_id}, device, password)
+
+    def set_interfaz_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
+        variant = "enabled" if enabled else "disabled"
+        return self._aplicar_desde_template(
+            "set_interfaz_admin_state", {"vlan_id": vlan_id}, device, password, variant=variant,
+        )
+
+    def set_interfaz_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
+        variant = "clear" if self._is_description_empty(description) else "set"
+        return self._aplicar_desde_template(
+            "set_interfaz_description", {"vlan_id": vlan_id, "description": description},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
+        """*ipv4_address* llega en CIDR (``"10.10.10.11/24"``) o ``""``/
+        ``None`` para limpiar -- VRP espera dirección + máscara punteada
+        separadas, mismo criterio de conversión que Cisco."""
+        variant = "clear" if not ipv4_address else "set"
+        addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address)
+        return self._aplicar_desde_template(
+            "set_interfaz_ipv4", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_ipv4_secondary(
+        self, vlan_id: int, ipv4_address: "str | None", previous_ipv4_address: "str | None",
+        device: Device, password: str,
+    ) -> dict:
+        """VRP llama "sub" a la dirección secundaria (no confirmado contra
+        device real). Igual que Cisco, limpiar necesita la dirección
+        secundaria actual (*previous_ipv4_address*) para armar "undo ip
+        address {addr} {mask} sub"."""
+        variant = "clear" if not ipv4_address else "set"
+        addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address if ipv4_address else previous_ipv4_address)
+        return self._aplicar_desde_template(
+            "set_interfaz_ipv4_secondary", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
+        """*ipv6_address* llega en CIDR -- a diferencia de Cisco, VRP espera
+        dirección + prefix-length separados (``ipv6 address {addr}
+        {prefix}``), no CIDR de un tirón."""
+        variant = "clear" if not ipv6_address else "set"
+        addr, prefix = self._cidr_a_direccion_y_prefijo_v6(ipv6_address)
+        return self._aplicar_desde_template(
+            "set_interfaz_ipv6", {"vlan_id": vlan_id, "ipv6_addr": addr, "ipv6_prefix": prefix},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_acl(
+        self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
+    ) -> dict:
+        variant = "clear" if not acl_name else "set"
+        return self._aplicar_desde_template(
+            "set_interfaz_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
+            device, password, variant=variant,
+        )
+
+    def set_interfaz_dhcp_relay(
+        self, vlan_id: int, servers: list[str], device: Device, password: str,
+    ) -> dict:
+        """Sintaxis más incierta de las 9 -- VRP típicamente necesita ``dhcp
+        select relay`` + declarar el server aparte, no es un comando por IP
+        como el ``ip helper-address`` de Cisco (ver comentario en
+        commands.yaml). Confirmar con ``dhcp ?`` en la consola real antes de
+        confiar en esto. Mismo bypass de ``_aplicar_desde_template()`` que
+        Cisco -- lista de N servers, el motor de templates arma listas fijas
+        por diseño."""
+        block = ["system-view", f"interface Vlanif{vlan_id}", "undo dhcp select relay"]
+        for ip in servers:
+            block += ["dhcp select relay", f"dhcp relay server-ip {ip}"]
+        block += ["commit", "quit", "quit"]
+        return self._aplicar(
+            {"command_block": "\n".join(block)}, device, password, op_label="set interfaz DHCP relay",
+        )
+
+    _VLANIF_BRIEF_RE = re.compile(r"^Vlanif(\d+)\b", re.MULTILINE)
+
+    def get_interfaces_virtuales(self, device: Device, password: str) -> list[InterfazVirtual]:
+        """Confirmado contra el device real de lab: VRP rechaza el comando
+        bulk "display current-configuration interface Vlanif" sin número
+        ("Error: Wrong parameter found at '^' position") -- a diferencia
+        de Cisco, acá hace falta 2 pasadas: primero ``display ip interface
+        brief`` para descubrir qué Vlanif existen, después un ``display
+        current-configuration interface Vlanif{id}`` por cada una
+        encontrada (confirmado que esta forma con número sí funciona).
+        Bypassa el YAML para este operación -- el número de comandos es
+        dinámico según lo que reporte el device, mismo criterio que
+        ``set_interfaz_dhcp_relay()``."""
+        brief = self._leer(["display ip interface brief"], device, password)[0]
+        vlan_ids = sorted({int(m) for m in self._VLANIF_BRIEF_RE.findall(brief)})
+        from app.services.parsers.interfaz_virtual_parser import parse_vrp_interfaces_virtuales
+        if not vlan_ids:
+            return parse_vrp_interfaces_virtuales("", brief)
+        per_iface_commands = [f"display current-configuration interface Vlanif{vid}" for vid in vlan_ids]
+        per_iface_outputs = self._leer(per_iface_commands, device, password)
+        config = "\n".join(per_iface_outputs)
+        return parse_vrp_interfaces_virtuales(config, brief)
+
+    def list_acl_names(self, device: Device, password: str) -> list[str]:
+        commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        from app.services.parsers.interfaz_virtual_parser import parse_vrp_acl_names
+        return parse_vrp_acl_names(stdouts[0] if stdouts else "")
+
+    @staticmethod
+    def _cidr_a_direccion_y_mascara(cidr: "str | None") -> tuple[str, str]:
+        """``"10.10.10.11/24"`` → ``("10.10.10.11", "255.255.255.0")`` --
+        VRP espera máscara punteada, no CIDR, para ``ip address``. Con
+        ``cidr`` vacío/``None`` (caso "limpiar") devuelve ``("", "")``."""
+        if not cidr:
+            return "", ""
+        interfaz = ipaddress.ip_interface(cidr)
+        return str(interfaz.ip), str(interfaz.netmask)
+
+    @staticmethod
+    def _cidr_a_direccion_y_prefijo_v6(cidr: "str | None") -> tuple[str, str]:
+        """``"2001:db8::1/64"`` → ``("2001:db8::1", "64")`` -- VRP espera
+        dirección + prefix-length separados para ``ipv6 address``."""
+        if not cidr:
+            return "", ""
+        interfaz = ipaddress.ip_interface(cidr)
+        return str(interfaz.ip), str(interfaz.network.prefixlen)
