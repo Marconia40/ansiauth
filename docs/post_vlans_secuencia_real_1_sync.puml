@@ -169,4 +169,20 @@ Router --> Cliente : 200 {"success":true, "group_job_id":"...",\n"jobs":[{"devic
 note right of Router : armado con core/response.py:ok(group_job_id=...,\njobs=...) desde esta sesión -- mismo shape exacto,\nverificado byte a byte contra el literal que reemplazó
 deactivate Router
 
+note over Cliente, Queue
+  El shape de la respuesta NO cambió con la introducción del read model
+  cache-first (esta sesión). El cambio de forma vive del lado del GET
+  /vlans (envelope SyncedResource con synced_at / sync_error /
+  sync_in_progress) -- ver get_vlans_secuencia_real.puml.
+
+  Lo que sí cambió acá es lo que pasa DESPUÉS de este 200: cuando cada
+  worker Celery termine su Job con éxito, Orquestador.ejecutar()
+  chequea job_repository.hay_otros_activos(device, "vlan", job_id) --
+  si es el ÚLTIMO Job pending/running sobre (device, "vlan") dispara
+  sync_device_task.delay(device, "vlans") para refrescar la caché
+  (device_vlans + devices.vlans_synced_at). Si NO es el último, se
+  saltea y el último Job del burst hace el único refresh. Todo el
+  detalle en post_vlans_secuencia_real_2_async.puml.
+end note
+
 @enduml
