@@ -87,15 +87,34 @@ set_port_poe:
       parents: "interface {interface}"
       lines: ["power inline never"]
 
+# Sintaxis confirmada contra un Cisco real (no el IOSv de lab, que no
+# implementa storm-control en absoluto -- "% Invalid input detected").
+# "include multicast" hace que el umbral de broadcast también cuente
+# tráfico multicast -- Cisco no tiene un "storm-control multicast level"
+# separado como podría esperarse. "action" admite 2 líneas simultáneas
+# (shutdown + trap), no son mutuamente excluyentes acá.
 set_storm_control:
   enabled:
     primary:
       parents: "interface {interface}"
-      lines: ["storm-control broadcast level {threshold}"]
+      lines:
+      - "storm-control broadcast include multicast"
+      - "storm-control broadcast level {threshold}"
+      - "storm-control action shutdown"
+      - "storm-control action trap"
+
   disabled:
+    # Mismo criterio "no X" de siempre en IOS, invierte las 4 líneas del
+    # enable una por una (no solo el level) -- alta confianza, es el
+    # patrón estándar de Cisco, ya usado en todo este archivo
+    # (no shutdown/shutdown, no description, etc.).
     primary:
       parents: "interface {interface}"
-      lines: ["no storm-control broadcast level"]
+      lines:
+      - "no storm-control broadcast level"
+      - "no storm-control broadcast include multicast"
+      - "no storm-control action shutdown"
+      - "no storm-control action trap"
 
 reset_port:
   primary:

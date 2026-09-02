@@ -260,44 +260,44 @@ set_port_poe:
 # Sintaxis confirmada contra un device real (no el CE12800 de lab): usa
 # min-rate/max-rate por tipo de tráfico, no un único "level" como Cisco --
 # {threshold} se sustituye en las 4 posiciones numéricas (broadcast +
-# multicast, min y max iguales). "storm-control action block" +
-# "storm-control enable trap" son fijas, sin placeholder.
+# multicast, min y max iguales). "storm control action block" +
+# "storm control enable trap" son fijas, sin placeholder. Si el equipo
+# soporta la línea de broadcast, soporta multicast con el mismo comando --
+# no es un eje de variación aparte (descartado, no es "algunos Huawei no
+# soportan multicast" como se pensó en un principio).
 #
-# 2 variaciones reales conocidas, cada una con su propia alternativa:
-#   - Algunos Huawei no soportan la línea de multicast (rechazan
-#     "storm-control multicast..." como comando no reconocido) --
-#     alternativa: mismo bloque sin esa línea.
-#   - Los mismos Huawei "sin commit" ya vistos en el resto de este archivo
-#     también aplican acá -- alternativa: mismo bloque (con multicast) sin
+# 2 causas reales conocidas, correlacionadas entre sí (confirmado en
+# campo): los Huawei que escriben el comando SIN guión ("storm control",
+# como el primary de acá abajo) usan candidate-config con "commit"; los
+# que lo escriben CON guión ("storm-control") aplican directo, sin
+# "commit" -- mismo criterio que el resto de este archivo. 2 alternativas:
+#   - "storm control" entero rechazado (nada se aplicó, como el caso de
+#     encapsulation de Cisco) -- alternativa: mismo bloque completo, pero
+#     con guión y sin "commit".
+#   - Solo "commit" rechazado (las líneas de antes ya se aplicaron,
+#     re-mandarlas es redundante pero no incorrecto -- se hace igual por
+#     seguridad: si además de "commit" hubiera fallado otra línea por una
+#     razón real y separada, achicar la alternativa a un simple "quit"
+#     taparía ese error en vez de dejarlo salir de nuevo) -- alternativa:
+#     mismo bloque completo, misma sintaxis del primary (espacio), sin
 #     "commit".
-# Si algún device necesitara las 2 variaciones a la vez, agregar una 3ra
-# alternativa combinada cuando se confirme ese caso real -- no
-# precombinado a ciegas.
+# Cuadrante sin confirmar todavía: guión CON commit -- no se agrega a
+# ciegas, esperar un caso real.
 set_storm_control:
   enabled:
     primary:
       block:
         - "system-view"
         - "interface {interface}"
-        - "storm-control broadcast min-rate percent {threshold} max-rate percent {threshold}"
-        - "storm-control multicast min-rate percent {threshold} max-rate percent {threshold}"
-        - "storm-control action block"
-        - "storm-control enable trap"
+        - "storm control broadcast min-rate percent {threshold} max-rate percent {threshold}"
+        - "storm control multicast min-rate percent {threshold} max-rate percent {threshold}"
+        - "storm control action block"
+        - "storm control enable trap"
         - "commit"
         - "quit"
         - "quit"
     alternatives:
-      - triggered_by_error: 'storm-control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
-        block:
-          - "system-view"
-          - "interface {interface}"
-          - "storm-control broadcast min-rate percent {threshold} max-rate percent {threshold}"
-          - "storm-control action block"
-          - "storm-control enable trap"
-          - "commit"
-          - "quit"
-          - "quit"
-      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      - triggered_by_error: 'storm control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
           - "interface {interface}"
@@ -307,30 +307,34 @@ set_storm_control:
           - "storm-control enable trap"
           - "quit"
           - "quit"
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        # A diferencia de la alternativa de arriba, acá lo único que falló
+        # fue "commit" -- las líneas de storm control (con espacio, lo que
+        # manda el primary) ya se aplicaron bien. Reusa la misma sintaxis
+        # del primary, no cambia a guión sin motivo.
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "storm control broadcast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm control multicast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm control action block"
+          - "storm control enable trap"
+          - "quit"
+          - "quit"
   disabled:
     primary:
       block:
         - "system-view"
         - "interface {interface}"
-        - "undo storm-control broadcast"
-        - "undo storm-control multicast"
-        - "undo storm-control action"
-        - "undo storm-control enable trap"
+        - "undo storm control broadcast"
+        - "undo storm control multicast"
+        - "undo storm control action"
+        - "undo storm control enable trap"
         - "commit"
         - "quit"
         - "quit"
     alternatives:
-      - triggered_by_error: 'storm-control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
-        block:
-          - "system-view"
-          - "interface {interface}"
-          - "undo storm-control broadcast"
-          - "undo storm-control action"
-          - "undo storm-control enable trap"
-          - "commit"
-          - "quit"
-          - "quit"
-      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      - triggered_by_error: 'storm control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
           - "interface {interface}"
@@ -338,6 +342,18 @@ set_storm_control:
           - "undo storm-control multicast"
           - "undo storm-control action"
           - "undo storm-control enable trap"
+          - "quit"
+          - "quit"
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        # Mismo criterio que en "enabled": solo falló "commit", reusa la
+        # sintaxis del primary (espacio), no cambia a guión.
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "undo storm control broadcast"
+          - "undo storm control multicast"
+          - "undo storm control action"
+          - "undo storm control enable trap"
           - "quit"
           - "quit"
 
