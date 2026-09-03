@@ -16,8 +16,15 @@ import type { PortListResponse } from '@/types/port';
 import { vendorLabel } from '@/types/device';
 import { Panel } from './Panel';
 import { JobsPieChart, type JobsPieData } from './JobsPieChart';
+import { Pie } from './Pie';
 import { RefreshButton } from './RefreshButton';
 import { runScopeRefresh } from './scopeRefresh';
+
+const VENDOR_COLORS = {
+  cisco: 'var(--color-accent-info)',
+  huawei: 'var(--color-accent-warning)',
+  other: 'var(--color-text-muted)',
+} as const;
 
 export type Scope =
   | { kind: 'org' }
@@ -55,11 +62,16 @@ export function ScopeDashboard({ scope }: Props) {
   // Per-device VLAN + port envelopes. useQueries parallels across all devices;
   // React Query dedupes with the sidebar and any drill-down that reads the
   // same slice.
+  // While the backend Celery task is running for a device, sync_in_progress
+  // stays true — we poll every 2s until it flips to false so the "Last synced"
+  // label updates on its own after the user clicks Refresh.
   const vlanQueries = useQueries({
     queries: deviceNames.map((name) => ({
       queryKey: ['vlans', 'synced', name],
       queryFn: () => getVlansSynced(name),
       enabled: Boolean(name),
+      refetchInterval: (query: { state: { data?: SyncedResource<VlanEntry[]> } }) =>
+        query.state.data?.sync_in_progress ? 2000 : false,
     })),
   });
   const portQueries = useQueries({
@@ -67,6 +79,8 @@ export function ScopeDashboard({ scope }: Props) {
       queryKey: ['ports', 'synced', name],
       queryFn: () => getPortsSynced(name),
       enabled: Boolean(name),
+      refetchInterval: (query: { state: { data?: SyncedResource<PortListResponse> } }) =>
+        query.state.data?.sync_in_progress ? 2000 : false,
     })),
   });
 
@@ -177,17 +191,71 @@ interface CardProps {
 function DevicesCard({ totals, loading }: CardProps) {
   return (
     <Panel title="Devices">
-      <BigNumber value={totals.deviceCount} loading={loading} />
-      <div className="grid grid-cols-2 gap-2 mt-3 text-sm">
-        <StatRow label="Cisco" value={totals.ciscoCount} />
-        <StatRow label="Huawei" value={totals.huaweiCount} />
+      <div className="flex items-center gap-4">
+        <Pie
+          size={100}
+          strokeWidth={16}
+          slices={[
+            { value: totals.ciscoCount, color: VENDOR_COLORS.cisco },
+            { value: totals.huaweiCount, color: VENDOR_COLORS.huawei },
+            { value: totals.otherVendorCount, color: VENDOR_COLORS.other },
+          ]}
+          center={
+            <>
+              <span className="text-lg font-semibold text-text leading-none">
+                {loading ? '…' : totals.deviceCount}
+              </span>
+              <span className="text-[10px] uppercase tracking-wide text-muted mt-1">
+                Total
+              </span>
+            </>
+          }
+        />
+        <div className="flex flex-col gap-1 text-sm">
+          <VendorLegendRow
+            color={VENDOR_COLORS.cisco}
+            label="CISCO"
+            value={totals.ciscoCount}
+          />
+          <VendorLegendRow
+            color={VENDOR_COLORS.huawei}
+            label="HUAWEI"
+            value={totals.huaweiCount}
+          />
+          {totals.otherVendorCount > 0 && (
+            <VendorLegendRow
+              color={VENDOR_COLORS.other}
+              label="OTHER"
+              value={totals.otherVendorCount}
+            />
+          )}
+        </div>
       </div>
-      {totals.otherVendorCount > 0 && (
-        <p className="text-xs text-muted mt-2">
-          Other vendors: {totals.otherVendorCount}
-        </p>
-      )}
     </Panel>
+  );
+}
+
+function VendorLegendRow({
+  color,
+  label,
+  value,
+}: {
+  color: string;
+  label: string;
+  value: number;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span
+        className="inline-block h-3 w-3 rounded-sm"
+        style={{ background: color }}
+        aria-hidden
+      />
+      <span className="text-xs font-semibold uppercase tracking-wider text-muted w-16">
+        {label}
+      </span>
+      <span className="text-sm font-semibold text-text tabular-nums">{value}</span>
+    </div>
   );
 }
 
@@ -278,15 +346,6 @@ function BigNumber({ value, loading }: { value: number; loading: boolean }) {
   return (
     <div className="text-4xl font-bold tabular-nums text-text">
       {loading ? <span className="text-muted">…</span> : value.toLocaleString()}
-    </div>
-  );
-}
-
-function StatRow({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex items-center justify-between rounded bg-panel-elev px-3 py-1.5">
-      <span className="text-xs uppercase tracking-wider text-muted">{label}</span>
-      <span className="text-sm font-semibold text-text tabular-nums">{value}</span>
     </div>
   );
 }
