@@ -4,7 +4,7 @@ import ipaddress
 import re
 from typing import TYPE_CHECKING
 
-from app.services.parsers.port_parser import expandir_nombre_interfaz, parse_vrp_ports
+from app.services.parsers.port_parser import HuaweiPortParser, expandir_nombre_interfaz
 from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
@@ -110,7 +110,7 @@ class HuaweiVendor(VendorDriver):
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         port_vlan = stdouts[_PORT_VLAN_INDEX] if len(stdouts) > _PORT_VLAN_INDEX else ""
         try:
-            ports = parse_vrp_ports(brief, description, port_vlan)
+            ports = HuaweiPortParser.parse_ports(brief, description, port_vlan)
         except Exception as exc:
             raise RuntimeError(f"Cannot determine port state on device '{device.name}': {exc}") from exc
         return ports
@@ -347,16 +347,16 @@ class HuaweiVendor(VendorDriver):
         forma)."""
         brief = self._leer(["display ip interface brief"], device, password)[0]
         vlan_ids = sorted({int(m) for m in self._VLANIF_BRIEF_RE.findall(brief)})
-        from app.services.parsers.svi_parser import parse_vrp_dhcp_relay_groups, parse_vrp_svis
+        from app.services.parsers.svi_parser import HuaweiSVIParser
         if not vlan_ids:
             dhcp_config = self._leer(["display current-configuration configuration dhcp"], device, password)[0]
-            return parse_vrp_svis("", brief, parse_vrp_dhcp_relay_groups(dhcp_config))
+            return HuaweiSVIParser.parse_svis("", brief, dhcp_groups=HuaweiSVIParser.parse_dhcp_relay_groups(dhcp_config))
         per_iface_commands = [f"display current-configuration interface Vlanif{vid}" for vid in vlan_ids]
         per_iface_commands.append("display current-configuration configuration dhcp")
         outputs = self._leer(per_iface_commands, device, password)
         config = "\n".join(outputs[:-1])
-        dhcp_groups = parse_vrp_dhcp_relay_groups(outputs[-1])
-        return parse_vrp_svis(config, brief, dhcp_groups)
+        dhcp_groups = HuaweiSVIParser.parse_dhcp_relay_groups(outputs[-1])
+        return HuaweiSVIParser.parse_svis(config, brief, dhcp_groups=dhcp_groups)
 
     def list_acl_names(self, device: Device, password: str) -> list[str]:
         commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]

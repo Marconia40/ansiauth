@@ -47,30 +47,30 @@ def test_brief_filters_pseudo_interfaces():
     assert "Vlanif1" not in rows
     assert "NULL0" not in rows
     assert set(rows.keys()) == {
-        "GigabitEthernet0/0/1",
-        "GigabitEthernet0/0/2",
-        "GigabitEthernet0/0/3",
-        "GigabitEthernet0/0/4",
+        "GE0/0/1",
+        "GE0/0/2",
+        "GE0/0/3",
+        "GE0/0/4",
     }
 
 
 def test_brief_admin_state_mapping():
     rows = parse_vrp_interface_brief(BRIEF_SAMPLE)
-    assert rows["GigabitEthernet0/0/1"].admin_up is True
+    assert rows["GE0/0/1"].admin_up is True
     # *down means administratively down
-    assert rows["GigabitEthernet0/0/2"].admin_up is False
+    assert rows["GE0/0/2"].admin_up is False
     # Plain "down" still means admin-up (operator did not shut it)
-    assert rows["GigabitEthernet0/0/3"].admin_up is True
-    assert rows["GigabitEthernet0/0/4"].admin_up is True
+    assert rows["GE0/0/3"].admin_up is True
+    assert rows["GE0/0/4"].admin_up is True
 
 
 def test_brief_operational_state_mapping():
     rows = parse_vrp_interface_brief(BRIEF_SAMPLE)
-    assert rows["GigabitEthernet0/0/1"].operational_up is True
-    assert rows["GigabitEthernet0/0/2"].operational_up is False
-    assert rows["GigabitEthernet0/0/3"].operational_up is False
+    assert rows["GE0/0/1"].operational_up is True
+    assert rows["GE0/0/2"].operational_up is False
+    assert rows["GE0/0/3"].operational_up is False
     # up(s) — spoofing variant — should still count as operational
-    assert rows["GigabitEthernet0/0/4"].operational_up is True
+    assert rows["GE0/0/4"].operational_up is True
 
 
 def test_brief_empty_input():
@@ -95,14 +95,14 @@ GigabitEthernet0/0/4       up       up       multi word description here
 
 def test_descriptions_extracted_with_spaces():
     rows = parse_vrp_interface_description(DESCRIPTION_SAMPLE)
-    assert rows["GigabitEthernet0/0/1"] == "Workstation01"
-    assert rows["GigabitEthernet0/0/2"] == "Reserved port for printer"
-    assert rows["GigabitEthernet0/0/4"] == "multi word description here"
+    assert rows["GE0/0/1"] == "Workstation01"
+    assert rows["GE0/0/2"] == "Reserved port for printer"
+    assert rows["GE0/0/4"] == "multi word description here"
 
 
 def test_empty_description_becomes_none():
     rows = parse_vrp_interface_description(DESCRIPTION_SAMPLE)
-    assert rows["GigabitEthernet0/0/3"] is None
+    assert rows["GE0/0/3"] is None
 
 
 # ── display port vlan ────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ GigabitEthernet0/0/7    trunk        1     10 20 30 to 32
 
 def test_port_vlan_access_mode():
     rows = parse_vrp_port_vlan(PORT_VLAN_SAMPLE)
-    row = rows["GigabitEthernet0/0/1"]
+    row = rows["GE0/0/1"]
     assert row.mode == "access"
     assert row.access_vlan == 10
     assert row.allowed_vlans is None
@@ -130,7 +130,7 @@ def test_port_vlan_access_mode():
 
 def test_port_vlan_trunk_with_range():
     rows = parse_vrp_port_vlan(PORT_VLAN_SAMPLE)
-    row = rows["GigabitEthernet0/0/2"]
+    row = rows["GE0/0/2"]
     assert row.mode == "trunk"
     assert row.access_vlan == 1
     # Full range expanded
@@ -142,7 +142,7 @@ def test_port_vlan_trunk_with_range():
 
 def test_port_vlan_hybrid_normalized_to_unknown():
     rows = parse_vrp_port_vlan(PORT_VLAN_SAMPLE)
-    row = rows["GigabitEthernet0/0/3"]
+    row = rows["GE0/0/3"]
     # Hybrid mode is not access/trunk so should be normalized to unknown
     assert row.mode == "unknown"
     # PVID still captured
@@ -153,7 +153,7 @@ def test_port_vlan_hybrid_normalized_to_unknown():
 
 def test_port_vlan_trunk_mixed_list_and_range():
     rows = parse_vrp_port_vlan(PORT_VLAN_SAMPLE)
-    row = rows["GigabitEthernet0/0/4"]
+    row = rows["GE0/0/4"]
     assert row.mode == "trunk"
     assert row.access_vlan == 99
     assert row.allowed_vlans == [10, 20, 30, 31, 32]
@@ -161,7 +161,7 @@ def test_port_vlan_trunk_mixed_list_and_range():
 
 def test_port_vlan_trunk_space_separated():
     rows = parse_vrp_port_vlan(PORT_VLAN_SAMPLE)
-    row = rows["GigabitEthernet0/0/6"]
+    row = rows["GE0/0/6"]
     assert row.mode == "trunk"
     assert row.access_vlan == 50
     assert row.allowed_vlans == [50, 400]
@@ -169,7 +169,7 @@ def test_port_vlan_trunk_space_separated():
 
 def test_port_vlan_trunk_mixed_space_and_range():
     rows = parse_vrp_port_vlan(PORT_VLAN_SAMPLE)
-    row = rows["GigabitEthernet0/0/7"]
+    row = rows["GE0/0/7"]
     assert row.mode == "trunk"
     assert row.access_vlan == 1
     assert row.allowed_vlans == [10, 20, 30, 31, 32]
@@ -183,16 +183,16 @@ def test_port_vlan_empty_input():
 
 def test_combined_parser_merges_three_sources():
     ports = parse_vrp_ports(BRIEF_SAMPLE, DESCRIPTION_SAMPLE, PORT_VLAN_SAMPLE)
-    by_name = {p.name: p for p in ports}
+    by_name = {p.interface: p for p in ports}
 
     # Pseudo-interfaces excluded across all three sources
     assert "Vlanif1" not in by_name
     assert "NULL0" not in by_name
 
     # Output sorted by name
-    assert [p.name for p in ports] == sorted(p.name for p in ports)
+    assert [p.interface for p in ports] == sorted(p.interface for p in ports)
 
-    g1 = by_name["GigabitEthernet0/0/1"]
+    g1 = by_name["GE0/0/1"]
     assert g1.description == "Workstation01"
     assert g1.admin_up is True
     assert g1.operational_up is True
@@ -200,7 +200,7 @@ def test_combined_parser_merges_three_sources():
     assert g1.access_vlan == 10
     assert g1.allowed_vlans is None
 
-    g2 = by_name["GigabitEthernet0/0/2"]
+    g2 = by_name["GE0/0/2"]
     assert g2.description == "Reserved port for printer"
     assert g2.admin_up is False
     assert g2.operational_up is False
@@ -215,8 +215,8 @@ def test_combined_parser_merges_three_sources():
 def test_combined_parser_tolerates_missing_sources():
     # No brief input: admin/oper become None, but mode/VLANs still come through
     ports = parse_vrp_ports("", "", PORT_VLAN_SAMPLE)
-    by_name = {p.name: p for p in ports}
-    g1 = by_name["GigabitEthernet0/0/1"]
+    by_name = {p.interface: p for p in ports}
+    g1 = by_name["GE0/0/1"]
     assert g1.admin_up is None
     assert g1.operational_up is None
     assert g1.description is None
@@ -236,7 +236,7 @@ GigabitEthernet0/0/99       up      up        0%     0%           0        0
 """
     ports = parse_vrp_ports(brief_only, "", "")
     assert len(ports) == 1
-    assert ports[0].name == "GigabitEthernet0/0/99"
+    assert ports[0].interface == "GE0/0/99"
     assert ports[0].mode == "unknown"
     assert ports[0].admin_up is True
     assert ports[0].operational_up is True

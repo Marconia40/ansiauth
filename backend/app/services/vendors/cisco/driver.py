@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 from typing import TYPE_CHECKING
 
-from app.services.parsers.cisco_port_parser import parse_ios_ports
+from app.services.parsers.port_parser import CiscoPortParser
 from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
@@ -113,7 +113,7 @@ class CiscoVendor(VendorDriver):
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         switchport = stdouts[_SWITCHPORT_INDEX] if len(stdouts) > _SWITCHPORT_INDEX else ""
         try:
-            ports = parse_ios_ports(status, description, switchport)
+            ports = CiscoPortParser.parse_ports(status, description, switchport)
         except Exception as exc:
             raise RuntimeError(f"Cannot determine port state on device '{device.name}': {exc}") from exc
         return ports
@@ -274,10 +274,10 @@ class CiscoVendor(VendorDriver):
     def get_svis(self, device: Device, password: str) -> list[SVI]:
         commands = self._cargar_comandos()["get_svis"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
-        from app.services.parsers.svi_parser import parse_ios_svis
+        from app.services.parsers.svi_parser import CiscoSVIParser
         running_config = stdouts[0] if len(stdouts) > 0 else ""
         brief = stdouts[1] if len(stdouts) > 1 else ""
-        return parse_ios_svis(running_config, brief)
+        return CiscoSVIParser.parse_svis(running_config, brief)
 
     def list_acl_names(self, device: Device, password: str) -> list[str]:
         """Confirmado contra el device real de lab con ACLs configuradas.

@@ -3,14 +3,13 @@ from __future__ import annotations
 import re
 
 from app.models.vlan import VLAN
+from app.services.parsers._common import strip_ansi
 
 # IOS-internal VLANs that are not user-managed
 _IOS_INTERNAL = {1, 1002, 1003, 1004, 1005}
 
 # VRP default/management VLANs excluded from user-visible output
 _VRP_INTERNAL = {1}
-
-_ANSI_ESCAPE = re.compile(r"\x1B\[[0-9;]*m")
 
 # Tabular format -- 2 variantes reales confirmadas: el CE12800 de lab expone
 # "VID  Type  Status  Property  MAC-LRN  STAT  BC  MC  UC  Description" (9
@@ -50,7 +49,7 @@ def parse_vrp_vlan_display(output: str) -> list[VLAN]:
     list[VLAN]
         Normalized VLAN entries, one per configured user VLAN.
     """
-    clean_lines = [_ANSI_ESCAPE.sub("", line) for line in output.splitlines()]
+    clean_lines = [strip_ansi(line) for line in output.splitlines()]
 
     # Detect tabular format by locating the detail-table header line
     detail_start = next(
@@ -143,7 +142,7 @@ def parse_vlan_brief(output: str) -> list[VLAN]:
     """
     vlans: list[VLAN] = []
     for line in output.splitlines():
-        line = _ANSI_ESCAPE.sub("", line)
+        line = strip_ansi(line)
         parts = line.split()
         if len(parts) >= 2 and parts[0].isdigit():
             vlan_id = int(parts[0])

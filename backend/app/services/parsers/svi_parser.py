@@ -3,7 +3,7 @@
 Igual que el resto de los parsers de este paquete, están escritos contra el
 formato de output *documentado* de cada plataforma, no contra una captura
 verificada de un device real corriendo estos comandos exactos (a diferencia
-de ``vlan_parser.py``/``cisco_port_parser.py``, que sí lo están). Marcar
+de ``vlan_parser.py``/``port_parser.py``, que sí lo están). Marcar
 como pendiente de confirmar antes de confiar ciegamente en el parseo --
 mismo criterio que el resto de esta sesión con sintaxis no verificada.
 """
@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from abc import ABC, abstractmethod
 
 from app.models.svi import SVI
-
-_ANSI_ESCAPE = re.compile(r"\x1B\[[0-9;]*m")
+from app.services.parsers._common import strip_ansi
 
 
 def _direccion_y_mascara_a_cidr(addr: str, mascara: str) -> str:
@@ -47,6 +47,27 @@ def _normalizar_ipv6(cidr: str) -> str:
         return cidr
 
 
+class SVIParser(ABC):
+    """Base para los parsers de SVI por vendor -- mismo patrón que
+    ``PortParser``/``CiscoPortParser``/``HuaweiPortParser`` (y, más atrás,
+    ``VendorDriver``/``CiscoVendor``/``HuaweiVendor``): la limpieza de
+    líneas ya vive en un solo lugar (``_common.strip_ansi``, no acá
+    específicamente); cada subclase implementa su propio ``parse_svis()``
+    con sus regex/columnas reales, confirmadas contra devices reales, no
+    genéricas -- el escaneo de bloque de config difiere lo suficiente
+    entre plataformas (Huawei resuelve DHCP relay contra un mapeo de
+    grupos aparte, Cisco no) que forzar un template compartido ahí
+    generaría más ceremonia que código evitado."""
+
+    @classmethod
+    @abstractmethod
+    def parse_svis(cls, config_output: str, brief_output: str, **kwargs) -> list[SVI]:
+        """Combina el output de config + brief de este vendor en una lista
+        de ``SVI``. Firma exacta (kwargs extra) es vendor-específica --
+        ver cada subclase."""
+        ...
+
+
 # ── Cisco IOS ────────────────────────────────────────────────────────────────
 
 # "interface Vlan10" -- arranca un bloque nuevo en el running-config filtrado.
@@ -77,79 +98,86 @@ _IOS_BRIEF_LINE = re.compile(
 )
 
 
+class CiscoSVIParser(SVIParser):
+    @classmethod
+    def parse_svis(cls, running_config_output: str, brief_output: str, **kwargs) -> list[SVI]:
+        """Parse ``show running-config | section ^interface Vlan`` +
+        ``show ip interface brief | include Vlan`` en ``SVI``.
+
+        El primero trae la config deseada (ip/ipv6, description, ACLs,
+        helper-address); el segundo el estado administrativo real (running-config
+        no siempre expone ``shutdown``/``no shutdown`` de forma consistente
+        entre versiones de IOS)."""
+        estado_por_vlan: dict[int, tuple[bool, bool]] = {}
+        for raw in brief_output.splitlines():
+            line = strip_ansi(raw).rstrip()
+            m = _IOS_BRIEF_LINE.match(line)
+            if not m:
+                continue
+            vlan_id, status_text, protocol = int(m.group(1)), m.group(2), m.group(3)
+            admin_up = "administratively down" not in status_text.lower()
+            operational_up = protocol.lower() == "up"
+            estado_por_vlan[vlan_id] = (admin_up, operational_up)
+
+        interfaces: list[SVI] = []
+        actual: SVI | None = None
+        helpers: list[str] = []
+
+        def _cerrar_actual() -> None:
+            if actual is not None:
+                actual.dhcp_relay_servers = helpers[:] if helpers else None
+                interfaces.append(actual)
+
+        for raw in running_config_output.splitlines():
+            line = strip_ansi(raw).rstrip()
+            header = _IOS_IFACE_HEADER.match(line)
+            if header:
+                _cerrar_actual()
+                vlan_id = int(header.group(1))
+                admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
+                actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
+                helpers = []
+                continue
+            if actual is None:
+                continue
+            if _IOS_SHUTDOWN.match(line):
+                actual.admin_up = False
+                continue
+            m = _IOS_DESCRIPTION.match(line)
+            if m:
+                actual.description = m.group(1)
+                continue
+            m = _IOS_IPV4_SECONDARY.match(line)
+            if m:
+                actual.ipv4_address_secondary = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
+                continue
+            m = _IOS_IPV4.match(line)
+            if m:
+                actual.ipv4_address = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
+                continue
+            m = _IOS_IPV6.match(line)
+            if m:
+                actual.ipv6_address = m.group(1)
+                continue
+            m = _IOS_ACL.match(line)
+            if m:
+                if m.group(2).lower() == "in":
+                    actual.acl_in = m.group(1)
+                else:
+                    actual.acl_out = m.group(1)
+                continue
+            m = _IOS_HELPER.match(line)
+            if m:
+                helpers.append(m.group(1))
+                continue
+
+        _cerrar_actual()
+        return interfaces
+
+
 def parse_ios_svis(running_config_output: str, brief_output: str) -> list[SVI]:
-    """Parse ``show running-config | section ^interface Vlan`` +
-    ``show ip interface brief | include Vlan`` en ``SVI``.
-
-    El primero trae la config deseada (ip/ipv6, description, ACLs,
-    helper-address); el segundo el estado administrativo real (running-config
-    no siempre expone ``shutdown``/``no shutdown`` de forma consistente
-    entre versiones de IOS)."""
-    estado_por_vlan: dict[int, tuple[bool, bool]] = {}
-    for raw in brief_output.splitlines():
-        line = _ANSI_ESCAPE.sub("", raw).rstrip()
-        m = _IOS_BRIEF_LINE.match(line)
-        if not m:
-            continue
-        vlan_id, status_text, protocol = int(m.group(1)), m.group(2), m.group(3)
-        admin_up = "administratively down" not in status_text.lower()
-        operational_up = protocol.lower() == "up"
-        estado_por_vlan[vlan_id] = (admin_up, operational_up)
-
-    interfaces: list[SVI] = []
-    actual: SVI | None = None
-    helpers: list[str] = []
-
-    def _cerrar_actual() -> None:
-        if actual is not None:
-            actual.dhcp_relay_servers = helpers[:] if helpers else None
-            interfaces.append(actual)
-
-    for raw in running_config_output.splitlines():
-        line = _ANSI_ESCAPE.sub("", raw).rstrip()
-        header = _IOS_IFACE_HEADER.match(line)
-        if header:
-            _cerrar_actual()
-            vlan_id = int(header.group(1))
-            admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
-            actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
-            helpers = []
-            continue
-        if actual is None:
-            continue
-        if _IOS_SHUTDOWN.match(line):
-            actual.admin_up = False
-            continue
-        m = _IOS_DESCRIPTION.match(line)
-        if m:
-            actual.description = m.group(1)
-            continue
-        m = _IOS_IPV4_SECONDARY.match(line)
-        if m:
-            actual.ipv4_address_secondary = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
-            continue
-        m = _IOS_IPV4.match(line)
-        if m:
-            actual.ipv4_address = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
-            continue
-        m = _IOS_IPV6.match(line)
-        if m:
-            actual.ipv6_address = m.group(1)
-            continue
-        m = _IOS_ACL.match(line)
-        if m:
-            if m.group(2).lower() == "in":
-                actual.acl_in = m.group(1)
-            else:
-                actual.acl_out = m.group(1)
-            continue
-        m = _IOS_HELPER.match(line)
-        if m:
-            helpers.append(m.group(1))
-            continue
-
-    _cerrar_actual()
-    return interfaces
+    """Back-compat free-function wrapper — see ``CiscoSVIParser.parse_svis``."""
+    return CiscoSVIParser.parse_svis(running_config_output, brief_output)
 
 
 # ── Huawei VRP ───────────────────────────────────────────────────────────────
@@ -181,8 +209,8 @@ _VRP_ACL_NAMED = re.compile(r"^\s*traffic-filter\s+acl\s+(\S+)\s+(inbound|outbou
 # (huawei/commands.yaml: set_svi_dhcp_relay, 2da alternativa -- la única
 # que existe en el CE12800 de lab) no deja ninguna IP en el bloque de la
 # interfaz, solo esta línea con el nombre del grupo -- las IPs viven en un
-# bloque global aparte, resuelto por _parse_vrp_dhcp_relay_groups() más
-# abajo. Bug real encontrado probando esto en vivo: sin este segundo
+# bloque global aparte, resuelto por ``HuaweiSVIParser.parse_dhcp_relay_groups()``
+# más abajo. Bug real encontrado probando esto en vivo: sin este segundo
 # camino, reconciliar() veía la interfaz siempre con dhcp_relay_servers=
 # None aunque el grupo tuviera servers reales, así que
 # SVI._aplicar_dhcp_relay_add() agregaba el 2do server sobre una lista que
@@ -207,125 +235,142 @@ _VRP_GROUP_HEADER = re.compile(r"^dhcp relay server group\s+(\S+)\s*$", re.IGNOR
 _VRP_GROUP_SERVER = re.compile(r"^\s*server\s+(\S+)\s+\d+\s*$", re.IGNORECASE)
 
 
+class HuaweiSVIParser(SVIParser):
+    @classmethod
+    def parse_dhcp_relay_groups(cls, dhcp_config_output: str) -> dict[str, list[str]]:
+        """Parse ``display current-configuration configuration dhcp`` en
+        ``{group_name: [server_ip, ...]}`` -- el mapeo que ``parse_svis()``
+        necesita para resolver la forma "server group" del DHCP relay (ver
+        nota en ``_VRP_HELPER`` arriba)."""
+        groups: dict[str, list[str]] = {}
+        current: str | None = None
+        for raw in dhcp_config_output.splitlines():
+            line = strip_ansi(raw).rstrip()
+            header = _VRP_GROUP_HEADER.match(line)
+            if header:
+                current = header.group(1)
+                groups.setdefault(current, [])
+                continue
+            if current is None:
+                continue
+            m = _VRP_GROUP_SERVER.match(line)
+            if m:
+                groups[current].append(m.group(1))
+                continue
+            if line.strip() == "#":
+                current = None
+        return groups
+
+    @classmethod
+    def parse_svis(
+        cls, config_output: str, brief_output: str,
+        dhcp_groups: "dict[str, list[str]] | None" = None, **kwargs,
+    ) -> list[SVI]:
+        """Parse ``display current-configuration interface Vlanif`` +
+        ``display ip interface brief`` en ``SVI``. Mismo criterio
+        de 2 fuentes que Cisco: una para la config deseada, otra para el
+        estado administrativo real. *dhcp_groups*, cuando se pasa (ver
+        ``parse_dhcp_relay_groups()``), resuelve la forma "server group"
+        del DHCP relay -- ver nota en ``_VRP_HELPER``."""
+        dhcp_groups = dhcp_groups or {}
+        estado_por_vlan: dict[int, tuple[bool, bool]] = {}
+        for raw in brief_output.splitlines():
+            line = strip_ansi(raw).rstrip()
+            m = _VRP_BRIEF_LINE.match(line)
+            if not m:
+                continue
+            vlan_id, physical, protocol = int(m.group(1)), m.group(2), m.group(3)
+            admin_up = not physical.lower().startswith("*")  # "*down" = administrativamente abajo
+            operational_up = protocol.lower() == "up"
+            estado_por_vlan[vlan_id] = (admin_up, operational_up)
+
+        interfaces: list[SVI] = []
+        actual: SVI | None = None
+        helpers: list[str] = []
+        binding_group: str | None = None
+
+        def _cerrar_actual() -> None:
+            if actual is not None:
+                if binding_group is not None:
+                    actual.dhcp_relay_servers = dhcp_groups.get(binding_group) or None
+                else:
+                    actual.dhcp_relay_servers = helpers[:] if helpers else None
+                interfaces.append(actual)
+
+        for raw in config_output.splitlines():
+            line = strip_ansi(raw).rstrip()
+            header = _VRP_IFACE_HEADER.match(line)
+            if header:
+                _cerrar_actual()
+                vlan_id = int(header.group(1))
+                admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
+                actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
+                helpers = []
+                binding_group = None
+                continue
+            if actual is None:
+                continue
+            if _VRP_SHUTDOWN.match(line):
+                actual.admin_up = False
+                continue
+            m = _VRP_DESCRIPTION.match(line)
+            if m:
+                actual.description = m.group(1)
+                continue
+            m = _VRP_IPV4_SECONDARY.match(line)
+            if m:
+                actual.ipv4_address_secondary = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
+                continue
+            m = _VRP_IPV4.match(line)
+            if m:
+                actual.ipv4_address = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
+                continue
+            m = _VRP_IPV6.match(line)
+            if m:
+                actual.ipv6_address = _normalizar_ipv6(m.group(1))
+                continue
+            m = _VRP_ACL_NUMERIC.match(line)
+            if m:
+                if m.group(1).lower() == "inbound":
+                    actual.acl_in = m.group(2)
+                else:
+                    actual.acl_out = m.group(2)
+                continue
+            m = _VRP_ACL_NAMED.match(line)
+            if m:
+                if m.group(2).lower() == "inbound":
+                    actual.acl_in = m.group(1)
+                else:
+                    actual.acl_out = m.group(1)
+                continue
+            m = _VRP_HELPER.match(line)
+            if m:
+                helpers.append(m.group(1))
+                continue
+            m = _VRP_BINDING.match(line)
+            if m:
+                binding_group = m.group(1)
+                continue
+
+        _cerrar_actual()
+        return interfaces
+
+
 def parse_vrp_dhcp_relay_groups(dhcp_config_output: str) -> dict[str, list[str]]:
-    """Parse ``display current-configuration configuration dhcp`` en
-    ``{group_name: [server_ip, ...]}`` -- el mapeo que ``parse_vrp_svis()``
-    necesita para resolver la forma "server group" del DHCP relay (ver
-    nota en ``_VRP_HELPER`` arriba)."""
-    groups: dict[str, list[str]] = {}
-    current: str | None = None
-    for raw in dhcp_config_output.splitlines():
-        line = _ANSI_ESCAPE.sub("", raw).rstrip()
-        header = _VRP_GROUP_HEADER.match(line)
-        if header:
-            current = header.group(1)
-            groups.setdefault(current, [])
-            continue
-        if current is None:
-            continue
-        m = _VRP_GROUP_SERVER.match(line)
-        if m:
-            groups[current].append(m.group(1))
-            continue
-        if line.strip() == "#":
-            current = None
-    return groups
+    """Back-compat free-function wrapper — see ``HuaweiSVIParser.parse_dhcp_relay_groups``."""
+    return HuaweiSVIParser.parse_dhcp_relay_groups(dhcp_config_output)
 
 
 def parse_vrp_svis(
     config_output: str, brief_output: str, dhcp_groups: "dict[str, list[str]] | None" = None,
 ) -> list[SVI]:
-    """Parse ``display current-configuration interface Vlanif`` +
-    ``display ip interface brief`` en ``SVI``. Mismo criterio
-    de 2 fuentes que Cisco: una para la config deseada, otra para el
-    estado administrativo real. *dhcp_groups*, cuando se pasa (ver
-    ``parse_vrp_dhcp_relay_groups()``), resuelve la forma "server group"
-    del DHCP relay -- ver nota en ``_VRP_HELPER``."""
-    dhcp_groups = dhcp_groups or {}
-    estado_por_vlan: dict[int, tuple[bool, bool]] = {}
-    for raw in brief_output.splitlines():
-        line = _ANSI_ESCAPE.sub("", raw).rstrip()
-        m = _VRP_BRIEF_LINE.match(line)
-        if not m:
-            continue
-        vlan_id, physical, protocol = int(m.group(1)), m.group(2), m.group(3)
-        admin_up = not physical.lower().startswith("*")  # "*down" = administrativamente abajo
-        operational_up = protocol.lower() == "up"
-        estado_por_vlan[vlan_id] = (admin_up, operational_up)
-
-    interfaces: list[SVI] = []
-    actual: SVI | None = None
-    helpers: list[str] = []
-    binding_group: str | None = None
-
-    def _cerrar_actual() -> None:
-        if actual is not None:
-            if binding_group is not None:
-                actual.dhcp_relay_servers = dhcp_groups.get(binding_group) or None
-            else:
-                actual.dhcp_relay_servers = helpers[:] if helpers else None
-            interfaces.append(actual)
-
-    for raw in config_output.splitlines():
-        line = _ANSI_ESCAPE.sub("", raw).rstrip()
-        header = _VRP_IFACE_HEADER.match(line)
-        if header:
-            _cerrar_actual()
-            vlan_id = int(header.group(1))
-            admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
-            actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
-            helpers = []
-            binding_group = None
-            continue
-        if actual is None:
-            continue
-        if _VRP_SHUTDOWN.match(line):
-            actual.admin_up = False
-            continue
-        m = _VRP_DESCRIPTION.match(line)
-        if m:
-            actual.description = m.group(1)
-            continue
-        m = _VRP_IPV4_SECONDARY.match(line)
-        if m:
-            actual.ipv4_address_secondary = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
-            continue
-        m = _VRP_IPV4.match(line)
-        if m:
-            actual.ipv4_address = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
-            continue
-        m = _VRP_IPV6.match(line)
-        if m:
-            actual.ipv6_address = _normalizar_ipv6(m.group(1))
-            continue
-        m = _VRP_ACL_NUMERIC.match(line)
-        if m:
-            if m.group(1).lower() == "inbound":
-                actual.acl_in = m.group(2)
-            else:
-                actual.acl_out = m.group(2)
-            continue
-        m = _VRP_ACL_NAMED.match(line)
-        if m:
-            if m.group(2).lower() == "inbound":
-                actual.acl_in = m.group(1)
-            else:
-                actual.acl_out = m.group(1)
-            continue
-        m = _VRP_HELPER.match(line)
-        if m:
-            helpers.append(m.group(1))
-            continue
-        m = _VRP_BINDING.match(line)
-        if m:
-            binding_group = m.group(1)
-            continue
-
-    _cerrar_actual()
-    return interfaces
+    """Back-compat free-function wrapper — see ``HuaweiSVIParser.parse_svis``."""
+    return HuaweiSVIParser.parse_svis(config_output, brief_output, dhcp_groups=dhcp_groups)
 
 
 # ── Listado de ACLs (RF-INTERV-04's precondición "ACL previamente creada") ──
+# No forman parte de SVIParser -- filtran nombres de ACL, no arman SVI, y no
+# comparten forma con parse_svis() más allá del ANSI-strip ya centralizado.
 
 # "Standard IP access list <nombre-o-número>" / "Extended IP access list
 # <nombre-o-número>" -- confirmado contra el device real de lab. Un nombre
@@ -336,7 +381,7 @@ _IOS_ACL_HEADER = re.compile(r"^(?:Standard|Extended) IP access list (\S+)", re.
 def parse_ios_acl_names(show_access_lists_output: str) -> list[str]:
     return [
         m.group(1) for raw in show_access_lists_output.splitlines()
-        if (m := _IOS_ACL_HEADER.match(_ANSI_ESCAPE.sub("", raw).rstrip()))
+        if (m := _IOS_ACL_HEADER.match(strip_ansi(raw).rstrip()))
     ]
 
 
@@ -353,5 +398,5 @@ _VRP_ACL_HEADER = re.compile(
 def parse_vrp_acl_names(display_acl_all_output: str) -> list[str]:
     return [
         m.group(1) for raw in display_acl_all_output.splitlines()
-        if (m := _VRP_ACL_HEADER.match(_ANSI_ESCAPE.sub("", raw).rstrip()))
+        if (m := _VRP_ACL_HEADER.match(strip_ansi(raw).rstrip()))
     ]
