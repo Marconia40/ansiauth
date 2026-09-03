@@ -26,6 +26,50 @@ _VRP_PSEUDO_PREFIXES = (
 )
 
 
+# "display interface brief" y "display port vlan" devuelven el nombre
+# completo ("GigabitEthernet0/0/1"), pero "display interface description"
+# devuelve la forma abreviada ("GE0/0/1") -- confirmado contra un device
+# real (S-series). Bug real encontrado ahí: parse_vrp_ports() mergea las
+# 3 fuentes por nombre exacto, así que sin normalizar cada puerto físico
+# quedaba duplicado bajo 2 keys distintas (52 puertos reales -> 104 filas,
+# cada una con solo parte de los campos poblados, dependiendo de qué
+# fuente usó qué spelling).
+_VRP_IFACE_ABBREV = (
+    ("XGigabitEthernet", "XGE"),
+    ("GigabitEthernet", "GE"),
+)
+
+
+def _normalizar_nombre_interfaz(name: str) -> str:
+    """Reduce el nombre completo de interfaz VRP a la forma abreviada --
+    ver nota en ``_VRP_IFACE_ABBREV``. No-op si *name* ya viene abreviado
+    (o es de un tipo sin abreviatura conocida)."""
+    for full, short in _VRP_IFACE_ABBREV:
+        if name.startswith(full):
+            return short + name[len(full):]
+    return name
+
+
+def expandir_nombre_interfaz(name: str) -> str:
+    """Inverso de ``_normalizar_nombre_interfaz()`` -- expande la forma
+    abreviada ("GE0/0/1") a la forma completa ("GigabitEthernet0/0/1").
+
+    Usado por el driver de escritura (``huawei/driver.py``): confirmado
+    contra 2 devices reales que este vendor/platform no tiene un único
+    formato de nombre de interfaz para comandos de configuración --
+    ``f3r9s2`` (S-series real) rechaza la forma abreviada en ``interface
+    {interface}`` ("Error: Wrong parameter found"), mientras que
+    ``huawei01`` (CE12800 de lab) rechaza la forma completa con el mismo
+    error. El driver manda ambas formas como vars distintas
+    (``interface``/``interface_full``) y ``commands.yaml`` reintenta con
+    la completa cuando la abreviada falla (mismo mecanismo de
+    ``alternatives`` que ya usa el resto de este vendor)."""
+    for full, short in _VRP_IFACE_ABBREV:
+        if name.startswith(short) and not name.startswith(full):
+            return full + name[len(short):]
+    return name
+
+
 def _is_physical_port(name: str) -> bool:
     """Return True if *name* looks like a physical switchport.
 
@@ -112,7 +156,7 @@ def parse_vrp_interface_brief(output: str) -> dict[str, _BriefRow]:
         parts = stripped.split()
         if len(parts) < 3:
             continue
-        name = parts[0]
+        name = _normalizar_nombre_interfaz(parts[0])
         if not _is_physical_port(name):
             continue
         rows[name] = _BriefRow(
@@ -171,6 +215,7 @@ def parse_vrp_interface_description(output: str) -> dict[str, str | None]:
             name = parts[0]
             desc = parts[3].strip() if len(parts) == 4 else ""
 
+        name = _normalizar_nombre_interfaz(name)
         if not name or not _is_physical_port(name):
             continue
         descriptions[name] = desc or None
@@ -322,6 +367,7 @@ def parse_vrp_port_vlan(output: str) -> dict[str, _PortVlanRow]:
                         rows[last_name].allowed_vlans = merged or None
                 continue
 
+        name = _normalizar_nombre_interfaz(name)
         if not name or not _is_physical_port(name):
             continue
 

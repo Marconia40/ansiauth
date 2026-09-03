@@ -62,10 +62,17 @@ _IOS_ACL = re.compile(r"^\s*ip access-group\s+(\S+)\s+(in|out)\s*$", re.IGNORECA
 _IOS_HELPER = re.compile(r"^\s*ip helper-address\s+(\S+)\s*$")
 
 # "Vlan10 ... up" / "Vlan10 ... administratively down" -- de
-# 'show ip interface brief'. El estado admin real está en la ÚLTIMA
-# columna de "Status" (protocol es la de más a la derecha del todo).
+# 'show ip interface brief'. El estado admin real está en la columna
+# "Status" (protocol es la de más a la derecha del todo). La columna
+# "Method" (4ta, entre OK? y Status) se dejaba como alternación fija
+# (manual/dhcp/other/unset) -- bug real encontrado contra un device real:
+# esa columna reportaba "NVRAM" (config guardada, no volátil), un valor
+# real y válido no cubierto por esa lista, y la línea entera no matcheaba
+# nada -- admin_up/operational_up quedaban None para toda VLAN del
+# device. Generalizado a \S+ (cualquier token), ya que el valor de esa
+# columna no importa para lo que este parser necesita.
 _IOS_BRIEF_LINE = re.compile(
-    r"^Vlan(\d+)\s+\S+\s+\S+\s+(?:manual|dhcp|other|unset)\s+(.+?)\s+(up|down)\s*$",
+    r"^Vlan(\d+)\s+\S+\s+\S+\s+\S+\s+(.+?)\s+(up|down)\s*$",
     re.IGNORECASE,
 )
 
@@ -183,8 +190,14 @@ _VRP_ACL_NAMED = re.compile(r"^\s*traffic-filter\s+acl\s+(\S+)\s+(inbound|outbou
 _VRP_HELPER = re.compile(r"^\s*dhcp relay server-ip\s+(\S+)\s*$", re.IGNORECASE)
 _VRP_BINDING = re.compile(r"^\s*dhcp relay binding server group\s+(\S+)\s*$", re.IGNORECASE)
 
+# Bug real encontrado contra un device real: la regex no dejaba lugar para
+# la columna "IP Address/Mask" entre el nombre de interfaz y Physical/
+# Protocol ("Vlanif156  172.16.61.210/22  up  up") -- nunca matcheaba nada,
+# admin_up/operational_up quedaban None para toda SVI del device (incluido
+# el CE12800 de lab, que tiene la misma columna -- este bug no era nuevo,
+# solo nunca se había notado).
 _VRP_BRIEF_LINE = re.compile(
-    r"^Vlanif(\d+)\s+(up|down|\*down)\s+(up|down)\s*", re.IGNORECASE,
+    r"^Vlanif(\d+)\s+\S+\s+(up|down|\*down)\s+(up|down)\s*", re.IGNORECASE,
 )
 
 # "display current-configuration configuration dhcp" -- confirmado contra

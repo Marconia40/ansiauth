@@ -12,8 +12,16 @@ _VRP_INTERNAL = {1}
 
 _ANSI_ESCAPE = re.compile(r"\x1B\[[0-9;]*m")
 
-# Tabular format: "VID  Type  Status  Property  MAC-LRN  STAT  BC  MC  UC  Description"
-_VRP_DETAIL_HEADER = re.compile(r"^VID\s+Type\s+Status", re.IGNORECASE)
+# Tabular format -- 2 variantes reales confirmadas: el CE12800 de lab expone
+# "VID  Type  Status  Property  MAC-LRN  STAT  BC  MC  UC  Description" (9
+# columnas fijas), un switch real (S-series) expone "VID  Status  Property
+# MAC-LRN  Statistics  Description" (5, sin "Type") -- bug real encontrado
+# corriendo esto contra el 2do: la regex vieja exigía "Type" y el corte fijo
+# en parts[9:] devolvía 0 VLANs (ninguna fila matcheaba, o la descripción
+# salía mal recortada). "Type" ahora es opcional, y el ancho de columnas se
+# cuenta del propio header en vez de asumir un número fijo -- ver
+# _parse_vrp_tabular().
+_VRP_DETAIL_HEADER = re.compile(r"^VID\s+(?:Type\s+)?Status\s+Property", re.IGNORECASE)
 
 # Block format (older VRP style): "The information of VLAN 10:" or "VLAN 10:"
 _VRP_VLAN_BLOCK = re.compile(r"(?:The information of )?VLAN\s+(\d+)\s*:", re.IGNORECASE)
@@ -50,17 +58,22 @@ def parse_vrp_vlan_display(output: str) -> list[VLAN]:
         None,
     )
     if detail_start is not None:
-        return _parse_vrp_tabular(clean_lines[detail_start + 1:])
+        # Contar las columnas del propio header (menos "Description", que es
+        # texto libre de ancho variable) en vez de asumir un número fijo --
+        # ver nota en _VRP_DETAIL_HEADER.
+        header_cols = clean_lines[detail_start].strip().split()
+        num_fixed_cols = max(len(header_cols) - 1, 1)
+        return _parse_vrp_tabular(clean_lines[detail_start + 1:], num_fixed_cols)
 
     return _parse_vrp_block(clean_lines)
 
 
-def _parse_vrp_tabular(lines: list[str]) -> list[VLAN]:
+def _parse_vrp_tabular(lines: list[str], num_fixed_cols: int) -> list[VLAN]:
     """Parse the detail table section of 'display vlan' output.
 
-    Expected columns (9 fixed fields before optional description):
-      ``VID  Type  Status  Property  MAC-LRN  STAT  BC  MC  UC  [Description…]``
-    """
+    *num_fixed_cols* -- cantidad de columnas fijas antes de la descripción
+    (incluye VID), calculado por el caller a partir del propio header --
+    2 anchos reales confirmados, ver nota en ``_VRP_DETAIL_HEADER``."""
     vlans: list[VLAN] = []
     for line in lines:
         line = line.strip()
@@ -72,8 +85,7 @@ def _parse_vrp_tabular(lines: list[str]) -> list[VLAN]:
         vlan_id = int(parts[0])
         if vlan_id in _VRP_INTERNAL:
             continue
-        # columns 1-8 are Type/Status/Property/MAC-LRN/STAT/BC/MC/UC; rest is description
-        description = " ".join(parts[9:]).strip() if len(parts) > 9 else ""
+        description = " ".join(parts[num_fixed_cols:]).strip() if len(parts) > num_fixed_cols else ""
         vlans.append(VLAN(
             vlan_id=vlan_id,
             name=description or f"VLAN{vlan_id:04d}",

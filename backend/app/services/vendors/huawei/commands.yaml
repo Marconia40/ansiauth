@@ -93,6 +93,22 @@ list_ports:
       - "display interface description"
       - "display port vlan"
 
+# Todo comando de puertos de acá en adelante sustituye {interface} en la
+# primera línea ("interface {interface}") -- 2 devices reales confirman
+# que este vendor/platform NO tiene un único formato de nombre de
+# interfaz para comandos de config: f3r9s2 (S-series real) exige el
+# nombre completo ("GigabitEthernet0/0/1") y rechaza la forma abreviada
+# ("Error: Wrong parameter found" apenas se manda "interface GE0/0/1");
+# huawei01 (CE12800 de lab) es al revés, exige la abreviada y rechaza la
+# completa con el mismo error. El driver (huawei/driver.py) manda ambas
+# formas como vars separadas -- {interface} (abreviada, la que usan los
+# comandos de lectura y el resto del sistema) e {interface_full}
+# (completa, calculada por expandir_nombre_interfaz()) -- primary intenta
+# con la abreviada primero (funciona en el lab y es la forma "nativa" del
+# resto del sistema), y esta alternativa reintenta con la completa cuando
+# el device la rechaza.
+_INTERFACE_WRONG_PARAM: &interface_wrong_param 'interface \S+\r?\n\s*\^\r?\nError: Wrong parameter found'
+
 update_port_description:
   set:
     primary:
@@ -104,6 +120,13 @@ update_port_description:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "description {description}"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -121,6 +144,13 @@ update_port_description:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "undo description"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -140,6 +170,13 @@ set_port_admin_state:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "undo shutdown"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -157,6 +194,13 @@ set_port_admin_state:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "shutdown"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -175,6 +219,13 @@ set_port_access_vlan:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "port default vlan {vlan_id}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -193,6 +244,13 @@ set_trunk_pvid_vlan:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "port trunk pvid vlan {vlan_id}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -212,6 +270,14 @@ set_trunk_allowed_vlans:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "undo port trunk allow-pass vlan all"
+        - "port trunk allow-pass vlan {allowed_vlans}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -232,6 +298,13 @@ set_port_poe:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "poe enable"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -249,6 +322,13 @@ set_port_poe:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "poe disable"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -297,6 +377,16 @@ set_storm_control:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "storm control broadcast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm control multicast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm control action block"
+          - "storm control enable trap"
+          - "quit"
+          - "quit"
       - triggered_by_error: 'storm control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -334,6 +424,16 @@ set_storm_control:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "undo storm control broadcast"
+          - "undo storm control multicast"
+          - "undo storm control action"
+          - "undo storm control enable trap"
+          - "quit"
+          - "quit"
       - triggered_by_error: 'storm control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -369,6 +469,18 @@ reset_port:
       - "clear configuration interface {interface}"
       - "y"
       - "quit"
+  # Mismo problema de nombre de interfaz que el resto de este archivo
+  # (ver nota grande más arriba) -- alternativa sin probar en vivo (el
+  # comando es destructivo, no se ensaya a ciegas contra un device real),
+  # pero el mecanismo y el trigger son los mismos ya confirmados para
+  # todos los demás comandos de puertos.
+  alternatives:
+    - triggered_by_error: 'clear configuration interface \S+\r?\n\s*\^\r?\nError: Wrong parameter found'
+      block:
+        - "system-view"
+        - "clear configuration interface {interface_full}"
+        - "y"
+        - "quit"
 
 set_access_mode:
   primary:
@@ -381,6 +493,14 @@ set_access_mode:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "port link-type access"
+        - "port default vlan {vlan_id}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -403,6 +523,16 @@ set_trunk_mode:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "port link-type trunk"
+        - "port trunk pvid vlan {native_vlan}"
+        - "undo port trunk allow-pass vlan all"
+        - "port trunk allow-pass vlan {allowed_vlans}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"

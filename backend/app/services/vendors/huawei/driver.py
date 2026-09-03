@@ -4,7 +4,7 @@ import ipaddress
 import re
 from typing import TYPE_CHECKING
 
-from app.services.parsers.port_parser import parse_vrp_ports
+from app.services.parsers.port_parser import expandir_nombre_interfaz, parse_vrp_ports
 from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
@@ -120,36 +120,50 @@ class HuaweiVendor(VendorDriver):
     def update_port_description(self, interface: str, description: str, device: Device, password: str) -> dict:
         variant = "clear" if self._is_description_empty(description) else "set"
         return self._aplicar_desde_template(
-            "update_port_description", {"interface": interface, "description": description},
+            "update_port_description",
+            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "description": description},
             device, password, variant=variant,
         )
 
     def set_port_admin_state(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
         variant = "enabled" if enabled else "disabled"
         return self._aplicar_desde_template(
-            "set_port_admin_state", {"interface": interface}, device, password, variant=variant,
+            "set_port_admin_state",
+            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)},
+            device, password, variant=variant,
         )
 
     def set_port_access_vlan(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
         return self._aplicar_desde_template(
-            "set_port_access_vlan", {"interface": interface, "vlan_id": vlan_id}, device, password,
+            "set_port_access_vlan",
+            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id},
+            device, password,
         )
 
     def set_trunk_pvid_vlan(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
         return self._aplicar_desde_template(
-            "set_trunk_pvid_vlan", {"interface": interface, "vlan_id": vlan_id}, device, password,
+            "set_trunk_pvid_vlan",
+            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id},
+            device, password,
         )
 
     def set_trunk_allowed_vlans(self, interface: str, vlan_list: list[int], device: Device, password: str) -> dict:
         vlan_str = self._compress_vlans_huawei(sorted(set(vlan_list)))
         return self._aplicar_desde_template(
-            "set_trunk_allowed_vlans", {"interface": interface, "allowed_vlans": vlan_str}, device, password,
+            "set_trunk_allowed_vlans",
+            {
+                "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
+                "allowed_vlans": vlan_str,
+            },
+            device, password,
         )
 
     def set_port_poe(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
         variant = "enabled" if enabled else "disabled"
         return self._aplicar_desde_template(
-            "set_port_poe", {"interface": interface}, device, password, variant=variant,
+            "set_port_poe",
+            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)},
+            device, password, variant=variant,
         )
 
     def set_storm_control(
@@ -162,11 +176,18 @@ class HuaweiVendor(VendorDriver):
         # (storm-control broadcast level 80.00), por eso esta conversión
         # queda acá y no en el modelo/schema compartido.
         variant = "enabled" if enabled else "disabled"
-        vars = {"interface": interface, "threshold": int(threshold) if threshold is not None else None}
+        vars = {
+            "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
+            "threshold": int(threshold) if threshold is not None else None,
+        }
         return self._aplicar_desde_template("set_storm_control", vars, device, password, variant=variant)
 
     def reset_port(self, interface: str, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template("reset_port", {"interface": interface}, device, password)
+        return self._aplicar_desde_template(
+            "reset_port",
+            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)},
+            device, password,
+        )
 
     # ── Mode-change operations ────────────────────────────────────────────────
 
@@ -175,7 +196,9 @@ class HuaweiVendor(VendorDriver):
         ``port link-type access`` + ``port default vlan``, same single
         candidate-config session as every other mutation on this driver."""
         return self._aplicar_desde_template(
-            "set_access_mode", {"interface": interface, "vlan_id": vlan_id}, device, password,
+            "set_access_mode",
+            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id},
+            device, password,
         )
 
     def set_trunk_mode(
@@ -188,7 +211,10 @@ class HuaweiVendor(VendorDriver):
         vlan_str = self._compress_vlans_huawei(sorted(set(vlan_list)))
         return self._aplicar_desde_template(
             "set_trunk_mode",
-            {"interface": interface, "native_vlan": native_vlan, "allowed_vlans": vlan_str},
+            {
+                "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
+                "native_vlan": native_vlan, "allowed_vlans": vlan_str,
+            },
             device, password,
         )
 
