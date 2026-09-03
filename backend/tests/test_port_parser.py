@@ -147,8 +147,10 @@ def test_port_vlan_hybrid_normalized_to_unknown():
     assert row.mode == "unknown"
     # PVID still captured
     assert row.access_vlan == 1
-    # Allowed VLANs parsed best-effort from "1 untagged, 100 tagged"
-    assert row.allowed_vlans == [1, 100]
+    # allowed_vlans only makes sense for a confirmed trunk -- a port that
+    # isn't actually trunking (hybrid/desirable/etc.) reports a VLAN list
+    # by default that isn't meaningful here, so it's suppressed to None.
+    assert row.allowed_vlans is None
 
 
 def test_port_vlan_trunk_mixed_list_and_range():

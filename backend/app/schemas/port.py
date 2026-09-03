@@ -50,15 +50,6 @@ class PortRead(BaseModel):
             "Null for access ports or when the device does not expose this."
         ),
     )
-    poe_enabled: Optional[bool] = Field(
-        None, description="Power-over-Ethernet enable state, or null when unknown / unsupported."
-    )
-    speed: Optional[str] = Field(
-        None, description="Negotiated link speed string, or null when unknown."
-    )
-    duplex: Optional[str] = Field(
-        None, description="Negotiated duplex string, or null when unknown."
-    )
 
 
 class _PortTargetRequest(BaseModel):

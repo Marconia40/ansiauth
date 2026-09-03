@@ -11,9 +11,6 @@ export interface Port {
   mode: PortMode;
   access_vlan: number | null;
   allowed_vlans: number[] | null;
-  poe_enabled: boolean | null;
-  speed: string | null;
-  duplex: string | null;
 }
 
 // Envelope returned by GET /api/v1/ports/?device=...

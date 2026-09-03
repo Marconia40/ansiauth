@@ -113,8 +113,7 @@ def list_ports(
             PortRead(
                 name=p.interface, description=p.description, admin_up=p.admin_up,
                 operational_up=p.operational_up, mode=p.mode or "unknown", access_vlan=p.access_vlan,
-                allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
-                speed=p.speed, duplex=p.duplex,
+                allowed_vlans=p.allowed_vlans,
             ).model_dump()
             for p in puertos
         ],

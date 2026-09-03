@@ -470,7 +470,11 @@ def parse_vrp_port_vlan(output: str) -> dict[str, _PortVlanRow]:
             access_vlan: int | None = int(pvid_str) if pvid_str.isdigit() else None
         except ValueError:
             access_vlan = None
-        allowed = _parse_trunk_vlan_list_vrp(trunk_str) if trunk_str else None
+        # "desirable"/hybrid (mode == "unknown") reporta "1-4094" en Trunk
+        # VLAN List por default aunque el puerto no esté trunkeando nada --
+        # mismo bug que Cisco, allowed_vlans solo tiene sentido para un
+        # trunk confirmado.
+        allowed = _parse_trunk_vlan_list_vrp(trunk_str) if trunk_str and mode == "trunk" else None
 
         rows[name] = _PortVlanRow(
             name=name,
@@ -1037,12 +1041,15 @@ def parse_ios_switchport(output: str) -> dict[str, _SwitchportRow]:
         if mode == "trunk":
             access_vlan = _parse_vlan_id_with_label(native_vlan_raw or "")
             allowed_vlans = _parse_trunk_vlan_list_ios(allowed_raw or "")
-        elif mode == "access":
+        else:
+            # "unknown" (dynamic auto/desirable, not actually negotiated to
+            # trunk) reports "Trunking VLANs Enabled: ALL" by default even
+            # though the port isn't trunking anything -- bug real: eso
+            # expandía a la lista completa 1-4094 para cualquier puerto en
+            # ese estado. allowed_vlans solo tiene sentido para un trunk
+            # confirmado, mismo criterio que "access" ya tenía.
             access_vlan = _parse_vlan_id_with_label(access_vlan_raw or "")
             allowed_vlans = None
-        else:
-            access_vlan = _parse_vlan_id_with_label(access_vlan_raw or "")
-            allowed_vlans = _parse_trunk_vlan_list_ios(allowed_raw or "") if allowed_raw else None
 
         rows[name] = _SwitchportRow(
             name=name,
