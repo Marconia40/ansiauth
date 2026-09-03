@@ -63,23 +63,6 @@ def _require_driver_with(device: "Device", method_name: str):
     return driver
 
 
-def _check_device_not_locked(device_name: str) -> None:
-    """Mismo criterio que ``api/ports.py``'s ``_check_device_not_locked``."""
-    from app.composition import redis_coordinator
-
-    if redis_coordinator.esta_ocupado(device_name):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "DEVICE_LOCKED",
-                "message": (
-                    f"Device '{device_name}' is busy with another operation — "
-                    "retry shortly"
-                ),
-            },
-        )
-
-
 def _require_vlan_existente(device_name: str, vlan_id: int) -> None:
     """RF-INTERV-9: crear una SVI la asocia a su VLAN -- se valida acá que
     la VLAN ya exista en *device_name* antes de encolar la creación, contra
@@ -176,7 +159,6 @@ def create_svi(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "create_svi")
     _require_vlan_existente(name, data.vlan_id)
 
@@ -209,7 +191,6 @@ def delete_svi(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "delete_svi")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -244,7 +225,6 @@ def set_svi_admin_state(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -280,7 +260,6 @@ def set_svi_description(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -311,7 +290,6 @@ def clear_svi_description(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -351,7 +329,6 @@ def set_svi_ipv4(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_ipv4_secondary" if data.secondary else "set_svi_ipv4")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -385,7 +362,6 @@ def clear_svi_ipv4(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_ipv4_secondary" if data.secondary else "set_svi_ipv4")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -424,7 +400,6 @@ def set_svi_ipv6(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_ipv6")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -455,7 +430,6 @@ def clear_svi_ipv6(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_ipv6")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -495,7 +469,6 @@ def set_svi_acl(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     driver = _require_driver_with(dev, "set_svi_acl")
     _require_driver_with(dev, "list_acl_names")
 
@@ -536,7 +509,6 @@ def clear_svi_acl(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_acl")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -574,7 +546,6 @@ def add_svi_dhcp_relay(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_dhcp_relay")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -611,7 +582,6 @@ def remove_svi_dhcp_relay(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_driver_with(dev, "set_svi_dhcp_relay")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])

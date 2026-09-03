@@ -72,28 +72,6 @@ def _require_port_driver_with(device: "Device", method_name: str):
     return driver
 
 
-def _check_device_not_locked(device_name: str) -> None:
-    """Raise 409 immediately when the device is already held by another
-    operation. Non-blocking probe via RedisCoordinator -- reemplaza
-    device_locks.is_device_busy() (FASE_1.md, RedisCoordinator fusiona
-    device_locks.py + rate_limiter.py). Misma ventana TOCTOU que la real:
-    el chequeo es best-effort, Orquestador adquiere su propio lock al
-    ejecutar el job."""
-    from app.composition import redis_coordinator
-
-    if redis_coordinator.esta_ocupado(device_name):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "DEVICE_LOCKED",
-                "message": (
-                    f"Device '{device_name}' is busy with another operation — "
-                    "retry shortly"
-                ),
-            },
-        )
-
-
 @router.get(
     "/",
     summary="List ports",
@@ -184,7 +162,6 @@ def update_port_description(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "update_port_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -220,7 +197,6 @@ def clear_port_description(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "update_port_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -260,7 +236,6 @@ def set_port_admin_state(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -303,7 +278,6 @@ def set_port_access_vlan(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_port_access_vlan")
     # Puerto._aplicar_access_vlan() despacha a set_trunk_pvid_vlan() en vez
     # de acá cuando el puerto resulta estar en modo trunk (access_vlan es
@@ -362,7 +336,6 @@ def set_trunk_allowed_vlans(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_trunk_allowed_vlans")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -404,7 +377,6 @@ def set_port_access_mode(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_access_mode")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -452,7 +424,6 @@ def set_port_trunk_mode(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_trunk_mode")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -499,7 +470,6 @@ def shutdown_port(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -541,7 +511,6 @@ def enable_port(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -580,7 +549,6 @@ def set_port_poe(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_port_poe")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -622,7 +590,6 @@ def set_port_storm_control(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "set_storm_control")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -657,7 +624,6 @@ def reset_port(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _check_device_not_locked(name)
     _require_port_driver_with(dev, "reset_port")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
