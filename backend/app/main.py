@@ -48,6 +48,7 @@ from app.core.exceptions import (
     ConflictError,
     DeviceExecutionError,
     NotFoundError,
+    TransicionInvalidaError,
     UnsupportedVendorError,
     ValidationError,
 )
@@ -337,7 +338,7 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
 @app.exception_handler(ValidationError)
 async def validation_error_handler(request: Request, exc: ValidationError):
     logger.warning("Validation error: %s", str(exc))
-    return JSONResponse(status_code=400, content=make_error(400, str(exc), "VALIDATION_ERROR"))
+    return JSONResponse(status_code=422, content=make_error(422, str(exc), "VALIDATION_ERROR"))
 
 
 @app.exception_handler(NotFoundError)
@@ -349,6 +350,17 @@ async def not_found_error_handler(request: Request, exc: NotFoundError):
 @app.exception_handler(ConflictError)
 async def conflict_error_handler(request: Request, exc: ConflictError):
     logger.warning("Conflict: %s", str(exc))
+    return JSONResponse(status_code=409, content=make_error(409, str(exc), "CONFLICT"))
+
+
+@app.exception_handler(TransicionInvalidaError)
+async def transicion_invalida_error_handler(request: Request, exc: TransicionInvalidaError):
+    """Mismo criterio 409 que ConflictError -- ver docstring de la excepción
+    en core/exceptions.py. Antes se atrapaba a mano en api/jobs.py:cancel_job()
+    y se traducía a un HTTPException(409, "string suelto"); ahora hay un
+    handler global como el resto de las excepciones de dominio, así que
+    cancel_job() no necesita el try/except."""
+    logger.warning("Invalid job transition: %s", str(exc))
     return JSONResponse(status_code=409, content=make_error(409, str(exc), "CONFLICT"))
 
 

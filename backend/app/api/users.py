@@ -74,10 +74,10 @@ def list_users(
     all_users = user_repository.listar(incluir_inactivos=include_inactive)
     total = len(all_users)
     start = (page - 1) * page_size
-    return ok(
-        [_to_read(u) for u in all_users[start : start + page_size]],
-        total=total, page=page, page_size=page_size,
-    )
+    return ok({
+        "items": [_to_read(u) for u in all_users[start : start + page_size]],
+        "total": total, "page": page, "page_size": page_size,
+    })
 
 
 @router.get(

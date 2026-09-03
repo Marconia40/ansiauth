@@ -8,17 +8,12 @@ import { ErrorMessage } from '@/components/ErrorMessage';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { useAuth } from '@/context/AuthContext';
-import { getDevices, getJobs, getAuditLogs, getSites } from '@/services/api';
+import { getDevices, getJobs, getAuditLogs, getSites, extractMessage } from '@/services/api';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Device } from '@/types/device';
 import type { Job } from '@/types/job';
 import type { AuditLog } from '@/types/audit';
 import type { Site } from '@/types/site';
-
-function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
-}
 
 function statusColor(status: string): string {
   if (status === 'completed' || status === 'success') return 'text-green-600';

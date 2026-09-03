@@ -14,15 +14,11 @@ import {
   getDeviceGroupDevices,
   moveDevice,
   getSites,
+  extractMessage,
 } from '@/services/api';
 import type { DeviceGroup } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
-
-function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
-}
 
 export default function DeviceGroupsPage() {
   const canMutate = useHasRole('operator');

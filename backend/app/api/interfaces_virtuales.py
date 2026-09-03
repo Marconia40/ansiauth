@@ -143,6 +143,7 @@ def list_interfaces_virtuales(
 
 @router.post(
     "/",
+    status_code=202,
     summary="Create virtual interface",
     description=(
         "Create the virtual interface (SVI) for a VLAN on a single device "
@@ -180,11 +181,12 @@ def create_interfaz_virtual(
     _require_vlan_existente(name, data.vlan_id)
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.delete(
     "/",
+    status_code=202,
     summary="Delete virtual interface",
     description=(
         "Delete the virtual interface (SVI) of a VLAN on a single device "
@@ -211,11 +213,12 @@ def delete_interfaz_virtual(
     _require_driver_with(dev, "delete_interfaz_virtual")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/admin-state",
+    status_code=202,
     summary="Set virtual interface admin state",
     description=(
         "Administratively enable or disable a virtual interface (SVI) "
@@ -245,11 +248,12 @@ def set_interfaz_admin_state(
     _require_driver_with(dev, "set_interfaz_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/description",
+    status_code=202,
     summary="Set virtual interface description",
     description=(
         "Assign a description to a virtual interface (SVI) (RF-INTERV-08). "
@@ -280,11 +284,12 @@ def set_interfaz_description(
     _require_driver_with(dev, "set_interfaz_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.delete(
     "/description",
+    status_code=202,
     summary="Clear virtual interface description",
     description=(
         "Clear the description of a virtual interface (SVI) (RF-INTERV-08). "
@@ -310,11 +315,12 @@ def clear_interfaz_description(
     _require_driver_with(dev, "set_interfaz_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/ipv4",
+    status_code=202,
     summary="Set virtual interface IPv4 address",
     description=(
         "Assign the IPv4 address of a virtual interface (SVI) (RF-INTERV-03). "
@@ -349,11 +355,12 @@ def set_interfaz_ipv4(
     _require_driver_with(dev, "set_interfaz_ipv4_secondary" if data.secondary else "set_interfaz_ipv4")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.delete(
     "/ipv4",
+    status_code=202,
     summary="Clear virtual interface IPv4 address",
     description=(
         "Clear the IPv4 address of a virtual interface (SVI) (RF-INTERV-03). "
@@ -382,11 +389,12 @@ def clear_interfaz_ipv4(
     _require_driver_with(dev, "set_interfaz_ipv4_secondary" if data.secondary else "set_interfaz_ipv4")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/ipv6",
+    status_code=202,
     summary="Set virtual interface IPv6 address",
     description=(
         "Assign the IPv6 address of a virtual interface (SVI) (RF-INTERV-04). "
@@ -420,11 +428,12 @@ def set_interfaz_ipv6(
     _require_driver_with(dev, "set_interfaz_ipv6")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.delete(
     "/ipv6",
+    status_code=202,
     summary="Clear virtual interface IPv6 address",
     description=(
         "Clear the IPv6 address of a virtual interface (SVI) (RF-INTERV-04). "
@@ -450,11 +459,12 @@ def clear_interfaz_ipv6(
     _require_driver_with(dev, "set_interfaz_ipv6")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/acl",
+    status_code=202,
     summary="Set virtual interface ACL binding",
     description=(
         "Bind an existing ACL to a virtual interface (SVI) in a given "
@@ -497,11 +507,12 @@ def set_interfaz_acl(
         )
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.delete(
     "/acl",
+    status_code=202,
     summary="Clear virtual interface ACL binding",
     description=(
         "Remove the ACL bound to a virtual interface (SVI) in a given "
@@ -529,11 +540,12 @@ def clear_interfaz_acl(
     _require_driver_with(dev, "set_interfaz_acl")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/dhcp-relay",
+    status_code=202,
     summary="Add a virtual interface DHCP relay server",
     description=(
         "Add a single DHCP relay/helper-address server to a virtual "
@@ -566,11 +578,12 @@ def add_interfaz_dhcp_relay(
     _require_driver_with(dev, "set_interfaz_dhcp_relay")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.delete(
     "/dhcp-relay",
+    status_code=202,
     summary="Remove a virtual interface DHCP relay server",
     description=(
         "Remove a single DHCP relay/helper-address server from a virtual "
@@ -602,4 +615,4 @@ def remove_interfaz_dhcp_relay(
     _require_driver_with(dev, "set_interfaz_dhcp_relay")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})

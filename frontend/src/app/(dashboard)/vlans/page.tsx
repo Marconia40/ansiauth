@@ -7,15 +7,10 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getDevices, getVlans, createVlan, updateVlan, deleteVlan, getSites } from '@/services/api';
+import { getDevices, getVlans, createVlan, updateVlan, deleteVlan, getSites, extractMessage } from '@/services/api';
 import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
 import type { VlanEntry } from '@/types/vlan';
-
-function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
-}
 
 export default function VlansPage() {
   const { user } = useAuth();

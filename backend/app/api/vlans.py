@@ -102,6 +102,7 @@ def get_vlans(
 
 @router.post(
     "/",
+    status_code=202,
     summary="Create VLAN",
     description=(
         "Create a new VLAN on one or more devices via Ansible. "
@@ -139,11 +140,12 @@ def create_vlan(
     # revisión de código).
     _authz_devices(scope, vlan.devices, min_role="operator", resolved_by_name=devices_by_name)
     group_job_id, jobs = group_operation_runner.encolar(entidad, vlan.devices, current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.delete(
     "/{vlan_id}",
+    status_code=202,
     summary="Delete VLAN",
     description=(
         "Remove a VLAN from one or more devices via Ansible. "
@@ -173,11 +175,12 @@ def delete_vlan(
     # admin-only per device.
     _authz_devices(scope, data.devices, min_role="admin", resolved_by_name=devices_by_name)
     group_job_id, jobs = group_operation_runner.encolar(entidad, data.devices, current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/{vlan_id}",
+    status_code=202,
     summary="Update VLAN",
     description=(
         "Update the description of an existing VLAN on one or more devices. "
@@ -200,4 +203,4 @@ def update_vlan(
     devices_by_name = {name: require_device(name) for name in data.devices}
     _authz_devices(scope, data.devices, min_role="operator", resolved_by_name=devices_by_name)
     group_job_id, jobs = group_operation_runner.encolar(entidad, data.devices, current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})

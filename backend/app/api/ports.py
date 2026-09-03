@@ -153,6 +153,7 @@ def list_ports(
 
 @router.patch(
     "/description",
+    status_code=202,
     summary="Set port description",
     description=(
         "Assign a description to a single interface on a device.  To "
@@ -187,11 +188,12 @@ def update_port_description(
     _require_port_driver_with(dev, "update_port_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.delete(
     "/description",
+    status_code=202,
     summary="Clear port description",
     description=(
         "Clear the description of a single interface on a device "
@@ -222,11 +224,12 @@ def clear_port_description(
     _require_port_driver_with(dev, "update_port_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/admin-state",
+    status_code=202,
     summary="Set port admin state",
     description=(
         "Administratively enable or disable a single interface.  "
@@ -261,11 +264,12 @@ def set_port_admin_state(
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/access-vlan",
+    status_code=202,
     summary="Set port access VLAN",
     description=(
         "Assign an access VLAN to a single interface — or the native VLAN "
@@ -312,11 +316,12 @@ def set_port_access_vlan(
     _require_port_driver_with(dev, "set_trunk_pvid_vlan")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/trunk-vlans",
+    status_code=202,
     summary="Set trunk allowed VLANs",
     description=(
         "Modify the trunk allowed-VLAN list on a single interface.  "
@@ -361,11 +366,12 @@ def set_trunk_allowed_vlans(
     _require_port_driver_with(dev, "set_trunk_allowed_vlans")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/access-mode",
+    status_code=202,
     summary="Set port to access mode",
     description=(
         "Set a single interface to access mode with the given access VLAN, "
@@ -402,11 +408,12 @@ def set_port_access_mode(
     _require_port_driver_with(dev, "set_access_mode")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/trunk-mode",
+    status_code=202,
     summary="Set port to trunk mode",
     description=(
         "Set a single interface to trunk mode with the given native VLAN "
@@ -449,11 +456,12 @@ def set_port_trunk_mode(
     _require_port_driver_with(dev, "set_trunk_mode")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/shutdown",
+    status_code=202,
     summary="Shutdown port",
     description=(
         "Administratively disable a single interface (``shutdown`` command).  "
@@ -495,11 +503,12 @@ def shutdown_port(
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/enable",
+    status_code=202,
     summary="Enable port",
     description=(
         "Administratively enable a single interface (``no shutdown`` / "
@@ -536,11 +545,12 @@ def enable_port(
     _require_port_driver_with(dev, "set_port_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/poe",
+    status_code=202,
     summary="Set port PoE state",
     description=(
         "Enable or disable Power-over-Ethernet on a single interface "
@@ -574,11 +584,12 @@ def set_port_poe(
     _require_port_driver_with(dev, "set_port_poe")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/storm-control",
+    status_code=202,
     summary="Set port storm-control state",
     description=(
         "Enable or disable broadcast storm-control on a single interface, "
@@ -615,11 +626,12 @@ def set_port_storm_control(
     _require_port_driver_with(dev, "set_storm_control")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/reset",
+    status_code=202,
     summary="Reset port to defaults",
     description=(
         "Reset a single interface to its factory-default configuration "
@@ -649,4 +661,4 @@ def reset_port(
     _require_port_driver_with(dev, "reset_port")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    return ok({"group_job_id": group_job_id, "jobs": jobs})

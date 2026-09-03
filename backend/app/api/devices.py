@@ -171,6 +171,7 @@ def move_device(
 
 @router.post(
     "/{name}/vlans/refresh",
+    status_code=202,
     summary="Refresh device VLAN cache",
     description=(
         "Trigger a background sync of *device*'s VLAN cache from the equipment. "
@@ -198,6 +199,7 @@ def refresh_device_vlans(
 
 @router.post(
     "/{name}/ports/refresh",
+    status_code=202,
     summary="Refresh device port cache",
     description=(
         "Trigger a background sync of *device*'s port cache from the equipment. "
@@ -225,6 +227,7 @@ def refresh_device_ports(
 
 @router.post(
     "/{name}/interfaces-virtuales/refresh",
+    status_code=202,
     summary="Refresh device virtual interface cache",
     description=(
         "Trigger a background sync of *device*'s virtual interface (SVI) "

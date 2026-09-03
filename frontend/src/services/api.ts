@@ -265,6 +265,24 @@ async function unwrap<T>(promise: Promise<{ data: ApiResponse<T> }>): Promise<T>
   return data.data;
 }
 
+// Single shared implementation, replacing 10 near-identical local copies.
+// Prefers the first Pydantic validation message (RequestValidationError's
+// `details.errors[]`, see backend/app/main.py) over the generic
+// "Request validation failed" summary in `message`.
+export function extractMessage(error: unknown, fallback: string): string {
+  const e = error as {
+    response?: {
+      data?: {
+        message?: string;
+        details?: { errors?: Array<{ msg?: string }> };
+      };
+    };
+    message?: string;
+  } | null;
+  const validationMsg = e?.response?.data?.details?.errors?.[0]?.msg;
+  return validationMsg ?? e?.response?.data?.message ?? e?.message ?? fallback;
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 export async function login(
@@ -338,21 +356,23 @@ export async function getVlans(device?: string): Promise<VlanEntry[]> {
   return envelope.data;
 }
 
-type VlanRawResponse = { success: boolean; group_job_id: string; jobs: { device: string; job_id: string }[] };
-
 export async function createVlan(body: VlanCreate): Promise<VlanOperationResult> {
-  const { data } = await client.post<VlanRawResponse>('/vlans/', body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<VlanOperationResult>(client.post<ApiResponse<VlanOperationResult>>('/vlans/', body));
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function updateVlan(vlanId: number, body: VlanUpdate): Promise<VlanOperationResult> {
-  const { data } = await client.patch<VlanRawResponse>(`/vlans/${vlanId}`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<VlanOperationResult>(
+    client.patch<ApiResponse<VlanOperationResult>>(`/vlans/${vlanId}`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<VlanOperationResult> {
-  const { data } = await client.delete<VlanRawResponse>(`/vlans/${vlanId}`, { data: body });
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<VlanOperationResult>(
+    client.delete<ApiResponse<VlanOperationResult>>(`/vlans/${vlanId}`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 // ── Ports ─────────────────────────────────────────────────────────────────────
@@ -367,90 +387,104 @@ export async function getPorts(device: string): Promise<PortListResponse> {
   return envelope.data;
 }
 
-type PortJobRawResponse = {
-  success: boolean;
-  group_job_id: string;
-  jobs: { device: string; job_id: string; status?: string }[];
-};
-
 export async function updatePortDescription(
   device: string,
   body: PortDescriptionUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/description`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.patch<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/description`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function clearPortDescription(
   device: string,
   body: PortDescriptionClearRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.delete<PortJobRawResponse>(`/devices/${device}/ports/description`, { data: body });
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.delete<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/description`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setPortAdminState(
   device: string,
   body: PortAdminStateUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/admin-state`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.patch<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/admin-state`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setPortAccessVlan(
   device: string,
   body: PortAccessVlanUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/access-vlan`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.patch<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/access-vlan`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setTrunkAllowedVlans(
   device: string,
   body: PortTrunkVlansUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/trunk-vlans`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.patch<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/trunk-vlans`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setPortAccessMode(
   device: string,
   body: PortSetAccessModeRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.post<PortJobRawResponse>(`/devices/${device}/ports/access-mode`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.post<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/access-mode`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setPortTrunkMode(
   device: string,
   body: PortSetTrunkModeRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.post<PortJobRawResponse>(`/devices/${device}/ports/trunk-mode`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.post<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/trunk-mode`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setPortPoe(
   device: string,
   body: PortPoeUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/poe`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.patch<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/poe`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setPortStormControl(
   device: string,
   body: PortStormControlUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/storm-control`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.patch<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/storm-control`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function resetPort(
   device: string,
   body: PortResetRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.post<PortJobRawResponse>(`/devices/${device}/ports/reset`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<PortOperationResult>(
+    client.post<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/reset`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 // ── Virtual interfaces (SVI) ─────────────────────────────────────────────────
@@ -463,114 +497,134 @@ export async function getInterfacesVirtuales(device: string): Promise<InterfazVi
   return envelope.data;
 }
 
-type InterfazVirtualJobRawResponse = {
-  success: boolean;
-  group_job_id: string;
-  jobs: { device: string; job_id: string; status?: string }[];
-};
-
 export async function createInterfazVirtual(
   device: string,
   body: InterfazVirtualCreateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.post<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.post<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function deleteInterfazVirtual(
   device: string,
   body: InterfazVirtualDeleteRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/`, { data: body });
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setInterfazAdminState(
   device: string,
   body: InterfazVirtualAdminStateUpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/admin-state`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/admin-state`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setInterfazDescription(
   device: string,
   body: InterfazVirtualDescriptionUpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/description`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/description`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function clearInterfazDescription(
   device: string,
   body: InterfazVirtualDescriptionClearRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/description`, { data: body });
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/description`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setInterfazIpv4(
   device: string,
   body: InterfazVirtualIpv4UpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/ipv4`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/ipv4`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function clearInterfazIpv4(
   device: string,
   body: InterfazVirtualIpv4ClearRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/ipv4`, { data: body });
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/ipv4`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setInterfazIpv6(
   device: string,
   body: InterfazVirtualIpv6UpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/ipv6`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/ipv6`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function clearInterfazIpv6(
   device: string,
   body: InterfazVirtualIpv6ClearRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/ipv6`, { data: body });
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/ipv6`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function setInterfazAcl(
   device: string,
   body: InterfazVirtualAclUpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/acl`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/acl`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function clearInterfazAcl(
   device: string,
   body: InterfazVirtualAclClearRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/acl`, { data: body });
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/acl`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function addInterfazDhcpRelay(
   device: string,
   body: InterfazVirtualDhcpRelayAddRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.post<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/dhcp-relay`, body);
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.post<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/dhcp-relay`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 export async function removeInterfazDhcpRelay(
   device: string,
   body: InterfazVirtualDhcpRelayRemoveRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/dhcp-relay`, { data: body });
-  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+  const result = await unwrap<InterfazVirtualOperationResult>(
+    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/dhcp-relay`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────
@@ -620,7 +674,9 @@ export async function getJobs(params?: {
   page?: number;
   page_size?: number;
 }): Promise<{ items: Job[]; total: number }> {
-  const { data } = await client.get<{ items: Job[]; total: number }>('/jobs/', { params });
+  const data = await unwrap<{ items: Job[]; total: number }>(
+    client.get<ApiResponse<{ items: Job[]; total: number }>>('/jobs/', { params }),
+  );
   return { items: data.items ?? [], total: data.total ?? 0 };
 }
 
@@ -639,7 +695,10 @@ export async function getGroupJob(groupJobId: string): Promise<GroupJob> {
 // ── Users ─────────────────────────────────────────────────────────────────────
 
 export async function getUsers(): Promise<User[]> {
-  return unwrap(client.get<ApiResponse<User[]>>('/users/'));
+  const data = await unwrap<{ items: User[]; total: number; page: number; page_size: number }>(
+    client.get<ApiResponse<{ items: User[]; total: number; page: number; page_size: number }>>('/users/'),
+  );
+  return data.items ?? [];
 }
 
 export async function createUser(body: UserCreate) {
@@ -670,11 +729,10 @@ export async function getAuditLogs(params?: {
   skip?: number;
   limit?: number;
 }): Promise<{ items: AuditLog[]; total: number }> {
-  const response = await client.get<AuditLog[]>('/audit/', { params });
-  const items = Array.isArray(response.data) ? response.data : [];
-  const header = response.headers?.['x-total-count'] ?? response.headers?.['X-Total-Count'];
-  const total = header != null ? Number(header) : items.length;
-  return { items, total: Number.isFinite(total) ? total : items.length };
+  const data = await unwrap<{ items: AuditLog[]; total: number; page: number; page_size: number }>(
+    client.get<ApiResponse<{ items: AuditLog[]; total: number; page: number; page_size: number }>>('/audit/', { params }),
+  );
+  return { items: data.items ?? [], total: data.total ?? 0 };
 }
 
 // ── Device Groups ─────────────────────────────────────────────────────────────
