@@ -310,16 +310,27 @@ class HuaweiVendor(VendorDriver):
         encontrada (confirmado que esta forma con número sí funciona).
         Bypassa el YAML para este operación -- el número de comandos es
         dinámico según lo que reporte el device, mismo criterio que
-        ``set_svi_dhcp_relay()``."""
+        ``set_svi_dhcp_relay()``.
+
+        Agrega ``display current-configuration configuration dhcp`` a la
+        misma tanda (confirmado contra el device real de lab) -- resuelve
+        la forma "server group" del DHCP relay, la única que existe en
+        este CE12800 (ver nota en ``svi_parser._VRP_HELPER``, bug real
+        encontrado probando el incremental-add en vivo: sin esto,
+        reconciliar() nunca veía los servers ya configurados por esa
+        forma)."""
         brief = self._leer(["display ip interface brief"], device, password)[0]
         vlan_ids = sorted({int(m) for m in self._VLANIF_BRIEF_RE.findall(brief)})
-        from app.services.parsers.svi_parser import parse_vrp_svis
+        from app.services.parsers.svi_parser import parse_vrp_dhcp_relay_groups, parse_vrp_svis
         if not vlan_ids:
-            return parse_vrp_svis("", brief)
+            dhcp_config = self._leer(["display current-configuration configuration dhcp"], device, password)[0]
+            return parse_vrp_svis("", brief, parse_vrp_dhcp_relay_groups(dhcp_config))
         per_iface_commands = [f"display current-configuration interface Vlanif{vid}" for vid in vlan_ids]
-        per_iface_outputs = self._leer(per_iface_commands, device, password)
-        config = "\n".join(per_iface_outputs)
-        return parse_vrp_svis(config, brief)
+        per_iface_commands.append("display current-configuration configuration dhcp")
+        outputs = self._leer(per_iface_commands, device, password)
+        config = "\n".join(outputs[:-1])
+        dhcp_groups = parse_vrp_dhcp_relay_groups(outputs[-1])
+        return parse_vrp_svis(config, brief, dhcp_groups)
 
     def list_acl_names(self, device: Device, password: str) -> list[str]:
         commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]

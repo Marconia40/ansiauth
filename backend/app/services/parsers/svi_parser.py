@@ -170,20 +170,65 @@ _VRP_IPV6 = re.compile(r"^\s*ipv6 address\s+(\S+)\s*$")
 _VRP_ACL_NUMERIC = re.compile(r"^\s*traffic-filter\s+(inbound|outbound)\s+acl\s+(\S+)\s*$", re.IGNORECASE)
 _VRP_ACL_NAMED = re.compile(r"^\s*traffic-filter\s+acl\s+(\S+)\s+(inbound|outbound)\s*$", re.IGNORECASE)
 # Confirmado contra config real de producción: "dhcp relay server-ip <ip>"
-# por cada server (forma directa -- ver huawei/commands.yaml para la
-# forma alternativa por "server group", no usada acá).
+# por cada server (forma directa). La forma alternativa por "server group"
+# (huawei/commands.yaml: set_svi_dhcp_relay, 2da alternativa -- la única
+# que existe en el CE12800 de lab) no deja ninguna IP en el bloque de la
+# interfaz, solo esta línea con el nombre del grupo -- las IPs viven en un
+# bloque global aparte, resuelto por _parse_vrp_dhcp_relay_groups() más
+# abajo. Bug real encontrado probando esto en vivo: sin este segundo
+# camino, reconciliar() veía la interfaz siempre con dhcp_relay_servers=
+# None aunque el grupo tuviera servers reales, así que
+# SVI._aplicar_dhcp_relay_add() agregaba el 2do server sobre una lista que
+# creía vacía y el driver (full-replace puertas adentro) pisaba el 1ro.
 _VRP_HELPER = re.compile(r"^\s*dhcp relay server-ip\s+(\S+)\s*$", re.IGNORECASE)
+_VRP_BINDING = re.compile(r"^\s*dhcp relay binding server group\s+(\S+)\s*$", re.IGNORECASE)
 
 _VRP_BRIEF_LINE = re.compile(
     r"^Vlanif(\d+)\s+(up|down|\*down)\s+(up|down)\s*", re.IGNORECASE,
 )
 
+# "display current-configuration configuration dhcp" -- confirmado contra
+# el device real de lab: cada grupo es un bloque separado por líneas "#",
+# con el nombre en el header y 1 "server {ip} {index}" por línea.
+_VRP_GROUP_HEADER = re.compile(r"^dhcp relay server group\s+(\S+)\s*$", re.IGNORECASE)
+_VRP_GROUP_SERVER = re.compile(r"^\s*server\s+(\S+)\s+\d+\s*$", re.IGNORECASE)
 
-def parse_vrp_svis(config_output: str, brief_output: str) -> list[SVI]:
+
+def parse_vrp_dhcp_relay_groups(dhcp_config_output: str) -> dict[str, list[str]]:
+    """Parse ``display current-configuration configuration dhcp`` en
+    ``{group_name: [server_ip, ...]}`` -- el mapeo que ``parse_vrp_svis()``
+    necesita para resolver la forma "server group" del DHCP relay (ver
+    nota en ``_VRP_HELPER`` arriba)."""
+    groups: dict[str, list[str]] = {}
+    current: str | None = None
+    for raw in dhcp_config_output.splitlines():
+        line = _ANSI_ESCAPE.sub("", raw).rstrip()
+        header = _VRP_GROUP_HEADER.match(line)
+        if header:
+            current = header.group(1)
+            groups.setdefault(current, [])
+            continue
+        if current is None:
+            continue
+        m = _VRP_GROUP_SERVER.match(line)
+        if m:
+            groups[current].append(m.group(1))
+            continue
+        if line.strip() == "#":
+            current = None
+    return groups
+
+
+def parse_vrp_svis(
+    config_output: str, brief_output: str, dhcp_groups: "dict[str, list[str]] | None" = None,
+) -> list[SVI]:
     """Parse ``display current-configuration interface Vlanif`` +
     ``display ip interface brief`` en ``SVI``. Mismo criterio
     de 2 fuentes que Cisco: una para la config deseada, otra para el
-    estado administrativo real."""
+    estado administrativo real. *dhcp_groups*, cuando se pasa (ver
+    ``parse_vrp_dhcp_relay_groups()``), resuelve la forma "server group"
+    del DHCP relay -- ver nota en ``_VRP_HELPER``."""
+    dhcp_groups = dhcp_groups or {}
     estado_por_vlan: dict[int, tuple[bool, bool]] = {}
     for raw in brief_output.splitlines():
         line = _ANSI_ESCAPE.sub("", raw).rstrip()
@@ -198,10 +243,14 @@ def parse_vrp_svis(config_output: str, brief_output: str) -> list[SVI]:
     interfaces: list[SVI] = []
     actual: SVI | None = None
     helpers: list[str] = []
+    binding_group: str | None = None
 
     def _cerrar_actual() -> None:
         if actual is not None:
-            actual.dhcp_relay_servers = helpers[:] if helpers else None
+            if binding_group is not None:
+                actual.dhcp_relay_servers = dhcp_groups.get(binding_group) or None
+            else:
+                actual.dhcp_relay_servers = helpers[:] if helpers else None
             interfaces.append(actual)
 
     for raw in config_output.splitlines():
@@ -213,6 +262,7 @@ def parse_vrp_svis(config_output: str, brief_output: str) -> list[SVI]:
             admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
             actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
             helpers = []
+            binding_group = None
             continue
         if actual is None:
             continue
@@ -252,6 +302,10 @@ def parse_vrp_svis(config_output: str, brief_output: str) -> list[SVI]:
         m = _VRP_HELPER.match(line)
         if m:
             helpers.append(m.group(1))
+            continue
+        m = _VRP_BINDING.match(line)
+        if m:
+            binding_group = m.group(1)
             continue
 
     _cerrar_actual()
