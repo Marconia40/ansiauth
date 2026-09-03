@@ -160,20 +160,66 @@ class VendorDriver(ABC):
                 cls._commands_cache = yaml.safe_load(f)
         return cls._commands_cache
 
+    def _lineas_repetidas(self, step: dict, vars: dict) -> list[str]:
+        """``repeat`` arma N líneas a partir de una lista en *vars* -- para
+        operaciones "full-replace de una lista de tamaño variable" (ej.
+        DHCP relay servers, ``ip helper-address``/``dhcp relay
+        server-ip``/``dhcp relay server group`` uno por IP) que
+        ``lines``/``block`` solos no pueden expresar (son listas FIJAS).
+        Todo comando sigue viviendo en el YAML -- esto reemplaza el bypass
+        que antes armaba la lista a mano en el driver.
+
+        Shape de ``repeat`` en el YAML::
+
+            repeat:
+              over: "servers"                   # nombre de la lista en vars
+              prefix_if_nonempty: ["..."]        # opcional, 1 vez, solo si la lista NO está vacía (antes de los items)
+              line: "... {item} ... {index} ..."  # 1 vez por elemento -- {item} = elemento actual, {index} = posición (0-based)
+              suffix_if_nonempty: ["..."]        # opcional, 1 vez, solo si la lista NO está vacía (después de los items)
+              if_empty: ["..."]                  # opcional, en vez de prefix/line/suffix cuando la lista SÍ está vacía
+        """
+        repeat = step.get("repeat")
+        if not repeat:
+            return []
+        items = vars.get(repeat["over"]) or []
+        lineas: list[str] = []
+        if items:
+            lineas += [l.format(**vars) for l in repeat.get("prefix_if_nonempty", [])]
+            lineas += [
+                repeat["line"].format(item=item, index=i, **vars) for i, item in enumerate(items)
+            ]
+            lineas += [l.format(**vars) for l in repeat.get("suffix_if_nonempty", [])]
+        else:
+            lineas += [l.format(**vars) for l in repeat.get("if_empty", [])]
+        return lineas
+
     def _ejecutar_paso(self, step: dict, vars: dict, device: Device, password: str, *, op_label: str) -> dict:
         """Renderiza un paso del YAML (``lines``[+``parents``], ``block``, o
         ``commands`` -- se infiere de qué clave está presente, no hace
         falta declarar el modo aparte) sustituyendo *vars* con
         ``str.format()``, arma el extravars shape que ``run.yml`` de este
-        vendor entiende, y corre ``_aplicar()`` (sin tocar)."""
+        vendor entiende, y corre ``_aplicar()`` (sin tocar).
+
+        ``repeat`` (ver ``_lineas_repetidas()``) y ``trailer`` (líneas
+        fijas después de las repetidas, ej. ``commit``/``quit``/``quit``
+        de Huawei) se agregan al final de ``lines``/``block`` cuando
+        están presentes. ``match`` (Cisco/``ios_config`` -- ver nota en
+        ``set_interfaz_dhcp_relay`` de ambos vendors) pasa directo al
+        extravars si está presente."""
+        extra = self._lineas_repetidas(step, vars)
+        trailer = [l.format(**vars) for l in step.get("trailer", [])]
         if "commands" in step:
-            extravars = {"commands": [c.format(**vars) for c in step["commands"]]}
+            extravars = {"commands": [c.format(**vars) for c in step["commands"]] + extra + trailer}
         elif "block" in step:
-            extravars = {"command_block": "\n".join(c.format(**vars) for c in step["block"])}
+            todas = [c.format(**vars) for c in step["block"]] + extra + trailer
+            extravars = {"command_block": "\n".join(todas)}
         else:
-            extravars = {"lines": [c.format(**vars) for c in step["lines"]]}
+            todas = [c.format(**vars) for c in step["lines"]] + extra + trailer
+            extravars = {"lines": todas}
             if "parents" in step:
                 extravars["parents"] = step["parents"].format(**vars)
+        if "match" in step:
+            extravars["match"] = step["match"]
         return self._aplicar(extravars, device, password, op_label=op_label)
 
     def _aplicar_desde_template(

@@ -387,8 +387,8 @@ _err = {s: {"model": ErrorResponse} for s in (400, 401, 403, 404, 409, 422, 429,
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], responses=_err)
 app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"], responses=_err)
-app.include_router(ports.router, prefix="/api/v1/ports", tags=["ports"], responses=_err)
-app.include_router(interfaces_virtuales.router, prefix="/api/v1/interfaces-virtuales", tags=["interfaces-virtuales"], responses=_err)
+app.include_router(ports.router, prefix="/api/v1/devices/{name}/ports", tags=["ports"], responses=_err)
+app.include_router(interfaces_virtuales.router, prefix="/api/v1/devices/{name}/interfaces-virtuales", tags=["interfaces-virtuales"], responses=_err)
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"], responses=_err)
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], responses=_err)
 app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)

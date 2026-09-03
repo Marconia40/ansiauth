@@ -28,67 +28,90 @@ export interface InterfazVirtualListResponse {
 // description is optional, applied atomically right after creation. If the
 // interface already exists, the job reports it as a no-op duplicate.
 export interface InterfazVirtualCreateRequest {
-  device: string;
   vlan_id: number;
   description?: string | null;
 }
 
-// Body for POST /api/v1/interfaces-virtuales/delete.
+// Body for DELETE /api/v1/interfaces-virtuales/.
 export interface InterfazVirtualDeleteRequest {
-  device: string;
   vlan_id: number;
 }
 
 // Body for PATCH /api/v1/interfaces-virtuales/admin-state.
 export interface InterfazVirtualAdminStateUpdateRequest {
-  device: string;
   vlan_id: number;
   enabled: boolean;
 }
 
-// Body for PATCH /api/v1/interfaces-virtuales/description. Empty description clears it.
+// Body for PATCH /api/v1/interfaces-virtuales/description. Sets a description
+// (value required). To clear it, use InterfazVirtualDescriptionClearRequest instead.
 export interface InterfazVirtualDescriptionUpdateRequest {
-  device: string;
   vlan_id: number;
   description: string;
 }
 
-// Body for PATCH /api/v1/interfaces-virtuales/ipv4. CIDR (e.g. "10.10.10.11/24");
-// omitted/empty clears the address. secondary=true targets the secondary
-// IPv4 address instead of the primary (requires a primary already configured).
-export interface InterfazVirtualIpv4UpdateRequest {
-  device: string;
+// Body for DELETE /api/v1/interfaces-virtuales/description.
+export interface InterfazVirtualDescriptionClearRequest {
   vlan_id: number;
-  ipv4_address?: string | null;
+}
+
+// Body for PATCH /api/v1/interfaces-virtuales/ipv4. CIDR (e.g. "10.10.10.11/24"),
+// value required. secondary=true targets the secondary IPv4 address instead
+// of the primary (requires a primary already configured). To clear an
+// address, use InterfazVirtualIpv4ClearRequest instead.
+export interface InterfazVirtualIpv4UpdateRequest {
+  vlan_id: number;
+  ipv4_address: string;
   secondary?: boolean;
 }
 
-// Body for PATCH /api/v1/interfaces-virtuales/ipv6. CIDR (e.g. "2001:db8::1/64");
-// omitted/empty clears the address.
-export interface InterfazVirtualIpv6UpdateRequest {
-  device: string;
+// Body for DELETE /api/v1/interfaces-virtuales/ipv4.
+export interface InterfazVirtualIpv4ClearRequest {
   vlan_id: number;
-  ipv6_address?: string | null;
+  secondary?: boolean;
+}
+
+// Body for PATCH /api/v1/interfaces-virtuales/ipv6. CIDR (e.g. "2001:db8::1/64"),
+// value required. To clear it, use InterfazVirtualIpv6ClearRequest instead.
+export interface InterfazVirtualIpv6UpdateRequest {
+  vlan_id: number;
+  ipv6_address: string;
+}
+
+// Body for DELETE /api/v1/interfaces-virtuales/ipv6.
+export interface InterfazVirtualIpv6ClearRequest {
+  vlan_id: number;
 }
 
 export type InterfazVirtualAclDirection = 'in' | 'out';
 
 // Body for PATCH /api/v1/interfaces-virtuales/acl. Binds an ACL that already
-// exists on the device — omitted/empty acl_name clears the current binding.
+// exists on the device, acl_name required. To clear a binding, use
+// InterfazVirtualAclClearRequest instead.
 export interface InterfazVirtualAclUpdateRequest {
-  device: string;
   vlan_id: number;
   direction: InterfazVirtualAclDirection;
-  acl_name?: string | null;
+  acl_name: string;
 }
 
-// Body for PATCH /api/v1/interfaces-virtuales/dhcp-relay. Incremental —
-// exactly one of add/remove per call, not a full-replace of the list.
-export interface InterfazVirtualDhcpRelayUpdateRequest {
-  device: string;
+// Body for DELETE /api/v1/interfaces-virtuales/acl.
+export interface InterfazVirtualAclClearRequest {
   vlan_id: number;
-  add?: string | null;
-  remove?: string | null;
+  direction: InterfazVirtualAclDirection;
+}
+
+// Body for POST /api/v1/interfaces-virtuales/dhcp-relay. Adds 1 server,
+// incremental — leaves any other server already configured untouched.
+export interface InterfazVirtualDhcpRelayAddRequest {
+  vlan_id: number;
+  server: string;
+}
+
+// Body for DELETE /api/v1/interfaces-virtuales/dhcp-relay. Removes 1 server,
+// incremental — leaves any other server already configured untouched.
+export interface InterfazVirtualDhcpRelayRemoveRequest {
+  vlan_id: number;
+  server: string;
 }
 
 // Response shape — matches the orchestration envelope used by VLAN/port endpoints,

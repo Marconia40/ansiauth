@@ -253,20 +253,35 @@ class HuaweiVendor(VendorDriver):
         )
 
     def set_interfaz_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
-        """*ipv6_address* llega en CIDR -- a diferencia de Cisco, VRP espera
-        dirección + prefix-length separados (``ipv6 address {addr}
-        {prefix}``), no CIDR de un tirón."""
+        """Confirmado contra config real de un device de producción (no de
+        lab): VRP usa CIDR de un tirón para ``ipv6 address``, igual que
+        Cisco -- NO separa dirección/prefix-length como sí hace con IPv4
+        (``ip address {addr} {mask}``). Ejemplo real:
+        ``ipv6 address 2801:120:832::1/64`` sobre una interfaz con
+        ``ipv6 enable`` ya puesto."""
         variant = "clear" if not ipv6_address else "set"
-        addr, prefix = self._cidr_a_direccion_y_prefijo_v6(ipv6_address)
         return self._aplicar_desde_template(
-            "set_interfaz_ipv6", {"vlan_id": vlan_id, "ipv6_addr": addr, "ipv6_prefix": prefix},
+            "set_interfaz_ipv6", {"vlan_id": vlan_id, "ipv6_address": ipv6_address or ""},
             device, password, variant=variant,
         )
 
     def set_interfaz_acl(
         self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
     ) -> dict:
-        variant = "clear" if not acl_name else "set"
+        """Confirmado contra config real: el orden de ``traffic-filter``
+        cambia según si la ACL es numerada o con nombre --
+        ``traffic-filter {direction}bound acl {numero}`` para numeradas
+        (ej. ``traffic-filter inbound acl 3002``), pero
+        ``traffic-filter acl {nombre} {direction}bound`` para ACLs con
+        nombre (ej. ``traffic-filter acl servers-admin-dc2-vlan830
+        inbound``) -- el nombre va pegado a "acl" y la dirección al final,
+        no como en el caso numerado."""
+        if not acl_name:
+            variant = "clear"
+        elif acl_name.isdigit():
+            variant = "set_numeric"
+        else:
+            variant = "set_named"
         return self._aplicar_desde_template(
             "set_interfaz_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
             device, password, variant=variant,
@@ -275,19 +290,12 @@ class HuaweiVendor(VendorDriver):
     def set_interfaz_dhcp_relay(
         self, vlan_id: int, servers: list[str], device: Device, password: str,
     ) -> dict:
-        """Sintaxis más incierta de las 9 -- VRP típicamente necesita ``dhcp
-        select relay`` + declarar el server aparte, no es un comando por IP
-        como el ``ip helper-address`` de Cisco (ver comentario en
-        commands.yaml). Confirmar con ``dhcp ?`` en la consola real antes de
-        confiar en esto. Mismo bypass de ``_aplicar_desde_template()`` que
-        Cisco -- lista de N servers, el motor de templates arma listas fijas
-        por diseño."""
-        block = ["system-view", f"interface Vlanif{vlan_id}", "undo dhcp select relay"]
-        for ip in servers:
-            block += ["dhcp select relay", f"dhcp relay server-ip {ip}"]
-        block += ["commit", "quit", "quit"]
-        return self._aplicar(
-            {"command_block": "\n".join(block)}, device, password, op_label="set interfaz DHCP relay",
+        """Full-replace de la lista de relay servers -- ver YAML
+        (``repeat``) para el "undo dhcp select relay" fijo + "dhcp select
+        relay" (si hay al menos 1 server) + 1 línea por server, y la nota
+        sobre la forma alternativa por "server group" ahí mismo."""
+        return self._aplicar_desde_template(
+            "set_interfaz_dhcp_relay", {"vlan_id": vlan_id, "servers": servers}, device, password,
         )
 
     _VLANIF_BRIEF_RE = re.compile(r"^Vlanif(\d+)\b", re.MULTILINE)
@@ -328,12 +336,3 @@ class HuaweiVendor(VendorDriver):
             return "", ""
         interfaz = ipaddress.ip_interface(cidr)
         return str(interfaz.ip), str(interfaz.netmask)
-
-    @staticmethod
-    def _cidr_a_direccion_y_prefijo_v6(cidr: "str | None") -> tuple[str, str]:
-        """``"2001:db8::1/64"`` → ``("2001:db8::1", "64")`` -- VRP espera
-        dirección + prefix-length separados para ``ipv6 address``."""
-        if not cidr:
-            return "", ""
-        interfaz = ipaddress.ip_interface(cidr)
-        return str(interfaz.ip), str(interfaz.network.prefixlen)

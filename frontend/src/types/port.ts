@@ -25,24 +25,27 @@ export interface PortListResponse {
   ports: Port[];
 }
 
-// Body for PATCH /api/v1/ports/description.  Empty description clears it.
+// Body for PATCH /api/v1/ports/description.  Sets a description (value
+// required). To clear it, use PortDescriptionClearRequest instead.
 export interface PortDescriptionUpdateRequest {
-  device: string;
   interface: string;
   description: string;
+}
+
+// Body for DELETE /api/v1/ports/description.
+export interface PortDescriptionClearRequest {
+  interface: string;
 }
 
 // Body for PATCH /api/v1/ports/admin-state.
 // enabled=true → `undo shutdown` / `no shutdown`; enabled=false → `shutdown`.
 export interface PortAdminStateUpdateRequest {
-  device: string;
   interface: string;
   enabled: boolean;
 }
 
 // Body for PATCH /api/v1/ports/access-vlan.
 export interface PortAccessVlanUpdateRequest {
-  device: string;
   interface: string;
   vlan_id: number;
 }
@@ -51,7 +54,6 @@ export interface PortAccessVlanUpdateRequest {
 export type TrunkVlanMode = 'replace' | 'add' | 'remove';
 
 export interface PortTrunkVlansUpdateRequest {
-  device: string;
   interface: string;
   mode: TrunkVlanMode;
   vlans: number[];
@@ -60,7 +62,6 @@ export interface PortTrunkVlansUpdateRequest {
 // Body for POST /api/v1/ports/access-mode. Replaces the old generic
 // /ports/configure for this specific, well-defined operation.
 export interface PortSetAccessModeRequest {
-  device: string;
   interface: string;
   access_vlan: number;
 }
@@ -71,7 +72,6 @@ export interface PortSetAccessModeRequest {
 // PortTrunkVlansUpdateRequest to adjust either individually on a port
 // that's already trunk).
 export interface PortSetTrunkModeRequest {
-  device: string;
   interface: string;
   native_vlan: number;
   allowed_vlans: number[];
@@ -80,7 +80,6 @@ export interface PortSetTrunkModeRequest {
 // Body for PATCH /api/v1/ports/poe (RF-PUERTO-09).
 // enabled=true → `power inline auto` / `poe enable`; enabled=false → `power inline never` / `poe disable`.
 export interface PortPoeUpdateRequest {
-  device: string;
   interface: string;
   enabled: boolean;
 }
@@ -89,7 +88,6 @@ export interface PortPoeUpdateRequest {
 // one enable flag + one global percentage threshold, not the 3 traffic types
 // real hardware exposes separately. threshold_percent is required when enabled=true.
 export interface PortStormControlUpdateRequest {
-  device: string;
   interface: string;
   enabled: boolean;
   threshold_percent?: number | null;
@@ -98,7 +96,6 @@ export interface PortStormControlUpdateRequest {
 // Body for POST /api/v1/ports/reset (RF-PUERTO-10). Resets the interface to
 // its factory-default configuration — no extra fields beyond device+interface.
 export interface PortResetRequest {
-  device: string;
   interface: string;
 }
 

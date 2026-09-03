@@ -15,6 +15,7 @@ import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
 import type {
   PortAccessVlanUpdateRequest,
   PortAdminStateUpdateRequest,
+  PortDescriptionClearRequest,
   PortDescriptionUpdateRequest,
   PortListResponse,
   PortOperationResult,
@@ -26,13 +27,18 @@ import type {
   PortTrunkVlansUpdateRequest,
 } from '@/types/port';
 import type {
+  InterfazVirtualAclClearRequest,
   InterfazVirtualAclUpdateRequest,
   InterfazVirtualAdminStateUpdateRequest,
   InterfazVirtualCreateRequest,
   InterfazVirtualDeleteRequest,
+  InterfazVirtualDescriptionClearRequest,
   InterfazVirtualDescriptionUpdateRequest,
-  InterfazVirtualDhcpRelayUpdateRequest,
+  InterfazVirtualDhcpRelayAddRequest,
+  InterfazVirtualDhcpRelayRemoveRequest,
+  InterfazVirtualIpv4ClearRequest,
   InterfazVirtualIpv4UpdateRequest,
+  InterfazVirtualIpv6ClearRequest,
   InterfazVirtualIpv6UpdateRequest,
   InterfazVirtualListResponse,
   InterfazVirtualOperationResult,
@@ -356,9 +362,7 @@ export async function getPorts(device: string): Promise<PortListResponse> {
   // Drop the freshness metadata here; the upcoming frontend rewrite will
   // consume the envelope directly.
   const envelope = await unwrap<{ data: PortListResponse }>(
-    client.get<ApiResponse<{ data: PortListResponse }>>('/ports/', {
-      params: { device },
-    }),
+    client.get<ApiResponse<{ data: PortListResponse }>>(`/devices/${device}/ports/`),
   );
   return envelope.data;
 }
@@ -370,65 +374,82 @@ type PortJobRawResponse = {
 };
 
 export async function updatePortDescription(
+  device: string,
   body: PortDescriptionUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>('/ports/description', body);
+  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/description`, body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function clearPortDescription(
+  device: string,
+  body: PortDescriptionClearRequest,
+): Promise<PortOperationResult> {
+  const { data } = await client.delete<PortJobRawResponse>(`/devices/${device}/ports/description`, { data: body });
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setPortAdminState(
+  device: string,
   body: PortAdminStateUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>('/ports/admin-state', body);
+  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/admin-state`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setPortAccessVlan(
+  device: string,
   body: PortAccessVlanUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>('/ports/access-vlan', body);
+  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/access-vlan`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setTrunkAllowedVlans(
+  device: string,
   body: PortTrunkVlansUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>('/ports/trunk-vlans', body);
+  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/trunk-vlans`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setPortAccessMode(
+  device: string,
   body: PortSetAccessModeRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.post<PortJobRawResponse>('/ports/access-mode', body);
+  const { data } = await client.post<PortJobRawResponse>(`/devices/${device}/ports/access-mode`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setPortTrunkMode(
+  device: string,
   body: PortSetTrunkModeRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.post<PortJobRawResponse>('/ports/trunk-mode', body);
+  const { data } = await client.post<PortJobRawResponse>(`/devices/${device}/ports/trunk-mode`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setPortPoe(
+  device: string,
   body: PortPoeUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>('/ports/poe', body);
+  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/poe`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setPortStormControl(
+  device: string,
   body: PortStormControlUpdateRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.patch<PortJobRawResponse>('/ports/storm-control', body);
+  const { data } = await client.patch<PortJobRawResponse>(`/devices/${device}/ports/storm-control`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function resetPort(
+  device: string,
   body: PortResetRequest,
 ): Promise<PortOperationResult> {
-  const { data } = await client.post<PortJobRawResponse>('/ports/reset', body);
+  const { data } = await client.post<PortJobRawResponse>(`/devices/${device}/ports/reset`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
@@ -437,9 +458,7 @@ export async function resetPort(
 export async function getInterfacesVirtuales(device: string): Promise<InterfazVirtualListResponse> {
   // Cache-first, same SyncedResource envelope as getPorts()/getVlans().
   const envelope = await unwrap<{ data: InterfazVirtualListResponse }>(
-    client.get<ApiResponse<{ data: InterfazVirtualListResponse }>>('/interfaces-virtuales/', {
-      params: { device },
-    }),
+    client.get<ApiResponse<{ data: InterfazVirtualListResponse }>>(`/devices/${device}/interfaces-virtuales/`),
   );
   return envelope.data;
 }
@@ -451,58 +470,106 @@ type InterfazVirtualJobRawResponse = {
 };
 
 export async function createInterfazVirtual(
+  device: string,
   body: InterfazVirtualCreateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.post<InterfazVirtualJobRawResponse>('/interfaces-virtuales/', body);
+  const { data } = await client.post<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function deleteInterfazVirtual(
+  device: string,
   body: InterfazVirtualDeleteRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.post<InterfazVirtualJobRawResponse>('/interfaces-virtuales/delete', body);
+  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/`, { data: body });
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setInterfazAdminState(
+  device: string,
   body: InterfazVirtualAdminStateUpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/admin-state', body);
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/admin-state`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setInterfazDescription(
+  device: string,
   body: InterfazVirtualDescriptionUpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/description', body);
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/description`, body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function clearInterfazDescription(
+  device: string,
+  body: InterfazVirtualDescriptionClearRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/description`, { data: body });
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setInterfazIpv4(
+  device: string,
   body: InterfazVirtualIpv4UpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/ipv4', body);
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/ipv4`, body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function clearInterfazIpv4(
+  device: string,
+  body: InterfazVirtualIpv4ClearRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/ipv4`, { data: body });
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setInterfazIpv6(
+  device: string,
   body: InterfazVirtualIpv6UpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/ipv6', body);
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/ipv6`, body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function clearInterfazIpv6(
+  device: string,
+  body: InterfazVirtualIpv6ClearRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/ipv6`, { data: body });
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
 export async function setInterfazAcl(
+  device: string,
   body: InterfazVirtualAclUpdateRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/acl', body);
+  const { data } = await client.patch<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/acl`, body);
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 
-export async function setInterfazDhcpRelay(
-  body: InterfazVirtualDhcpRelayUpdateRequest,
+export async function clearInterfazAcl(
+  device: string,
+  body: InterfazVirtualAclClearRequest,
 ): Promise<InterfazVirtualOperationResult> {
-  const { data } = await client.patch<InterfazVirtualJobRawResponse>('/interfaces-virtuales/dhcp-relay', body);
+  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/acl`, { data: body });
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function addInterfazDhcpRelay(
+  device: string,
+  body: InterfazVirtualDhcpRelayAddRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.post<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/dhcp-relay`, body);
+  return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
+}
+
+export async function removeInterfazDhcpRelay(
+  device: string,
+  body: InterfazVirtualDhcpRelayRemoveRequest,
+): Promise<InterfazVirtualOperationResult> {
+  const { data } = await client.delete<InterfazVirtualJobRawResponse>(`/devices/${device}/interfaces-virtuales/dhcp-relay`, { data: body });
   return { group_job_id: data.group_job_id, jobs: data.jobs ?? [] };
 }
 

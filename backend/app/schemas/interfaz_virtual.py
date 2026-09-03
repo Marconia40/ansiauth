@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 def _validar_cidr(value: str, version: int) -> str:
@@ -41,10 +41,11 @@ class InterfazVirtualRead(BaseModel):
 
 
 class _InterfazVirtualTargetRequest(BaseModel):
-    """Target device+vlan_id compartido por cada request de escritura sobre
-    una interfaz virtual puntual."""
+    """Target vlan_id compartido por cada request de escritura sobre una
+    interfaz virtual puntual. El device ya no va en el body -- es un
+    segmento de la URL (``/devices/{name}/interfaces-virtuales/...``),
+    mismo criterio que los endpoints de refresh."""
 
-    device: str = Field(..., min_length=1, description="Target device name.")
     vlan_id: int = Field(..., ge=1, le=4094, description="VLAN ID de la interfaz (1-4094).")
 
 
@@ -64,7 +65,7 @@ class InterfazVirtualCreateRequest(_InterfazVirtualTargetRequest):
 
 
 class InterfazVirtualDeleteRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``POST /interfaces-virtuales/delete`` (RF-INTERV-02)."""
+    """Request body para ``DELETE /interfaces-virtuales/`` (RF-INTERV-02)."""
 
 
 class InterfazVirtualAdminStateUpdateRequest(_InterfazVirtualTargetRequest):
@@ -74,25 +75,28 @@ class InterfazVirtualAdminStateUpdateRequest(_InterfazVirtualTargetRequest):
 
 
 class InterfazVirtualDescriptionUpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/description`` (RF-INTERV-08).
+    """Request body para ``PATCH /interfaces-virtuales/description``
+    (RF-INTERV-08) -- asigna una descripción. Para limpiarla, ver
+    ``DELETE /interfaces-virtuales/description`` (verbo explícito en vez de
+    inferir "limpiar" de un valor vacío -- mismo criterio que DHCP relay,
+    ver ``InterfazVirtualDhcpRelayAddRequest``)."""
 
-    Un ``description`` vacío limpia la descripción configurada."""
+    description: str = Field(..., min_length=1, max_length=240, description="Nueva descripción.")
 
-    description: str = Field(default="", max_length=240, description="Nueva descripción. Vacío limpia la descripción actual.")
+
+class InterfazVirtualDescriptionClearRequest(_InterfazVirtualTargetRequest):
+    """Request body para ``DELETE /interfaces-virtuales/description`` (RF-INTERV-08)."""
 
 
 class InterfazVirtualIpv4UpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/ipv4`` (RF-INTERV-03).
+    """Request body para ``PATCH /interfaces-virtuales/ipv4`` (RF-INTERV-03)
+    -- asigna una dirección IPv4. Para limpiarla, ver
+    ``DELETE /interfaces-virtuales/ipv4``. ``secondary=true`` aplica sobre
+    la IP secundaria en vez de la primaria -- requiere que ya exista una
+    primaria en la interfaz (chequeado contra estado real del device, no
+    algo que se pueda validar acá)."""
 
-    ``ipv4_address`` vacío o ausente limpia la dirección configurada.
-    ``secondary=true`` aplica sobre la IP secundaria en vez de la primaria
-    -- requiere que ya exista una primaria en la interfaz (chequeado contra
-    estado real del device, no algo que se pueda validar acá)."""
-
-    ipv4_address: Optional[str] = Field(
-        default=None,
-        description="Dirección IPv4 en formato CIDR (ej. '10.10.10.11/24'). Vacío/null limpia la dirección actual.",
-    )
+    ipv4_address: str = Field(..., description="Dirección IPv4 en formato CIDR (ej. '10.10.10.11/24').")
     secondary: bool = Field(
         default=False,
         description="Si true, aplica sobre la IP secundaria (RF-INTERV-03) en vez de la primaria.",
@@ -100,66 +104,76 @@ class InterfazVirtualIpv4UpdateRequest(_InterfazVirtualTargetRequest):
 
     @field_validator("ipv4_address")
     @classmethod
-    def _validar_ipv4(cls, v: "str | None") -> "str | None":
-        if not v:
-            return v
+    def _validar_ipv4(cls, v: str) -> str:
         return _validar_cidr(v, 4)
 
 
-class InterfazVirtualIpv6UpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/ipv6`` (RF-INTERV-04).
+class InterfazVirtualIpv4ClearRequest(_InterfazVirtualTargetRequest):
+    """Request body para ``DELETE /interfaces-virtuales/ipv4`` (RF-INTERV-03)."""
 
-    ``ipv6_address`` vacío o ausente limpia la dirección configurada."""
-
-    ipv6_address: Optional[str] = Field(
-        default=None,
-        description="Dirección IPv6 en formato CIDR (ej. '2001:db8::1/64'). Vacío/null limpia la dirección actual.",
+    secondary: bool = Field(
+        default=False,
+        description="Si true, limpia la IP secundaria en vez de la primaria.",
     )
+
+
+class InterfazVirtualIpv6UpdateRequest(_InterfazVirtualTargetRequest):
+    """Request body para ``PATCH /interfaces-virtuales/ipv6`` (RF-INTERV-04)
+    -- asigna una dirección IPv6. Para limpiarla, ver
+    ``DELETE /interfaces-virtuales/ipv6``."""
+
+    ipv6_address: str = Field(..., description="Dirección IPv6 en formato CIDR (ej. '2001:db8::1/64').")
 
     @field_validator("ipv6_address")
     @classmethod
-    def _validar_ipv6(cls, v: "str | None") -> "str | None":
-        if not v:
-            return v
+    def _validar_ipv6(cls, v: str) -> str:
         return _validar_cidr(v, 6)
 
 
-class InterfazVirtualAclUpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/acl`` (RF-INTERV-05).
+class InterfazVirtualIpv6ClearRequest(_InterfazVirtualTargetRequest):
+    """Request body para ``DELETE /interfaces-virtuales/ipv6`` (RF-INTERV-04)."""
 
-    Asigna (o limpia, si ``acl_name`` es vacío/null) una ACL que ya existe
-    en el device en el sentido indicado -- no crea la ACL (RF-GLOBAL-04,
-    aparte)."""
+
+class InterfazVirtualAclUpdateRequest(_InterfazVirtualTargetRequest):
+    """Request body para ``PATCH /interfaces-virtuales/acl`` (RF-INTERV-05)
+    -- asigna una ACL que ya existe en el device al sentido indicado, no la
+    crea (RF-GLOBAL-04, aparte). Para desasignarla, ver
+    ``DELETE /interfaces-virtuales/acl``."""
 
     direction: Literal["in", "out"] = Field(..., description="Sentido de la ACL -- 'in' o 'out'.")
-    acl_name: Optional[str] = Field(
-        default=None,
-        description="Nombre/número de la ACL a asignar. Vacío/null limpia la ACL actual de ese sentido.",
-    )
+    acl_name: str = Field(..., min_length=1, description="Nombre/número de la ACL a asignar.")
 
 
-class InterfazVirtualDhcpRelayUpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/dhcp-relay`` (RF-INTERV-05).
+class InterfazVirtualAclClearRequest(_InterfazVirtualTargetRequest):
+    """Request body para ``DELETE /interfaces-virtuales/acl`` (RF-INTERV-05)."""
 
-    Incremental -- 1 server por llamada, no full-replace (así lo modela el
-    SRS: "Acción: asignar/eliminar" sobre una dirección puntual). Exactamente
-    uno de ``add``/``remove`` debe venir. El backend valida contra el
-    estado real de la interfaz que la familia de IP (v4/v6) del server ya
-    tenga su dirección correspondiente configurada, y evita duplicados/
-    excede-el-límite."""
+    direction: Literal["in", "out"] = Field(..., description="Sentido de la ACL a desasignar -- 'in' o 'out'.")
 
-    add: Optional[str] = Field(default=None, description="IP de un servidor DHCP relay a agregar.")
-    remove: Optional[str] = Field(default=None, description="IP de un servidor DHCP relay a eliminar.")
 
-    @field_validator("add", "remove")
+class InterfazVirtualDhcpRelayAddRequest(_InterfazVirtualTargetRequest):
+    """Request body para ``POST /interfaces-virtuales/dhcp-relay``
+    (RF-INTERV-05) -- agrega 1 server, sin tocar los demás ya configurados.
+
+    El verbo POST ya expresa la acción (alta) -- a diferencia de un único
+    endpoint con un campo ``add``/``remove`` en el body (lo que se
+    descartó: el método HTTP no dice nada sobre qué hace, y hace falta un
+    validador cruzado para exigir exactamente uno de los dos)."""
+
+    server: str = Field(..., description="IP de un servidor DHCP relay a agregar.")
+
+    @field_validator("server")
     @classmethod
-    def _validar_ip(cls, v: "str | None") -> "str | None":
-        if not v:
-            return v
+    def _validar_ip(cls, v: str) -> str:
         return _validar_ip_plana(v)
 
-    @model_validator(mode="after")
-    def _exactamente_uno(self) -> "InterfazVirtualDhcpRelayUpdateRequest":
-        if bool(self.add) == bool(self.remove):
-            raise ValueError("exactly one of 'add' or 'remove' must be provided")
-        return self
+
+class InterfazVirtualDhcpRelayRemoveRequest(_InterfazVirtualTargetRequest):
+    """Request body para ``DELETE /interfaces-virtuales/dhcp-relay``
+    (RF-INTERV-05) -- elimina 1 server, sin tocar los demás."""
+
+    server: str = Field(..., description="IP de un servidor DHCP relay a eliminar.")
+
+    @field_validator("server")
+    @classmethod
+    def _validar_ip(cls, v: str) -> str:
+        return _validar_ip_plana(v)

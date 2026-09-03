@@ -240,14 +240,26 @@ set_interfaz_acl:
       parents: "interface Vlan{vlan_id}"
       lines: ["no ip access-group {direction}"]
 
-# set_interfaz_dhcp_relay NO tiene entrada acá a propósito -- es una lista
-# de N servers (RF-INTERV-06, "asignar o eliminar", full-replace), y este
-# motor de templates arma listas de líneas FIJAS por diseño (no soporta un
-# número variable de líneas por YAML). El driver construye el "ip
-# helper-address {ip}" por cada server directo en Python y llama
-# self._aplicar() -- mismo criterio que "el cómputo no va en el YAML",
-# llevado al límite cuando el cómputo es "cuántas líneas mandar", no solo
-# "qué valor va en el placeholder". Ver driver.py.
+# {servers} es la lista completa de relay servers (InterfazVirtual arma el
+# full-replace antes de llegar acá -- RF-INTERV-05 es incremental a nivel
+# API, full-replace a nivel CLI). "repeat" arma 1 "ip helper-address {ip}"
+# por cada elemento, después del "no ip helper-address" fijo.
+#
+# "match: none" es necesario -- bug real encontrado contra el device de
+# lab: el diffing por default de ios_config ("match: line") compara contra
+# una foto de la running-config tomada ANTES del batch, así que "saltea"
+# reenviar una "ip helper-address X" que ya ve configurada, sin darse
+# cuenta de que el "no ip helper-address" de esta misma llamada la va a
+# borrar -- el resultado real era que solo sobrevivía el último server
+# agregado, no el full-replace completo.
+set_interfaz_dhcp_relay:
+  primary:
+    parents: "interface Vlan{vlan_id}"
+    lines: ["no ip helper-address"]
+    match: "none"
+    repeat:
+      over: "servers"
+      line: "ip helper-address {item}"
 
 # 2 comandos: el running-config de cada interfaz Vlan (tiene ip/ipv6
 # address, description, access-group, helper-address) + el estado

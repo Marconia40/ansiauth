@@ -264,26 +264,11 @@ class CiscoVendor(VendorDriver):
     def set_interfaz_dhcp_relay(
         self, vlan_id: int, servers: list[str], device: Device, password: str,
     ) -> dict:
-        """Full-replace de la lista de relay servers -- número variable de
-        líneas ("ip helper-address {ip}" por cada server), el motor de
-        templates de YAML arma listas fijas por diseño, así que este caso
-        puntual arma el extravars acá y llama _aplicar() directo (mismo
-        _aplicar() que ya usa _ejecutar_paso() por debajo, sin pasar por
-        _aplicar_desde_template()/alternatives -- no hay ningún error
-        conocido todavía para esta operación puntual).
-
-        "match": "none" es necesario acá -- bug real encontrado contra el
-        device de lab: el diffing por default de ios_config ("match: line")
-        compara contra una foto de la running-config tomada ANTES del
-        batch, así que "saltea" reenviar una "ip helper-address X" que ya
-        ve configurada, sin darse cuenta de que el "no ip helper-address"
-        de esta misma llamada la va a borrar -- el resultado real era que
-        solo sobrevivía el último server agregado, no el full-replace
-        completo (ver comentario en run.yml)."""
-        lines = ["no ip helper-address"] + [f"ip helper-address {ip}" for ip in servers]
-        return self._aplicar(
-            {"parents": f"interface Vlan{vlan_id}", "lines": lines, "match": "none"},
-            device, password, op_label="set interfaz DHCP relay",
+        """Full-replace de la lista de relay servers -- ver YAML
+        (``repeat``) para el "no ip helper-address" fijo + 1 línea por
+        server, y la nota sobre "match: none" ahí mismo."""
+        return self._aplicar_desde_template(
+            "set_interfaz_dhcp_relay", {"vlan_id": vlan_id, "servers": servers}, device, password,
         )
 
     def get_interfaces_virtuales(self, device: Device, password: str) -> list[InterfazVirtual]:

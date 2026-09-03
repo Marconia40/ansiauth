@@ -33,6 +33,20 @@ def _direccion_y_mascara_a_cidr(addr: str, mascara: str) -> str:
         return f"{addr}/{mascara}"
 
 
+def _normalizar_ipv6(cidr: str) -> str:
+    """VRP devuelve las IPv6 en MAYÚSCULAS (``2001:DB8::1/64``) aunque se
+    hayan configurado en minúsculas -- confirmado contra el device real de
+    lab. Sin normalizar, la comparación de no-op en
+    ``InterfazVirtual._aplicar_ipv6`` (``actual.ipv6_address ==
+    self.ipv6_address``) nunca matchea, y cada PATCH reenvía el comando al
+    device aunque el valor ya sea el mismo. ``ipaddress`` normaliza a
+    minúsculas, igual que el resto de este sistema."""
+    try:
+        return str(ipaddress.ip_interface(cidr))
+    except ValueError:
+        return cidr
+
+
 # ── Cisco IOS ────────────────────────────────────────────────────────────────
 
 # "interface Vlan10" -- arranca un bloque nuevo en el running-config filtrado.
@@ -135,8 +149,10 @@ def parse_ios_interfaces_virtuales(running_config_output: str, brief_output: str
 # Header/description/shutdown/ip address (IPv4) y el formato de brief
 # confirmados contra el device real de lab (ver driver.py -- 2 pasadas,
 # "display current-configuration interface Vlanif{id}" con número +
-# "display ip interface brief"). ipv6 address / traffic-filter siguen sin
-# confirmar (no probados contra hardware real todavía).
+# "display ip interface brief"). ipv6 address / traffic-filter (ambas
+# formas, numerada y con nombre) confirmados aparte contra config real de
+# un device de producción. dhcp select relay/server-ip -- ver
+# huawei/commands.yaml.
 
 _VRP_IFACE_HEADER = re.compile(r"^interface\s+Vlanif(\d+)\s*$", re.IGNORECASE)
 _VRP_DESCRIPTION = re.compile(r"^\s*description\s+(.+?)\s*$")
@@ -145,8 +161,18 @@ _VRP_SHUTDOWN = re.compile(r"^\s*shutdown\s*$")
 # "secondary") -- no confirmado contra device real, forma probable.
 _VRP_IPV4_SECONDARY = re.compile(r"^\s*ip address\s+(\S+)\s+(\S+)\s+sub\s*$", re.IGNORECASE)
 _VRP_IPV4 = re.compile(r"^\s*ip address\s+(\S+)\s+(\S+)\s*$")
-_VRP_IPV6 = re.compile(r"^\s*ipv6 address\s+(\S+)\s+(\S+)\s*$")
-_VRP_ACL = re.compile(r"^\s*traffic-filter\s+(inbound|outbound)\s+acl\s+(\S+)\s*$", re.IGNORECASE)
+# Confirmado contra config real de producción: CIDR de un tirón, igual que
+# Cisco -- no separado addr+prefix-length como el IPv4 de esta plataforma.
+_VRP_IPV6 = re.compile(r"^\s*ipv6 address\s+(\S+)\s*$")
+# El orden de traffic-filter cambia según numerada vs con nombre --
+# confirmado contra config real: "traffic-filter inbound acl 3002" para
+# numeradas, "traffic-filter acl <nombre> inbound" para ACLs con nombre.
+_VRP_ACL_NUMERIC = re.compile(r"^\s*traffic-filter\s+(inbound|outbound)\s+acl\s+(\S+)\s*$", re.IGNORECASE)
+_VRP_ACL_NAMED = re.compile(r"^\s*traffic-filter\s+acl\s+(\S+)\s+(inbound|outbound)\s*$", re.IGNORECASE)
+# Confirmado contra config real de producción: "dhcp relay server-ip <ip>"
+# por cada server (forma directa -- ver huawei/commands.yaml para la
+# forma alternativa por "server group", no usada acá).
+_VRP_HELPER = re.compile(r"^\s*dhcp relay server-ip\s+(\S+)\s*$", re.IGNORECASE)
 
 _VRP_BRIEF_LINE = re.compile(
     r"^Vlanif(\d+)\s+(up|down|\*down)\s+(up|down)\s*", re.IGNORECASE,
@@ -171,9 +197,11 @@ def parse_vrp_interfaces_virtuales(config_output: str, brief_output: str) -> lis
 
     interfaces: list[InterfazVirtual] = []
     actual: InterfazVirtual | None = None
+    helpers: list[str] = []
 
     def _cerrar_actual() -> None:
         if actual is not None:
+            actual.dhcp_relay_servers = helpers[:] if helpers else None
             interfaces.append(actual)
 
     for raw in config_output.splitlines():
@@ -184,6 +212,7 @@ def parse_vrp_interfaces_virtuales(config_output: str, brief_output: str) -> lis
             vlan_id = int(header.group(1))
             admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
             actual = InterfazVirtual(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
+            helpers = []
             continue
         if actual is None:
             continue
@@ -204,14 +233,25 @@ def parse_vrp_interfaces_virtuales(config_output: str, brief_output: str) -> lis
             continue
         m = _VRP_IPV6.match(line)
         if m:
-            actual.ipv6_address = f"{m.group(1)}/{m.group(2)}"
+            actual.ipv6_address = _normalizar_ipv6(m.group(1))
             continue
-        m = _VRP_ACL.match(line)
+        m = _VRP_ACL_NUMERIC.match(line)
         if m:
             if m.group(1).lower() == "inbound":
                 actual.acl_in = m.group(2)
             else:
                 actual.acl_out = m.group(2)
+            continue
+        m = _VRP_ACL_NAMED.match(line)
+        if m:
+            if m.group(2).lower() == "inbound":
+                actual.acl_in = m.group(1)
+            else:
+                actual.acl_out = m.group(1)
+            continue
+        m = _VRP_HELPER.match(line)
+        if m:
+            helpers.append(m.group(1))
             continue
 
     _cerrar_actual()
@@ -233,12 +273,13 @@ def parse_ios_acl_names(show_access_lists_output: str) -> list[str]:
     ]
 
 
-# "Total nonempty ACL number is 0" confirmado contra el device real de lab
-# (caso vacío). El formato con ACLs reales ("Basic/Advanced ACL <num-o-
-# nombre>, N rule(s)") es la forma documentada de VRP, NO confirmada contra
-# una instancia con ACLs (ver comentario en huawei/commands.yaml).
+# Confirmado contra config real de producción, ambos casos: ACLs numeradas
+# ("Advanced ACL 3000, 8 rules") y con nombre ("Basic Name ACL
+# acceso-snmp, 2 rules" -- la palabra "Name" de más solo aparece cuando la
+# ACL tiene nombre, no número). "Total nonempty ACL number is 0" (caso
+# vacío) confirmado aparte contra el device real de lab.
 _VRP_ACL_HEADER = re.compile(
-    r"^(?:Basic|Advanced|Ethernet frame|User)\s+ACL\s+(\S+?),", re.IGNORECASE,
+    r"^(?:Basic|Advanced|Ethernet frame|User)\s+(?:Name\s+)?ACL\s+(\S+?),", re.IGNORECASE,
 )
 
 
