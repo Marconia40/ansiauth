@@ -1,4 +1,11 @@
-export type Vendor = 'cisco' | 'huawei';
+export type Vendor = 'cisco_ios' | 'huawei_vrp';
+
+/** Display label for a vendor value returned by the API. */
+export function vendorLabel(vendor: Vendor | string): string {
+  if (vendor === 'cisco_ios') return 'Cisco';
+  if (vendor === 'huawei_vrp') return 'Huawei';
+  return vendor;
+}
 
 /**
  * Matches backend DevicePublic schema post-Phase 4.

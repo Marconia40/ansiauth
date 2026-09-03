@@ -25,8 +25,8 @@ function extractMessage(error: unknown, fallback: string): string {
 }
 
 const VENDOR_LABELS: Record<Vendor, string> = {
-  cisco: 'Cisco IOS',
-  huawei: 'Huawei',
+  cisco_ios: 'Cisco IOS',
+  huawei_vrp: 'Huawei VRP',
 };
 
 export default function DevicesPage() {
@@ -41,7 +41,7 @@ export default function DevicesPage() {
   // ── Create form ──────────────────────────────────────────────────────────
   const [newName, setNewName] = useState('');
   const [newHost, setNewHost] = useState('');
-  const [newVendor, setNewVendor] = useState<Vendor>('cisco');
+  const [newVendor, setNewVendor] = useState<Vendor>('cisco_ios');
   const [newPlatform, setNewPlatform] = useState('');
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -53,7 +53,7 @@ export default function DevicesPage() {
   // ── Edit form (site/group NOT edited here per D20 — use Move… instead) ──
   const [editingDeviceName, setEditingDeviceName] = useState<string | null>(null);
   const [editingHost, setEditingHost] = useState('');
-  const [editingVendor, setEditingVendor] = useState<Vendor>('cisco');
+  const [editingVendor, setEditingVendor] = useState<Vendor>('cisco_ios');
   const [editingPlatform, setEditingPlatform] = useState('');
   const [editingUsername, setEditingUsername] = useState('');
   const [editingPassword, setEditingPassword] = useState('');
@@ -146,7 +146,7 @@ export default function DevicesPage() {
       });
       setNewName('');
       setNewHost('');
-      setNewVendor('cisco');
+      setNewVendor('cisco_ios');
       setNewPlatform('');
       setNewUsername('');
       setNewPassword('');
@@ -175,7 +175,7 @@ export default function DevicesPage() {
   function handleEditCancel() {
     setEditingDeviceName(null);
     setEditingHost('');
-    setEditingVendor('cisco');
+    setEditingVendor('cisco_ios');
     setEditingPlatform('');
     setEditingUsername('');
     setEditingPassword('');
@@ -304,8 +304,8 @@ export default function DevicesPage() {
           disabled={isSubmitting}
           className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
         >
-          <option value="cisco">Cisco IOS</option>
-          <option value="huawei">Huawei</option>
+          <option value="cisco_ios">Cisco IOS</option>
+          <option value="huawei_vrp">Huawei VRP</option>
         </select>
         <input
           type="text"
@@ -445,8 +445,8 @@ export default function DevicesPage() {
                           disabled={isSubmitting}
                           className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                         >
-                          <option value="cisco">Cisco IOS</option>
-                          <option value="huawei">Huawei</option>
+                          <option value="cisco_ios">Cisco IOS</option>
+                          <option value="huawei_vrp">Huawei VRP</option>
                         </select>
                       ) : (
                         VENDOR_LABELS[device.vendor] ?? device.vendor
