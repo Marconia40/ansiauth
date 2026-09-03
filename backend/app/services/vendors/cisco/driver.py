@@ -8,7 +8,7 @@ from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.interfaz_virtual import InterfazVirtual
+    from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
 
@@ -196,41 +196,41 @@ class CiscoVendor(VendorDriver):
 
     # ── Virtual interface (SVI) operations, RF-INTERV-* ───────────────────────
 
-    def create_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template("create_interfaz_virtual", {"vlan_id": vlan_id}, device, password)
+    def create_svi(self, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("create_svi", {"vlan_id": vlan_id}, device, password)
 
-    def delete_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template("delete_interfaz_virtual", {"vlan_id": vlan_id}, device, password)
+    def delete_svi(self, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("delete_svi", {"vlan_id": vlan_id}, device, password)
 
-    def set_interfaz_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
+    def set_svi_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
         variant = "enabled" if enabled else "disabled"
         return self._aplicar_desde_template(
-            "set_interfaz_admin_state", {"vlan_id": vlan_id}, device, password, variant=variant,
+            "set_svi_admin_state", {"vlan_id": vlan_id}, device, password, variant=variant,
         )
 
-    def set_interfaz_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
+    def set_svi_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
         variant = "clear" if self._is_description_empty(description) else "set"
         return self._aplicar_desde_template(
-            "set_interfaz_description", {"vlan_id": vlan_id, "description": description},
+            "set_svi_description", {"vlan_id": vlan_id, "description": description},
             device, password, variant=variant,
         )
 
-    def set_interfaz_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
+    def set_svi_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
         """*ipv4_address* llega en CIDR (``"10.10.10.11/24"``) o ``""``/
         ``None`` para limpiar -- la conversión a máscara punteada (lo que
         IOS realmente espera) es cómputo real, se hace acá, no en el YAML."""
         variant = "clear" if not ipv4_address else "set"
         addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address)
         return self._aplicar_desde_template(
-            "set_interfaz_ipv4", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
+            "set_svi_ipv4", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
             device, password, variant=variant,
         )
 
-    def set_interfaz_ipv4_secondary(
+    def set_svi_ipv4_secondary(
         self, vlan_id: int, ipv4_address: "str | None", previous_ipv4_address: "str | None",
         device: Device, password: str,
     ) -> dict:
-        """Misma conversión CIDR->máscara que set_interfaz_ipv4() -- IOS
+        """Misma conversión CIDR->máscara que set_svi_ipv4() -- IOS
         pide "ip address {addr} {mask} secondary", y para limpiar hace
         falta repetir la dirección secundaria actual con "no" (a diferencia
         de la primaria, "no ip address" a secas borra TODO, no solo la
@@ -239,45 +239,45 @@ class CiscoVendor(VendorDriver):
         variant = "clear" if not ipv4_address else "set"
         addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address if ipv4_address else previous_ipv4_address)
         return self._aplicar_desde_template(
-            "set_interfaz_ipv4_secondary", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
+            "set_svi_ipv4_secondary", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
             device, password, variant=variant,
         )
 
-    def set_interfaz_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
+    def set_svi_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
         """Cisco sí acepta CIDR directo para IPv6 -- no hace falta separar
         dirección/prefix como en IPv4."""
         variant = "clear" if not ipv6_address else "set"
         return self._aplicar_desde_template(
-            "set_interfaz_ipv6", {"vlan_id": vlan_id, "ipv6_address": ipv6_address or ""},
+            "set_svi_ipv6", {"vlan_id": vlan_id, "ipv6_address": ipv6_address or ""},
             device, password, variant=variant,
         )
 
-    def set_interfaz_acl(
+    def set_svi_acl(
         self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
     ) -> dict:
         variant = "clear" if not acl_name else "set"
         return self._aplicar_desde_template(
-            "set_interfaz_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
+            "set_svi_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
             device, password, variant=variant,
         )
 
-    def set_interfaz_dhcp_relay(
+    def set_svi_dhcp_relay(
         self, vlan_id: int, servers: list[str], device: Device, password: str,
     ) -> dict:
         """Full-replace de la lista de relay servers -- ver YAML
         (``repeat``) para el "no ip helper-address" fijo + 1 línea por
         server, y la nota sobre "match: none" ahí mismo."""
         return self._aplicar_desde_template(
-            "set_interfaz_dhcp_relay", {"vlan_id": vlan_id, "servers": servers}, device, password,
+            "set_svi_dhcp_relay", {"vlan_id": vlan_id, "servers": servers}, device, password,
         )
 
-    def get_interfaces_virtuales(self, device: Device, password: str) -> list[InterfazVirtual]:
-        commands = self._cargar_comandos()["get_interfaces_virtuales"]["primary"]["commands"]
+    def get_svis(self, device: Device, password: str) -> list[SVI]:
+        commands = self._cargar_comandos()["get_svis"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
-        from app.services.parsers.interfaz_virtual_parser import parse_ios_interfaces_virtuales
+        from app.services.parsers.svi_parser import parse_ios_svis
         running_config = stdouts[0] if len(stdouts) > 0 else ""
         brief = stdouts[1] if len(stdouts) > 1 else ""
-        return parse_ios_interfaces_virtuales(running_config, brief)
+        return parse_ios_svis(running_config, brief)
 
     def list_acl_names(self, device: Device, password: str) -> list[str]:
         """Confirmado contra el device real de lab con ACLs configuradas.
@@ -288,7 +288,7 @@ class CiscoVendor(VendorDriver):
         lectura, no como "0 ACLs") -- confirmar antes de asumir."""
         commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
-        from app.services.parsers.interfaz_virtual_parser import parse_ios_acl_names
+        from app.services.parsers.svi_parser import parse_ios_acl_names
         return parse_ios_acl_names(stdouts[0] if stdouts else "")
 
     @staticmethod

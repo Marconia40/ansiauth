@@ -27,22 +27,22 @@ import type {
   PortTrunkVlansUpdateRequest,
 } from '@/types/port';
 import type {
-  InterfazVirtualAclClearRequest,
-  InterfazVirtualAclUpdateRequest,
-  InterfazVirtualAdminStateUpdateRequest,
-  InterfazVirtualCreateRequest,
-  InterfazVirtualDeleteRequest,
-  InterfazVirtualDescriptionClearRequest,
-  InterfazVirtualDescriptionUpdateRequest,
-  InterfazVirtualDhcpRelayAddRequest,
-  InterfazVirtualDhcpRelayRemoveRequest,
-  InterfazVirtualIpv4ClearRequest,
-  InterfazVirtualIpv4UpdateRequest,
-  InterfazVirtualIpv6ClearRequest,
-  InterfazVirtualIpv6UpdateRequest,
-  InterfazVirtualListResponse,
-  InterfazVirtualOperationResult,
-} from '@/types/interfaz-virtual';
+  SVIAclClearRequest,
+  SVIAclUpdateRequest,
+  SVIAdminStateUpdateRequest,
+  SVICreateRequest,
+  SVIDeleteRequest,
+  SVIDescriptionClearRequest,
+  SVIDescriptionUpdateRequest,
+  SVIDhcpRelayAddRequest,
+  SVIDhcpRelayRemoveRequest,
+  SVIIpv4ClearRequest,
+  SVIIpv4UpdateRequest,
+  SVIIpv6ClearRequest,
+  SVIIpv6UpdateRequest,
+  SVIListResponse,
+  SVIOperationResult,
+} from '@/types/svi';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -489,140 +489,140 @@ export async function resetPort(
 
 // ── Virtual interfaces (SVI) ─────────────────────────────────────────────────
 
-export async function getInterfacesVirtuales(device: string): Promise<InterfazVirtualListResponse> {
+export async function getInterfacesVirtuales(device: string): Promise<SVIListResponse> {
   // Cache-first, same SyncedResource envelope as getPorts()/getVlans().
-  const envelope = await unwrap<{ data: InterfazVirtualListResponse }>(
-    client.get<ApiResponse<{ data: InterfazVirtualListResponse }>>(`/devices/${device}/interfaces-virtuales/`),
+  const envelope = await unwrap<{ data: SVIListResponse }>(
+    client.get<ApiResponse<{ data: SVIListResponse }>>(`/devices/${device}/svis/`),
   );
   return envelope.data;
 }
 
-export async function createInterfazVirtual(
+export async function createSVI(
   device: string,
-  body: InterfazVirtualCreateRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.post<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/`, body),
+  body: SVICreateRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.post<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/`, body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function deleteInterfazVirtual(
+export async function deleteSVI(
   device: string,
-  body: InterfazVirtualDeleteRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/`, { data: body }),
+  body: SVIDeleteRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/`, { data: body }),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function setInterfazAdminState(
+export async function setSVIAdminState(
   device: string,
-  body: InterfazVirtualAdminStateUpdateRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/admin-state`, body),
+  body: SVIAdminStateUpdateRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.patch<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/admin-state`, body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function setInterfazDescription(
+export async function setSVIDescription(
   device: string,
-  body: InterfazVirtualDescriptionUpdateRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/description`, body),
+  body: SVIDescriptionUpdateRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.patch<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/description`, body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function clearInterfazDescription(
+export async function clearSVIDescription(
   device: string,
-  body: InterfazVirtualDescriptionClearRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/description`, { data: body }),
+  body: SVIDescriptionClearRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/description`, { data: body }),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function setInterfazIpv4(
+export async function setSVIIpv4(
   device: string,
-  body: InterfazVirtualIpv4UpdateRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/ipv4`, body),
+  body: SVIIpv4UpdateRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.patch<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/ipv4`, body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function clearInterfazIpv4(
+export async function clearSVIIpv4(
   device: string,
-  body: InterfazVirtualIpv4ClearRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/ipv4`, { data: body }),
+  body: SVIIpv4ClearRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/ipv4`, { data: body }),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function setInterfazIpv6(
+export async function setSVIIpv6(
   device: string,
-  body: InterfazVirtualIpv6UpdateRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/ipv6`, body),
+  body: SVIIpv6UpdateRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.patch<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/ipv6`, body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function clearInterfazIpv6(
+export async function clearSVIIpv6(
   device: string,
-  body: InterfazVirtualIpv6ClearRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/ipv6`, { data: body }),
+  body: SVIIpv6ClearRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/ipv6`, { data: body }),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function setInterfazAcl(
+export async function setSVIAcl(
   device: string,
-  body: InterfazVirtualAclUpdateRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.patch<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/acl`, body),
+  body: SVIAclUpdateRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.patch<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/acl`, body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function clearInterfazAcl(
+export async function clearSVIAcl(
   device: string,
-  body: InterfazVirtualAclClearRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/acl`, { data: body }),
+  body: SVIAclClearRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/acl`, { data: body }),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function addInterfazDhcpRelay(
+export async function addSVIDhcpRelay(
   device: string,
-  body: InterfazVirtualDhcpRelayAddRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.post<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/dhcp-relay`, body),
+  body: SVIDhcpRelayAddRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.post<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/dhcp-relay`, body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
-export async function removeInterfazDhcpRelay(
+export async function removeSVIDhcpRelay(
   device: string,
-  body: InterfazVirtualDhcpRelayRemoveRequest,
-): Promise<InterfazVirtualOperationResult> {
-  const result = await unwrap<InterfazVirtualOperationResult>(
-    client.delete<ApiResponse<InterfazVirtualOperationResult>>(`/devices/${device}/interfaces-virtuales/dhcp-relay`, { data: body }),
+  body: SVIDhcpRelayRemoveRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/dhcp-relay`, { data: body }),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }

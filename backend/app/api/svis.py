@@ -7,24 +7,24 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.exceptions import ValidationError
 from app.core.response import ok
 from app.core.scope import authorize_device, obtener_scope, require_authenticated, require_device
-from app.models.interfaz_virtual import InterfazVirtual
+from app.models.svi import SVI
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.device_sync import SyncedResource
-from app.schemas.interfaz_virtual import (
-    InterfazVirtualAclClearRequest,
-    InterfazVirtualAclUpdateRequest,
-    InterfazVirtualAdminStateUpdateRequest,
-    InterfazVirtualCreateRequest,
-    InterfazVirtualDeleteRequest,
-    InterfazVirtualDescriptionClearRequest,
-    InterfazVirtualDescriptionUpdateRequest,
-    InterfazVirtualDhcpRelayAddRequest,
-    InterfazVirtualDhcpRelayRemoveRequest,
-    InterfazVirtualIpv4ClearRequest,
-    InterfazVirtualIpv4UpdateRequest,
-    InterfazVirtualIpv6ClearRequest,
-    InterfazVirtualIpv6UpdateRequest,
-    InterfazVirtualRead,
+from app.schemas.svi import (
+    SVIAclClearRequest,
+    SVIAclUpdateRequest,
+    SVIAdminStateUpdateRequest,
+    SVICreateRequest,
+    SVIDeleteRequest,
+    SVIDescriptionClearRequest,
+    SVIDescriptionUpdateRequest,
+    SVIDhcpRelayAddRequest,
+    SVIDhcpRelayRemoveRequest,
+    SVIIpv4ClearRequest,
+    SVIIpv4UpdateRequest,
+    SVIIpv6ClearRequest,
+    SVIIpv6UpdateRequest,
+    SVIRead,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ def _authz_device(
     ``authorize_device()``, pasando ``(site_id, device_group_id)`` ya
     resueltos cuando el caller ya tiene el ``Device`` en mano."""
     resolved = (device.site_id, device.device_group_id) if device is not None else None
-    authorize_device(scope, device_name, "interfaz_virtual_device_op", min_role, resolved=resolved)
+    authorize_device(scope, device_name, "svi_device_op", min_role, resolved=resolved)
 
 
 def _require_driver_with(device: "Device", method_name: str):
@@ -50,7 +50,7 @@ def _require_driver_with(device: "Device", method_name: str):
     driver = device.driver
     if getattr(type(driver), method_name) is getattr(VendorDriver, method_name):
         logger.info(
-            "Interfaz virtual %s unimplemented on driver=%s for device=%s",
+            "SVI %s unimplemented on driver=%s for device=%s",
             method_name, type(driver).__name__, device.name,
         )
         raise HTTPException(
@@ -106,22 +106,22 @@ def _require_vlan_existente(device_name: str, vlan_id: int) -> None:
         "users may only query devices in their allowed sites."
     ),
 )
-def list_interfaces_virtuales(
+def list_svis(
     name: str,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_sync_service, interfaz_virtual_repository, redis_coordinator
+    from app.composition import device_sync_service, svi_repository, redis_coordinator
 
     _authz_device(scope, name, min_role="observer")
     dev = require_device(name)
-    interfaces = interfaz_virtual_repository.list(device=name)
+    interfaces = svi_repository.list(device=name)
     payload = {
         "device": dev.name,
         "vendor": dev.vendor,
         "count": len(interfaces),
-        "interfaces_virtuales": [
-            InterfazVirtualRead(
+        "svis": [
+            SVIRead(
                 vlan_id=i.vlan_id, description=i.description, admin_up=i.admin_up,
                 operational_up=i.operational_up, ipv4_address=i.ipv4_address,
                 ipv4_address_secondary=i.ipv4_address_secondary,
@@ -131,7 +131,7 @@ def list_interfaces_virtuales(
             for i in interfaces
         ],
     }
-    synced_at, sync_error = device_sync_service.metadata(name, "interfaces_virtuales")
+    synced_at, sync_error = device_sync_service.metadata(name, "svis")
     envelope = SyncedResource(
         data=payload,
         synced_at=synced_at,
@@ -160,16 +160,16 @@ def list_interfaces_virtuales(
         "target devices in their allowed sites."
     ),
 )
-def create_interfaz_virtual(
+def create_svi(
     name: str,
-    data: InterfazVirtualCreateRequest,
+    data: SVICreateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
     try:
-        entidad = InterfazVirtual(vlan_id=data.vlan_id, crear=True, description=data.description)
+        entidad = SVI(vlan_id=data.vlan_id, crear=True, description=data.description)
         entidad.validar()
     except ValueError as exc:
         raise ValidationError(str(exc))
@@ -177,7 +177,7 @@ def create_interfaz_virtual(
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "create_interfaz_virtual")
+    _require_driver_with(dev, "create_svi")
     _require_vlan_existente(name, data.vlan_id)
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
@@ -196,21 +196,21 @@ def create_interfaz_virtual(
         "site-scoped users may only target devices in their allowed sites."
     ),
 )
-def delete_interfaz_virtual(
+def delete_svi(
     name: str,
-    data: InterfazVirtualDeleteRequest,
+    data: SVIDeleteRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, eliminar=True)
+    entidad = SVI(vlan_id=data.vlan_id, eliminar=True)
     entidad.validar()
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "delete_interfaz_virtual")
+    _require_driver_with(dev, "delete_svi")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -228,15 +228,15 @@ def delete_interfaz_virtual(
         "allowed sites."
     ),
 )
-def set_interfaz_admin_state(
+def set_svi_admin_state(
     name: str,
-    data: InterfazVirtualAdminStateUpdateRequest,
+    data: SVIAdminStateUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, admin_up=data.enabled)
+    entidad = SVI(vlan_id=data.vlan_id, admin_up=data.enabled)
     try:
         entidad.validar()
     except ValueError as exc:
@@ -245,7 +245,7 @@ def set_interfaz_admin_state(
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_admin_state")
+    _require_driver_with(dev, "set_svi_admin_state")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -264,15 +264,15 @@ def set_interfaz_admin_state(
         "devices in their allowed sites."
     ),
 )
-def set_interfaz_description(
+def set_svi_description(
     name: str,
-    data: InterfazVirtualDescriptionUpdateRequest,
+    data: SVIDescriptionUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, description=data.description)
+    entidad = SVI(vlan_id=data.vlan_id, description=data.description)
     try:
         entidad.validar()
     except ValueError as exc:
@@ -281,7 +281,7 @@ def set_interfaz_description(
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_description")
+    _require_driver_with(dev, "set_svi_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -298,21 +298,21 @@ def set_interfaz_description(
         "site-scoped users may only target devices in their allowed sites."
     ),
 )
-def clear_interfaz_description(
+def clear_svi_description(
     name: str,
-    data: InterfazVirtualDescriptionClearRequest,
+    data: SVIDescriptionClearRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, description="")
+    entidad = SVI(vlan_id=data.vlan_id, description="")
     entidad.validar()
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_description")
+    _require_driver_with(dev, "set_svi_description")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -334,16 +334,16 @@ def clear_interfaz_description(
         "site-scoped users may only target devices in their allowed sites."
     ),
 )
-def set_interfaz_ipv4(
+def set_svi_ipv4(
     name: str,
-    data: InterfazVirtualIpv4UpdateRequest,
+    data: SVIIpv4UpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
     campo = "ipv4_address_secondary" if data.secondary else "ipv4_address"
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, **{campo: data.ipv4_address})
+    entidad = SVI(vlan_id=data.vlan_id, **{campo: data.ipv4_address})
     try:
         entidad.validar()
     except ValueError as exc:
@@ -352,7 +352,7 @@ def set_interfaz_ipv4(
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_ipv4_secondary" if data.secondary else "set_interfaz_ipv4")
+    _require_driver_with(dev, "set_svi_ipv4_secondary" if data.secondary else "set_svi_ipv4")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -371,22 +371,22 @@ def set_interfaz_ipv4(
         "allowed sites."
     ),
 )
-def clear_interfaz_ipv4(
+def clear_svi_ipv4(
     name: str,
-    data: InterfazVirtualIpv4ClearRequest,
+    data: SVIIpv4ClearRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
     campo = "ipv4_address_secondary" if data.secondary else "ipv4_address"
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, **{campo: ""})
+    entidad = SVI(vlan_id=data.vlan_id, **{campo: ""})
     entidad.validar()
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_ipv4_secondary" if data.secondary else "set_interfaz_ipv4")
+    _require_driver_with(dev, "set_svi_ipv4_secondary" if data.secondary else "set_svi_ipv4")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -408,15 +408,15 @@ def clear_interfaz_ipv4(
         "allowed sites."
     ),
 )
-def set_interfaz_ipv6(
+def set_svi_ipv6(
     name: str,
-    data: InterfazVirtualIpv6UpdateRequest,
+    data: SVIIpv6UpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, ipv6_address=data.ipv6_address)
+    entidad = SVI(vlan_id=data.vlan_id, ipv6_address=data.ipv6_address)
     try:
         entidad.validar()
     except ValueError as exc:
@@ -425,7 +425,7 @@ def set_interfaz_ipv6(
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_ipv6")
+    _require_driver_with(dev, "set_svi_ipv6")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -442,21 +442,21 @@ def set_interfaz_ipv6(
         "site-scoped users may only target devices in their allowed sites."
     ),
 )
-def clear_interfaz_ipv6(
+def clear_svi_ipv6(
     name: str,
-    data: InterfazVirtualIpv6ClearRequest,
+    data: SVIIpv6ClearRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, ipv6_address="")
+    entidad = SVI(vlan_id=data.vlan_id, ipv6_address="")
     entidad.validar()
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_ipv6")
+    _require_driver_with(dev, "set_svi_ipv6")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -478,16 +478,16 @@ def clear_interfaz_ipv6(
         "devices in their allowed sites."
     ),
 )
-def set_interfaz_acl(
+def set_svi_acl(
     name: str,
-    data: InterfazVirtualAclUpdateRequest,
+    data: SVIAclUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
     campo = "acl_in" if data.direction == "in" else "acl_out"
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, **{campo: data.acl_name})
+    entidad = SVI(vlan_id=data.vlan_id, **{campo: data.acl_name})
     try:
         entidad.validar()
     except ValueError as exc:
@@ -496,7 +496,7 @@ def set_interfaz_acl(
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    driver = _require_driver_with(dev, "set_interfaz_acl")
+    driver = _require_driver_with(dev, "set_svi_acl")
     _require_driver_with(dev, "list_acl_names")
 
     acls_existentes = driver.list_acl_names(dev, dev.password)
@@ -522,22 +522,22 @@ def set_interfaz_acl(
         "devices in their allowed sites."
     ),
 )
-def clear_interfaz_acl(
+def clear_svi_acl(
     name: str,
-    data: InterfazVirtualAclClearRequest,
+    data: SVIAclClearRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
     campo = "acl_in" if data.direction == "in" else "acl_out"
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, **{campo: ""})
+    entidad = SVI(vlan_id=data.vlan_id, **{campo: ""})
     entidad.validar()
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_acl")
+    _require_driver_with(dev, "set_svi_acl")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -558,15 +558,15 @@ def clear_interfaz_acl(
         "site-scoped users may only target devices in their allowed sites."
     ),
 )
-def add_interfaz_dhcp_relay(
+def add_svi_dhcp_relay(
     name: str,
-    data: InterfazVirtualDhcpRelayAddRequest,
+    data: SVIDhcpRelayAddRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, dhcp_relay_add=data.server)
+    entidad = SVI(vlan_id=data.vlan_id, dhcp_relay_add=data.server)
     try:
         entidad.validar()
     except ValueError as exc:
@@ -575,7 +575,7 @@ def add_interfaz_dhcp_relay(
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_dhcp_relay")
+    _require_driver_with(dev, "set_svi_dhcp_relay")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -595,15 +595,15 @@ def add_interfaz_dhcp_relay(
         "allowed sites."
     ),
 )
-def remove_interfaz_dhcp_relay(
+def remove_svi_dhcp_relay(
     name: str,
-    data: InterfazVirtualDhcpRelayRemoveRequest,
+    data: SVIDhcpRelayRemoveRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = InterfazVirtual(vlan_id=data.vlan_id, dhcp_relay_remove=data.server)
+    entidad = SVI(vlan_id=data.vlan_id, dhcp_relay_remove=data.server)
     try:
         entidad.validar()
     except ValueError as exc:
@@ -612,7 +612,7 @@ def remove_interfaz_dhcp_relay(
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
     _check_device_not_locked(name)
-    _require_driver_with(dev, "set_interfaz_dhcp_relay")
+    _require_driver_with(dev, "set_svi_dhcp_relay")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})

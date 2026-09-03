@@ -1,4 +1,4 @@
-"""Parsers para el output real de ``get_interfaces_virtuales`` -- RF-INTERV-07.
+"""Parsers para el output real de ``get_svis`` -- RF-INTERV-07.
 
 Igual que el resto de los parsers de este paquete, están escritos contra el
 formato de output *documentado* de cada plataforma, no contra una captura
@@ -12,7 +12,7 @@ from __future__ import annotations
 import ipaddress
 import re
 
-from app.models.interfaz_virtual import InterfazVirtual
+from app.models.svi import SVI
 
 _ANSI_ESCAPE = re.compile(r"\x1B\[[0-9;]*m")
 
@@ -23,7 +23,7 @@ def _direccion_y_mascara_a_cidr(addr: str, mascara: str) -> str:
     {dotted-mask}``, VRP tiene el mismo formato) que ``ip_interface()``
     acepta una máscara punteada en la parte "/" y la normaliza a
     prefix-length sola. El resto del sistema (schemas, comparación de
-    no-op en ``InterfazVirtual._aplicar_ipv4``) espera CIDR, no
+    no-op en ``SVI._aplicar_ipv4``) espera CIDR, no
     "dirección/máscara-punteada" -- unirlas con un simple f-string (bug
     real encontrado corriendo esto contra el device de lab) rompía ese
     contrato silenciosamente."""
@@ -37,7 +37,7 @@ def _normalizar_ipv6(cidr: str) -> str:
     """VRP devuelve las IPv6 en MAYÚSCULAS (``2001:DB8::1/64``) aunque se
     hayan configurado en minúsculas -- confirmado contra el device real de
     lab. Sin normalizar, la comparación de no-op en
-    ``InterfazVirtual._aplicar_ipv6`` (``actual.ipv6_address ==
+    ``SVI._aplicar_ipv6`` (``actual.ipv6_address ==
     self.ipv6_address``) nunca matchea, y cada PATCH reenvía el comando al
     device aunque el valor ya sea el mismo. ``ipaddress`` normaliza a
     minúsculas, igual que el resto de este sistema."""
@@ -70,9 +70,9 @@ _IOS_BRIEF_LINE = re.compile(
 )
 
 
-def parse_ios_interfaces_virtuales(running_config_output: str, brief_output: str) -> list[InterfazVirtual]:
+def parse_ios_svis(running_config_output: str, brief_output: str) -> list[SVI]:
     """Parse ``show running-config | section ^interface Vlan`` +
-    ``show ip interface brief | include Vlan`` en ``InterfazVirtual``.
+    ``show ip interface brief | include Vlan`` en ``SVI``.
 
     El primero trae la config deseada (ip/ipv6, description, ACLs,
     helper-address); el segundo el estado administrativo real (running-config
@@ -89,8 +89,8 @@ def parse_ios_interfaces_virtuales(running_config_output: str, brief_output: str
         operational_up = protocol.lower() == "up"
         estado_por_vlan[vlan_id] = (admin_up, operational_up)
 
-    interfaces: list[InterfazVirtual] = []
-    actual: InterfazVirtual | None = None
+    interfaces: list[SVI] = []
+    actual: SVI | None = None
     helpers: list[str] = []
 
     def _cerrar_actual() -> None:
@@ -105,7 +105,7 @@ def parse_ios_interfaces_virtuales(running_config_output: str, brief_output: str
             _cerrar_actual()
             vlan_id = int(header.group(1))
             admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
-            actual = InterfazVirtual(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
+            actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
             helpers = []
             continue
         if actual is None:
@@ -179,9 +179,9 @@ _VRP_BRIEF_LINE = re.compile(
 )
 
 
-def parse_vrp_interfaces_virtuales(config_output: str, brief_output: str) -> list[InterfazVirtual]:
+def parse_vrp_svis(config_output: str, brief_output: str) -> list[SVI]:
     """Parse ``display current-configuration interface Vlanif`` +
-    ``display ip interface brief`` en ``InterfazVirtual``. Mismo criterio
+    ``display ip interface brief`` en ``SVI``. Mismo criterio
     de 2 fuentes que Cisco: una para la config deseada, otra para el
     estado administrativo real."""
     estado_por_vlan: dict[int, tuple[bool, bool]] = {}
@@ -195,8 +195,8 @@ def parse_vrp_interfaces_virtuales(config_output: str, brief_output: str) -> lis
         operational_up = protocol.lower() == "up"
         estado_por_vlan[vlan_id] = (admin_up, operational_up)
 
-    interfaces: list[InterfazVirtual] = []
-    actual: InterfazVirtual | None = None
+    interfaces: list[SVI] = []
+    actual: SVI | None = None
     helpers: list[str] = []
 
     def _cerrar_actual() -> None:
@@ -211,7 +211,7 @@ def parse_vrp_interfaces_virtuales(config_output: str, brief_output: str) -> lis
             _cerrar_actual()
             vlan_id = int(header.group(1))
             admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
-            actual = InterfazVirtual(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
+            actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
             helpers = []
             continue
         if actual is None:

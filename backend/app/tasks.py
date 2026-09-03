@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="ansiauth.orquestador.ejecutar")
 def ejecutar_task(recurso_dict: dict, tipo_recurso: str, device_name: str, actor: str, job_id: str) -> None:
     from app.composition import job_repository, orquestador
-    from app.models.interfaz_virtual import InterfazVirtual
+    from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
 
-    _TIPOS = {"vlan": VLAN, "puerto": Puerto, "interfaz_virtual": InterfazVirtual}
+    _TIPOS = {"vlan": VLAN, "puerto": Puerto, "svi": SVI}
     recurso = _TIPOS[tipo_recurso](**recurso_dict)
     job = job_repository.get(job_id)
     orquestador.ejecutar(recurso, device_name, actor, job)
@@ -37,13 +37,13 @@ def ejecutar_task(recurso_dict: dict, tipo_recurso: str, device_name: str, actor
 @celery_app.task(name="ansiauth.device.sync")
 def sync_device_task(device_name: str, scope: str) -> None:
     """Sincroniza la caché en DB (``device_vlans`` / ``device_ports`` /
-    ``device_interfaces_virtuales``) con el estado en vivo del equipo.
-    ``scope`` ∈ ``{"vlans", "ports", "interfaces_virtuales", "all"}``.
+    ``device_svis``) con el estado en vivo del equipo.
+    ``scope`` ∈ ``{"vlans", "ports", "svis", "all"}``.
 
     Disparado por:
     * ``Inventory.register()`` con ``scope="all"`` -- alta de device
       (fire-and-forget, el POST vuelve al toque).
-    * ``POST /devices/{name}/{vlans,ports,interfaces-virtuales}/refresh`` --
+    * ``POST /devices/{name}/{vlans,ports,svis}/refresh`` --
       refresh manual granular desde la UI.
     * ``Orquestador`` al completar OK un job -- coherencia post-escritura.
 
@@ -52,7 +52,7 @@ def sync_device_task(device_name: str, scope: str) -> None:
     no es razón para no leer los puertos ni las interfaces). Si alguno
     falló, la task termina en error para que Celery/observabilidad lo
     vean; los detalles ya quedaron persistidos en
-    ``devices.{vlans,ports,interfaces_virtuales}_sync_error`` por el propio
+    ``devices.{vlans,ports,svis}_sync_error`` por el propio
     servicio, así que el frontend los muestra sin depender del resultado
     del task.
     """
@@ -69,14 +69,14 @@ def sync_device_task(device_name: str, scope: str) -> None:
         device_sync_service.sync_vlans(device)
     elif scope == "ports":
         device_sync_service.sync_ports(device)
-    elif scope == "interfaces_virtuales":
-        device_sync_service.sync_interfaces_virtuales(device)
+    elif scope == "svis":
+        device_sync_service.sync_svis(device)
     elif scope == "all":
         errores: list[str] = []
         for nombre, fn in (
             ("vlans", device_sync_service.sync_vlans),
             ("ports", device_sync_service.sync_ports),
-            ("interfaces_virtuales", device_sync_service.sync_interfaces_virtuales),
+            ("svis", device_sync_service.sync_svis),
         ):
             try:
                 fn(device)
@@ -90,5 +90,5 @@ def sync_device_task(device_name: str, scope: str) -> None:
     else:
         raise ValueError(
             f"sync_device_task: scope inválido {scope!r} "
-            "(esperado: vlans / ports / interfaces_virtuales / all)"
+            "(esperado: vlans / ports / svis / all)"
         )

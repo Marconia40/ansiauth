@@ -89,8 +89,8 @@ class DeviceModel(Base):
     vlans_sync_error = Column(Text, nullable=True)
     ports_synced_at = Column(DateTime(timezone=True), nullable=True)
     ports_sync_error = Column(Text, nullable=True)
-    interfaces_virtuales_synced_at = Column(DateTime(timezone=True), nullable=True)
-    interfaces_virtuales_sync_error = Column(Text, nullable=True)
+    svis_synced_at = Column(DateTime(timezone=True), nullable=True)
+    svis_sync_error = Column(Text, nullable=True)
 
     device_group = relationship(
         "DeviceGroupModel",
@@ -146,14 +146,14 @@ class DevicePortModel(Base):
     duplex = Column(String, nullable=True)
 
 
-class DeviceInterfazVirtualModel(Base):
-    """RF-INTERV-* — Repository[InterfazVirtual]. PK compuesta real
+class DeviceSVIModel(Base):
+    """RF-INTERV-* — Repository[SVI]. PK compuesta real
     (``vlan_id``, ``device``), mismo criterio que ``DeviceVlanModel``/
     ``DevicePortModel``. Doble función igual que esas 2 tablas: destino del
     tracking-write de Orquestador tras una escritura exitosa, y cache que
-    sirve ``GET /interfaces-virtuales`` (front-data, cache-first)."""
+    sirve ``GET /svis`` (front-data, cache-first)."""
 
-    __tablename__ = "device_interfaces_virtuales"
+    __tablename__ = "device_svis"
 
     vlan_id = Column(Integer, primary_key=True)
     device = Column(String, primary_key=True)

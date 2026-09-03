@@ -21,11 +21,11 @@ def _validar_ip_plana(value: str) -> str:
     return value
 
 
-class InterfazVirtualRead(BaseModel):
+class SVIRead(BaseModel):
     """Wire-format representation of a single virtual interface (SVI)
-    returned by ``GET /interfaces-virtuales``.
+    returned by ``GET /svis``.
 
-    Mirrors ``app.models.interfaz_virtual.InterfazVirtual`` field-for-field
+    Mirrors ``app.models.svi.SVI`` field-for-field
     (minus ``eliminar``, que es intención de escritura, no estado)."""
 
     vlan_id: int = Field(..., description="VLAN ID -- identidad real de la interfaz (Vlan{id}/Vlanif{id}).")
@@ -40,17 +40,17 @@ class InterfazVirtualRead(BaseModel):
     dhcp_relay_servers: Optional[list[str]] = Field(None, description="Lista de IPs de DHCP relay, o null si no hay ninguna.")
 
 
-class _InterfazVirtualTargetRequest(BaseModel):
+class _SVITargetRequest(BaseModel):
     """Target vlan_id compartido por cada request de escritura sobre una
-    interfaz virtual puntual. El device ya no va en el body -- es un
-    segmento de la URL (``/devices/{name}/interfaces-virtuales/...``),
+    SVI puntual. El device ya no va en el body -- es un
+    segmento de la URL (``/devices/{name}/svis/...``),
     mismo criterio que los endpoints de refresh."""
 
     vlan_id: int = Field(..., ge=1, le=4094, description="VLAN ID de la interfaz (1-4094).")
 
 
-class InterfazVirtualCreateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``POST /interfaces-virtuales`` (RF-INTERV-01, +09).
+class SVICreateRequest(_SVITargetRequest):
+    """Request body para ``POST /svis`` (RF-INTERV-01, +09).
 
     Crea la SVI de *vlan_id* en *device* -- la asociación a la VLAN (RF-INTERV-9)
     es implícita en la identidad (``vlan_id`` ES qué VLAN asocia). El endpoint
@@ -64,34 +64,34 @@ class InterfazVirtualCreateRequest(_InterfazVirtualTargetRequest):
     )
 
 
-class InterfazVirtualDeleteRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``DELETE /interfaces-virtuales/`` (RF-INTERV-02)."""
+class SVIDeleteRequest(_SVITargetRequest):
+    """Request body para ``DELETE /svis/`` (RF-INTERV-02)."""
 
 
-class InterfazVirtualAdminStateUpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/admin-state`` (RF-INTERV-03)."""
+class SVIAdminStateUpdateRequest(_SVITargetRequest):
+    """Request body para ``PATCH /svis/admin-state`` (RF-INTERV-03)."""
 
     enabled: bool = Field(..., description="Estado administrativo deseado -- True para activar, False para desactivar.")
 
 
-class InterfazVirtualDescriptionUpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/description``
+class SVIDescriptionUpdateRequest(_SVITargetRequest):
+    """Request body para ``PATCH /svis/description``
     (RF-INTERV-08) -- asigna una descripción. Para limpiarla, ver
-    ``DELETE /interfaces-virtuales/description`` (verbo explícito en vez de
+    ``DELETE /svis/description`` (verbo explícito en vez de
     inferir "limpiar" de un valor vacío -- mismo criterio que DHCP relay,
-    ver ``InterfazVirtualDhcpRelayAddRequest``)."""
+    ver ``SVIDhcpRelayAddRequest``)."""
 
     description: str = Field(..., min_length=1, max_length=240, description="Nueva descripción.")
 
 
-class InterfazVirtualDescriptionClearRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``DELETE /interfaces-virtuales/description`` (RF-INTERV-08)."""
+class SVIDescriptionClearRequest(_SVITargetRequest):
+    """Request body para ``DELETE /svis/description`` (RF-INTERV-08)."""
 
 
-class InterfazVirtualIpv4UpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/ipv4`` (RF-INTERV-03)
+class SVIIpv4UpdateRequest(_SVITargetRequest):
+    """Request body para ``PATCH /svis/ipv4`` (RF-INTERV-03)
     -- asigna una dirección IPv4. Para limpiarla, ver
-    ``DELETE /interfaces-virtuales/ipv4``. ``secondary=true`` aplica sobre
+    ``DELETE /svis/ipv4``. ``secondary=true`` aplica sobre
     la IP secundaria en vez de la primaria -- requiere que ya exista una
     primaria en la interfaz (chequeado contra estado real del device, no
     algo que se pueda validar acá)."""
@@ -108,8 +108,8 @@ class InterfazVirtualIpv4UpdateRequest(_InterfazVirtualTargetRequest):
         return _validar_cidr(v, 4)
 
 
-class InterfazVirtualIpv4ClearRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``DELETE /interfaces-virtuales/ipv4`` (RF-INTERV-03)."""
+class SVIIpv4ClearRequest(_SVITargetRequest):
+    """Request body para ``DELETE /svis/ipv4`` (RF-INTERV-03)."""
 
     secondary: bool = Field(
         default=False,
@@ -117,10 +117,10 @@ class InterfazVirtualIpv4ClearRequest(_InterfazVirtualTargetRequest):
     )
 
 
-class InterfazVirtualIpv6UpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/ipv6`` (RF-INTERV-04)
+class SVIIpv6UpdateRequest(_SVITargetRequest):
+    """Request body para ``PATCH /svis/ipv6`` (RF-INTERV-04)
     -- asigna una dirección IPv6. Para limpiarla, ver
-    ``DELETE /interfaces-virtuales/ipv6``."""
+    ``DELETE /svis/ipv6``."""
 
     ipv6_address: str = Field(..., description="Dirección IPv6 en formato CIDR (ej. '2001:db8::1/64').")
 
@@ -130,28 +130,28 @@ class InterfazVirtualIpv6UpdateRequest(_InterfazVirtualTargetRequest):
         return _validar_cidr(v, 6)
 
 
-class InterfazVirtualIpv6ClearRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``DELETE /interfaces-virtuales/ipv6`` (RF-INTERV-04)."""
+class SVIIpv6ClearRequest(_SVITargetRequest):
+    """Request body para ``DELETE /svis/ipv6`` (RF-INTERV-04)."""
 
 
-class InterfazVirtualAclUpdateRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``PATCH /interfaces-virtuales/acl`` (RF-INTERV-05)
+class SVIAclUpdateRequest(_SVITargetRequest):
+    """Request body para ``PATCH /svis/acl`` (RF-INTERV-05)
     -- asigna una ACL que ya existe en el device al sentido indicado, no la
     crea (RF-GLOBAL-04, aparte). Para desasignarla, ver
-    ``DELETE /interfaces-virtuales/acl``."""
+    ``DELETE /svis/acl``."""
 
     direction: Literal["in", "out"] = Field(..., description="Sentido de la ACL -- 'in' o 'out'.")
     acl_name: str = Field(..., min_length=1, description="Nombre/número de la ACL a asignar.")
 
 
-class InterfazVirtualAclClearRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``DELETE /interfaces-virtuales/acl`` (RF-INTERV-05)."""
+class SVIAclClearRequest(_SVITargetRequest):
+    """Request body para ``DELETE /svis/acl`` (RF-INTERV-05)."""
 
     direction: Literal["in", "out"] = Field(..., description="Sentido de la ACL a desasignar -- 'in' o 'out'.")
 
 
-class InterfazVirtualDhcpRelayAddRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``POST /interfaces-virtuales/dhcp-relay``
+class SVIDhcpRelayAddRequest(_SVITargetRequest):
+    """Request body para ``POST /svis/dhcp-relay``
     (RF-INTERV-05) -- agrega 1 server, sin tocar los demás ya configurados.
 
     El verbo POST ya expresa la acción (alta) -- a diferencia de un único
@@ -167,8 +167,8 @@ class InterfazVirtualDhcpRelayAddRequest(_InterfazVirtualTargetRequest):
         return _validar_ip_plana(v)
 
 
-class InterfazVirtualDhcpRelayRemoveRequest(_InterfazVirtualTargetRequest):
-    """Request body para ``DELETE /interfaces-virtuales/dhcp-relay``
+class SVIDhcpRelayRemoveRequest(_SVITargetRequest):
+    """Request body para ``DELETE /svis/dhcp-relay``
     (RF-INTERV-05) -- elimina 1 server, sin tocar los demás."""
 
     server: str = Field(..., description="IP de un servidor DHCP relay a eliminar.")

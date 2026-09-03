@@ -10,7 +10,7 @@ etc.) — no hace falta anticipar esas partes acá, cada fase agrega lo suyo.
 from __future__ import annotations
 
 from app.core.repository import Repository
-from app.db.models import DeviceVlanModel, DevicePortModel, DeviceInterfazVirtualModel
+from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.device_group_repository import DeviceGroupRepository
 from app.repositories.device_repository import DeviceRepository
@@ -91,8 +91,8 @@ puerto_repository = Repository(
 )
 
 
-def _interfaz_virtual_to_orm(i: "InterfazVirtual"):
-    return DeviceInterfazVirtualModel(
+def _svi_to_orm(i: "SVI"):
+    return DeviceSVIModel(
         vlan_id=i.vlan_id, device=i.device, description=i.description,
         admin_up=i.admin_up, ipv4_address=i.ipv4_address,
         ipv4_address_secondary=i.ipv4_address_secondary, ipv6_address=i.ipv6_address,
@@ -101,9 +101,9 @@ def _interfaz_virtual_to_orm(i: "InterfazVirtual"):
     )
 
 
-def _interfaz_virtual_to_domain(row) -> "InterfazVirtual":
-    from app.models.interfaz_virtual import InterfazVirtual
-    return InterfazVirtual(
+def _svi_to_domain(row) -> "SVI":
+    from app.models.svi import SVI
+    return SVI(
         vlan_id=row.vlan_id, device=row.device, description=row.description,
         admin_up=row.admin_up, ipv4_address=row.ipv4_address,
         ipv4_address_secondary=row.ipv4_address_secondary, ipv6_address=row.ipv6_address,
@@ -112,8 +112,8 @@ def _interfaz_virtual_to_domain(row) -> "InterfazVirtual":
     )
 
 
-interfaz_virtual_repository = Repository(
-    DeviceInterfazVirtualModel, _interfaz_virtual_to_domain, _interfaz_virtual_to_orm,
+svi_repository = Repository(
+    DeviceSVIModel, _svi_to_domain, _svi_to_orm,
     pk_field=("vlan_id", "device"),
 )
 
@@ -147,7 +147,7 @@ event_dispatcher.suscribir(AuditListener(audit_repository))
 
 orquestador = Orquestador(
     device_repository,
-    {"vlan": vlan_repository, "puerto": puerto_repository, "interfaz_virtual": interfaz_virtual_repository},
+    {"vlan": vlan_repository, "puerto": puerto_repository, "svi": svi_repository},
     job_repository, event_dispatcher, redis_coordinator,
 )
 
@@ -161,5 +161,5 @@ inventory = Inventory(
 )
 
 device_sync_service = DeviceSyncService(
-    vlan_repository, puerto_repository, interfaz_virtual_repository, redis_coordinator,
+    vlan_repository, puerto_repository, svi_repository, redis_coordinator,
 )

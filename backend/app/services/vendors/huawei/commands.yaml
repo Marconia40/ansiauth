@@ -414,13 +414,13 @@ set_trunk_mode:
         - "quit"
         - "quit"
 
-# ── Interfaces virtuales (SVI), RF-INTERV-* ─────────────────────────────────
+# ── SVI, RF-INTERV-* ─────────────────────────────────
 # "interface Vlanif{vlan_id}". Reusa el mismo trigger _NO_COMMIT que
 # VLAN/puerto en cada operación -- misma plataforma, mismo comportamiento
 # de sesión CLI, no hay motivo para que solo algunas operaciones lo
 # necesiten.
 
-create_interfaz_virtual:
+create_svi:
   primary:
     block: ["system-view", "interface Vlanif{vlan_id}", "undo shutdown", "commit", "quit", "quit"]
   alternatives:
@@ -432,7 +432,7 @@ create_interfaz_virtual:
         - "quit"
         - "quit"
 
-delete_interfaz_virtual:
+delete_svi:
   primary:
     block: ["system-view", "undo interface Vlanif{vlan_id}", "commit", "quit"]
   alternatives:
@@ -442,7 +442,7 @@ delete_interfaz_virtual:
         - "undo interface Vlanif{vlan_id}"
         - "quit"
 
-set_interfaz_admin_state:
+set_svi_admin_state:
   enabled:
     primary:
       block: ["system-view", "interface Vlanif{vlan_id}", "undo shutdown", "commit", "quit", "quit"]
@@ -466,7 +466,7 @@ set_interfaz_admin_state:
           - "quit"
           - "quit"
 
-set_interfaz_description:
+set_svi_description:
   set:
     primary:
       block: ["system-view", "interface Vlanif{vlan_id}", "description {description}", "commit", "quit", "quit"]
@@ -494,7 +494,7 @@ set_interfaz_description:
 # sesión: "interface Vlanif10 / ip address 10.10.10.10 255.255.255.0").
 # {ipv4_addr}/{ipv4_mask} ya vienen separados (máscara punteada) -- la
 # conversión CIDR->máscara es cómputo real, la hace el driver en Python.
-set_interfaz_ipv4:
+set_svi_ipv4:
   set:
     primary:
       block: ["system-view", "interface Vlanif{vlan_id}", "ip address {ipv4_addr} {ipv4_mask}", "commit", "quit", "quit"]
@@ -520,10 +520,10 @@ set_interfaz_ipv4:
 
 # RF-INTERV-03: IP secundaria -- VRP llama "sub" a esto, confirmado contra
 # config real de producción (ver ejemplo de Vlanif832 en la nota de
-# set_interfaz_ipv6 más abajo -- misma interfaz, "ip address ... sub").
-# Requiere primaria existente (lo valida InterfazVirtual antes de llegar
+# set_svi_ipv6 más abajo -- misma interfaz, "ip address ... sub").
+# Requiere primaria existente (lo valida SVI antes de llegar
 # acá).
-set_interfaz_ipv4_secondary:
+set_svi_ipv4_secondary:
   set:
     primary:
       block: ["system-view", "interface Vlanif{vlan_id}", "ip address {ipv4_addr} {ipv4_mask} sub", "commit", "quit", "quit"]
@@ -556,7 +556,7 @@ set_interfaz_ipv4_secondary:
 # diferencia de Cisco, que solo necesita "ipv6 unicast-routing" global) --
 # pero a diferencia del IPv4 de esta misma plataforma, ipv6 SÍ va en CIDR
 # de un tirón, igual que Cisco (no separado addr+prefix-length).
-set_interfaz_ipv6:
+set_svi_ipv6:
   set:
     primary:
       block: ["system-view", "interface Vlanif{vlan_id}", "ipv6 enable", "ipv6 address {ipv6_address}", "commit", "quit", "quit"]
@@ -588,7 +588,7 @@ set_interfaz_ipv6:
 # driver.py decide "set_numeric" vs "set_named" según acl_name.isdigit().
 # Asigna una ACL que ya existe en el device, no la crea (RF-GLOBAL-04,
 # aparte).
-set_interfaz_acl:
+set_svi_acl:
   set_numeric:
     primary:
       block: ["system-view", "interface Vlanif{vlan_id}", "traffic-filter {direction}bound acl {acl_name}", "commit", "quit", "quit"]
@@ -623,7 +623,7 @@ set_interfaz_acl:
           - "quit"
           - "quit"
 
-# {servers} es la lista completa de relay servers (InterfazVirtual arma el
+# {servers} es la lista completa de relay servers (SVI arma el
 # full-replace antes de llegar acá -- RF-INTERV-05 es incremental a nivel
 # API, full-replace a nivel CLI). Hay 2 formas reales confirmadas, y varían
 # por plataforma -- primary intenta la forma directa, alternatives cubre
@@ -671,7 +671,7 @@ set_interfaz_acl:
 # queda colgado. Confirmado que "undo dhcp relay binding server group"
 # es inofensivo cuando nunca hubo nada bindeado (probado en una interfaz
 # recién creada, sin ningún dhcp relay configurado todavía).
-set_interfaz_dhcp_relay:
+set_svi_dhcp_relay:
   primary:
     block:
       - "system-view"
@@ -728,13 +728,13 @@ set_interfaz_dhcp_relay:
 # ("Basic/Advanced ACL <num>, N rules" para numeradas, "Basic/Advanced
 # Name ACL <nombre>, N rules" para con nombre -- la palabra "Name" extra
 # solo aparece en ese caso) confirmado aparte contra config real de un
-# device de producción (parseo en interfaz_virtual_parser.py).
+# device de producción (parseo en svi_parser.py).
 list_acls:
   primary:
     commands:
       - "display acl all"
 
-# get_interfaces_virtuales NO tiene entrada acá a propósito -- confirmado
+# get_svis NO tiene entrada acá a propósito -- confirmado
 # contra el device real de lab que "display current-configuration
 # interface Vlanif" sin número es rechazado ("Error: Wrong parameter
 # found at '^' position"), a diferencia de Cisco. driver.py arma los
@@ -742,4 +742,4 @@ list_acls:
 # descubrir qué Vlanif existen, después "display current-configuration
 # interface Vlanif{id}" (confirmado que esta forma con número sí
 # funciona) por cada una -- mismo criterio de bypass de YAML que
-# set_interfaz_dhcp_relay (número de comandos dinámico).
+# set_svi_dhcp_relay (número de comandos dinámico).

@@ -9,7 +9,7 @@ from app.services.vendors.base import VendorDriver
 
 if TYPE_CHECKING:
     from app.models.device import Device
-    from app.models.interfaz_virtual import InterfazVirtual
+    from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
 
@@ -207,37 +207,37 @@ class HuaweiVendor(VendorDriver):
 
     # ── Virtual interface (SVI) operations, RF-INTERV-* ───────────────────────
 
-    def create_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template("create_interfaz_virtual", {"vlan_id": vlan_id}, device, password)
+    def create_svi(self, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("create_svi", {"vlan_id": vlan_id}, device, password)
 
-    def delete_interfaz_virtual(self, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template("delete_interfaz_virtual", {"vlan_id": vlan_id}, device, password)
+    def delete_svi(self, vlan_id: int, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("delete_svi", {"vlan_id": vlan_id}, device, password)
 
-    def set_interfaz_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
+    def set_svi_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
         variant = "enabled" if enabled else "disabled"
         return self._aplicar_desde_template(
-            "set_interfaz_admin_state", {"vlan_id": vlan_id}, device, password, variant=variant,
+            "set_svi_admin_state", {"vlan_id": vlan_id}, device, password, variant=variant,
         )
 
-    def set_interfaz_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
+    def set_svi_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
         variant = "clear" if self._is_description_empty(description) else "set"
         return self._aplicar_desde_template(
-            "set_interfaz_description", {"vlan_id": vlan_id, "description": description},
+            "set_svi_description", {"vlan_id": vlan_id, "description": description},
             device, password, variant=variant,
         )
 
-    def set_interfaz_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
+    def set_svi_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
         """*ipv4_address* llega en CIDR (``"10.10.10.11/24"``) o ``""``/
         ``None`` para limpiar -- VRP espera dirección + máscara punteada
         separadas, mismo criterio de conversión que Cisco."""
         variant = "clear" if not ipv4_address else "set"
         addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address)
         return self._aplicar_desde_template(
-            "set_interfaz_ipv4", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
+            "set_svi_ipv4", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
             device, password, variant=variant,
         )
 
-    def set_interfaz_ipv4_secondary(
+    def set_svi_ipv4_secondary(
         self, vlan_id: int, ipv4_address: "str | None", previous_ipv4_address: "str | None",
         device: Device, password: str,
     ) -> dict:
@@ -248,11 +248,11 @@ class HuaweiVendor(VendorDriver):
         variant = "clear" if not ipv4_address else "set"
         addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address if ipv4_address else previous_ipv4_address)
         return self._aplicar_desde_template(
-            "set_interfaz_ipv4_secondary", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
+            "set_svi_ipv4_secondary", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
             device, password, variant=variant,
         )
 
-    def set_interfaz_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
+    def set_svi_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
         """Confirmado contra config real de un device de producción (no de
         lab): VRP usa CIDR de un tirón para ``ipv6 address``, igual que
         Cisco -- NO separa dirección/prefix-length como sí hace con IPv4
@@ -261,11 +261,11 @@ class HuaweiVendor(VendorDriver):
         ``ipv6 enable`` ya puesto."""
         variant = "clear" if not ipv6_address else "set"
         return self._aplicar_desde_template(
-            "set_interfaz_ipv6", {"vlan_id": vlan_id, "ipv6_address": ipv6_address or ""},
+            "set_svi_ipv6", {"vlan_id": vlan_id, "ipv6_address": ipv6_address or ""},
             device, password, variant=variant,
         )
 
-    def set_interfaz_acl(
+    def set_svi_acl(
         self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
     ) -> dict:
         """Confirmado contra config real: el orden de ``traffic-filter``
@@ -283,11 +283,11 @@ class HuaweiVendor(VendorDriver):
         else:
             variant = "set_named"
         return self._aplicar_desde_template(
-            "set_interfaz_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
+            "set_svi_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
             device, password, variant=variant,
         )
 
-    def set_interfaz_dhcp_relay(
+    def set_svi_dhcp_relay(
         self, vlan_id: int, servers: list[str], device: Device, password: str,
     ) -> dict:
         """Full-replace de la lista de relay servers -- ver YAML
@@ -295,12 +295,12 @@ class HuaweiVendor(VendorDriver):
         relay" (si hay al menos 1 server) + 1 línea por server, y la nota
         sobre la forma alternativa por "server group" ahí mismo."""
         return self._aplicar_desde_template(
-            "set_interfaz_dhcp_relay", {"vlan_id": vlan_id, "servers": servers}, device, password,
+            "set_svi_dhcp_relay", {"vlan_id": vlan_id, "servers": servers}, device, password,
         )
 
     _VLANIF_BRIEF_RE = re.compile(r"^Vlanif(\d+)\b", re.MULTILINE)
 
-    def get_interfaces_virtuales(self, device: Device, password: str) -> list[InterfazVirtual]:
+    def get_svis(self, device: Device, password: str) -> list[SVI]:
         """Confirmado contra el device real de lab: VRP rechaza el comando
         bulk "display current-configuration interface Vlanif" sin número
         ("Error: Wrong parameter found at '^' position") -- a diferencia
@@ -310,21 +310,21 @@ class HuaweiVendor(VendorDriver):
         encontrada (confirmado que esta forma con número sí funciona).
         Bypassa el YAML para este operación -- el número de comandos es
         dinámico según lo que reporte el device, mismo criterio que
-        ``set_interfaz_dhcp_relay()``."""
+        ``set_svi_dhcp_relay()``."""
         brief = self._leer(["display ip interface brief"], device, password)[0]
         vlan_ids = sorted({int(m) for m in self._VLANIF_BRIEF_RE.findall(brief)})
-        from app.services.parsers.interfaz_virtual_parser import parse_vrp_interfaces_virtuales
+        from app.services.parsers.svi_parser import parse_vrp_svis
         if not vlan_ids:
-            return parse_vrp_interfaces_virtuales("", brief)
+            return parse_vrp_svis("", brief)
         per_iface_commands = [f"display current-configuration interface Vlanif{vid}" for vid in vlan_ids]
         per_iface_outputs = self._leer(per_iface_commands, device, password)
         config = "\n".join(per_iface_outputs)
-        return parse_vrp_interfaces_virtuales(config, brief)
+        return parse_vrp_svis(config, brief)
 
     def list_acl_names(self, device: Device, password: str) -> list[str]:
         commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
-        from app.services.parsers.interfaz_virtual_parser import parse_vrp_acl_names
+        from app.services.parsers.svi_parser import parse_vrp_acl_names
         return parse_vrp_acl_names(stdouts[0] if stdouts else "")
 
     @staticmethod

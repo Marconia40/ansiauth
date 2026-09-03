@@ -149,19 +149,19 @@ set_trunk_mode:
         - "switchport trunk native vlan {native_vlan}"
         - "switchport trunk allowed vlan {allowed_vlans}"
 
-# ── Interfaces virtuales (SVI), RF-INTERV-* ─────────────────────────────────
+# ── SVI, RF-INTERV-* ─────────────────────────────────
 # "interface Vlan{vlan_id}" -- crear = entrar a la interfaz (IOS la crea
 # sola si la VLAN existe; eso se valida antes en el endpoint, no acá).
 
-create_interfaz_virtual:
+create_svi:
   primary:
     lines: ["interface Vlan{vlan_id}", "no shutdown"]
 
-delete_interfaz_virtual:
+delete_svi:
   primary:
     lines: ["no interface Vlan{vlan_id}"]
 
-set_interfaz_admin_state:
+set_svi_admin_state:
   enabled:
     primary:
       parents: "interface Vlan{vlan_id}"
@@ -171,7 +171,7 @@ set_interfaz_admin_state:
       parents: "interface Vlan{vlan_id}"
       lines: ["shutdown"]
 
-set_interfaz_description:
+set_svi_description:
   set:
     primary:
       parents: "interface Vlan{vlan_id}"
@@ -184,7 +184,7 @@ set_interfaz_description:
 # {ipv4_addr}/{ipv4_mask} ya vienen separados (máscara punteada, no CIDR) --
 # la conversión CIDR->máscara es cómputo real, la hace el driver en Python,
 # no este YAML.
-set_interfaz_ipv4:
+set_svi_ipv4:
   set:
     primary:
       parents: "interface Vlan{vlan_id}"
@@ -198,10 +198,10 @@ set_interfaz_ipv4:
       lines: ["no ip address"]
 
 # RF-INTERV-03: IP secundaria (requiere que ya haya una primaria -- lo
-# valida InterfazVirtual antes de llegar acá). A diferencia de la primaria,
+# valida SVI antes de llegar acá). A diferencia de la primaria,
 # limpiar necesita repetir la dirección exacta -- "no ip address" a secas
 # borraría la primaria Y todas las secundarias, no solo esta.
-set_interfaz_ipv4_secondary:
+set_svi_ipv4_secondary:
   set:
     primary:
       parents: "interface Vlan{vlan_id}"
@@ -214,7 +214,7 @@ set_interfaz_ipv4_secondary:
 # Cisco sí acepta CIDR directo para IPv6 (a diferencia de IPv4). Precondición
 # de device, no manejada acá: requiere "ipv6 unicast-routing" habilitado
 # globalmente -- confirmar que ya está antes de asumir que esto va a andar.
-set_interfaz_ipv6:
+set_svi_ipv6:
   set:
     primary:
       parents: "interface Vlan{vlan_id}"
@@ -228,7 +228,7 @@ set_interfaz_ipv6:
 
 # {direction} = "in" | "out". Asigna una ACL que ya existe en el device, no
 # la crea (eso es RF-GLOBAL-04, aparte).
-set_interfaz_acl:
+set_svi_acl:
   set:
     primary:
       parents: "interface Vlan{vlan_id}"
@@ -240,7 +240,7 @@ set_interfaz_acl:
       parents: "interface Vlan{vlan_id}"
       lines: ["no ip access-group {direction}"]
 
-# {servers} es la lista completa de relay servers (InterfazVirtual arma el
+# {servers} es la lista completa de relay servers (SVI arma el
 # full-replace antes de llegar acá -- RF-INTERV-05 es incremental a nivel
 # API, full-replace a nivel CLI). "repeat" arma 1 "ip helper-address {ip}"
 # por cada elemento, después del "no ip helper-address" fijo.
@@ -252,7 +252,7 @@ set_interfaz_acl:
 # cuenta de que el "no ip helper-address" de esta misma llamada la va a
 # borrar -- el resultado real era que solo sobrevivía el último server
 # agregado, no el full-replace completo.
-set_interfaz_dhcp_relay:
+set_svi_dhcp_relay:
   primary:
     parents: "interface Vlan{vlan_id}"
     lines: ["no ip helper-address"]
@@ -264,10 +264,10 @@ set_interfaz_dhcp_relay:
 # 2 comandos: el running-config de cada interfaz Vlan (tiene ip/ipv6
 # address, description, access-group, helper-address) + el estado
 # admin/protocolo (running-config no lo expone). Parseo en
-# services/parsers/interfaz_virtual_parser.py -- igual que el resto de los
+# services/parsers/svi_parser.py -- igual que el resto de los
 # parsers, esto necesita confirmarse contra output real de un device antes
 # de darlo por bueno a ciegas.
-get_interfaces_virtuales:
+get_svis:
   primary:
     commands:
       - "show running-config | section ^interface Vlan"
@@ -276,7 +276,7 @@ get_interfaces_virtuales:
 # RF-INTERV-04's "ACL previamente creada... e identificador válido" --
 # confirmado contra el device real de lab: "Standard/Extended IP access
 # list <nombre-o-número>" por cada ACL configurada. Parseo en
-# services/parsers/interfaz_virtual_parser.py.
+# services/parsers/svi_parser.py.
 list_acls:
   primary:
     commands:

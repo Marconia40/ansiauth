@@ -36,7 +36,7 @@ def _validate_description(description: str) -> None:
 
 
 @dataclass
-class InterfazVirtual:
+class SVI:
     """Domain representation of a virtual interface (SVI) — ``interface
     Vlan{vlan_id}`` en Cisco, ``interface Vlanif{vlan_id}`` en Huawei.
     Implementa el contrato ``RecursoGestionable`` (``validar``/
@@ -121,8 +121,8 @@ class InterfazVirtual:
         """Estado actual de esta interfaz en *device*, leído en vivo --
         mismo criterio que ``VLAN.reconciliar()``/``Puerto.reconciliar()``:
         una escritura necesita el estado real del momento, no la cache que
-        sirve ``GET /interfaces-virtuales``."""
-        interfaces = device.driver.get_interfaces_virtuales(device, device.password)
+        sirve ``GET /svis``."""
+        interfaces = device.driver.get_svis(device, device.password)
         existente = next((i for i in interfaces if i.vlan_id == self.vlan_id), None)
         return {"existed": existente is not None, "actual": existente}
 
@@ -133,9 +133,9 @@ class InterfazVirtual:
         if self.eliminar:
             estado = pre_state if pre_state is not None else self.reconciliar(device)
             if not estado["existed"]:
-                return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": "eliminar_interfaz"}
-            resultado = device.driver.delete_interfaz_virtual(self.vlan_id, device, device.password)
-            return {**resultado, "accion": "eliminar_interfaz"}
+                return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": "eliminar_svi"}
+            resultado = device.driver.delete_svi(self.vlan_id, device, device.password)
+            return {**resultado, "accion": "eliminar_svi"}
 
         if self.crear:
             return self._aplicar_crear(device, pre_state)
@@ -143,7 +143,7 @@ class InterfazVirtual:
         campos = self.mutation_fields
         if len(campos) != 1:
             raise ValueError(
-                f"InterfazVirtual.aplicar(): se espera exactamente 1 campo de "
+                f"SVI.aplicar(): se espera exactamente 1 campo de "
                 f"mutación por llamada (se recibieron {sorted(campos)}) -- "
                 f"un endpoint por campo, mismo criterio que Puerto"
             )
@@ -164,7 +164,7 @@ class InterfazVirtual:
             return self._aplicar_dhcp_relay_add(device, pre_state)
         if campo == "dhcp_relay_remove":
             return self._aplicar_dhcp_relay_remove(device, pre_state)
-        raise ValueError(f"InterfazVirtual.aplicar(): no hay driver call para el campo {campo!r}")
+        raise ValueError(f"SVI.aplicar(): no hay driver call para el campo {campo!r}")
 
     def _noop_resultado(self, accion: str, **extra: object) -> dict:
         return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": accion, **extra}
@@ -179,39 +179,39 @@ class InterfazVirtual:
         acepta opcional al crear), se aplica atómicamente después."""
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         if estado["existed"]:
-            return self._noop_resultado("crear_interfaz", duplicate=True)
-        resultado = device.driver.create_interfaz_virtual(self.vlan_id, device, device.password)
+            return self._noop_resultado("crear_svi", duplicate=True)
+        resultado = device.driver.create_svi(self.vlan_id, device, device.password)
         if not resultado.get("success") or not self.description:
-            return {**resultado, "accion": "crear_interfaz"}
-        desc_resultado = device.driver.set_interfaz_description(
+            return {**resultado, "accion": "crear_svi"}
+        desc_resultado = device.driver.set_svi_description(
             self.vlan_id, self.description, device, device.password,
         )
-        return {**desc_resultado, "accion": "crear_interfaz"}
+        return {**desc_resultado, "accion": "crear_svi"}
 
     def _aplicar_description(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and actual.description == self.description:
-            return self._noop_resultado("actualizar_descripcion_interfaz")
-        resultado = device.driver.set_interfaz_description(self.vlan_id, self.description, device, device.password)
-        return {**resultado, "accion": "actualizar_descripcion_interfaz"}
+            return self._noop_resultado("actualizar_descripcion_svi")
+        resultado = device.driver.set_svi_description(self.vlan_id, self.description, device, device.password)
+        return {**resultado, "accion": "actualizar_descripcion_svi"}
 
     def _aplicar_admin_up(self, device: "Device", pre_state: "dict | None" = None) -> dict:
-        accion = "activar_interfaz" if self.admin_up else "desactivar_interfaz"
+        accion = "activar_svi" if self.admin_up else "desactivar_svi"
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and actual.admin_up == self.admin_up:
             return self._noop_resultado(accion)
-        resultado = device.driver.set_interfaz_admin_state(self.vlan_id, self.admin_up, device, device.password)
+        resultado = device.driver.set_svi_admin_state(self.vlan_id, self.admin_up, device, device.password)
         return {**resultado, "accion": accion}
 
     def _aplicar_ipv4(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and actual.ipv4_address == self.ipv4_address:
-            return self._noop_resultado("configurar_ipv4_interfaz")
-        resultado = device.driver.set_interfaz_ipv4(self.vlan_id, self.ipv4_address, device, device.password)
-        return {**resultado, "accion": "configurar_ipv4_interfaz"}
+            return self._noop_resultado("configurar_ipv4_svi")
+        resultado = device.driver.set_svi_ipv4(self.vlan_id, self.ipv4_address, device, device.password)
+        return {**resultado, "accion": "configurar_ipv4_svi"}
 
     def _aplicar_ipv4_secondary(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """RF-INTERV-03: "IP secundaria sin IP primaria: se intenta asignar
@@ -228,20 +228,20 @@ class InterfazVirtual:
                 "cannot set a secondary IPv4 address: interface has no primary IPv4 address configured"
             )
         if actual is not None and actual.ipv4_address_secondary == self.ipv4_address_secondary:
-            return self._noop_resultado("configurar_ipv4_secundaria_interfaz")
+            return self._noop_resultado("configurar_ipv4_secundaria_svi")
         previa = actual.ipv4_address_secondary if actual is not None else None
-        resultado = device.driver.set_interfaz_ipv4_secondary(
+        resultado = device.driver.set_svi_ipv4_secondary(
             self.vlan_id, self.ipv4_address_secondary, previa, device, device.password,
         )
-        return {**resultado, "accion": "configurar_ipv4_secundaria_interfaz"}
+        return {**resultado, "accion": "configurar_ipv4_secundaria_svi"}
 
     def _aplicar_ipv6(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and actual.ipv6_address == self.ipv6_address:
-            return self._noop_resultado("configurar_ipv6_interfaz")
-        resultado = device.driver.set_interfaz_ipv6(self.vlan_id, self.ipv6_address, device, device.password)
-        return {**resultado, "accion": "configurar_ipv6_interfaz"}
+            return self._noop_resultado("configurar_ipv6_svi")
+        resultado = device.driver.set_svi_ipv6(self.vlan_id, self.ipv6_address, device, device.password)
+        return {**resultado, "accion": "configurar_ipv6_svi"}
 
     def _aplicar_acl(self, device: "Device", pre_state: "dict | None" = None, campo: str = "acl_in") -> dict:
         direccion = "in" if campo == "acl_in" else "out"
@@ -249,9 +249,9 @@ class InterfazVirtual:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         if actual is not None and getattr(actual, campo) == valor:
-            return self._noop_resultado("configurar_acl_interfaz")
-        resultado = device.driver.set_interfaz_acl(self.vlan_id, direccion, valor, device, device.password)
-        return {**resultado, "accion": "configurar_acl_interfaz"}
+            return self._noop_resultado("configurar_acl_svi")
+        resultado = device.driver.set_svi_acl(self.vlan_id, direccion, valor, device, device.password)
+        return {**resultado, "accion": "configurar_acl_svi"}
 
     @staticmethod
     def _es_ipv6(ip: str) -> bool:
@@ -279,13 +279,13 @@ class InterfazVirtual:
                 "cannot add an IPv4 DHCP relay server: interface has no IPv4 address configured"
             )
         if ip in servers_actuales:
-            return self._noop_resultado("agregar_dhcp_relay_interfaz")
+            return self._noop_resultado("agregar_dhcp_relay_svi")
         if len(servers_actuales) >= _MAX_DHCP_RELAY_SERVERS:
             raise ValueError(f"cannot add DHCP relay server: limit of {_MAX_DHCP_RELAY_SERVERS} reached")
-        resultado = device.driver.set_interfaz_dhcp_relay(
+        resultado = device.driver.set_svi_dhcp_relay(
             self.vlan_id, servers_actuales + [ip], device, device.password,
         )
-        return {**resultado, "accion": "agregar_dhcp_relay_interfaz"}
+        return {**resultado, "accion": "agregar_dhcp_relay_svi"}
 
     def _aplicar_dhcp_relay_remove(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """El SRS pide "sin error crítico" si la IP a eliminar no estaba --
@@ -295,14 +295,14 @@ class InterfazVirtual:
         servers_actuales = list(actual.dhcp_relay_servers) if actual and actual.dhcp_relay_servers else []
         ip = self.dhcp_relay_remove
         if ip not in servers_actuales:
-            return self._noop_resultado("eliminar_dhcp_relay_interfaz")
-        resultado = device.driver.set_interfaz_dhcp_relay(
+            return self._noop_resultado("eliminar_dhcp_relay_svi")
+        resultado = device.driver.set_svi_dhcp_relay(
             self.vlan_id, [s for s in servers_actuales if s != ip], device, device.password,
         )
-        return {**resultado, "accion": "eliminar_dhcp_relay_interfaz"}
+        return {**resultado, "accion": "eliminar_dhcp_relay_svi"}
 
     def repositorio(self) -> str:
-        return "interfaz_virtual"
+        return "svi"
 
     def to_dict(self) -> dict:
         return {
@@ -320,7 +320,7 @@ class InterfazVirtual:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "InterfazVirtual":
+    def from_dict(cls, data: dict) -> "SVI":
         servers = data.get("dhcp_relay_servers")
         return cls(
             vlan_id=data["vlan_id"],

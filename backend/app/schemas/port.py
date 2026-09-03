@@ -80,7 +80,7 @@ class PortDescriptionUpdateRequest(_PortTargetRequest):
     """Request body for ``PATCH /api/v1/devices/{name}/ports/description``
     (Step 2.1) -- sets a description. To clear it, use
     ``DELETE .../description`` instead (verbo explícito en vez de inferir
-    "limpiar" de un valor vacío -- mismo criterio que interfaz virtual)."""
+    "limpiar" de un valor vacío -- mismo criterio que SVI)."""
 
     description: str = Field(
         ...,
