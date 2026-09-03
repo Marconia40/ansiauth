@@ -308,16 +308,49 @@ export async function logout(): Promise<void> {
 
 // ── VLANs ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Envelope wrapping any cached device-scraped resource. `synced_at` is the
+ * timestamp of the last successful scrape (may be null on brand-new devices);
+ * `sync_error` carries the message from the most recent failed scrape and is
+ * null on success; `sync_in_progress` flips true while a Celery refresh task
+ * is running.
+ */
+export interface SyncedResource<T> {
+  data: T;
+  synced_at: string | null;
+  sync_error: string | null;
+  sync_in_progress: boolean;
+}
+
 export async function getVlans(device?: string): Promise<VlanEntry[]> {
-  // Backend now returns a SyncedResource envelope: { data, synced_at, sync_error, sync_in_progress }.
-  // Drop the freshness metadata here to keep the current UI shape; the upcoming
-  // frontend rewrite will consume the envelope directly.
-  const envelope = await unwrap<{ data: VlanEntry[] }>(
-    client.get<ApiResponse<{ data: VlanEntry[] }>>('/vlans/', {
+  const envelope = await unwrap<SyncedResource<VlanEntry[]>>(
+    client.get<ApiResponse<SyncedResource<VlanEntry[]>>>('/vlans/', {
       params: device ? { device } : {},
     }),
   );
   return envelope.data;
+}
+
+/** Returns the full envelope, keeping freshness metadata. Preferred for
+ * dashboards that render a "Last synced Xm ago" indicator. */
+export async function getVlansSynced(device: string): Promise<SyncedResource<VlanEntry[]>> {
+  return unwrap<SyncedResource<VlanEntry[]>>(
+    client.get<ApiResponse<SyncedResource<VlanEntry[]>>>('/vlans/', {
+      params: { device },
+    }),
+  );
+}
+
+/** Fires the async Celery refresh for a device's VLAN cache. Returns as soon
+ * as the task is queued — callers poll getVlansSynced watching
+ * `sync_in_progress` to know when the DB is fresh. */
+export async function refreshDeviceVlans(
+  device: string,
+): Promise<{ device: string; scope: 'vlans'; task_id: string }> {
+  const { data } = await client.post<{ device: string; scope: 'vlans'; task_id: string }>(
+    `/devices/${encodeURIComponent(device)}/vlans/refresh`,
+  );
+  return data;
 }
 
 type VlanRawResponse = { success: boolean; group_job_id: string; jobs: { device: string; job_id: string }[] };
@@ -340,15 +373,32 @@ export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<Vlan
 // ── Ports ─────────────────────────────────────────────────────────────────────
 
 export async function getPorts(device: string): Promise<PortListResponse> {
-  // Backend now returns a SyncedResource envelope wrapping the port payload.
-  // Drop the freshness metadata here; the upcoming frontend rewrite will
-  // consume the envelope directly.
-  const envelope = await unwrap<{ data: PortListResponse }>(
-    client.get<ApiResponse<{ data: PortListResponse }>>('/ports/', {
+  const envelope = await unwrap<SyncedResource<PortListResponse>>(
+    client.get<ApiResponse<SyncedResource<PortListResponse>>>('/ports/', {
       params: { device },
     }),
   );
   return envelope.data;
+}
+
+/** Full envelope variant — see `getVlansSynced` for the motivation. */
+export async function getPortsSynced(
+  device: string,
+): Promise<SyncedResource<PortListResponse>> {
+  return unwrap<SyncedResource<PortListResponse>>(
+    client.get<ApiResponse<SyncedResource<PortListResponse>>>('/ports/', {
+      params: { device },
+    }),
+  );
+}
+
+export async function refreshDevicePorts(
+  device: string,
+): Promise<{ device: string; scope: 'ports'; task_id: string }> {
+  const { data } = await client.post<{ device: string; scope: 'ports'; task_id: string }>(
+    `/devices/${encodeURIComponent(device)}/ports/refresh`,
+  );
+  return data;
 }
 
 type PortJobRawResponse = {
@@ -464,6 +514,8 @@ export async function getJobs(params?: {
   status?: string;
   device?: string;
   site_id?: number;
+  from_date?: string;
+  to_date?: string;
   page?: number;
   page_size?: number;
 }): Promise<{ items: Job[]; total: number }> {

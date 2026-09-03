@@ -10,6 +10,9 @@ export interface RefreshButtonProps {
   syncedAt?: string | null;
   /** If the last sync errored, message shown in danger tone. */
   syncError?: string | null;
+  /** While a multi-device refresh runs, e.g. "12 / 20 synced". Replaces the
+   * synced-at label until the refresh finishes. */
+  progressLabel?: string | null;
 }
 
 function formatRelative(iso: string): string {
@@ -31,10 +34,13 @@ export function RefreshButton({
   disabled,
   syncedAt,
   syncError,
+  progressLabel,
 }: RefreshButtonProps) {
   return (
     <div className="flex items-center gap-2">
-      {syncError ? (
+      {progressLabel ? (
+        <span className="text-xs text-muted tabular-nums">{progressLabel}</span>
+      ) : syncError ? (
         <span className="text-xs text-danger">Sync error</span>
       ) : syncedAt ? (
         <span className="text-xs text-muted">

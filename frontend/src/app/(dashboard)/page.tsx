@@ -1,6 +1,6 @@
 import { ScopeShell } from '@/components/scope/ScopeShell';
 import type { ScopeTab } from '@/components/scope/ScopeTabs';
-import { PlaceholderPanel } from '@/components/scope/Panel';
+import { ScopeDashboard } from '@/components/scope/ScopeDashboard';
 
 // At the Organization scope the VLAN/PORTS/VI/GC actions target ALL devices
 // under every site the caller can see. Enabling them here is a later block —
@@ -31,7 +31,7 @@ export default function OrgDashboardPage() {
       tabsBase="/"
       tabs={ORG_TABS}
     >
-      <PlaceholderPanel label="Organization dashboard — 4 cards + jobs pie (block 2)" />
+      <ScopeDashboard scope={{ kind: 'org' }} />
     </ScopeShell>
   );
 }

@@ -1,5 +1,11 @@
-import { PlaceholderPanel } from '@/components/scope/Panel';
+'use client';
+
+import { useParams } from 'next/navigation';
+import { ScopeDashboard } from '@/components/scope/ScopeDashboard';
 
 export default function SiteDashboardPage() {
-  return <PlaceholderPanel label="Site dashboard — 4 cards + jobs pie (block 2)" />;
+  const params = useParams<{ id: string }>();
+  const siteId = Number(params.id);
+  if (!Number.isFinite(siteId)) return null;
+  return <ScopeDashboard scope={{ kind: 'site', siteId }} />;
 }

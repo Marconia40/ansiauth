@@ -279,7 +279,11 @@ export default function UsersPage() {
     currentUser.role === 'admin' || currentUser.role === 'super-admin';
 
   return (
-    <div>
+    // Block 1 transitional wrapper — legacy layout keeps its light palette on a
+    // white "canvas" so it stays readable under the new dark app shell. Block 6
+    // will rewrite this page against the dark theme (light text, white hover
+    // row) and drop this wrapper.
+    <div className="bg-white text-gray-900 rounded-lg p-6 shadow">
       <PageHeader
         title="User Management"
         actions={
