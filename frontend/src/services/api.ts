@@ -43,6 +43,7 @@ import type {
   SVIListResponse,
   SVIOperationResult,
 } from '@/types/svi';
+import type { DashboardSummary, DashboardSummaryParams } from '@/types/dashboard';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -744,6 +745,40 @@ export async function cancelJob(jobId: string) {
 
 export async function getGroupJob(groupJobId: string): Promise<GroupJob> {
   return unwrap(client.get<ApiResponse<GroupJob>>(`/group-jobs/${groupJobId}`));
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+
+/** Server-side aggregation. Reemplaza el patrón N+1 del dashboard:
+ * antes eran (1 + 3N) requests con N = cantidad de devices; ahora es 1.
+ * Ver docs/prompts/new/plan-dashboard-summary-endpoint.md */
+export async function getDashboardSummary(
+  params: DashboardSummaryParams,
+): Promise<DashboardSummary> {
+  return unwrap<DashboardSummary>(
+    client.get<ApiResponse<DashboardSummary>>('/dashboard/summary', { params }),
+  );
+}
+
+export interface DashboardRefreshResult {
+  devices_queued: number;
+  tasks_dispatched: number;
+  tasks: { device: string; scope: 'vlans' | 'ports' | 'svis'; task_id: string }[];
+}
+
+/** Encola sync de vlans+ports+svis para cada device del scope. Fire and
+ * forget: la respuesta trae los task_ids pero el frontend simplemente
+ * hace polling del summary hasta que sync_in_progress_count vuelve a 0. */
+export async function refreshDashboardScope(
+  params: Pick<DashboardSummaryParams, 'scope' | 'id' | 'name'>,
+): Promise<DashboardRefreshResult> {
+  return unwrap<DashboardRefreshResult>(
+    client.post<ApiResponse<DashboardRefreshResult>>(
+      '/dashboard/refresh',
+      undefined,
+      { params },
+    ),
+  );
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────

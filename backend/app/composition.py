@@ -21,6 +21,7 @@ from app.repositories.site_repository import SiteRepository
 from app.repositories.user_repository import UserRepository
 from app.services.audit_listener import AuditListener
 from app.services.cleanup_scheduler import CleanupScheduler
+from app.services.dashboard_service import DashboardService
 from app.services.device_sync_service import DeviceSyncService
 from app.services.event_dispatcher import EventDispatcher
 from app.services.group_operation_runner import GroupOperationRunner
@@ -163,3 +164,5 @@ inventory = Inventory(
 device_sync_service = DeviceSyncService(
     vlan_repository, puerto_repository, svi_repository, redis_coordinator,
 )
+
+dashboard_service = DashboardService(redis_coordinator)

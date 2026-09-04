@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 init_db(DATABASE_URL)
 logger.info("Database ready: %s", DATABASE_URL)
 
-from app.api import audit, auth, device_groups, devices, group_jobs, health, svis, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, dashboard, device_groups, devices, group_jobs, health, svis, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.core.rls_context import system_context  # noqa: E402
 from app.models.audit import AuditRecord  # noqa: E402
 
@@ -408,6 +408,7 @@ app.include_router(sites.router, prefix="/api/v1/sites", tags=["sites"], respons
 app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], responses=_err)
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"], responses=_err)
 app.include_router(group_jobs.router, prefix="/api/v1/group-jobs", tags=["group-jobs"], responses=_err)
+app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"], responses=_err)
 
 
 @app.get("/")

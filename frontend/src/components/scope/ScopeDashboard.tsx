@@ -2,24 +2,14 @@
 
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  getDevices,
-  getJobs,
-  getPortsSynced,
-  getVlansSynced,
-  type SyncedResource,
-} from '@/services/api';
-import type { Device } from '@/types/device';
-import type { Job } from '@/types/job';
-import type { VlanEntry } from '@/types/vlan';
-import type { PortListResponse } from '@/types/port';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { getDashboardSummary, refreshDashboardScope } from '@/services/api';
+import type { DashboardSummary, DashboardSummaryParams } from '@/types/dashboard';
 import { vendorLabel } from '@/types/device';
 import { Panel } from './Panel';
 import { JobsPieChart, type JobsPieData } from './JobsPieChart';
 import { Pie } from './Pie';
 import { RefreshButton } from './RefreshButton';
-import { runScopeRefresh } from './scopeRefresh';
 
 const VENDOR_COLORS = {
   cisco: 'var(--color-accent-info)',
@@ -42,24 +32,18 @@ export type Scope =
   | { kind: 'group'; groupId: number }
   | { kind: 'device'; deviceName: string };
 
-/** Devices matching the scope. */
-function useScopedDevices(scope: Scope) {
-  return useQuery<Device[]>({
-    queryKey: ['scope', 'devices', scope],
-    queryFn: async () => {
-      const all = await getDevices();
-      switch (scope.kind) {
-        case 'org':
-          return all;
-        case 'site':
-          return all.filter((d) => d.site_id === scope.siteId);
-        case 'group':
-          return all.filter((d) => d.device_group_id === scope.groupId);
-        case 'device':
-          return all.filter((d) => d.name === scope.deviceName);
-      }
-    },
-  });
+/** Convierte el Scope del frontend en los query params que espera el endpoint. */
+function scopeToSummaryParams(scope: Scope): DashboardSummaryParams {
+  switch (scope.kind) {
+    case 'org':
+      return { scope: 'org' };
+    case 'site':
+      return { scope: 'site', id: scope.siteId };
+    case 'group':
+      return { scope: 'group', id: scope.groupId };
+    case 'device':
+      return { scope: 'device', name: scope.deviceName };
+  }
 }
 
 interface Props {
@@ -68,144 +52,133 @@ interface Props {
 
 export function ScopeDashboard({ scope }: Props) {
   const queryClient = useQueryClient();
-  const devicesQuery = useScopedDevices(scope);
-  const devices = useMemo(() => devicesQuery.data ?? [], [devicesQuery.data]);
-  const deviceNames = useMemo(() => devices.map((d) => d.name), [devices]);
 
-  // Per-device VLAN + port envelopes. useQueries parallels across all devices;
-  // React Query dedupes with the sidebar and any drill-down that reads the
-  // same slice.
-  // While the backend Celery task is running for a device, sync_in_progress
-  // stays true — we poll every 2s until it flips to false so the "Last synced"
-  // label updates on its own after the user clicks Refresh.
-  const vlanQueries = useQueries({
-    queries: deviceNames.map((name) => ({
-      queryKey: ['vlans', 'synced', name],
-      queryFn: () => getVlansSynced(name),
-      enabled: Boolean(name),
-      refetchInterval: (query: { state: { data?: SyncedResource<VlanEntry[]> } }) =>
-        query.state.data?.sync_in_progress ? 2000 : false,
-    })),
-  });
-  const portQueries = useQueries({
-    queries: deviceNames.map((name) => ({
-      queryKey: ['ports', 'synced', name],
-      queryFn: () => getPortsSynced(name),
-      enabled: Boolean(name),
-      refetchInterval: (query: { state: { data?: SyncedResource<PortListResponse> } }) =>
-        query.state.data?.sync_in_progress ? 2000 : false,
-    })),
+  // Una sola query trae todos los conteos del scope. Sustituye el patrón
+  // anterior (1 getDevices + N getVlansSynced + N getPortsSynced + 1
+  // getJobs = 3N+2 requests) por 1 sola. Polling automático cada 2s
+  // mientras algún device tenga el lock Redis tomado, igual criterio
+  // que usaba useQueries de vlans/ports antes de este refactor.
+  const summaryQuery = useQuery<DashboardSummary>({
+    queryKey: ['dashboard', 'summary', scope],
+    queryFn: () => getDashboardSummary(scopeToSummaryParams(scope)),
+    staleTime: 60_000,
+    refetchInterval: (query) => {
+      const data = query.state.data as DashboardSummary | undefined;
+      return data && data.devices.sync_in_progress_count > 0 ? 2000 : false;
+    },
   });
 
-  // Jobs — last 7 days. Backend only supports site_id (no group filter), so at
-  // group scope we still ask by site and filter client-side by device name.
-  const siteIdForJobs =
-    scope.kind === 'site'
-      ? scope.siteId
-      : scope.kind === 'group'
-      ? devices[0]?.site_id
-      : undefined;
-  const fromDate = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 7);
-    return d.toISOString();
-  }, []);
-  const jobsQuery = useQuery({
-    queryKey: ['scope', 'jobs', scope, fromDate, siteIdForJobs],
-    queryFn: () =>
-      getJobs({
-        site_id: siteIdForJobs,
-        from_date: fromDate,
-        page_size: 200,
-      }),
-    enabled: scope.kind === 'org' || siteIdForJobs !== undefined,
-  });
+  const summary = summaryQuery.data;
+  const loading = summaryQuery.isLoading;
 
-  const totals = useMemo(
-    () => computeTotals(devices, vlanQueries, portQueries, jobsQuery.data?.items ?? [], scope),
-    [devices, vlanQueries, portQueries, jobsQuery.data, scope],
-  );
-
-  const syncMeta = useMemo(() => {
-    // Oldest synced_at across VLANs + ports envelopes = the timestamp we
-    // truthfully claim as "last synced" for the whole scope.
-    const envelopes = [
-      ...vlanQueries.map((q) => q.data as SyncedResource<VlanEntry[]> | undefined),
-      ...portQueries.map((q) => q.data as SyncedResource<PortListResponse> | undefined),
-    ].filter(Boolean) as SyncedResource<unknown>[];
-    if (envelopes.length === 0) {
-      return { syncedAt: null as string | null, error: null as string | null, inProgress: false };
+  // VLAN name discrepancy: se calcula en el frontend a partir de
+  // summary.vlans.entries[i].names.length > 1. Decisión de diseño para
+  // no duplicar la lógica en backend.
+  const vlanDerived = useMemo(() => {
+    const entries = summary?.vlans.entries ?? [];
+    const ids = entries.map((e) => e.id);
+    const discrepancies = new Set<number>();
+    const namesById = new Map<number, string[]>();
+    for (const e of entries) {
+      namesById.set(e.id, e.names);
+      if (e.names.length > 1) discrepancies.add(e.id);
     }
-    let oldest: string | null = null;
-    let error: string | null = null;
-    let inProgress = false;
-    for (const env of envelopes) {
-      if (env.sync_error) error = env.sync_error;
-      if (env.sync_in_progress) inProgress = true;
-      if (env.synced_at && (oldest === null || env.synced_at < oldest)) oldest = env.synced_at;
-    }
-    return { syncedAt: oldest, error, inProgress };
-  }, [vlanQueries, portQueries]);
+    return { ids, discrepancies, namesById };
+  }, [summary?.vlans.entries]);
 
-  const [refreshState, setRefreshState] = useRefreshState();
-  const loading =
-    devicesQuery.isLoading ||
-    vlanQueries.some((q) => q.isLoading) ||
-    portQueries.some((q) => q.isLoading);
+  const [refreshRunning, setRefreshRunning] = useState(false);
 
   async function handleRefresh() {
-    setRefreshState({ running: true, done: 0, total: deviceNames.length });
-    await runScopeRefresh(deviceNames, {
-      onProgress: (done, total) => setRefreshState({ running: true, done, total }),
-    });
-    // Invalidate every synced envelope for these devices, plus jobs.
-    for (const name of deviceNames) {
-      queryClient.invalidateQueries({ queryKey: ['vlans', 'synced', name] });
-      queryClient.invalidateQueries({ queryKey: ['ports', 'synced', name] });
+    setRefreshRunning(true);
+    try {
+      // 1 sola request encola vlans+ports+svis para cada device del scope.
+      // Fire and forget: no esperamos las tareas, invalidamos el summary
+      // para que el polling agarre sync_in_progress_count>0 y siga desde
+      // ahí hasta que baje a 0.
+      await refreshDashboardScope(scopeToSummaryParams(scope));
+    } finally {
+      queryClient.invalidateQueries({ queryKey: ['dashboard', 'summary'] });
+      // Invalidar también las envelopes de detalle por si el user tiene
+      // una tab de VLAN/Ports abierta en otro tab del navegador.
+      queryClient.invalidateQueries({ queryKey: ['vlans', 'synced'] });
+      queryClient.invalidateQueries({ queryKey: ['ports', 'synced'] });
+      setRefreshRunning(false);
     }
-    queryClient.invalidateQueries({ queryKey: ['scope', 'jobs'] });
-    setRefreshState({ running: false, done: 0, total: 0 });
   }
+
+  const syncInProgress =
+    (summary?.devices.sync_in_progress_count ?? 0) > 0;
+  const deviceCount = summary?.devices.total ?? 0;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-end">
         <RefreshButton
           onClick={handleRefresh}
-          loading={refreshState.running || syncMeta.inProgress}
-          disabled={deviceNames.length === 0}
-          syncedAt={syncMeta.syncedAt}
-          syncError={syncMeta.error}
+          loading={refreshRunning || syncInProgress}
+          disabled={deviceCount === 0}
+          syncedAt={summary?.devices.last_sync_at ?? null}
+          syncError={summary && summary.devices.sync_errors > 0 ? 'Sync error' : null}
           progressLabel={
-            refreshState.running
-              ? `${refreshState.done} / ${refreshState.total} synced`
+            syncInProgress
+              ? `${summary?.devices.sync_in_progress_count ?? 0} in progress`
               : undefined
           }
         />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <DevicesCard totals={totals} loading={loading} />
-        <VlansCard totals={totals} loading={loading} />
-        <PortsCard totals={totals} loading={loading} />
+        <DevicesCard summary={summary} loading={loading} />
+        <VlansCard
+          summary={summary}
+          loading={loading}
+          vlanIds={vlanDerived.ids}
+          discrepancies={vlanDerived.discrepancies}
+          namesById={vlanDerived.namesById}
+        />
+        <PortsCard summary={summary} loading={loading} />
         <JobsCard
-          totals={totals}
-          loading={jobsQuery.isLoading}
-          jobsHref={jobsHrefForScope(scope, siteIdForJobs)}
+          summary={summary}
+          loading={loading}
+          jobsHref={jobsHrefForScope(scope, jobsSiteIdFor(scope))}
         />
       </div>
     </div>
   );
 }
 
+/** Enlace "View all →" al listado de jobs. Sigue queriendo un site_id
+ * para pre-filtrar. Para scope=group el filtro por site queda a cargo
+ * del listado de jobs (no crítico para el link inicial). */
+function jobsSiteIdFor(scope: Scope): number | undefined {
+  if (scope.kind === 'site') return scope.siteId;
+  return undefined;
+}
+
 // ── Cards ────────────────────────────────────────────────────────────────────
 
 interface CardProps {
-  totals: ScopeTotals;
+  summary: DashboardSummary | undefined;
   loading: boolean;
 }
 
-function DevicesCard({ totals, loading }: CardProps) {
+function DevicesCard({ summary, loading }: CardProps) {
+  // by_vendor viene con las keys que usa la DB (cisco_ios, huawei_vrp,
+  // etc — el driver key, no el label). Agrupar por lo que muestra
+  // vendorLabel() garantiza que cualquier vendor futuro con label
+  // 'Cisco' o 'Huawei' caiga en el bucket correcto sin cambio.
+  const byVendor = summary?.devices.by_vendor ?? {};
+  let cisco = 0;
+  let huawei = 0;
+  let other = 0;
+  for (const [key, count] of Object.entries(byVendor)) {
+    const label = vendorLabel(key);
+    if (label === 'Cisco') cisco += count;
+    else if (label === 'Huawei') huawei += count;
+    else other += count;
+  }
+  const total = summary?.devices.total ?? 0;
+
   return (
     <Panel title="Devices">
       <div className="flex items-center gap-4">
@@ -213,14 +186,14 @@ function DevicesCard({ totals, loading }: CardProps) {
           size={100}
           strokeWidth={16}
           slices={[
-            { value: totals.ciscoCount, color: VENDOR_COLORS.cisco },
-            { value: totals.huaweiCount, color: VENDOR_COLORS.huawei },
-            { value: totals.otherVendorCount, color: VENDOR_COLORS.other },
+            { value: cisco, color: VENDOR_COLORS.cisco },
+            { value: huawei, color: VENDOR_COLORS.huawei },
+            { value: other, color: VENDOR_COLORS.other },
           ]}
           center={
             <>
               <span className="text-lg font-semibold text-text leading-none">
-                {loading ? '…' : totals.deviceCount}
+                {loading ? '…' : total}
               </span>
               <span className="text-[10px] uppercase tracking-wide text-muted mt-1">
                 Total
@@ -232,18 +205,18 @@ function DevicesCard({ totals, loading }: CardProps) {
           <VendorLegendRow
             color={VENDOR_COLORS.cisco}
             label="CISCO"
-            value={totals.ciscoCount}
+            value={cisco}
           />
           <VendorLegendRow
             color={VENDOR_COLORS.huawei}
             label="HUAWEI"
-            value={totals.huaweiCount}
+            value={huawei}
           />
-          {totals.otherVendorCount > 0 && (
+          {other > 0 && (
             <VendorLegendRow
               color={VENDOR_COLORS.other}
               label="OTHER"
-              value={totals.otherVendorCount}
+              value={other}
             />
           )}
         </div>
@@ -276,14 +249,20 @@ function VendorLegendRow({
   );
 }
 
-function VlansCard({ totals, loading }: CardProps) {
+interface VlansCardProps extends CardProps {
+  vlanIds: number[];
+  discrepancies: Set<number>;
+  namesById: Map<number, string[]>;
+}
+
+function VlansCard({ summary, loading, vlanIds, discrepancies, namesById }: VlansCardProps) {
   return (
     <Panel title="VLANs">
-      <BigNumber value={totals.vlanIds.length} loading={loading} />
+      <BigNumber value={summary?.vlans.unique_count ?? 0} loading={loading} />
       <div className="mt-3 flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
-        {totals.vlanIds.map((id) => {
-          const hasDiscrepancy = totals.vlanNameDiscrepancies.has(id);
-          const names = totals.vlanNamesById.get(id) ?? [];
+        {vlanIds.map((id) => {
+          const hasDiscrepancy = discrepancies.has(id);
+          const names = namesById.get(id) ?? [];
           return (
             <span
               key={id}
@@ -303,11 +282,11 @@ function VlansCard({ totals, loading }: CardProps) {
             </span>
           );
         })}
-        {totals.vlanIds.length === 0 && (
+        {vlanIds.length === 0 && !loading && (
           <span className="text-xs italic text-muted">No VLANs discovered</span>
         )}
       </div>
-      {totals.vlanNameDiscrepancies.size > 0 && (
+      {discrepancies.size > 0 && (
         <p className="text-[11px] text-muted mt-2">
           * marks VLAN IDs whose name differs between devices — hover to see the
           variants.
@@ -317,10 +296,11 @@ function VlansCard({ totals, loading }: CardProps) {
   );
 }
 
-function PortsCard({ totals, loading }: CardProps) {
+function PortsCard({ summary, loading }: CardProps) {
+  const ports = summary?.ports ?? { total: 0, up: 0, down: 0, shutdown: 0 };
   return (
     <Panel title="Ports">
-      <BigNumber value={totals.portTotal} loading={loading} />
+      <BigNumber value={ports.total} loading={loading} />
       <table className="w-full mt-3 text-sm">
         <thead className="text-xs uppercase tracking-wider text-muted">
           <tr>
@@ -331,15 +311,15 @@ function PortsCard({ totals, loading }: CardProps) {
         <tbody className="tabular-nums">
           <tr className="border-t border-panel-border">
             <td className="py-1 font-semibold text-success">UP</td>
-            <td className="py-1 text-right">{totals.portUp}</td>
+            <td className="py-1 text-right">{ports.up}</td>
           </tr>
           <tr className="border-t border-panel-border">
             <td className="py-1 font-semibold text-danger">DOWN</td>
-            <td className="py-1 text-right">{totals.portDown}</td>
+            <td className="py-1 text-right">{ports.down}</td>
           </tr>
           <tr className="border-t border-panel-border">
             <td className="py-1 font-semibold text-muted">SHUTDOWN</td>
-            <td className="py-1 text-right">{totals.portShutdown}</td>
+            <td className="py-1 text-right">{ports.shutdown}</td>
           </tr>
         </tbody>
       </table>
@@ -348,10 +328,11 @@ function PortsCard({ totals, loading }: CardProps) {
 }
 
 function JobsCard({
-  totals,
+  summary,
   loading,
   jobsHref,
 }: CardProps & { jobsHref: string }) {
+  const jobsPie = useMemo<JobsPieData>(() => aggregateJobsPie(summary), [summary]);
   return (
     <Panel
       title="Jobs — last 7 days"
@@ -367,10 +348,28 @@ function JobsCard({
       {loading ? (
         <BigNumber value={0} loading />
       ) : (
-        <JobsPieChart data={totals.jobs} />
+        <JobsPieChart data={jobsPie} />
       )}
     </Panel>
   );
+}
+
+/** Traduce el ``by_status`` del backend a los 3 buckets que el
+ * JobsPieChart entiende (success / failed / pending), más el conteo
+ * separado de rollbacks. Mantiene los mismos criterios que el
+ * ``computeTotals`` viejo. */
+function aggregateJobsPie(summary: DashboardSummary | undefined): JobsPieData {
+  if (!summary) return { success: 0, failed: 0, pending: 0, rollbackCount: 0 };
+  const by = summary.jobs.by_status;
+  const success = by.completed ?? 0;
+  const failed = (by.failed ?? 0) + (by.cancelled ?? 0);
+  const pending = (by.pending ?? 0) + (by.running ?? 0);
+  return {
+    success,
+    failed,
+    pending,
+    rollbackCount: summary.jobs.rollback_performed_count,
+  };
 }
 
 function BigNumber({ value, loading }: { value: number; loading: boolean }) {
@@ -379,130 +378,4 @@ function BigNumber({ value, loading }: { value: number; loading: boolean }) {
       {loading ? <span className="text-muted">…</span> : value.toLocaleString()}
     </div>
   );
-}
-
-// ── Aggregation ──────────────────────────────────────────────────────────────
-
-interface ScopeTotals {
-  deviceCount: number;
-  ciscoCount: number;
-  huaweiCount: number;
-  otherVendorCount: number;
-  vlanIds: number[];
-  vlanNamesById: Map<number, string[]>;
-  vlanNameDiscrepancies: Set<number>;
-  portTotal: number;
-  portUp: number;
-  portDown: number;
-  portShutdown: number;
-  jobs: JobsPieData;
-}
-
-function computeTotals(
-  devices: Device[],
-  vlanQueries: ReturnType<typeof useQueries> extends infer T ? T : never,
-  portQueries: ReturnType<typeof useQueries> extends infer T ? T : never,
-  jobs: Job[],
-  scope: Scope,
-): ScopeTotals {
-  // ── Devices by vendor ─────────────────────────────────────────────────────
-  let ciscoCount = 0;
-  let huaweiCount = 0;
-  let otherVendorCount = 0;
-  for (const d of devices) {
-    const label = vendorLabel(d.vendor);
-    if (label === 'Cisco') ciscoCount += 1;
-    else if (label === 'Huawei') huaweiCount += 1;
-    else otherVendorCount += 1;
-  }
-
-  // ── VLAN OR-union with per-id name tracking ───────────────────────────────
-  const vlanNames = new Map<number, Set<string>>();
-  const vqs = vlanQueries as { data?: SyncedResource<VlanEntry[]> }[];
-  for (const q of vqs) {
-    if (!q?.data) continue;
-    for (const entry of q.data.data) {
-      const bucket = vlanNames.get(entry.vlan_id) ?? new Set<string>();
-      if (entry.name) bucket.add(entry.name);
-      vlanNames.set(entry.vlan_id, bucket);
-    }
-  }
-  const vlanIds = Array.from(vlanNames.keys()).sort((a, b) => a - b);
-  const vlanNamesById = new Map<number, string[]>();
-  const vlanNameDiscrepancies = new Set<number>();
-  for (const [id, names] of vlanNames) {
-    const arr = Array.from(names);
-    vlanNamesById.set(id, arr);
-    if (arr.length > 1) vlanNameDiscrepancies.add(id);
-  }
-
-  // ── Port state buckets ────────────────────────────────────────────────────
-  let portTotal = 0;
-  let portUp = 0;
-  let portDown = 0;
-  let portShutdown = 0;
-  const pqs = portQueries as { data?: SyncedResource<PortListResponse> }[];
-  for (const q of pqs) {
-    if (!q?.data) continue;
-    const ports = q.data.data.ports;
-    portTotal += ports.length;
-    for (const p of ports) {
-      if (p.admin_up === false) portShutdown += 1;
-      else if (p.operational_up === true) portUp += 1;
-      else if (p.operational_up === false) portDown += 1;
-      // Unknown state (nulls) contribute to total but not to any bucket.
-    }
-  }
-
-  // ── Jobs — apply group-scope client-side filter if needed ────────────────
-  const deviceNameSet = new Set(devices.map((d) => d.name));
-  const scopedJobs =
-    scope.kind === 'group'
-      ? jobs.filter((j) => j.device !== null && deviceNameSet.has(j.device))
-      : jobs;
-
-  const jobsAgg: JobsPieData = {
-    success: 0,
-    failed: 0,
-    pending: 0,
-    rollbackCount: 0,
-  };
-  for (const j of scopedJobs) {
-    if (j.status === 'completed') jobsAgg.success += 1;
-    else if (
-      j.status === 'failed' ||
-      j.status === 'cancelled' ||
-      j.status === 'rollback_performed'
-    )
-      jobsAgg.failed += 1;
-    else jobsAgg.pending += 1;
-    if (j.rollback_performed) jobsAgg.rollbackCount += 1;
-  }
-
-  return {
-    deviceCount: devices.length,
-    ciscoCount,
-    huaweiCount,
-    otherVendorCount,
-    vlanIds,
-    vlanNamesById,
-    vlanNameDiscrepancies,
-    portTotal,
-    portUp,
-    portDown,
-    portShutdown,
-    jobs: jobsAgg,
-  };
-}
-
-// ── Refresh state (tiny local hook to avoid a full context) ──────────────────
-
-interface RefreshState {
-  running: boolean;
-  done: number;
-  total: number;
-}
-
-function useRefreshState(): [RefreshState, (s: RefreshState) => void] {
-  return useState<RefreshState>({ running: false, done: 0, total: 0 });
 }
