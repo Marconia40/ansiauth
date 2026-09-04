@@ -13,10 +13,10 @@ function typeLabel(port: Port): string {
   return '—';
 }
 
-/** POE flag is nullable when the device didn't report the capability. */
-function poeLabel(port: Port): string {
-  if (port.poe_enabled === true) return 'ENABLE';
-  if (port.poe_enabled === false) return 'DISABLE';
+// Backend no longer reads PoE / speed / duplex from devices (removed in
+// 49ec202 because the collectors never populated them). Keeping the rows
+// with a hardcoded 'N/A' for now; drop them if the layout looks off.
+function poeLabel(_port: Port): string {
   return 'N/A';
 }
 
@@ -40,8 +40,8 @@ function allowedLabel(port: Port): string {
   return list.join(', ');
 }
 
-function speedLabel(port: Port): string {
-  return port.speed ?? '—';
+function speedLabel(_port: Port): string {
+  return '—';
 }
 
 export function PortDetailCard({ port, emptyLabel }: Props) {

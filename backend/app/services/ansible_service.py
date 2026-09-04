@@ -252,14 +252,26 @@ def _extract_all_command_outputs(r) -> list[str]:
       see one entry per device-side command.
     * ``cli_command`` (netcommon): ``res.stdout`` is a plain string per task.
 
-    Tasks that produce no stdout (config modules, ``set_fact``, etc.) are
-    silently skipped — they contribute nothing to the result list.
+    Tasks that produce no stdout at all (config modules, ``set_fact``, etc.
+    -- the key is simply absent) are silently skipped. A command that DID
+    run and legitimately returned an empty string (e.g. "display
+    current-configuration configuration dhcp" on a device with nothing
+    configured there) is kept as ``""`` -- bug real encontrado probando
+    esto contra un device real: el truthiness check viejo (``and
+    item_stdout``) tiraba esas entradas vacías en vez de preservarlas,
+    lo que corría el índice de todos los comandos siguientes en la misma
+    tanda -- ``HuaweiVendor.get_svis()`` (que arma ``config``/``dhcp_groups``
+    por posición) terminaba leyendo la salida de una interfaz como si
+    fuera la del comando de DHCP, y la interfaz siguiente desaparecía sin
+    ningún error visible.
 
     Returns
     -------
     list[str]
-        Command stdouts in the order their tasks completed.  Empty list if
-        no relevant events were found.
+        Command stdouts in the order their tasks completed, 1 por comando
+        enviado (incluye entradas ``""`` cuando el device no devolvió nada
+        para ese comando puntual). Empty list if no relevant events were
+        found.
     """
     outputs: list[str] = []
     try:
@@ -279,15 +291,15 @@ def _extract_all_command_outputs(r) -> list[str]:
                     if not isinstance(item, dict):
                         continue
                     item_stdout = item.get("stdout")
-                    if isinstance(item_stdout, str) and item_stdout:
+                    if isinstance(item_stdout, str):
                         outputs.append(item_stdout)
                 continue
             stdout_val = res.get("stdout")
             if isinstance(stdout_val, list):
                 for entry in stdout_val:
-                    if isinstance(entry, str) and entry:
+                    if isinstance(entry, str):
                         outputs.append(entry)
-            elif isinstance(stdout_val, str) and stdout_val:
+            elif isinstance(stdout_val, str):
                 outputs.append(stdout_val)
     except Exception as exc:
         logger.debug("Could not extract command outputs from events: %s", exc)

@@ -93,6 +93,22 @@ list_ports:
       - "display interface description"
       - "display port vlan"
 
+# Todo comando de puertos de acá en adelante sustituye {interface} en la
+# primera línea ("interface {interface}") -- 2 devices reales confirman
+# que este vendor/platform NO tiene un único formato de nombre de
+# interfaz para comandos de config: f3r9s2 (S-series real) exige el
+# nombre completo ("GigabitEthernet0/0/1") y rechaza la forma abreviada
+# ("Error: Wrong parameter found" apenas se manda "interface GE0/0/1");
+# huawei01 (CE12800 de lab) es al revés, exige la abreviada y rechaza la
+# completa con el mismo error. El driver (huawei/driver.py) manda ambas
+# formas como vars separadas -- {interface} (abreviada, la que usan los
+# comandos de lectura y el resto del sistema) e {interface_full}
+# (completa, calculada por expandir_nombre_interfaz()) -- primary intenta
+# con la abreviada primero (funciona en el lab y es la forma "nativa" del
+# resto del sistema), y esta alternativa reintenta con la completa cuando
+# el device la rechaza.
+_INTERFACE_WRONG_PARAM: &interface_wrong_param 'interface \S+\r?\n\s*\^\r?\nError: Wrong parameter found'
+
 update_port_description:
   set:
     primary:
@@ -104,6 +120,13 @@ update_port_description:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "description {description}"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -121,6 +144,13 @@ update_port_description:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "undo description"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -140,6 +170,13 @@ set_port_admin_state:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "undo shutdown"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -157,6 +194,13 @@ set_port_admin_state:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "shutdown"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -175,6 +219,13 @@ set_port_access_vlan:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "port default vlan {vlan_id}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -193,6 +244,13 @@ set_trunk_pvid_vlan:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "port trunk pvid vlan {vlan_id}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -212,6 +270,14 @@ set_trunk_allowed_vlans:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "undo port trunk allow-pass vlan all"
+        - "port trunk allow-pass vlan {allowed_vlans}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -232,6 +298,13 @@ set_port_poe:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "poe enable"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -249,6 +322,13 @@ set_port_poe:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "poe disable"
+          - "quit"
+          - "quit"
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -297,6 +377,16 @@ set_storm_control:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "storm control broadcast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm control multicast min-rate percent {threshold} max-rate percent {threshold}"
+          - "storm control action block"
+          - "storm control enable trap"
+          - "quit"
+          - "quit"
       - triggered_by_error: 'storm control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -334,6 +424,16 @@ set_storm_control:
         - "quit"
         - "quit"
     alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "undo storm control broadcast"
+          - "undo storm control multicast"
+          - "undo storm control action"
+          - "undo storm control enable trap"
+          - "quit"
+          - "quit"
       - triggered_by_error: 'storm control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
@@ -369,6 +469,18 @@ reset_port:
       - "clear configuration interface {interface}"
       - "y"
       - "quit"
+  # Mismo problema de nombre de interfaz que el resto de este archivo
+  # (ver nota grande más arriba) -- alternativa sin probar en vivo (el
+  # comando es destructivo, no se ensaya a ciegas contra un device real),
+  # pero el mecanismo y el trigger son los mismos ya confirmados para
+  # todos los demás comandos de puertos.
+  alternatives:
+    - triggered_by_error: 'clear configuration interface \S+\r?\n\s*\^\r?\nError: Wrong parameter found'
+      block:
+        - "system-view"
+        - "clear configuration interface {interface_full}"
+        - "y"
+        - "quit"
 
 set_access_mode:
   primary:
@@ -381,6 +493,14 @@ set_access_mode:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "port link-type access"
+        - "port default vlan {vlan_id}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -403,6 +523,16 @@ set_trunk_mode:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: *interface_wrong_param
+      block:
+        - "system-view"
+        - "interface {interface_full}"
+        - "port link-type trunk"
+        - "port trunk pvid vlan {native_vlan}"
+        - "undo port trunk allow-pass vlan all"
+        - "port trunk allow-pass vlan {allowed_vlans}"
+        - "quit"
+        - "quit"
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
@@ -413,3 +543,333 @@ set_trunk_mode:
         - "port trunk allow-pass vlan {allowed_vlans}"
         - "quit"
         - "quit"
+
+# ── SVI, RF-INTERV-* ─────────────────────────────────
+# "interface Vlanif{vlan_id}". Reusa el mismo trigger _NO_COMMIT que
+# VLAN/puerto en cada operación -- misma plataforma, mismo comportamiento
+# de sesión CLI, no hay motivo para que solo algunas operaciones lo
+# necesiten.
+
+create_svi:
+  primary:
+    block: ["system-view", "interface Vlanif{vlan_id}", "undo shutdown", "commit", "quit", "quit"]
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "interface Vlanif{vlan_id}"
+        - "undo shutdown"
+        - "quit"
+        - "quit"
+
+delete_svi:
+  primary:
+    block: ["system-view", "undo interface Vlanif{vlan_id}", "commit", "quit"]
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo interface Vlanif{vlan_id}"
+        - "quit"
+
+set_svi_admin_state:
+  enabled:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo shutdown", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "undo shutdown"
+          - "quit"
+          - "quit"
+  disabled:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "shutdown", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "shutdown"
+          - "quit"
+          - "quit"
+
+set_svi_description:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "description {description}", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "description {description}"
+          - "quit"
+          - "quit"
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo description", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "undo description"
+          - "quit"
+          - "quit"
+
+# Confirmado contra el device real de lab (running-config visto esta
+# sesión: "interface Vlanif10 / ip address 10.10.10.10 255.255.255.0").
+# {ipv4_addr}/{ipv4_mask} ya vienen separados (máscara punteada) -- la
+# conversión CIDR->máscara es cómputo real, la hace el driver en Python.
+set_svi_ipv4:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "ip address {ipv4_addr} {ipv4_mask}", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "ip address {ipv4_addr} {ipv4_mask}"
+          - "quit"
+          - "quit"
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo ip address", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "undo ip address"
+          - "quit"
+          - "quit"
+
+# RF-INTERV-03: IP secundaria -- VRP llama "sub" a esto, confirmado contra
+# config real de producción (ver ejemplo de Vlanif832 en la nota de
+# set_svi_ipv6 más abajo -- misma interfaz, "ip address ... sub").
+# Requiere primaria existente (lo valida SVI antes de llegar
+# acá).
+set_svi_ipv4_secondary:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "ip address {ipv4_addr} {ipv4_mask} sub", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "ip address {ipv4_addr} {ipv4_mask} sub"
+          - "quit"
+          - "quit"
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo ip address {ipv4_addr} {ipv4_mask} sub", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "undo ip address {ipv4_addr} {ipv4_mask} sub"
+          - "quit"
+          - "quit"
+
+# Confirmado contra config real de producción (interface Vlanif832):
+#   ipv6 enable
+#   ip address 200.16.26.129 255.255.255.128
+#   ip address 172.23.112.1 255.255.255.0 sub
+#   ipv6 address 2801:120:832::1/64
+# "ipv6 enable" hace falta antes de poder asignar la dirección (a
+# diferencia de Cisco, que solo necesita "ipv6 unicast-routing" global) --
+# pero a diferencia del IPv4 de esta misma plataforma, ipv6 SÍ va en CIDR
+# de un tirón, igual que Cisco (no separado addr+prefix-length).
+set_svi_ipv6:
+  set:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "ipv6 enable", "ipv6 address {ipv6_address}", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "ipv6 enable"
+          - "ipv6 address {ipv6_address}"
+          - "quit"
+          - "quit"
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo ipv6 address", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "undo ipv6 address"
+          - "quit"
+          - "quit"
+
+# Confirmado contra config real de producción -- el orden de
+# "traffic-filter" cambia según si la ACL es numerada o con nombre:
+#   traffic-filter inbound acl 3002                           (numerada)
+#   traffic-filter acl servers-admin-dc2-vlan830 inbound       (con nombre)
+# driver.py decide "set_numeric" vs "set_named" según acl_name.isdigit().
+# Asigna una ACL que ya existe en el device, no la crea (RF-GLOBAL-04,
+# aparte).
+set_svi_acl:
+  set_numeric:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "traffic-filter {direction}bound acl {acl_name}", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "traffic-filter {direction}bound acl {acl_name}"
+          - "quit"
+          - "quit"
+  set_named:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "traffic-filter acl {acl_name} {direction}bound", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "traffic-filter acl {acl_name} {direction}bound"
+          - "quit"
+          - "quit"
+  clear:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo traffic-filter {direction}bound", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "undo traffic-filter {direction}bound"
+          - "quit"
+          - "quit"
+
+# {servers} es la lista completa de relay servers (SVI arma el
+# full-replace antes de llegar acá -- RF-INTERV-05 es incremental a nivel
+# API, full-replace a nivel CLI). Hay 2 formas reales confirmadas, y varían
+# por plataforma -- primary intenta la forma directa, alternatives cubre
+# tanto el "sin commit" ya conocido como la forma por "server group" para
+# las plataformas que rechazan la directa.
+#
+# FORMA DIRECTA (primary) -- "dhcp select relay" (una vez, solo si la
+# lista no está vacía) + "dhcp relay server-ip {ip}" por cada elemento,
+# después del "undo dhcp select relay" fijo que limpia cualquier config
+# previa. Confirmada contra config real de un device de producción.
+#
+# FORMA POR "SERVER GROUP" (2da alternativa) -- confirmada contra el
+# MISMO device de producción (coexisten, se elige una u otra por
+# interfaz) Y contra el CE12800 de lab (donde la forma directa NO existe
+# -- "dhcp relay ?" ahí no lista "server-ip", pero "dhcp relay server
+# group" sí). El grupo es un objeto GLOBAL (fuera del contexto de
+# interfaz) con nombre propio -- acá se genera uno determinístico por
+# VLAN ("ansiauth-vlan{vlan_id}") para no necesitar estado extra ni
+# compartir grupos entre interfaces (que es para lo que Huawei pensó esta
+# forma, pero no encaja con el modelo por-interfaz de RF-INTERV-05):
+#   dhcp relay server group ansiauth-vlan{vlan_id}
+#    server {ip} {index}          -- {index} 0-based, "INTEGER<0-19>" confirmado (máx 20 por grupo en el CE12800)
+#   interface Vlanif{vlan_id}
+#    dhcp select relay
+#    dhcp relay binding server group ansiauth-vlan{vlan_id}
+# Full-replace real y confirmado contra el device de lab (setup -> setup
+# de nuevo con otra lista -> clear, las 3 veces funcionando en secuencia):
+# hace falta desvincular ANTES de poder borrar/recrear el grupo (si no,
+# "Error: The DHCP server group is used on the interface N time(s)"), por
+# eso el "undo dhcp relay binding server group" (sin nombre -- con nombre
+# da "Too many parameters") va primero, incondicional.
+#
+# Limitación conocida: la 2da alternativa asume que además de rechazar la
+# forma directa, el device SÍ soporta commit -- si algún device rechaza
+# ambas cosas a la vez, el mecanismo de alternatives (1 solo reintento, no
+# encadena) no lo cubre todavía. No confirmado que ese caso exista.
+# El "undo dhcp relay binding server group" + "undo dhcp relay server
+# group ansiauth-vlan{vlan_id}" va INCONDICIONAL en el primary (y su
+# alternativa sin-commit), no solo en la alternativa por grupo -- bug real
+# encontrado probando el clear completo (lista vacía): como el "clear" de
+# la forma directa nunca manda una línea "dhcp relay server-ip" (no hay
+# nada que dispare el trigger de la 2da alternativa), la forma directa
+# "tiene éxito" trivialmente en un device que en realidad venía usando la
+# forma por grupo -- el reintento nunca se dispara y el binding viejo
+# queda colgado. Confirmado que "undo dhcp relay binding server group"
+# es inofensivo cuando nunca hubo nada bindeado (probado en una interfaz
+# recién creada, sin ningún dhcp relay configurado todavía).
+set_svi_dhcp_relay:
+  primary:
+    block:
+      - "system-view"
+      - "interface Vlanif{vlan_id}"
+      - "undo dhcp select relay"
+      - "undo dhcp relay binding server group"
+      - "quit"
+      - "undo dhcp relay server group ansiauth-vlan{vlan_id}"
+      - "interface Vlanif{vlan_id}"
+    repeat:
+      over: "servers"
+      prefix_if_nonempty: ["dhcp select relay"]
+      line: "dhcp relay server-ip {item}"
+    trailer: ["commit", "quit", "quit"]
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "interface Vlanif{vlan_id}"
+        - "undo dhcp select relay"
+        - "undo dhcp relay binding server group"
+        - "quit"
+        - "undo dhcp relay server group ansiauth-vlan{vlan_id}"
+        - "interface Vlanif{vlan_id}"
+      repeat:
+        over: "servers"
+        prefix_if_nonempty: ["dhcp select relay"]
+        line: "dhcp relay server-ip {item}"
+      trailer: ["quit", "quit"]
+    - triggered_by_error: 'dhcp relay server-ip \S+\r?\n\s*\^\r?\nError: (?:Unrecognized|Incomplete) command'
+      block:
+        - "system-view"
+        - "interface Vlanif{vlan_id}"
+        - "undo dhcp relay binding server group"
+        - "quit"
+        - "undo dhcp relay server group ansiauth-vlan{vlan_id}"
+      repeat:
+        over: "servers"
+        prefix_if_nonempty: ["dhcp relay server group ansiauth-vlan{vlan_id}"]
+        line: "server {item} {index}"
+        suffix_if_nonempty:
+          - "quit"
+          - "interface Vlanif{vlan_id}"
+          - "dhcp select relay"
+          - "dhcp relay binding server group ansiauth-vlan{vlan_id}"
+        if_empty:
+          - "interface Vlanif{vlan_id}"
+          - "undo dhcp select relay"
+      trailer: ["commit", "quit", "quit"]
+
+# RF-INTERV-04's "ACL previamente creada... e identificador válido" --
+# "Total nonempty ACL number is 0" confirmado contra el device real de lab
+# (estado vacío). El formato de encabezado con ACLs reales configuradas
+# ("Basic/Advanced ACL <num>, N rules" para numeradas, "Basic/Advanced
+# Name ACL <nombre>, N rules" para con nombre -- la palabra "Name" extra
+# solo aparece en ese caso) confirmado aparte contra config real de un
+# device de producción (parseo en svi_parser.py).
+list_acls:
+  primary:
+    commands:
+      - "display acl all"
+
+# get_svis NO tiene entrada acá a propósito -- confirmado
+# contra el device real de lab que "display current-configuration
+# interface Vlanif" sin número es rechazado ("Error: Wrong parameter
+# found at '^' position"), a diferencia de Cisco. driver.py arma los
+# comandos en Python: primero "display ip interface brief" para
+# descubrir qué Vlanif existen, después "display current-configuration
+# interface Vlanif{id}" (confirmado que esta forma con número sí
+# funciona) por cada una -- mismo criterio de bypass de YAML que
+# set_svi_dhcp_relay (número de comandos dinámico).

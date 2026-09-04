@@ -48,6 +48,7 @@ from app.core.exceptions import (
     ConflictError,
     DeviceExecutionError,
     NotFoundError,
+    TransicionInvalidaError,
     UnsupportedVendorError,
     ValidationError,
 )
@@ -62,7 +63,7 @@ logger = logging.getLogger(__name__)
 init_db(DATABASE_URL)
 logger.info("Database ready: %s", DATABASE_URL)
 
-from app.api import audit, auth, device_groups, devices, group_jobs, health, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
+from app.api import audit, auth, device_groups, devices, group_jobs, health, svis, jobs, ports, sites, users, vlans  # noqa: E402 (must follow DB init)
 from app.core.rls_context import system_context  # noqa: E402
 from app.models.audit import AuditRecord  # noqa: E402
 
@@ -337,7 +338,7 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
 @app.exception_handler(ValidationError)
 async def validation_error_handler(request: Request, exc: ValidationError):
     logger.warning("Validation error: %s", str(exc))
-    return JSONResponse(status_code=400, content=make_error(400, str(exc), "VALIDATION_ERROR"))
+    return JSONResponse(status_code=422, content=make_error(422, str(exc), "VALIDATION_ERROR"))
 
 
 @app.exception_handler(NotFoundError)
@@ -349,6 +350,17 @@ async def not_found_error_handler(request: Request, exc: NotFoundError):
 @app.exception_handler(ConflictError)
 async def conflict_error_handler(request: Request, exc: ConflictError):
     logger.warning("Conflict: %s", str(exc))
+    return JSONResponse(status_code=409, content=make_error(409, str(exc), "CONFLICT"))
+
+
+@app.exception_handler(TransicionInvalidaError)
+async def transicion_invalida_error_handler(request: Request, exc: TransicionInvalidaError):
+    """Mismo criterio 409 que ConflictError -- ver docstring de la excepción
+    en core/exceptions.py. Antes se atrapaba a mano en api/jobs.py:cancel_job()
+    y se traducía a un HTTPException(409, "string suelto"); ahora hay un
+    handler global como el resto de las excepciones de dominio, así que
+    cancel_job() no necesita el try/except."""
+    logger.warning("Invalid job transition: %s", str(exc))
     return JSONResponse(status_code=409, content=make_error(409, str(exc), "CONFLICT"))
 
 
@@ -387,7 +399,8 @@ _err = {s: {"model": ErrorResponse} for s in (400, 401, 403, 404, 409, 422, 429,
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], responses=_err)
 app.include_router(vlans.router, prefix="/api/v1/vlans", tags=["vlans"], responses=_err)
-app.include_router(ports.router, prefix="/api/v1/ports", tags=["ports"], responses=_err)
+app.include_router(ports.router, prefix="/api/v1/devices/{name}/ports", tags=["ports"], responses=_err)
+app.include_router(svis.router, prefix="/api/v1/devices/{name}/svis", tags=["svis"], responses=_err)
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"], responses=_err)
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"], responses=_err)
 app.include_router(device_groups.router, prefix="/api/v1/device-groups", tags=["device-groups"], responses=_err)

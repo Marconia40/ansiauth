@@ -8,6 +8,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
 import {
+  clearPortDescription,
   getDevices,
   getPorts,
   getSites,
@@ -240,11 +241,10 @@ export default function PortsPage() {
       setSavingPort(port.name);
       setEditErrorPort(null);
       try {
-        const result = await updatePortDescription({
-          device: effectiveSelectedDevice,
-          interface: port.name,
-          description: value,
-        });
+        const trimmed = value.trim();
+        const result = trimmed
+          ? await updatePortDescription(effectiveSelectedDevice, { interface: port.name, description: trimmed })
+          : await clearPortDescription(effectiveSelectedDevice, { interface: port.name });
         const job = result.jobs[0];
         if (job) trackJob(job.job_id, `Update description on ${port.name}`, job.device);
         description.cancel();
@@ -269,8 +269,7 @@ export default function PortsPage() {
       setTogglingPort(port.name);
       setAdminErrorPort(null);
       try {
-        const result = await setPortAdminState({
-          device: effectiveSelectedDevice,
+        const result = await setPortAdminState(effectiveSelectedDevice, {
           interface: port.name,
           enabled: nextEnabled,
         });
@@ -320,8 +319,7 @@ export default function PortsPage() {
       setSavingTrunkPort(port.name);
       setTrunkErrorPort(null);
       try {
-        const result = await setTrunkAllowedVlans({
-          device: effectiveSelectedDevice,
+        const result = await setTrunkAllowedVlans(effectiveSelectedDevice, {
           interface: port.name,
           mode: trunkEditMode,
           vlans,
@@ -381,8 +379,7 @@ export default function PortsPage() {
       setSavingAccessVlanPort(port.name);
       setAccessVlanErrorPort(null);
       try {
-        const result = await setPortAccessVlan({
-          device: effectiveSelectedDevice,
+        const result = await setPortAccessVlan(effectiveSelectedDevice, {
           interface: port.name,
           vlan_id: n,
         });
@@ -468,14 +465,12 @@ export default function PortsPage() {
       setModeErrorPort(null);
       try {
         const result = modeEditMode === 'trunk'
-          ? await setPortTrunkMode({
-              device: effectiveSelectedDevice,
+          ? await setPortTrunkMode(effectiveSelectedDevice, {
               interface: port.name,
               native_vlan: vlanNum,
               allowed_vlans: allowedVlans,
             })
-          : await setPortAccessMode({
-              device: effectiveSelectedDevice,
+          : await setPortAccessMode(effectiveSelectedDevice, {
               interface: port.name,
               access_vlan: vlanNum,
             });
@@ -517,8 +512,8 @@ export default function PortsPage() {
       for (const portName of Array.from(selectedPorts)) {
         try {
           const result = action === 'clear-description'
-            ? await updatePortDescription({ device: effectiveSelectedDevice, interface: portName, description: '' })
-            : await setPortAdminState({ device: effectiveSelectedDevice, interface: portName, enabled: action === 'enable' });
+            ? await clearPortDescription(effectiveSelectedDevice, { interface: portName })
+            : await setPortAdminState(effectiveSelectedDevice, { interface: portName, enabled: action === 'enable' });
           const job = result.jobs[0];
           if (job) {
             const label = action === 'enable' ? 'Enable' : action === 'disable' ? 'Disable' : 'Clear description on';
@@ -554,8 +549,7 @@ export default function PortsPage() {
       const errors: string[] = [];
       for (const portName of Array.from(selectedPorts)) {
         try {
-          const result = await setPortAccessMode({
-            device: effectiveSelectedDevice,
+          const result = await setPortAccessMode(effectiveSelectedDevice, {
             interface: portName,
             access_vlan: n,
           });

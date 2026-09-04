@@ -2,9 +2,9 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
-from app.core.exceptions import NotFoundError, TransicionInvalidaError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.response import ok
 from app.core.scope import authorize_device, obtener_scope, require_authenticated
 from app.models.audit import AuditRecord
@@ -79,14 +79,11 @@ def list_jobs(
     page_size: int = Query(default=50, ge=1, le=200),
 ):
     if status is not None and status not in _VALID_STATUSES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"status must be one of {sorted(_VALID_STATUSES)}",
-        )
+        raise ValidationError(f"status must be one of {sorted(_VALID_STATUSES)}")
     from_date = _ensure_aware(from_date)
     to_date = _ensure_aware(to_date)
     if from_date is not None and to_date is not None and from_date > to_date:
-        raise HTTPException(status_code=422, detail="from_date must not be after to_date")
+        raise ValidationError("from_date must not be after to_date")
 
     from app.composition import job_repository
 
@@ -100,7 +97,7 @@ def list_jobs(
         page=page,
         page_size=page_size,
     )
-    return ok(total=total, page=page, page_size=page_size, items=[_format_job(j) for j in jobs])
+    return ok({"total": total, "page": page, "page_size": page_size, "items": [_format_job(j) for j in jobs]})
 
 
 @router.get(
@@ -156,13 +153,7 @@ def cancel_job(
         raise NotFoundError(f"Job '{job_id}' not found")
     if job.device:
         _check_device_scope(scope, job.device, min_role="operator")
-    try:
-        job.cancelar()
-    except TransicionInvalidaError:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot cancel job with status '{job.status}'"
-        )
+    job.cancelar()
     job_repository.add(job)
     # audit_service.log_action() escrito acá antes -- reemplazado por
     # AuditRepository.append() directo (Fase 3/B1), no AuditRecord.desde()

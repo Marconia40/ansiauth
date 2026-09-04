@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Query
 
 from app.core.config import AUDIT_RETENTION_DAYS
+from app.core.exceptions import ValidationError
 from app.core.response import ok
 from app.core.scope import obtener_scope, require_authenticated, require_system_admin
 from app.models.visibility_scope import VisibilityScope
@@ -38,13 +39,12 @@ def purge_audit_log(
     description=(
         "Return append-only audit log entries in reverse chronological order. "
         "Supports filtering by `user`, `action`, `resource`, `status`, `device_id`, and UTC date range. "
-        "Paginated via either `skip`/`limit` (raw offsets) or `page`/`page_size`. "
-        "Total matching record count is exposed via the `X-Total-Count` response header "
-        "and `Access-Control-Expose-Headers`. Requires admin role or higher."
+        "Paginated via either `skip`/`limit` (raw offsets) or `page`/`page_size` -- the response "
+        "always reports the effective `page`/`page_size`/`total` used, regardless of which style "
+        "was passed. Requires admin role or higher."
     ),
 )
 def get_audit_log(
-    response: Response,
     user: Optional[str] = None,
     action: Optional[str] = None,
     resource: Optional[str] = None,
@@ -66,7 +66,7 @@ def get_audit_log(
     from app.composition import audit_repository
 
     if from_date is not None and to_date is not None and from_date > to_date:
-        raise HTTPException(status_code=422, detail="from_date must not be after to_date")
+        raise ValidationError("from_date must not be after to_date")
 
     # Acepta 2 formatos de paginación (skip/limit y page/page_size).
     # skip/limit pasa a AuditRepository.query() como offset= directo --
@@ -89,6 +89,9 @@ def get_audit_log(
         scope=scope, page=effective_page, page_size=effective_page_size,
         offset=effective_offset,
     )
-    response.headers["X-Total-Count"] = str(total)
-    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
-    return records
+    return ok({
+        "items": records,
+        "total": total,
+        "page": effective_page,
+        "page_size": effective_page_size,
+    })

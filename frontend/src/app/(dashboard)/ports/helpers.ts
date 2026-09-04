@@ -12,10 +12,7 @@ export const SELECT_CLS =
 export const RESERVED_VLANS = new Set([1002, 1003, 1004, 1005]);
 
 
-export function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
-}
+export { extractMessage } from '@/services/api';
 
 export function getStatus(error: unknown): number | null {
   const e = error as { response?: { status?: number } } | null;

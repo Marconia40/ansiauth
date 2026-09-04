@@ -1,5 +1,5 @@
 """Envelope Pydantic para lecturas cache-first de recursos de device
-(VLANs, ports, y futuros getters como interfaz virtual o config global).
+(VLANs, ports, y futuros getters como SVI o config global).
 
 Los GET que antes iban en vivo al equipo ahora leen de las tablas
 ``device_vlans`` / ``device_ports`` populated por ``sync_device_task``.

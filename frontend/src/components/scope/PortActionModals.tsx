@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import {
+  clearPortDescription,
   resetPort,
   setPortAccessMode,
   setPortAccessVlan,
@@ -48,14 +49,14 @@ const CONFIRM_META: Record<
     tone: 'danger',
     warning:
       'Selected ports will be administratively down. Attached hosts lose link immediately.',
-    exec: (ref) => setPortAdminState({ ...ref, enabled: false }),
+    exec: (ref) => setPortAdminState(ref.device, { interface: ref.interface, enabled: false }),
   },
   'undo-shutdown': {
     title: 'Undo shutdown',
     actionLabel: 'Enable',
     tone: 'default',
     warning: 'Selected ports will be administratively up again.',
-    exec: (ref) => setPortAdminState({ ...ref, enabled: true }),
+    exec: (ref) => setPortAdminState(ref.device, { interface: ref.interface, enabled: true }),
   },
   reset: {
     title: 'Delete port config',
@@ -63,7 +64,7 @@ const CONFIRM_META: Record<
     tone: 'danger',
     warning:
       'This wipes VLAN / description / PoE / storm-control back to the vendor default. Not reversible.',
-    exec: (ref) => resetPort(ref),
+    exec: (ref) => resetPort(ref.device, { interface: ref.interface }),
   },
 };
 
@@ -106,11 +107,12 @@ export function PortDescriptionModal({ open, onClose, selection, onDone }: BaseP
         runPortBatch(
           selection.refs,
           (ref) =>
-            updatePortDescription({
-              device: ref.device,
-              interface: ref.interface,
-              description,
-            }),
+            description === ''
+              ? clearPortDescription(ref.device, { interface: ref.interface })
+              : updatePortDescription(ref.device, {
+                  interface: ref.interface,
+                  description,
+                }),
           { onProgress: progress },
         )
       }
@@ -164,14 +166,12 @@ export function PortModeModal({ open, onClose, selection, onDone }: BaseProps) {
           selection.refs,
           async (ref) => {
             if (mode === 'access') {
-              return setPortAccessMode({
-                device: ref.device,
+              return setPortAccessMode(ref.device, {
                 interface: ref.interface,
                 access_vlan: accessParsed,
               });
             }
-            return setPortTrunkMode({
-              device: ref.device,
+            return setPortTrunkMode(ref.device, {
               interface: ref.interface,
               native_vlan: nativeParsed,
               allowed_vlans: allowedParsed ?? [],
@@ -257,8 +257,7 @@ export function PortAccessVlanModal({ open, onClose, selection, onDone }: BasePr
         runPortBatch(
           selection.refs,
           (ref) =>
-            setPortAccessVlan({
-              device: ref.device,
+            setPortAccessVlan(ref.device, {
               interface: ref.interface,
               vlan_id: parsed,
             }),
@@ -305,8 +304,7 @@ export function PortTrunkVlansModal({ open, onClose, selection, onDone }: BasePr
         runPortBatch(
           selection.refs,
           (ref) =>
-            setTrunkAllowedVlans({
-              device: ref.device,
+            setTrunkAllowedVlans(ref.device, {
               interface: ref.interface,
               mode,
               vlans: parsed ?? [],
@@ -365,8 +363,7 @@ export function PortPoeModal({ open, onClose, selection, onDone }: BaseProps) {
         runPortBatch(
           selection.refs,
           (ref) =>
-            setPortPoe({
-              device: ref.device,
+            setPortPoe(ref.device, {
               interface: ref.interface,
               enabled,
             }),
@@ -416,8 +413,7 @@ export function PortStormControlModal({ open, onClose, selection, onDone }: Base
         runPortBatch(
           selection.refs,
           (ref) =>
-            setPortStormControl({
-              device: ref.device,
+            setPortStormControl(ref.device, {
               interface: ref.interface,
               enabled,
               threshold_percent: enabled ? parsedThreshold : null,
