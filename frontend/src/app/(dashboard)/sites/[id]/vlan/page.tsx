@@ -1,5 +1,11 @@
-import { PlaceholderPanel } from '@/components/scope/Panel';
+'use client';
+
+import { useParams } from 'next/navigation';
+import { VlanTab } from '@/components/scope/VlanTab';
 
 export default function SiteVlanPage() {
-  return <PlaceholderPanel label="Site VLAN tab — aggregated VLAN list (block 4)" />;
+  const params = useParams<{ id: string }>();
+  const siteId = Number(params.id);
+  if (!Number.isFinite(siteId)) return null;
+  return <VlanTab scope={{ kind: 'site', siteId }} />;
 }

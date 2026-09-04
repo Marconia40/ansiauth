@@ -29,7 +29,8 @@ const VENDOR_COLORS = {
 export type Scope =
   | { kind: 'org' }
   | { kind: 'site'; siteId: number }
-  | { kind: 'group'; groupId: number };
+  | { kind: 'group'; groupId: number }
+  | { kind: 'device'; deviceName: string };
 
 /** Devices matching the scope. */
 function useScopedDevices(scope: Scope) {
@@ -44,6 +45,8 @@ function useScopedDevices(scope: Scope) {
           return all.filter((d) => d.site_id === scope.siteId);
         case 'group':
           return all.filter((d) => d.device_group_id === scope.groupId);
+        case 'device':
+          return all.filter((d) => d.name === scope.deviceName);
       }
     },
   });
