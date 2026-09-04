@@ -13,18 +13,13 @@ export interface ScopeTab {
 
 /**
  * Standard set of tabs available at every scope level (Org/Site/Group/Device).
- * Virtual-interfaces and global-config are disabled until backend endpoints exist.
+ * Global-config sigue deshabilitado hasta que el backend exponga endpoints.
  */
 export const STANDARD_TABS: ScopeTab[] = [
   { label: 'Dashboard', segment: '' },
   { label: 'VLAN', segment: 'vlan' },
   { label: 'PORTS', segment: 'ports' },
-  {
-    label: 'VIRTUAL-INTERFACES',
-    segment: 'virtual-interfaces',
-    disabled: true,
-    disabledReason: 'Coming soon — backend endpoint pending',
-  },
+  { label: 'VIRTUAL-INTERFACES', segment: 'virtual-interfaces' },
   {
     label: 'GLOBAL_CONFIG',
     segment: 'global-config',

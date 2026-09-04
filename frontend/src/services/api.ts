@@ -550,6 +550,29 @@ export async function getInterfacesVirtuales(device: string): Promise<SVIListRes
   return envelope.data;
 }
 
+/** Full envelope variant — mismo criterio que getVlansSynced/getPortsSynced.
+ * Preferido para dashboards / tabs que muestran "Last synced Xm ago". */
+export async function getSVIsSynced(
+  device: string,
+): Promise<SyncedResource<SVIListResponse>> {
+  return unwrap<SyncedResource<SVIListResponse>>(
+    client.get<ApiResponse<SyncedResource<SVIListResponse>>>(`/devices/${device}/svis/`),
+  );
+}
+
+/** Fires the async Celery refresh for a device's SVI cache. Returns as soon
+ * as the task is queued (backend responds 202) — callers poll getSVIsSynced
+ * watching `sync_in_progress` to know when the DB is fresh. */
+export async function refreshDeviceSvis(
+  device: string,
+): Promise<{ device: string; scope: 'svis'; task_id: string }> {
+  return unwrap<{ device: string; scope: 'svis'; task_id: string }>(
+    client.post<ApiResponse<{ device: string; scope: 'svis'; task_id: string }>>(
+      `/devices/${device}/svis/refresh`,
+    ),
+  );
+}
+
 export async function createSVI(
   device: string,
   body: SVICreateRequest,
