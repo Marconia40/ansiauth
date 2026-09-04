@@ -1,5 +1,12 @@
-import { PlaceholderPanel } from '@/components/scope/Panel';
+'use client';
+
+import { useParams } from 'next/navigation';
+import { DeviceDashboard } from '@/components/scope/DeviceDashboard';
 
 export default function DeviceDashboardPage() {
-  return <PlaceholderPanel label="Device dashboard — chassis + ports table + jobs pie (block 3)" />;
+  const params = useParams<{ name: string }>();
+  const raw = params.name;
+  const deviceName = typeof raw === 'string' ? decodeURIComponent(raw) : '';
+  if (!deviceName) return null;
+  return <DeviceDashboard deviceName={deviceName} />;
 }
