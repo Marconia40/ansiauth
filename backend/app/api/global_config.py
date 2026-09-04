@@ -20,6 +20,7 @@ from app.schemas.global_config import (
     GlobalConfigNtpRemoveRequest,
     GlobalConfigRead,
     GlobalConfigRouteAddRequest,
+    GlobalConfigVersionRead,
     GlobalConfigSnmpUpdateRequest,
 )
 
@@ -70,12 +71,15 @@ def _require_driver_with(device: "Device", method_name: str):
     "/",
     summary="Get global configuration",
     description=(
-        "Retrieve device-wide configuration: version, hostname, SNMP "
-        "status, routing table and ACL names (RF-GLOBAL-01/02/03/04). "
-        "Cache-first — reads from the synced cache (populated on device "
-        "registration, manual refresh, or after a write), not live from "
-        "the equipment. Requires observer role or higher; site-scoped "
-        "users may only query devices in their allowed sites."
+        "Retrieve the device's actual configuration (running_config), "
+        "hostname, SNMP status, routing table and ACL names "
+        "(RF-GLOBAL-01/03/04 — the 'consultar configuración general' half "
+        "of RF-GLOBAL-01). Device version lives in its own "
+        "`GET .../version` (the 'y/o versión' half). Cache-first — reads "
+        "from the synced cache (populated on device registration, manual "
+        "refresh, or after a write), not live from the equipment. "
+        "Requires observer role or higher; site-scoped users may only "
+        "query devices in their allowed sites."
     ),
 )
 def get_global_config(
@@ -92,8 +96,7 @@ def get_global_config(
         "device": dev.name,
         "vendor": dev.vendor,
         **GlobalConfigRead(
-            device_version=config.device_version if config else None,
-            running_config=config.running_config if config else None,
+            running_config=config.running_config.splitlines() if config and config.running_config else None,
             hostname=config.hostname if config else None,
             snmp_enabled=config.snmp_enabled if config else None,
             snmp_version=config.snmp_version if config else None,
@@ -106,6 +109,44 @@ def get_global_config(
             routes=config.routes if config else None,
             acls=config.acls if config else None,
         ).model_dump(),
+    }
+    synced_at, sync_error = device_sync_service.metadata(name, "global_config")
+    envelope = SyncedResource(
+        data=payload,
+        synced_at=synced_at,
+        sync_error=sync_error,
+        sync_in_progress=redis_coordinator.esta_ocupado(name),
+    ).model_dump(mode="json")
+    return ok(envelope)
+
+
+@router.get(
+    "/version",
+    summary="Get device version",
+    description=(
+        "Retrieve the device's version info ('show version'/'display "
+        "version' — RF-GLOBAL-01, the 'y/o versión' half of the use "
+        "case, split into its own endpoint from the config dump). "
+        "Cache-first, same underlying sync as `GET /` — this doesn't "
+        "trigger a separate read. Requires observer role or higher."
+    ),
+)
+def get_global_config_version(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import device_sync_service, global_config_repository, redis_coordinator
+    from app.services.parsers._common import parse_version_info
+
+    _authz_device(scope, name, min_role="observer")
+    dev = require_device(name)
+    config = global_config_repository.get(name)
+    info = parse_version_info(config.device_version if config and config.device_version else "")
+    payload = {
+        "device": dev.name,
+        "vendor": dev.vendor,
+        **GlobalConfigVersionRead(**info).model_dump(),
     }
     synced_at, sync_error = device_sync_service.metadata(name, "global_config")
     envelope = SyncedResource(
@@ -475,9 +516,11 @@ def remove_global_config_log_server(
     description=(
         "Read the device's ARP table live (not cached — this table "
         "changes constantly, caching it would go stale immediately, "
-        "unlike every other GET in this app). `include` is passed as-is "
-        "to the device's own `| include` filter — the caller is expected "
-        "to know what they're searching for, the output isn't parsed. "
+        "unlike every other GET in this app), parsed into structured rows "
+        "(`ip`, `mac`, `interface`, `vlan`, `type`, `age` — fields not "
+        "reported by a given vendor come back `null`). `include` is "
+        "optional and still passed as-is to the device's own `| include` "
+        "filter before parsing, if you want to narrow the table server-side. "
         "Requires observer role or higher."
     ),
 )
@@ -491,10 +534,10 @@ def get_global_config_arp(
     dev = require_device(name)
     _require_driver_with(dev, "get_arp_table")
     try:
-        output = dev.driver.get_arp_table(include, dev, dev.password)
+        entries = dev.driver.get_arp_table(include, dev, dev.password)
     except RuntimeError as exc:
         raise DeviceExecutionError(str(exc))
-    return ok({"device": dev.name, "output": output})
+    return ok({"device": dev.name, "entries": entries})
 
 
 @router.get(
@@ -502,8 +545,10 @@ def get_global_config_arp(
     summary="Get MAC address table",
     description=(
         "Read the device's MAC address table live (not cached, same "
-        "reason as `/arp`). `include` is passed as-is to the device's own "
-        "`| include` filter. Requires observer role or higher."
+        "reason as `/arp`), parsed into structured rows (`mac`, `vlan`, "
+        "`interface`, `type`). `include` is optional and still passed "
+        "as-is to the device's own `| include` filter before parsing. "
+        "Requires observer role or higher."
     ),
 )
 def get_global_config_mac(
@@ -516,7 +561,7 @@ def get_global_config_mac(
     dev = require_device(name)
     _require_driver_with(dev, "get_mac_table")
     try:
-        output = dev.driver.get_mac_table(include, dev, dev.password)
+        entries = dev.driver.get_mac_table(include, dev, dev.password)
     except RuntimeError as exc:
         raise DeviceExecutionError(str(exc))
-    return ok({"device": dev.name, "output": output})
+    return ok({"device": dev.name, "entries": entries})

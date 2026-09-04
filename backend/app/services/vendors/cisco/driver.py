@@ -4,6 +4,7 @@ import ipaddress
 import logging
 from typing import TYPE_CHECKING
 
+from app.services.parsers._common import strip_known_preamble
 from app.services.parsers.port_parser import CiscoPortParser
 from app.services.vendors.base import VendorDriver
 
@@ -23,6 +24,18 @@ _PLAYBOOK = "vendors/cisco/run.yml"
 _STATUS_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _SWITCHPORT_INDEX = 2
+
+# RF-GLOBAL-01 -- líneas de metadata al principio de "show running-config"
+# que no son config real, confirmadas en vivo contra f3r9s1 ("Building
+# configuration...", "Current configuration : N bytes", los 2 comentarios
+# de "Last configuration change"/"NVRAM config last updated"). Un "!" suelto
+# de separador real del config NO matchea ninguno de estos, queda intacto.
+_RUNNING_CONFIG_PREAMBLE = [
+    r"^Building configuration\.\.\.\s*$",
+    r"^Current configuration\s*:.*bytes\s*$",
+    r"^!\s*Last configuration change.*$",
+    r"^!\s*NVRAM config last updated.*$",
+]
 
 
 class CiscoVendor(VendorDriver):
@@ -334,7 +347,7 @@ class CiscoVendor(VendorDriver):
         )
         config.device = device.name
         config.acls = acls
-        config.running_config = running_config or None
+        config.running_config = strip_known_preamble(running_config, _RUNNING_CONFIG_PREAMBLE, separador="!") or None
         return config
 
     def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
@@ -396,21 +409,30 @@ class CiscoVendor(VendorDriver):
         """RF-GLOBAL-09 (Log, delete). Confirmado en vivo contra cisco01."""
         return self._aplicar_desde_template("remove_log_host", {"log_server": server}, device, password)
 
-    def get_arp_table(self, include: "str | None", device: Device, password: str) -> str:
+    def get_arp_table(self, include: "str | None", device: Device, password: str) -> list[dict]:
         """Tabla ARP en vivo, sin cache -- primer par de lecturas de esta
         app así (el resto es cache-first vía ``DeviceSyncService``), la
         tabla ARP cambia constantemente y cachearla la volvería vieja al
         instante. ``include`` ya viene validado (charset seguro, sin
         `\\r`/`\\n`) por el schema antes de llegar acá -- arma el comando
         en Python porque es el único caso de sufijo opcional de 1 sola
-        pieza (forzarlo a 2 templates YAML es más artificial)."""
-        comando = f"show arp | include {include}" if include else "show arp"
-        return self._leer([comando], device, password)[0]
+        pieza (forzarlo a 2 templates YAML es más artificial). Parseado a
+        filas estructuradas (RF-GLOBAL fuera de alcance, pedido del
+        usuario) -- confirmado en vivo contra f3r9s1, ver
+        ``arp_mac_parser.py``."""
+        from app.services.parsers.arp_mac_parser import parse_cisco_arp
 
-    def get_mac_table(self, include: "str | None", device: Device, password: str) -> str:
+        comando = f"show arp | include {include}" if include else "show arp"
+        raw = self._leer([comando], device, password)[0]
+        return parse_cisco_arp(raw)
+
+    def get_mac_table(self, include: "str | None", device: Device, password: str) -> list[dict]:
         """Mismo criterio que ``get_arp_table()``."""
+        from app.services.parsers.arp_mac_parser import parse_cisco_mac
+
         comando = f"show mac address-table | include {include}" if include else "show mac address-table"
-        return self._leer([comando], device, password)[0]
+        raw = self._leer([comando], device, password)[0]
+        return parse_cisco_mac(raw)
 
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
         """RF-GLOBAL-06. Confirmado en vivo contra cisco01: ``ip route

@@ -102,19 +102,42 @@ class GlobalConfigDnsRemoveRequest(BaseModel):
     server: str = Field(..., min_length=1, description="IP del DNS server a sacar.")
 
 
+class GlobalConfigVersionRead(BaseModel):
+    """Wire-format para ``GET /global-config/version`` (RF-GLOBAL-01, la
+    mitad "y/o versión" del use case, separada de la config a pedido del
+    usuario). Mismo cache que el resto -- no dispara una lectura nueva.
+    ``software_version``/``model``/``serial_number``/``uptime`` son
+    best-effort (ver ``parse_version_info()``, el formato de 'show
+    version'/'display version' varía mucho incluso dentro del mismo
+    vendor) -- ``raw`` siempre viene completo por si alguno da ``null``."""
+
+    raw: Optional[str] = Field(None, description="Salida completa y sin procesar de 'show version'/'display version'.")
+    software_version: Optional[str] = Field(None, description="Versión de software extraída (best-effort).")
+    model: Optional[str] = Field(None, description="Modelo de hardware extraído (best-effort).")
+    serial_number: Optional[str] = Field(None, description="Número de serie extraído (best-effort, no siempre presente en VRP).")
+    uptime: Optional[str] = Field(None, description="Uptime tal cual lo reporta el device (best-effort).")
+
+
 class GlobalConfigRead(BaseModel):
     """Wire-format representation de "Configuración Global" (SRS §3.4,
     RF-GLOBAL-01/02/03/04) returned by ``GET /global-config``.
 
     Mirrors ``app.models.global_config.GlobalConfig`` field-for-field
     (solo los campos de lectura -- los de escritura todavía no tienen
-    endpoint, ver plan)."""
+    endpoint, ver plan). ``device_version`` NO va acá a propósito -- RF-GLOBAL-01
+    describe "consultar configuración general Y/O versión" como 2 cosas, y
+    el usuario pidió separarlas: versión vive en su propio
+    ``GET /global-config/version`` (``GlobalConfigVersionRead``), este
+    endpoint queda enfocado solo en la config real del device."""
 
-    device_version: Optional[str] = Field(
-        None, description="Salida de 'show version'/'display version', o null si no se pudo leer.",
-    )
-    running_config: Optional[str] = Field(
-        None, description="Dump completo de 'show running-config'/'display current-configuration', o null si no se pudo leer.",
+    running_config: Optional[list[str]] = Field(
+        None,
+        description=(
+            "Dump completo de 'show running-config'/'display current-configuration' "
+            "como lista de líneas (no 1 solo string), o null si no se pudo leer. "
+            "Ya viene sin las líneas de metadata iniciales (ver "
+            "GlobalConfig.running_config)."
+        ),
     )
     hostname: Optional[str] = Field(None, description="Hostname configurado en el device, o null.")
     snmp_enabled: Optional[bool] = Field(

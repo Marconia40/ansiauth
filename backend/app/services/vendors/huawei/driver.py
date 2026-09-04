@@ -5,6 +5,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from app.services.parsers._common import strip_known_preamble
 from app.services.parsers.port_parser import HuaweiPortParser, expandir_nombre_interfaz
 from app.services.vendors.base import VendorDriver
 
@@ -23,6 +24,14 @@ _PLAYBOOK = "vendors/huawei/run.yml"
 _BRIEF_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _PORT_VLAN_INDEX = 2
+
+# RF-GLOBAL-01 -- línea de metadata al principio de "display
+# current-configuration" que no es config real, confirmada en vivo contra
+# f3r9s2 ("!Software Version ..."). Un "!"/"#" suelto de separador real del
+# config no matchea esto, queda intacto.
+_RUNNING_CONFIG_PREAMBLE = [
+    r"^!Software Version.*$",
+]
 
 
 class HuaweiVendor(VendorDriver):
@@ -404,7 +413,7 @@ class HuaweiVendor(VendorDriver):
         )
         config.device = device.name
         config.acls = acls
-        config.running_config = running_config or None
+        config.running_config = strip_known_preamble(running_config, _RUNNING_CONFIG_PREAMBLE) or None
         return config
 
     def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
@@ -478,16 +487,24 @@ class HuaweiVendor(VendorDriver):
         """RF-GLOBAL-09 (Log, delete). Confirmado en vivo contra huawei01."""
         return self._aplicar_desde_template("remove_log_host", {"server": server}, device, password)
 
-    def get_arp_table(self, include: "str | None", device: Device, password: str) -> str:
+    def get_arp_table(self, include: "str | None", device: Device, password: str) -> list[dict]:
         """Tabla ARP en vivo, sin cache -- ver docstring de
-        ``CiscoVendor.get_arp_table()``, mismo criterio."""
-        comando = f"display arp | include {include}" if include else "display arp"
-        return self._leer([comando], device, password)[0]
+        ``CiscoVendor.get_arp_table()``, mismo criterio. Parseado a filas
+        estructuradas -- confirmado en vivo contra f3r9s2 (formato de 2
+        líneas por fila, ver ``arp_mac_parser.py``)."""
+        from app.services.parsers.arp_mac_parser import parse_huawei_arp
 
-    def get_mac_table(self, include: "str | None", device: Device, password: str) -> str:
+        comando = f"display arp | include {include}" if include else "display arp"
+        raw = self._leer([comando], device, password)[0]
+        return parse_huawei_arp(raw)
+
+    def get_mac_table(self, include: "str | None", device: Device, password: str) -> list[dict]:
         """Mismo criterio que ``get_arp_table()``."""
+        from app.services.parsers.arp_mac_parser import parse_huawei_mac
+
         comando = f"display mac-address | include {include}" if include else "display mac-address"
-        return self._leer([comando], device, password)[0]
+        raw = self._leer([comando], device, password)[0]
+        return parse_huawei_mac(raw)
 
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
         """RF-GLOBAL-06. Confirmado en vivo contra huawei01: ``ip

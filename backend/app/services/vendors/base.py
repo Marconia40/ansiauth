@@ -977,12 +977,12 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement set_snmp yet"
         )
 
-    def get_arp_table(self, include: "str | None", device: Device, password: str) -> str:
+    def get_arp_table(self, include: "str | None", device: Device, password: str) -> "list[dict]":
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_arp_table yet"
         )
 
-    def get_mac_table(self, include: "str | None", device: Device, password: str) -> str:
+    def get_mac_table(self, include: "str | None", device: Device, password: str) -> "list[dict]":
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_mac_table yet"
         )
