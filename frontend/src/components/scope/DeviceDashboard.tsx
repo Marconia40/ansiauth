@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getDevice,
@@ -16,6 +17,7 @@ import { runScopeRefresh } from './scopeRefresh';
 import { ChassisGrid, classifyPort } from './ChassisGrid';
 import { PortDetailCard } from './PortDetailCard';
 import { JobsPieChart, type JobsPieData } from './JobsPieChart';
+import { jobsHrefForScope } from './ScopeDashboard';
 
 interface Props {
   deviceName: string;
@@ -151,7 +153,17 @@ export function DeviceDashboard({ deviceName }: Props) {
           </table>
         </Panel>
 
-        <Panel title="Jobs — last 7 days">
+        <Panel
+          title="Jobs — last 7 days"
+          actions={
+            <Link
+              href={jobsHrefForScope({ kind: 'device', deviceName }, siteId)}
+              className="text-xs uppercase tracking-wider text-info hover:brightness-125"
+            >
+              View all →
+            </Link>
+          }
+        >
           {jobsQuery.isLoading ? (
             <div className="text-sm text-muted">…</div>
           ) : (

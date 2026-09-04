@@ -279,24 +279,20 @@ export default function UsersPage() {
     currentUser.role === 'admin' || currentUser.role === 'super-admin';
 
   return (
-    // Block 1 transitional wrapper — legacy layout keeps its light palette on a
-    // white "canvas" so it stays readable under the new dark app shell. Block 6
-    // will rewrite this page against the dark theme (light text, white hover
-    // row) and drop this wrapper.
-    <div className="bg-white text-gray-900 rounded-lg p-6 shadow">
+    <div className="flex flex-col gap-4">
       <PageHeader
         title="User Management"
         actions={
           <button
             onClick={() => refetch()}
             disabled={isLoading || isFetching || isSubmitting}
-            className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-3 py-1.5 text-sm bg-panel border border-panel-border rounded-md hover:bg-panel-elev/60 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isFetching ? 'Refreshing...' : 'Refresh'}
           </button>
         }
       />
-      <p className="text-sm text-gray-500 mb-6">
+      <p className="text-sm text-muted mb-6">
         Manage platform users. Per-scope permissions are granted per user via
         the “Grants…” row action.
       </p>
@@ -310,7 +306,7 @@ export default function UsersPage() {
             onChange={(e) => setNewUsername(e.target.value)}
             disabled={isSubmitting}
             required
-            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            className="border border-panel-border rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
           />
           <input
             type="password"
@@ -319,13 +315,13 @@ export default function UsersPage() {
             onChange={(e) => setNewPassword(e.target.value)}
             disabled={isSubmitting}
             required
-            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            className="border border-panel-border rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
           />
           <select
             value={newRole}
             onChange={(e) => setNewRole(e.target.value as Role)}
             disabled={isSubmitting}
-            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
           >
             {ROLES.map((r) => (
               <option key={r} value={r}>{ROLE_LABELS[r]}</option>
@@ -334,14 +330,14 @@ export default function UsersPage() {
           <button
             type="submit"
             disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
-            className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-3 py-1.5 text-sm bg-info text-white rounded-md hover:bg-info disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isSubmitting && deletingUserId === null && editingUserId === null && !grantsUser
               ? 'Creating...'
               : 'Create User'}
           </button>
         </div>
-        <p className="text-xs text-gray-500">
+        <p className="text-xs text-muted">
           Legacy allowed-sites checkboxes are removed — after creating the
           user, use the “Grants…” row action to grant observer/operator/admin
           per site or per group.
@@ -349,7 +345,7 @@ export default function UsersPage() {
       </form>
 
       {successMessage && (
-        <div className="mb-4 text-sm text-green-700">✓ {successMessage}</div>
+        <div className="mb-4 text-sm text-success">✓ {successMessage}</div>
       )}
       {errorMessage && (
         <div className="mb-4">
@@ -366,36 +362,36 @@ export default function UsersPage() {
           <ErrorMessage error={extractMessage(usersError, 'Could not load users')} />
           <button
             onClick={() => refetch()}
-            className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+            className="mt-3 px-3 py-1.5 text-sm bg-panel border border-panel-border rounded-md hover:bg-panel-elev/60"
           >
             Retry
           </button>
         </div>
       ) : users.length === 0 ? (
-        <p className="py-12 text-center text-gray-400 text-sm">No users available.</p>
+        <p className="py-12 text-center text-muted/70 text-sm">No users available.</p>
       ) : (
         <table className="w-full border-collapse text-sm">
           <thead>
-            <tr className="border-b border-gray-200 bg-gray-50">
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Username</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Role</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">System-admin</th>
-              <th className="text-left px-4 py-2 font-medium text-gray-700">Actions</th>
+            <tr className="border-b border-panel-border bg-panel-elev/60">
+              <th className="text-left px-4 py-2 font-medium text-text">Username</th>
+              <th className="text-left px-4 py-2 font-medium text-text">Role</th>
+              <th className="text-left px-4 py-2 font-medium text-text">System-admin</th>
+              <th className="text-left px-4 py-2 font-medium text-text">Actions</th>
             </tr>
           </thead>
           <tbody>
             {users.map((u) => {
               const isEditing = editingUserId === u.id;
               return (
-                <tr key={u.id} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="px-4 py-2 text-gray-900 font-mono text-xs">{u.username}</td>
-                  <td className="px-4 py-2 text-gray-900">
+                <tr key={u.id} className="border-b border-panel-border hover:bg-panel-elev/60">
+                  <td className="px-4 py-2 text-text font-mono text-xs">{u.username}</td>
+                  <td className="px-4 py-2 text-text">
                     {isEditing ? (
                       <select
                         value={editingRole}
                         onChange={(e) => setEditingRole(e.target.value as Role)}
                         disabled={isSubmitting}
-                        className="border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                        className="border border-panel-border rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
                       >
                         {ROLES.map((r) => (
                           <option key={r} value={r}>{ROLE_LABELS[r]}</option>
@@ -412,14 +408,14 @@ export default function UsersPage() {
                         disabled={isSubmitting}
                         className={
                           u.is_system_admin
-                            ? 'px-2 py-1 text-xs text-white bg-amber-600 rounded hover:bg-amber-700 disabled:opacity-50'
-                            : 'px-2 py-1 text-xs text-gray-700 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50'
+                            ? 'px-2 py-1 text-xs text-white bg-warning rounded hover:brightness-110 disabled:opacity-50'
+                            : 'px-2 py-1 text-xs text-text border border-panel-border rounded hover:bg-panel-elev/60 disabled:opacity-50'
                         }
                       >
                         {u.is_system_admin ? 'Yes (revoke)' : 'No (promote)'}
                       </button>
                     ) : (
-                      <span className="text-xs text-gray-500">
+                      <span className="text-xs text-muted">
                         {u.is_system_admin ? 'Yes' : 'No'}
                       </span>
                     )}
@@ -433,19 +429,19 @@ export default function UsersPage() {
                           value={editingPassword}
                           onChange={(e) => setEditingPassword(e.target.value)}
                           disabled={isSubmitting}
-                          className="border border-gray-300 rounded-md px-2 py-1 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                          className="border border-panel-border rounded-md px-2 py-1 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
                         />
                         <button
                           onClick={handleUpdate}
                           disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-white bg-blue-600 border border-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="px-2 py-1 text-xs text-white bg-info border border-blue-600 rounded hover:bg-info disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {isSubmitting && deletingUserId === null ? 'Saving...' : 'Save'}
                         </button>
                         <button
                           onClick={handleEditCancel}
                           disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="px-2 py-1 text-xs text-muted border border-panel-border rounded hover:bg-panel-elev/60 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           Cancel
                         </button>
@@ -460,21 +456,21 @@ export default function UsersPage() {
                             setNewGrantRole('observer');
                           }}
                           disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-indigo-600 border border-indigo-300 rounded hover:bg-indigo-50 disabled:opacity-50"
+                          className="px-2 py-1 text-xs text-info border border-info/40 rounded hover:bg-info/10 disabled:opacity-50"
                         >
                           Grants…
                         </button>
                         <button
                           onClick={() => handleEditStart(u)}
                           disabled={isSubmitting || editingUserId !== null}
-                          className="px-2 py-1 text-xs text-blue-600 border border-blue-300 rounded hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="px-2 py-1 text-xs text-info border border-info/40 rounded hover:bg-info/10 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           Edit
                         </button>
                         <button
                           onClick={() => handleDelete(u)}
                           disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="px-2 py-1 text-xs text-danger border border-danger/40 rounded hover:bg-danger/10 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {deletingUserId === u.id ? 'Deleting...' : 'Delete'}
                         </button>
@@ -491,13 +487,13 @@ export default function UsersPage() {
       {/* ── Grants modal ───────────────────────────────────────────────── */}
       {grantsUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 overflow-y-auto py-8">
-          <div className="w-full max-w-2xl bg-white rounded-lg shadow-xl p-6">
+          <div className="w-full max-w-2xl bg-panel rounded-lg shadow-xl p-6">
             <div className="flex items-start justify-between mb-4">
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">
+                <h2 className="text-lg font-semibold text-text">
                   Grants for {grantsUser.username}
                 </h2>
-                <p className="text-xs text-gray-500 mt-1">
+                <p className="text-xs text-muted mt-1">
                   A grant is one role at one scope (site or site + group). The
                   most-specific matching grant wins per resource.
                 </p>
@@ -505,7 +501,7 @@ export default function UsersPage() {
               <button
                 onClick={() => setGrantsUser(null)}
                 disabled={isSubmitting}
-                className="text-sm text-gray-500 hover:text-gray-800 disabled:opacity-50"
+                className="text-sm text-muted hover:text-text disabled:opacity-50"
               >
                 Close
               </button>
@@ -513,26 +509,26 @@ export default function UsersPage() {
 
             {/* Existing grants */}
             <section className="mb-6">
-              <h3 className="text-xs font-semibold text-gray-500 uppercase mb-2">
+              <h3 className="text-xs font-semibold text-muted uppercase mb-2">
                 Current grants
               </h3>
               {grants && grants.length > 0 ? (
                 <table className="w-full border-collapse text-sm">
                   <thead>
-                    <tr className="border-b border-gray-200 bg-gray-50">
-                      <th className="text-left px-3 py-1.5 font-medium text-gray-700">Site</th>
-                      <th className="text-left px-3 py-1.5 font-medium text-gray-700">Group</th>
-                      <th className="text-left px-3 py-1.5 font-medium text-gray-700">Role</th>
-                      <th className="text-left px-3 py-1.5 font-medium text-gray-700">Actions</th>
+                    <tr className="border-b border-panel-border bg-panel-elev/60">
+                      <th className="text-left px-3 py-1.5 font-medium text-text">Site</th>
+                      <th className="text-left px-3 py-1.5 font-medium text-text">Group</th>
+                      <th className="text-left px-3 py-1.5 font-medium text-text">Role</th>
+                      <th className="text-left px-3 py-1.5 font-medium text-text">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {grants.map((g) => (
-                      <tr key={g.id} className="border-b border-gray-100">
+                      <tr key={g.id} className="border-b border-panel-border">
                         <td className="px-3 py-1.5">{g.site_name ?? `#${g.site_id}`}</td>
                         <td className="px-3 py-1.5">
                           {g.device_group_name ?? (
-                            <span className="text-gray-400 italic">whole site</span>
+                            <span className="text-muted/70 italic">whole site</span>
                           )}
                         </td>
                         <td className="px-3 py-1.5">{g.role}</td>
@@ -540,7 +536,7 @@ export default function UsersPage() {
                           <button
                             onClick={() => handleRevoke(g)}
                             disabled={isSubmitting}
-                            className="px-2 py-0.5 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50"
+                            className="px-2 py-0.5 text-xs text-danger border border-danger/40 rounded hover:bg-danger/10 disabled:opacity-50"
                           >
                             Revoke
                           </button>
@@ -550,13 +546,13 @@ export default function UsersPage() {
                   </tbody>
                 </table>
               ) : (
-                <p className="text-sm text-gray-400">No grants yet.</p>
+                <p className="text-sm text-muted/70">No grants yet.</p>
               )}
             </section>
 
             {/* Add grant */}
             <section>
-              <h3 className="text-xs font-semibold text-gray-500 uppercase mb-2">
+              <h3 className="text-xs font-semibold text-muted uppercase mb-2">
                 Add grant
               </h3>
               <div className="flex flex-wrap gap-2 items-center">
@@ -567,7 +563,7 @@ export default function UsersPage() {
                     setNewGrantGroupId('');
                   }}
                   disabled={isSubmitting}
-                  className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                  className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
                 >
                   <option value="">Select site…</option>
                   {siteList
@@ -580,7 +576,7 @@ export default function UsersPage() {
                   value={newGrantGroupId}
                   onChange={(e) => setNewGrantGroupId(e.target.value)}
                   disabled={isSubmitting || !newGrantSiteId}
-                  className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                  className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
                 >
                   <option value="">Whole site (any group)</option>
                   {(grantGroups ?? []).map((g) => (
@@ -591,7 +587,7 @@ export default function UsersPage() {
                   value={newGrantRole}
                   onChange={(e) => setNewGrantRole(e.target.value as AssignmentRole)}
                   disabled={isSubmitting}
-                  className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                  className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
                 >
                   {ASSIGNMENT_ROLES.map((r) => (
                     <option key={r} value={r}>{r}</option>
@@ -600,7 +596,7 @@ export default function UsersPage() {
                 <button
                   onClick={handleAddGrant}
                   disabled={isSubmitting || !newGrantSiteId}
-                  className="px-3 py-1.5 text-sm text-white bg-blue-600 rounded hover:bg-blue-700 disabled:opacity-50"
+                  className="px-3 py-1.5 text-sm text-white bg-info rounded hover:bg-info disabled:opacity-50"
                 >
                   Add
                 </button>

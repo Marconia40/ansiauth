@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getDevices,
@@ -25,6 +26,15 @@ const VENDOR_COLORS = {
   huawei: 'var(--color-accent-warning)',
   other: 'var(--color-text-muted)',
 } as const;
+
+/** Deep-links to /jobs with filters pre-applied for the given scope. Range is
+ * fixed to `7d` so the linked view matches what the dashboard card summarises. */
+export function jobsHrefForScope(scope: Scope, siteId: number | undefined): string {
+  const params = new URLSearchParams({ range: '7d' });
+  if (scope.kind === 'device') params.set('device', scope.deviceName);
+  else if (siteId !== undefined) params.set('site_id', String(siteId));
+  return `/jobs?${params.toString()}`;
+}
 
 export type Scope =
   | { kind: 'org' }
@@ -178,7 +188,11 @@ export function ScopeDashboard({ scope }: Props) {
         <DevicesCard totals={totals} loading={loading} />
         <VlansCard totals={totals} loading={loading} />
         <PortsCard totals={totals} loading={loading} />
-        <JobsCard totals={totals} loading={jobsQuery.isLoading} />
+        <JobsCard
+          totals={totals}
+          loading={jobsQuery.isLoading}
+          jobsHref={jobsHrefForScope(scope, siteIdForJobs)}
+        />
       </div>
     </div>
   );
@@ -333,9 +347,23 @@ function PortsCard({ totals, loading }: CardProps) {
   );
 }
 
-function JobsCard({ totals, loading }: CardProps) {
+function JobsCard({
+  totals,
+  loading,
+  jobsHref,
+}: CardProps & { jobsHref: string }) {
   return (
-    <Panel title="Jobs — last 7 days">
+    <Panel
+      title="Jobs — last 7 days"
+      actions={
+        <Link
+          href={jobsHref}
+          className="text-xs uppercase tracking-wider text-info hover:brightness-125"
+        >
+          View all →
+        </Link>
+      }
+    >
       {loading ? (
         <BigNumber value={0} loading />
       ) : (

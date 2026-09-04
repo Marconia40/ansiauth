@@ -19,9 +19,9 @@ const DEFAULT_PAGE_SIZE = 25;
 type DateRange = 'today' | '7d' | '30d' | 'all';
 
 const SELECT_CLS =
-  'px-2 py-1.5 text-sm border border-gray-300 rounded-md bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400';
+  'px-2 py-1.5 text-sm border border-panel-border rounded-md bg-panel text-text focus:outline-none focus:ring-1 focus:ring-info';
 const INPUT_CLS =
-  'px-2 py-1.5 text-sm border border-gray-300 rounded-md bg-white text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-400';
+  'px-2 py-1.5 text-sm border border-panel-border rounded-md bg-panel text-text placeholder-muted focus:outline-none focus:ring-1 focus:ring-info';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -38,7 +38,7 @@ function statusClass(status: string): string {
   if (status === 'success' || status === 'completed') return 'text-green-600';
   if (status === 'failed' || status === 'error' || status === 'failure') return 'text-red-600';
   if (status === 'pending' || status === 'running') return 'text-amber-600';
-  return 'text-gray-600';
+  return 'text-muted';
 }
 
 function startOfDayMs(offsetDays = 0): number {
@@ -153,7 +153,7 @@ function Pagination({ page, totalPages, totalItems, pageSize, onPrev, onNext, on
   if (totalPages <= 1) {
     return (
       <div className="flex items-center justify-between mt-4 text-sm">
-        <span className="text-xs text-gray-400">
+        <span className="text-xs text-muted/70">
           {firstItem}–{lastItem} of {totalItems}
         </span>
       </div>
@@ -162,7 +162,7 @@ function Pagination({ page, totalPages, totalItems, pageSize, onPrev, onNext, on
 
   return (
     <div className="flex items-center justify-between mt-4 text-sm">
-      <span className="text-xs text-gray-400">
+      <span className="text-xs text-muted/70">
         {firstItem}–{lastItem} of {totalItems}
       </span>
 
@@ -170,12 +170,12 @@ function Pagination({ page, totalPages, totalItems, pageSize, onPrev, onNext, on
         <button
           onClick={onPrev}
           disabled={page <= 1}
-          className="px-2.5 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="px-2.5 py-1 text-xs border border-panel-border rounded hover:bg-panel-elev/60 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           ← Prev
         </button>
 
-        <div className="flex items-center gap-1 text-xs text-gray-500">
+        <div className="flex items-center gap-1 text-xs text-muted">
           <span>Page</span>
           <input
             type="text"
@@ -183,7 +183,7 @@ function Pagination({ page, totalPages, totalItems, pageSize, onPrev, onNext, on
             onChange={e => setInputVal(e.target.value)}
             onKeyDown={handleKey}
             onBlur={handleBlur}
-            className="w-10 px-1.5 py-0.5 text-center border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+            className="w-10 px-1.5 py-0.5 text-center border border-panel-border rounded focus:outline-none focus:ring-1 focus:ring-info"
             aria-label="Page number"
           />
           <span>of {totalPages}</span>
@@ -192,7 +192,7 @@ function Pagination({ page, totalPages, totalItems, pageSize, onPrev, onNext, on
         <button
           onClick={onNext}
           disabled={page >= totalPages}
-          className="px-2.5 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="px-2.5 py-1 text-xs border border-panel-border rounded hover:bg-panel-elev/60 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Next →
         </button>
@@ -319,13 +319,13 @@ function FilterBar(props: FilterBarProps) {
       </select>
 
       {hasActiveFilters && (
-        <button onClick={onClearFilters} className="text-xs text-gray-500 hover:text-gray-700 underline px-1">
+        <button onClick={onClearFilters} className="text-xs text-muted hover:text-text underline px-1">
           Clear
         </button>
       )}
 
       <div className="ml-auto flex items-center gap-1.5">
-        <span className="text-xs text-gray-400 whitespace-nowrap">Per page:</span>
+        <span className="text-xs text-muted/70 whitespace-nowrap">Per page:</span>
         <select value={pageSize} onChange={e => setPageSize(Number(e.target.value))} className={SELECT_CLS}>
           {PAGE_SIZE_OPTIONS.map(n => (
             <option key={n} value={n}>{n}</option>
@@ -490,23 +490,23 @@ function ExportMenu({ onExport, busy, pageCount, totalCount }: ExportMenuProps) 
         disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="px-3 py-1.5 text-sm bg-panel border border-panel-border rounded-md hover:bg-panel-elev/60 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {busy ? 'Exporting…' : 'Export ▾'}
       </button>
       {open && (
         <div
           role="menu"
-          className="absolute right-0 mt-1 w-64 rounded-md border border-gray-200 bg-white shadow-lg text-sm z-10"
+          className="absolute right-0 mt-1 w-64 rounded-md border border-panel-border bg-panel shadow-lg text-sm z-10"
         >
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-400 border-b border-gray-100">
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted/70 border-b border-panel-border">
             Current page ({pageCount})
           </div>
           <button
             role="menuitem"
             onClick={() => choose('csv', 'page')}
             disabled={pageCount === 0}
-            className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="w-full text-left px-3 py-2 hover:bg-panel-elev/60 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Export current page (CSV)
           </button>
@@ -514,18 +514,18 @@ function ExportMenu({ onExport, busy, pageCount, totalCount }: ExportMenuProps) 
             role="menuitem"
             onClick={() => choose('json', 'page')}
             disabled={pageCount === 0}
-            className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="w-full text-left px-3 py-2 hover:bg-panel-elev/60 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Export current page (JSON)
           </button>
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-400 border-y border-gray-100">
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted/70 border-y border-panel-border">
             All filtered results ({totalCount.toLocaleString()})
           </div>
           <button
             role="menuitem"
             onClick={() => choose('csv', 'all')}
             disabled={totalCount === 0}
-            className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="w-full text-left px-3 py-2 hover:bg-panel-elev/60 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Export all filtered results (CSV)
           </button>
@@ -533,7 +533,7 @@ function ExportMenu({ onExport, busy, pageCount, totalCount }: ExportMenuProps) 
             role="menuitem"
             onClick={() => choose('json', 'all')}
             disabled={totalCount === 0}
-            className="w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="w-full text-left px-3 py-2 hover:bg-panel-elev/60 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Export all filtered results (JSON)
           </button>
@@ -722,11 +722,7 @@ function AuditPageContent() {
   );
 
   return (
-    // Block 1 transitional wrapper — legacy layout keeps its light palette on a
-    // white "canvas" so it stays readable under the new dark app shell. Block 6
-    // will rewrite the whole page against the dark theme (light text, white
-    // hover row) and drop this wrapper.
-    <div className="bg-white text-gray-900 rounded-lg p-6 shadow">
+    <div className="flex flex-col gap-4">
       <PageHeader
         title="Audit Logs"
         actions={
@@ -740,14 +736,14 @@ function AuditPageContent() {
             <button
               onClick={() => refetch()}
               disabled={isLoading || isFetching}
-              className="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 text-sm bg-panel border border-panel-border rounded-md hover:bg-panel-elev/60 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isFetching ? 'Refreshing…' : 'Refresh'}
             </button>
           </div>
         }
       />
-      <p className="text-sm text-gray-500 mb-6">View system audit history</p>
+      <p className="text-sm text-muted mb-6">View system audit history</p>
 
       {exportError && (
         <div className="mb-3">
@@ -760,8 +756,8 @@ function AuditPageContent() {
           role="status"
           className={`mb-3 px-3 py-2 text-sm rounded-md border ${
             exportInfo.level === 'warning'
-              ? 'bg-amber-50 border-amber-200 text-amber-800'
-              : 'bg-green-50 border-green-200 text-green-700'
+              ? 'bg-warning/10 border-warning/50 text-warning'
+              : 'bg-success/10 border-success/50 text-success'
           }`}
         >
           {exportInfo.message}
@@ -802,51 +798,51 @@ function AuditPageContent() {
           <ErrorMessage error={extractMessage(error, 'Failed to load audit logs')} />
           <button
             onClick={() => refetch()}
-            className="mt-3 px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+            className="mt-3 px-3 py-1.5 text-sm bg-panel border border-panel-border rounded-md hover:bg-panel-elev/60"
           >
             Retry
           </button>
         </div>
       ) : items.length === 0 ? (
         <div className="py-12 text-center">
-          <p className="text-gray-400 text-sm">No audit logs found.</p>
+          <p className="text-muted/70 text-sm">No audit logs found.</p>
           {hasActiveFilters && (
-            <button onClick={clearFilters} className="mt-2 text-xs text-blue-600 hover:underline">
+            <button onClick={clearFilters} className="mt-2 text-xs text-info hover:underline">
               Clear filters
             </button>
           )}
         </div>
       ) : (
         <>
-          <p className="text-xs text-gray-400 mb-2">
+          <p className="text-xs text-muted/70 mb-2">
             {total} total{hasActiveFilters && ' (filtered)'}
           </p>
 
           <table className="w-full border-collapse text-sm">
             <thead>
-              <tr className="border-b border-gray-200 bg-gray-50">
-                <th className="text-left px-4 py-2 font-medium text-gray-700 whitespace-nowrap">Timestamp</th>
-                <th className="text-left px-4 py-2 font-medium text-gray-700">User</th>
-                <th className="text-left px-4 py-2 font-medium text-gray-700">Action</th>
-                <th className="text-left px-4 py-2 font-medium text-gray-700">Resource Type</th>
-                <th className="text-left px-4 py-2 font-medium text-gray-700">Status</th>
-                <th className="text-left px-4 py-2 font-medium text-gray-700">Details</th>
+              <tr className="border-b border-panel-border bg-panel-elev/60">
+                <th className="text-left px-4 py-2 font-medium text-text whitespace-nowrap">Timestamp</th>
+                <th className="text-left px-4 py-2 font-medium text-text">User</th>
+                <th className="text-left px-4 py-2 font-medium text-text">Action</th>
+                <th className="text-left px-4 py-2 font-medium text-text">Resource Type</th>
+                <th className="text-left px-4 py-2 font-medium text-text">Status</th>
+                <th className="text-left px-4 py-2 font-medium text-text">Details</th>
               </tr>
             </thead>
             <tbody>
               {items.map(log => (
-                <tr key={log.id} className="border-b border-gray-100 hover:bg-gray-50 align-top">
-                  <td className="px-4 py-2 text-gray-600 whitespace-nowrap text-xs">
+                <tr key={log.id} className="border-b border-panel-border hover:bg-panel-elev/60 align-top">
+                  <td className="px-4 py-2 text-muted whitespace-nowrap text-xs">
                     {formatTimestamp(log.timestamp)}
                   </td>
-                  <td className="px-4 py-2 text-gray-900">{log.user}</td>
-                  <td className="px-4 py-2 font-mono text-xs text-gray-900">{log.action}</td>
-                  <td className="px-4 py-2 text-gray-600">{log.resource}</td>
+                  <td className="px-4 py-2 text-text">{log.user}</td>
+                  <td className="px-4 py-2 font-mono text-xs text-text">{log.action}</td>
+                  <td className="px-4 py-2 text-muted">{log.resource}</td>
                   <td className={`px-4 py-2 font-medium ${statusClass(log.status)}`}>
                     {log.status}
                   </td>
                   <td className="px-4 py-2">
-                    <pre className="text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded p-2 max-w-xs overflow-auto max-h-32 whitespace-pre-wrap">
+                    <pre className="text-xs text-text bg-panel-elev/60 border border-panel-border rounded p-2 max-w-xs overflow-auto max-h-32 whitespace-pre-wrap">
                       {JSON.stringify(log.details, null, 2)}
                     </pre>
                   </td>

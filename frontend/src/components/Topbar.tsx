@@ -8,6 +8,7 @@ import { logout } from '@/services/api';
 import {
   AuditIcon,
   InventoryIcon,
+  JobsIcon,
   KeyIcon,
   LogoutIcon,
   UserCircleIcon,
@@ -22,6 +23,7 @@ const TOP_LINKS: {
 }[] = [
   { href: '/users', label: 'Users', icon: UsersIcon, adminOnly: true },
   { href: '/audit', label: 'Audit', icon: AuditIcon },
+  { href: '/jobs', label: 'Jobs', icon: JobsIcon },
   { href: '/inventory', label: 'Inventory', icon: InventoryIcon },
 ];
 

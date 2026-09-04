@@ -32,7 +32,7 @@ function deriveDurationMs(startedAt: string | null, finishedAt: string | null): 
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2 mt-4 first:mt-0">
+    <div className="text-xs font-semibold uppercase tracking-wide text-muted/70 mb-2 mt-4 first:mt-0">
       {children}
     </div>
   );
@@ -49,19 +49,19 @@ function Field({
 }) {
   return (
     <div className="flex gap-3 py-1 text-sm border-b border-gray-50 last:border-0">
-      <span className="w-32 flex-shrink-0 text-gray-500">{label}</span>
-      <span className={`flex-1 break-all ${mono ? 'font-mono text-xs' : 'text-gray-900'}`}>
-        {children ?? <span className="text-gray-300">—</span>}
+      <span className="w-32 flex-shrink-0 text-muted">{label}</span>
+      <span className={`flex-1 break-all ${mono ? 'font-mono text-xs' : 'text-text'}`}>
+        {children ?? <span className="text-muted/50">—</span>}
       </span>
     </div>
   );
 }
 
 function JsonBlock({ data }: { data: unknown }) {
-  if (data == null) return <span className="text-gray-300 text-xs">null</span>;
+  if (data == null) return <span className="text-muted/50 text-xs">null</span>;
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
   return (
-    <pre className="mt-1 text-xs bg-gray-50 border border-gray-100 rounded p-2 overflow-auto max-h-36 text-gray-700 whitespace-pre-wrap break-all">
+    <pre className="mt-1 text-xs bg-panel-elev/60 border border-panel-border rounded p-2 overflow-auto max-h-36 text-text whitespace-pre-wrap break-all">
       {text}
     </pre>
   );
@@ -74,7 +74,7 @@ function RollbackRow({ performed, success }: { performed: boolean; success: bool
       <span>performed — </span>
       {success === true && <span className="text-green-600">succeeded</span>}
       {success === false && <span className="text-red-600">failed</span>}
-      {success === null && <span className="text-gray-400">unverified</span>}
+      {success === null && <span className="text-muted/70">unverified</span>}
     </Field>
   );
 }
@@ -94,7 +94,7 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       {onBack && (
         <button
           onClick={onBack}
-          className="flex items-center gap-1 text-xs text-blue-600 hover:underline mb-3"
+          className="flex items-center gap-1 text-xs text-info hover:underline mb-3"
         >
           ← {backLabel ?? 'Back'}
         </button>
@@ -105,13 +105,13 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
         <div className="flex items-center gap-2 flex-wrap">
           <StatusBadge status={job.status} />
           {job.rollback_performed && job.status !== 'rollback_performed' && (
-            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-50 text-orange-600">
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-warning/10 text-warning">
               Rollback executed
             </span>
           )}
           {isActive && <ElapsedTimer startedAt={job.started_at} />}
           {!isActive && durationMs != null && (
-            <span className="text-xs text-gray-400">{formatMs(durationMs)}</span>
+            <span className="text-xs text-muted/70">{formatMs(durationMs)}</span>
           )}
         </div>
       </Field>
@@ -171,7 +171,7 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       {hasError && job.status !== 'failed' && (
         <>
           <SectionHeader>Error</SectionHeader>
-          <div className="text-sm text-red-700 bg-red-50 border border-red-100 rounded p-2 break-all">
+          <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all">
             {job.error ?? job.last_error}
           </div>
         </>
@@ -179,7 +179,7 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       {hasError && job.status === 'failed' && (
         <>
           <SectionHeader>Full Error</SectionHeader>
-          <div className="text-sm text-red-700 bg-red-50 border border-red-100 rounded p-2 break-all">
+          <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all">
             {job.error ?? job.last_error}
           </div>
         </>
@@ -193,9 +193,9 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
 function deviceIcon(status: string): { icon: string; className: string } {
   if (status === 'completed') return { icon: '✓', className: 'text-green-600' };
   if (status === 'failed' || status === 'cancelled') return { icon: '✗', className: 'text-red-600' };
-  if (status === 'rollback_performed') return { icon: '↩', className: 'text-orange-600' };
+  if (status === 'rollback_performed') return { icon: '↩', className: 'text-warning' };
   if (status === 'running' || status === 'retrying') return { icon: '↻', className: 'text-amber-600' };
-  return { icon: '·', className: 'text-gray-400' };
+  return { icon: '·', className: 'text-muted/70' };
 }
 
 function DeviceRow({
@@ -210,14 +210,14 @@ function DeviceRow({
   return (
     <div className="flex items-center gap-2 py-1.5 text-sm border-b border-gray-50 last:border-0">
       <span className={`font-mono w-4 text-center flex-shrink-0 ${className}`}>{icon}</span>
-      <span className="flex-1 text-gray-900 min-w-0 truncate">{dr.device}</span>
+      <span className="flex-1 text-text min-w-0 truncate">{dr.device}</span>
       <span className="flex-shrink-0">
         <StatusBadge status={dr.status} />
       </span>
       {isDeviceActive ? (
-        <span className="text-xs text-gray-300 flex-shrink-0">running</span>
+        <span className="text-xs text-muted/50 flex-shrink-0">running</span>
       ) : dr.duration_ms != null ? (
-        <span className="text-xs text-gray-400 flex-shrink-0">{formatMs(dr.duration_ms)}</span>
+        <span className="text-xs text-muted/70 flex-shrink-0">{formatMs(dr.duration_ms)}</span>
       ) : null}
       {dr.retry_count > 0 && (
         <span className="text-xs text-amber-600 flex-shrink-0">↺{dr.retry_count}</span>
@@ -228,7 +228,7 @@ function DeviceRow({
       {dr.job_id && (
         <button
           onClick={() => onDrillDown(dr.job_id!)}
-          className="flex-shrink-0 text-xs text-blue-600 hover:underline"
+          className="flex-shrink-0 text-xs text-info hover:underline"
         >
           Details
         </button>
@@ -256,14 +256,14 @@ function GroupJobView({
         <div className="flex items-center gap-2 flex-wrap">
           <StatusBadge status={groupJob.status} />
           {s.total_devices > 0 && (
-            <span className="text-xs text-gray-500">
+            <span className="text-xs text-muted">
               {s.completed}/{s.total_devices} completed
               {s.failed > 0 && `, ${s.failed} failed`}
             </span>
           )}
           {isGroupActive && <ElapsedTimer startedAt={groupJob.started_at} />}
           {!isGroupActive && s.duration_ms != null && (
-            <span className="text-xs text-gray-400">{formatMs(s.duration_ms)}</span>
+            <span className="text-xs text-muted/70">{formatMs(s.duration_ms)}</span>
           )}
         </div>
       </Field>
@@ -288,7 +288,7 @@ function GroupJobView({
 
       <SectionHeader>Devices ({device_results.length})</SectionHeader>
       {device_results.length === 0 ? (
-        <p className="text-xs text-gray-400">No device results yet.</p>
+        <p className="text-xs text-muted/70">No device results yet.</p>
       ) : (
         <div>
           {device_results.map((dr) => (
@@ -301,7 +301,7 @@ function GroupJobView({
         </div>
       )}
       {s.rollback_count > 0 && (
-        <p className="text-xs text-orange-600 mt-2">
+        <p className="text-xs text-warning mt-2">
           ↩ {s.rollback_count} device{s.rollback_count > 1 ? 's' : ''} rolled back
         </p>
       )}
@@ -314,7 +314,7 @@ function GroupJobView({
 function Spinner() {
   return (
     <div className="flex items-center justify-center py-12">
-      <div className="w-6 h-6 rounded-full border-2 border-gray-200 border-t-blue-500 animate-spin" />
+      <div className="w-6 h-6 rounded-full border-2 border-panel-border border-t-blue-500 animate-spin" />
     </div>
   );
 }
@@ -420,20 +420,20 @@ export function JobDetailModal({ jobId, groupJobId, onClose }: JobDetailModalPro
       />
 
       {/* panel */}
-      <div className="relative bg-white rounded-lg shadow-xl w-full max-w-lg flex flex-col max-h-[80vh]">
+      <div className="relative bg-panel rounded-lg shadow-xl w-full max-w-lg flex flex-col max-h-[80vh]">
         {/* header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 flex-shrink-0">
-          <h2 className="font-semibold text-gray-900 text-sm truncate pr-4">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-panel-border flex-shrink-0">
+          <h2 className="font-semibold text-text text-sm truncate pr-4">
             {drillDevice ? (
               <span>
-                <span className="text-gray-400">{title} → </span>
+                <span className="text-muted/70">{title} → </span>
                 {drillDevice}
               </span>
             ) : title}
           </h2>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 text-xl leading-none flex-shrink-0"
+            className="text-muted/70 hover:text-muted text-xl leading-none flex-shrink-0"
             aria-label="Close"
           >
             &times;
@@ -470,7 +470,7 @@ export function JobDetailModal({ jobId, groupJobId, onClose }: JobDetailModalPro
                   />
                 : (
                   <div>
-                    <button onClick={handleBack} className="text-xs text-blue-600 hover:underline mb-3">
+                    <button onClick={handleBack} className="text-xs text-info hover:underline mb-3">
                       ← {title}
                     </button>
                     <p className="text-sm text-red-600">Could not load device job details.</p>
