@@ -1,5 +1,12 @@
-import { PlaceholderPanel } from '@/components/scope/Panel';
+'use client';
+
+import { useParams } from 'next/navigation';
+import { PortsTab } from '@/components/scope/PortsTab';
 
 export default function DevicePortsPage() {
-  return <PlaceholderPanel label="Device PORTS tab (block 5)" />;
+  const params = useParams<{ name: string }>();
+  const raw = params.name;
+  const deviceName = typeof raw === 'string' ? decodeURIComponent(raw) : '';
+  if (!deviceName) return null;
+  return <PortsTab scope={{ kind: 'device', deviceName }} />;
 }

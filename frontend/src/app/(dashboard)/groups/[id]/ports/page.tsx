@@ -1,5 +1,11 @@
-import { PlaceholderPanel } from '@/components/scope/Panel';
+'use client';
+
+import { useParams } from 'next/navigation';
+import { PortsTab } from '@/components/scope/PortsTab';
 
 export default function GroupPortsPage() {
-  return <PlaceholderPanel label="Group PORTS tab — cross-device selection (block 5)" />;
+  const params = useParams<{ id: string }>();
+  const groupId = Number(params.id);
+  if (!Number.isFinite(groupId)) return null;
+  return <PortsTab scope={{ kind: 'group', groupId }} />;
 }

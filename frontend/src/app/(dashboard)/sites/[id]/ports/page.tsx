@@ -1,5 +1,11 @@
-import { PlaceholderPanel } from '@/components/scope/Panel';
+'use client';
+
+import { useParams } from 'next/navigation';
+import { PortsTab } from '@/components/scope/PortsTab';
 
 export default function SitePortsPage() {
-  return <PlaceholderPanel label="Site PORTS tab — cross-device selection (block 5)" />;
+  const params = useParams<{ id: string }>();
+  const siteId = Number(params.id);
+  if (!Number.isFinite(siteId)) return null;
+  return <PortsTab scope={{ kind: 'site', siteId }} />;
 }
