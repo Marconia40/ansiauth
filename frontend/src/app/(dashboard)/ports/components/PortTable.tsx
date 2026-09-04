@@ -78,9 +78,6 @@ export function PortTable({
             <th className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">Mode</th>
             <th className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">Access VLAN</th>
             <th className="text-left px-3 py-2 font-medium text-gray-700">Allowed VLANs</th>
-            <th className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">PoE</th>
-            <th className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">Speed</th>
-            <th className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">Duplex</th>
           </tr>
         </thead>
         <tbody>

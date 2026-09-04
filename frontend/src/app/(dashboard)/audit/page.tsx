@@ -7,7 +7,7 @@ import { useAuth } from '@/context/AuthContext';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { getAuditLogs, getSites } from '@/services/api';
+import { getAuditLogs, getSites, extractMessage } from '@/services/api';
 import type { AuditLog } from '@/types/audit';
 import type { Site } from '@/types/site';
 
@@ -22,13 +22,6 @@ const SELECT_CLS =
   'px-2 py-1.5 text-sm border border-gray-300 rounded-md bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400';
 const INPUT_CLS =
   'px-2 py-1.5 text-sm border border-gray-300 rounded-md bg-white text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-400';
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.message ?? fallback;
-}
 
 function formatTimestamp(ts: string): string {
   return new Date(ts).toLocaleString();

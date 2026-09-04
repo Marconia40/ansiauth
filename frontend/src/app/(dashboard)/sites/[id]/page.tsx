@@ -12,15 +12,11 @@ import {
   listSiteGroups,
   getDevices,
   moveDevice,
+  extractMessage,
 } from '@/services/api';
 import type { DeviceGroup } from '@/services/api';
 import type { Site } from '@/types/site';
 import type { Device } from '@/types/device';
-
-function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
-}
 
 export default function SiteDetailPage() {
   // Next.js 16 App Router — `params` from `useParams` is synchronous in a

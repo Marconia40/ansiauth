@@ -50,21 +50,15 @@ class PortRead(BaseModel):
             "Null for access ports or when the device does not expose this."
         ),
     )
-    poe_enabled: Optional[bool] = Field(
-        None, description="Power-over-Ethernet enable state, or null when unknown / unsupported."
-    )
-    speed: Optional[str] = Field(
-        None, description="Negotiated link speed string, or null when unknown."
-    )
-    duplex: Optional[str] = Field(
-        None, description="Negotiated duplex string, or null when unknown."
-    )
 
 
 class _PortTargetRequest(BaseModel):
-    """Shared device+interface target for every single-port write request."""
+    """Shared interface target for every single-port write request.
 
-    device: str = Field(..., min_length=1, description="Target device name.")
+    Device is no longer part of the body -- it's a path segment
+    (``/devices/{name}/ports/...``), consistent with the refresh endpoints
+    that already lived under ``/devices/{name}/...``."""
+
     interface: str = Field(
         ...,
         min_length=2,
@@ -74,20 +68,23 @@ class _PortTargetRequest(BaseModel):
 
 
 class PortDescriptionUpdateRequest(_PortTargetRequest):
-    """Request body for ``PATCH /api/v1/ports/description`` (Step 2.1).
-
-    Single device only — the spec deliberately keeps Step 2.1 narrow.
-    Empty ``description`` is allowed and means "clear the description".
-    """
+    """Request body for ``PATCH /api/v1/devices/{name}/ports/description``
+    (Step 2.1) -- sets a description. To clear it, use
+    ``DELETE .../description`` instead (verbo explícito en vez de inferir
+    "limpiar" de un valor vacío -- mismo criterio que SVI)."""
 
     description: str = Field(
-        default="",
+        ...,
+        min_length=1,
         max_length=200,
-        description=(
-            "New description text. An empty string clears the description "
-            "(`undo description` on Huawei, `no description` on Cisco)."
-        ),
+        description="New description text.",
     )
+
+
+class PortDescriptionClearRequest(_PortTargetRequest):
+    """Request body for ``DELETE /api/v1/devices/{name}/ports/description``
+    (Step 2.1) -- clears the description (`undo description` on Huawei,
+    `no description` on Cisco)."""
 
 
 class PortAdminStateUpdateRequest(_PortTargetRequest):

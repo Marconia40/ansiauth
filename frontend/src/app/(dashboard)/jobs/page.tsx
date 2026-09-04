@@ -8,7 +8,7 @@ import { ErrorMessage } from '@/components/ErrorMessage';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { JobDetailModal } from '@/components/JobDetailModal';
-import { getJobs, getSites } from '@/services/api';
+import { getJobs, getSites, extractMessage } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Job } from '@/types/job';
@@ -22,11 +22,6 @@ type DateRange = 'today' | '7d' | '30d' | 'all';
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
-}
 
 function getDurationMs(job: Job): number | null {
   if (!job.started_at || !job.finished_at) return null;

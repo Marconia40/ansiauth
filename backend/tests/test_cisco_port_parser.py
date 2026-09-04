@@ -9,7 +9,7 @@ continuations), and the policy that L3 / non-switchport interfaces are
 excluded.
 """
 
-from app.services.parsers.cisco_port_parser import (
+from app.services.parsers.port_parser import (
     parse_ios_interface_description,
     parse_ios_interface_status,
     parse_ios_ports,
@@ -299,7 +299,7 @@ def test_switchport_empty_input():
 
 def test_combined_parser_merges_three_sources():
     ports = parse_ios_ports(STATUS_SAMPLE, DESCRIPTION_SAMPLE, SWITCHPORT_SAMPLE)
-    by_name = {p.name: p for p in ports}
+    by_name = {p.interface: p for p in ports}
 
     # The L3 SVI must not surface as a port.
     assert "Vl10" not in by_name
@@ -307,7 +307,7 @@ def test_combined_parser_merges_three_sources():
     assert "Gi0/99" not in by_name
 
     # Output sorted by name
-    assert [p.name for p in ports] == sorted(p.name for p in ports)
+    assert [p.interface for p in ports] == sorted(p.interface for p in ports)
 
     g1 = by_name["Gi0/1"]
     assert g1.description == "Workstation-01-detailed"
@@ -341,7 +341,7 @@ def test_combined_parser_tolerates_missing_description_source():
     # If description output is missing entirely, status_output supplies
     # admin / oper state.  description field stays None.
     ports = parse_ios_ports(STATUS_SAMPLE, "", SWITCHPORT_SAMPLE)
-    by_name = {p.name: p for p in ports}
+    by_name = {p.interface: p for p in ports}
     g1 = by_name["Gi0/1"]
     assert g1.description is None
     assert g1.admin_up is True
@@ -354,7 +354,7 @@ def test_combined_parser_tolerates_missing_status_source():
     # If status output is missing, we still get full data from description
     # + switchport.
     ports = parse_ios_ports("", DESCRIPTION_SAMPLE, SWITCHPORT_SAMPLE)
-    by_name = {p.name: p for p in ports}
+    by_name = {p.interface: p for p in ports}
     assert by_name["Gi0/3"].mode == "trunk"
     assert by_name["Gi0/3"].admin_up is True
     assert by_name["Gi0/3"].operational_up is True
@@ -381,7 +381,7 @@ Trunking VLANs Enabled: ALL
     ports = parse_ios_ports("", "", sw_only)
     assert len(ports) == 1
     p = ports[0]
-    assert p.name == "Gi0/42"
+    assert p.interface == "Gi0/42"
     assert p.admin_up is None
     assert p.operational_up is None
     assert p.description is None

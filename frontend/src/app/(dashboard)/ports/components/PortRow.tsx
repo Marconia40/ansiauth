@@ -80,11 +80,6 @@ export function PortRow({
       <td className="px-3 py-2 text-gray-900 max-w-xs">
         <TrunkVlansCell port={port} canEdit={canEdit} busy={busy} editor={trunkVlans} />
       </td>
-      <td className="px-3 py-2 text-gray-600">
-        {port.poe_enabled === null ? 'N/A' : port.poe_enabled ? 'On' : 'Off'}
-      </td>
-      <td className="px-3 py-2 text-gray-600">{port.speed ?? 'N/A'}</td>
-      <td className="px-3 py-2 text-gray-600">{port.duplex ?? 'N/A'}</td>
     </tr>
   );
 }

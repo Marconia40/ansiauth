@@ -225,7 +225,7 @@ class Orquestador:
             # broker no está, la escritura ya fue exitosa, sólo perdemos la
             # actualización proactiva de cache -- el usuario puede darle
             # refresh manual desde POST /devices/{name}/{vlans,ports}/refresh.
-            _SCOPE_POR_REPO = {"vlan": "vlans", "puerto": "ports"}
+            _SCOPE_POR_REPO = {"vlan": "vlans", "puerto": "ports", "svi": "svis"}
             sync_scope = _SCOPE_POR_REPO.get(recurso.repositorio())
             if sync_scope is not None:
                 # Coalesce del sync post-write cuando llega un burst de N jobs

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.device import Device
+    from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
 
@@ -159,20 +160,66 @@ class VendorDriver(ABC):
                 cls._commands_cache = yaml.safe_load(f)
         return cls._commands_cache
 
+    def _lineas_repetidas(self, step: dict, vars: dict) -> list[str]:
+        """``repeat`` arma N líneas a partir de una lista en *vars* -- para
+        operaciones "full-replace de una lista de tamaño variable" (ej.
+        DHCP relay servers, ``ip helper-address``/``dhcp relay
+        server-ip``/``dhcp relay server group`` uno por IP) que
+        ``lines``/``block`` solos no pueden expresar (son listas FIJAS).
+        Todo comando sigue viviendo en el YAML -- esto reemplaza el bypass
+        que antes armaba la lista a mano en el driver.
+
+        Shape de ``repeat`` en el YAML::
+
+            repeat:
+              over: "servers"                   # nombre de la lista en vars
+              prefix_if_nonempty: ["..."]        # opcional, 1 vez, solo si la lista NO está vacía (antes de los items)
+              line: "... {item} ... {index} ..."  # 1 vez por elemento -- {item} = elemento actual, {index} = posición (0-based)
+              suffix_if_nonempty: ["..."]        # opcional, 1 vez, solo si la lista NO está vacía (después de los items)
+              if_empty: ["..."]                  # opcional, en vez de prefix/line/suffix cuando la lista SÍ está vacía
+        """
+        repeat = step.get("repeat")
+        if not repeat:
+            return []
+        items = vars.get(repeat["over"]) or []
+        lineas: list[str] = []
+        if items:
+            lineas += [l.format(**vars) for l in repeat.get("prefix_if_nonempty", [])]
+            lineas += [
+                repeat["line"].format(item=item, index=i, **vars) for i, item in enumerate(items)
+            ]
+            lineas += [l.format(**vars) for l in repeat.get("suffix_if_nonempty", [])]
+        else:
+            lineas += [l.format(**vars) for l in repeat.get("if_empty", [])]
+        return lineas
+
     def _ejecutar_paso(self, step: dict, vars: dict, device: Device, password: str, *, op_label: str) -> dict:
         """Renderiza un paso del YAML (``lines``[+``parents``], ``block``, o
         ``commands`` -- se infiere de qué clave está presente, no hace
         falta declarar el modo aparte) sustituyendo *vars* con
         ``str.format()``, arma el extravars shape que ``run.yml`` de este
-        vendor entiende, y corre ``_aplicar()`` (sin tocar)."""
+        vendor entiende, y corre ``_aplicar()`` (sin tocar).
+
+        ``repeat`` (ver ``_lineas_repetidas()``) y ``trailer`` (líneas
+        fijas después de las repetidas, ej. ``commit``/``quit``/``quit``
+        de Huawei) se agregan al final de ``lines``/``block`` cuando
+        están presentes. ``match`` (Cisco/``ios_config`` -- ver nota en
+        ``set_svi_dhcp_relay`` de ambos vendors) pasa directo al
+        extravars si está presente."""
+        extra = self._lineas_repetidas(step, vars)
+        trailer = [l.format(**vars) for l in step.get("trailer", [])]
         if "commands" in step:
-            extravars = {"commands": [c.format(**vars) for c in step["commands"]]}
+            extravars = {"commands": [c.format(**vars) for c in step["commands"]] + extra + trailer}
         elif "block" in step:
-            extravars = {"command_block": "\n".join(c.format(**vars) for c in step["block"])}
+            todas = [c.format(**vars) for c in step["block"]] + extra + trailer
+            extravars = {"command_block": "\n".join(todas)}
         else:
-            extravars = {"lines": [c.format(**vars) for c in step["lines"]]}
+            todas = [c.format(**vars) for c in step["lines"]] + extra + trailer
+            extravars = {"lines": todas}
             if "parents" in step:
                 extravars["parents"] = step["parents"].format(**vars)
+        if "match" in step:
+            extravars["match"] = step["match"]
         return self._aplicar(extravars, device, password, op_label=op_label)
 
     def _aplicar_desde_template(
@@ -808,4 +855,107 @@ class VendorDriver(ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement set_trunk_mode yet"
+        )
+
+    # ── Virtual interface (SVI) operations, RF-INTERV-* ───────────────────────
+    # interface Vlan{id} en Cisco, interface Vlanif{id} en Huawei. La
+    # identidad de la interfaz ES el vlan_id -- no hay "reasignar a otra
+    # VLAN" (RF-INTERV-9), eso es borrar y crear de nuevo.
+
+    def create_svi(self, vlan_id: int, device: Device, password: str) -> dict:
+        """Create the SVI for *vlan_id* (assumes the VLAN itself already
+        exists -- validated by the caller before this runs)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement create_svi yet"
+        )
+
+    def delete_svi(self, vlan_id: int, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement delete_svi yet"
+        )
+
+    def set_svi_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_svi_admin_state yet"
+        )
+
+    def set_svi_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_svi_description yet"
+        )
+
+    def set_svi_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
+        """*ipv4_address* is CIDR (``"10.10.10.11/24"``) or ``""``/``None``
+        to clear. CIDR→dotted-mask conversion (needed by Cisco) is real
+        computation, done by the concrete driver -- not sintaxis, doesn't
+        belong in the YAML template."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_svi_ipv4 yet"
+        )
+
+    def set_svi_ipv4_secondary(
+        self, vlan_id: int, ipv4_address: "str | None", previous_ipv4_address: "str | None",
+        device: Device, password: str,
+    ) -> dict:
+        """Same contract as ``set_svi_ipv4()`` but for the secondary
+        IPv4 address (RF-INTERV-03) -- caller (``SVI``) already
+        checked a primary exists before calling this.
+
+        Unlike the primary address, clearing a secondary needs to name the
+        exact address being removed (``no ip address <addr> <mask>
+        secondary`` on IOS -- a bare ``no ip address`` wipes the primary
+        *and* every secondary). *previous_ipv4_address* is the currently
+        configured secondary (CIDR), passed by the caller from its
+        pre-state read -- only present when *ipv4_address* is falsy
+        (clearing); the caller guarantees it's non-None whenever a clear
+        actually reaches the driver (a clear with nothing configured is a
+        no-op handled before this is called)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_svi_ipv4_secondary yet"
+        )
+
+    def set_svi_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
+        """*ipv6_address* is CIDR (``"2001:db8::1/64"``) or ``""``/``None``
+        to clear. Precondition (not managed by this call): Cisco needs
+        ``ipv6 unicast-routing`` enabled globally; Huawei needs ``ipv6
+        enable`` on the interface first."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_svi_ipv6 yet"
+        )
+
+    def set_svi_acl(
+        self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
+    ) -> dict:
+        """Bind (or clear, if *acl_name* is ``""``/``None``) an ACL that
+        already exists on the device to *direction* (``"in"``/``"out"``).
+        Does not create the ACL itself -- that's RF-GLOBAL-04, out of scope
+        here."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_svi_acl yet"
+        )
+
+    def list_acl_names(self, device: Device, password: str) -> list[str]:
+        """Names/numbers of every ACL configured on the device -- used by
+        the API layer (RF-INTERV-04's "ACL previamente creada... e
+        identificador válido" precondition) to reject binding an ACL that
+        doesn't exist, before enqueueing the job. Minimal read, not the
+        full RF-GLOBAL-04 (details of each ACL's rules) -- out of scope
+        here."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement list_acl_names yet"
+        )
+
+    def set_svi_dhcp_relay(
+        self, vlan_id: int, servers: list[str], device: Device, password: str,
+    ) -> dict:
+        """Set the DHCP relay/helper server list to exactly *servers*
+        (empty list clears it) -- full replace, same convention as
+        ``set_trunk_allowed_vlans``."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_svi_dhcp_relay yet"
+        )
+
+    def get_svis(self, device: Device, password: str) -> list[SVI]:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_svis yet"
         )

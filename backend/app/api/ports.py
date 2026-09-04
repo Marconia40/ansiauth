@@ -13,6 +13,7 @@ from app.schemas.device_sync import SyncedResource
 from app.schemas.port import (
     PortAccessVlanUpdateRequest,
     PortAdminStateUpdateRequest,
+    PortDescriptionClearRequest,
     PortDescriptionUpdateRequest,
     PortEnableRequest,
     PortPoeUpdateRequest,
@@ -71,47 +72,24 @@ def _require_port_driver_with(device: "Device", method_name: str):
     return driver
 
 
-def _check_device_not_locked(device_name: str) -> None:
-    """Raise 409 immediately when the device is already held by another
-    operation. Non-blocking probe via RedisCoordinator -- reemplaza
-    device_locks.is_device_busy() (FASE_1.md, RedisCoordinator fusiona
-    device_locks.py + rate_limiter.py). Misma ventana TOCTOU que la real:
-    el chequeo es best-effort, Orquestador adquiere su propio lock al
-    ejecutar el job."""
-    from app.composition import redis_coordinator
-
-    if redis_coordinator.esta_ocupado(device_name):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "DEVICE_LOCKED",
-                "message": (
-                    f"Device '{device_name}' is busy with another operation — "
-                    "retry shortly"
-                ),
-            },
-        )
-
-
 @router.get(
     "/",
     summary="List ports",
     description=(
         "Retrieve the normalized port inventory of a single device. "
-        "Pass `device=<name>` as a query parameter.  Returns interface "
-        "name, description, admin and operational state, switchport mode, "
-        "access / trunk VLAN information, and (when exposed by the device) "
-        "PoE / speed / duplex.  Read-only — no configuration changes. "
-        "Requires observer role or higher; site-scoped users may only "
-        "query devices in their allowed sites."
+        "Returns interface name, description, admin and operational "
+        "state, switchport mode, access / trunk VLAN information, and "
+        "(when exposed by the device) PoE / speed / duplex.  Read-only — "
+        "no configuration changes.  Requires observer role or higher; "
+        "site-scoped users may only query devices in their allowed sites."
     ),
 )
 def list_ports(
-    device: str | None = None,
+    name: str,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    """Return the port inventory of *device* -- cache-first.
+    """Return the port inventory of *name* -- cache-first.
 
     Lee de ``Repository[Puerto]`` (populated por ``sync_device_task``,
     disparado en el alta / por refresh manual / post-escritura), no en
@@ -124,34 +102,9 @@ def list_ports(
     """
     from app.composition import device_sync_service, puerto_repository, redis_coordinator
 
-    if device is None:
-        from app.core.config import EXECUTION_MODE
-        if EXECUTION_MODE != "mock":
-            raise ValidationError("'device' query parameter is required")
-        from app.services.vendors.mock import _INITIAL_MOCK_PORTS
-        puertos = list(_INITIAL_MOCK_PORTS)
-        payload = {
-            "device": "mock_device",
-            "vendor": "mock",
-            "count": len(puertos),
-            "ports": [
-                PortRead(
-                    name=p.interface, description=p.description, admin_up=p.admin_up,
-                    operational_up=p.operational_up, mode=p.mode, access_vlan=p.access_vlan,
-                    allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
-                    speed=p.speed, duplex=p.duplex,
-                ).model_dump()
-                for p in puertos
-            ],
-        }
-        envelope = SyncedResource(
-            data=payload, synced_at=None, sync_error=None, sync_in_progress=False,
-        ).model_dump(mode="json")
-        return ok(envelope)
-
-    _authz_device(scope, device, min_role="observer")
-    dev = require_device(device)
-    puertos = puerto_repository.list(device=device)
+    _authz_device(scope, name, min_role="observer")
+    dev = require_device(name)
+    puertos = puerto_repository.list(device=name)
     payload = {
         "device": dev.name,
         "vendor": dev.vendor,
@@ -159,40 +112,41 @@ def list_ports(
         "ports": [
             PortRead(
                 name=p.interface, description=p.description, admin_up=p.admin_up,
-                operational_up=p.operational_up, mode=p.mode, access_vlan=p.access_vlan,
-                allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
-                speed=p.speed, duplex=p.duplex,
+                operational_up=p.operational_up, mode=p.mode or "unknown", access_vlan=p.access_vlan,
+                allowed_vlans=p.allowed_vlans,
             ).model_dump()
             for p in puertos
         ],
     }
-    synced_at, sync_error = device_sync_service.metadata(device, "ports")
+    synced_at, sync_error = device_sync_service.metadata(name, "ports")
     envelope = SyncedResource(
         data=payload,
         synced_at=synced_at,
         sync_error=sync_error,
-        sync_in_progress=redis_coordinator.esta_ocupado(device),
+        sync_in_progress=redis_coordinator.esta_ocupado(name),
     ).model_dump(mode="json")
     return ok(envelope)
 
 
 @router.patch(
     "/description",
-    summary="Update port description",
+    status_code=202,
+    summary="Set port description",
     description=(
-        "Update the description of a single interface on a device.  An "
-        "empty description clears the description (`undo description` on "
-        "Huawei VRP, `no description` on Cisco IOS).  Executed "
-        "asynchronously: the response carries a `group_job_id` and per-"
-        "device job entry the frontend can poll via "
-        "`GET /api/v1/jobs/{job_id}` and `GET /api/v1/group-jobs/{id}`.  "
-        "Pre-state is captured for rollback — if the device-side change "
-        "fails, the original description is restored automatically.  "
-        "Requires operator role or higher; site-scoped users may only "
-        "target devices in their allowed sites."
+        "Assign a description to a single interface on a device.  To "
+        "clear it, use `DELETE .../description` instead — a value is "
+        "always required here.  Executed asynchronously: the response "
+        "carries a `group_job_id` and per-device job entry the frontend "
+        "can poll via `GET /api/v1/jobs/{job_id}` and "
+        "`GET /api/v1/group-jobs/{id}`.  Pre-state is captured for "
+        "rollback — if the device-side change fails, the original "
+        "description is restored automatically.  Requires operator role "
+        "or higher; site-scoped users may only target devices in their "
+        "allowed sites."
     ),
 )
 def update_port_description(
+    name: str,
     data: PortDescriptionUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -205,17 +159,52 @@ def update_port_description(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "update_port_description")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.delete(
+    "/description",
+    status_code=202,
+    summary="Clear port description",
+    description=(
+        "Clear the description of a single interface on a device "
+        "(`undo description` on Huawei VRP, `no description` on Cisco "
+        "IOS).  Executed asynchronously: the response carries a "
+        "`group_job_id` and per-device job entry the frontend can poll "
+        "via `GET /api/v1/jobs/{job_id}` and `GET /api/v1/group-jobs/{id}`.  "
+        "Pre-state is captured for rollback — if the device-side change "
+        "fails, the original description is restored automatically.  "
+        "Requires operator role or higher; site-scoped users may only "
+        "target devices in their allowed sites."
+    ),
+)
+def clear_port_description(
+    name: str,
+    data: PortDescriptionClearRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = Puerto(interface=data.interface, description="")
+    entidad.validar()
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
+    _require_port_driver_with(dev, "update_port_description")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/admin-state",
+    status_code=202,
     summary="Set port admin state",
     description=(
         "Administratively enable or disable a single interface.  "
@@ -231,6 +220,7 @@ def update_port_description(
     ),
 )
 def set_port_admin_state(
+    name: str,
     data: PortAdminStateUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -243,17 +233,17 @@ def set_port_admin_state(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_port_admin_state")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/access-vlan",
+    status_code=202,
     summary="Set port access VLAN",
     description=(
         "Assign an access VLAN to a single interface — or the native VLAN "
@@ -269,6 +259,7 @@ def set_port_admin_state(
     ),
 )
 def set_port_access_vlan(
+    name: str,
     data: PortAccessVlanUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -284,9 +275,8 @@ def set_port_access_vlan(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_port_access_vlan")
     # Puerto._aplicar_access_vlan() despacha a set_trunk_pvid_vlan() en vez
     # de acá cuando el puerto resulta estar en modo trunk (access_vlan es
@@ -298,12 +288,13 @@ def set_port_access_vlan(
     # que este chequeo existe para dar.
     _require_port_driver_with(dev, "set_trunk_pvid_vlan")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/trunk-vlans",
+    status_code=202,
     summary="Set trunk allowed VLANs",
     description=(
         "Modify the trunk allowed-VLAN list on a single interface.  "
@@ -322,6 +313,7 @@ def set_port_access_vlan(
     ),
 )
 def set_trunk_allowed_vlans(
+    name: str,
     data: PortTrunkVlansUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -341,17 +333,17 @@ def set_trunk_allowed_vlans(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_trunk_allowed_vlans")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/access-mode",
+    status_code=202,
     summary="Set port to access mode",
     description=(
         "Set a single interface to access mode with the given access VLAN, "
@@ -369,6 +361,7 @@ def set_trunk_allowed_vlans(
     ),
 )
 def set_port_access_mode(
+    name: str,
     data: PortSetAccessModeRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -381,17 +374,17 @@ def set_port_access_mode(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_access_mode")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/trunk-mode",
+    status_code=202,
     summary="Set port to trunk mode",
     description=(
         "Set a single interface to trunk mode with the given native VLAN "
@@ -412,6 +405,7 @@ def set_port_access_mode(
     ),
 )
 def set_port_trunk_mode(
+    name: str,
     data: PortSetTrunkModeRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -427,17 +421,17 @@ def set_port_trunk_mode(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_trunk_mode")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/shutdown",
+    status_code=202,
     summary="Shutdown port",
     description=(
         "Administratively disable a single interface (``shutdown`` command).  "
@@ -452,6 +446,7 @@ def set_port_trunk_mode(
     ),
 )
 def shutdown_port(
+    name: str,
     data: PortShutdownRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -472,17 +467,17 @@ def shutdown_port(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_port_admin_state")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/enable",
+    status_code=202,
     summary="Enable port",
     description=(
         "Administratively enable a single interface (``no shutdown`` / "
@@ -498,6 +493,7 @@ def shutdown_port(
     ),
 )
 def enable_port(
+    name: str,
     data: PortEnableRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -512,17 +508,17 @@ def enable_port(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_port_admin_state")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/poe",
+    status_code=202,
     summary="Set port PoE state",
     description=(
         "Enable or disable Power-over-Ethernet on a single interface "
@@ -537,6 +533,7 @@ def enable_port(
     ),
 )
 def set_port_poe(
+    name: str,
     data: PortPoeUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -549,17 +546,17 @@ def set_port_poe(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_port_poe")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.patch(
     "/storm-control",
+    status_code=202,
     summary="Set port storm-control state",
     description=(
         "Enable or disable broadcast storm-control on a single interface, "
@@ -573,6 +570,7 @@ def set_port_poe(
     ),
 )
 def set_port_storm_control(
+    name: str,
     data: PortStormControlUpdateRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -589,17 +587,17 @@ def set_port_storm_control(
     except ValueError as exc:
         raise ValidationError(str(exc))
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "set_storm_control")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
 @router.post(
     "/reset",
+    status_code=202,
     summary="Reset port to defaults",
     description=(
         "Reset a single interface to its factory-default configuration "
@@ -613,6 +611,7 @@ def set_port_storm_control(
     ),
 )
 def reset_port(
+    name: str,
     data: PortResetRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
@@ -622,10 +621,9 @@ def reset_port(
     entidad = Puerto(interface=data.interface, reset=True)
     entidad.validar()
 
-    dev = require_device(data.device)
-    _authz_device(scope, data.device, min_role="operator", device=dev)
-    _check_device_not_locked(data.device)
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
     _require_port_driver_with(dev, "reset_port")
 
-    group_job_id, jobs = group_operation_runner.encolar(entidad, [data.device], current_user["username"])
-    return ok(group_job_id=group_job_id, jobs=jobs)
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})

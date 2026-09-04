@@ -1,10 +1,10 @@
-from app.services.parsers.cisco_port_parser import (
+from app.services.parsers.port_parser import (
+    CiscoPortParser,
+    HuaweiPortParser,
     parse_ios_interface_description,
     parse_ios_interface_status,
     parse_ios_ports,
     parse_ios_switchport,
-)
-from app.services.parsers.port_parser import (
     parse_vrp_interface_brief,
     parse_vrp_interface_description,
     parse_vrp_port_vlan,
@@ -15,6 +15,8 @@ from app.services.parsers.vlan_parser import parse_vlan_brief, parse_vrp_vlan_di
 __all__ = [
     "parse_vlan_brief",
     "parse_vrp_vlan_display",
+    "CiscoPortParser",
+    "HuaweiPortParser",
     "parse_vrp_interface_brief",
     "parse_vrp_interface_description",
     "parse_vrp_port_vlan",

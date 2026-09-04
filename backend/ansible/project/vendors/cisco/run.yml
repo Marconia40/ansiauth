@@ -12,6 +12,17 @@
 #     "interface GigabitEthernet0/0/1" or "vlan 100". Omitted for
 #     global-level lines (e.g. "no vlan 100").
 #   lines   (list[str]) — config lines to apply.
+#   match   (str, optional) — ios_config's idempotency-diff mode. Default
+#     ("line") lets the module skip re-sending a line it already sees in
+#     the current running-config -- fine for most operations, but a real
+#     bug found against the lab device for "no X" + "re-add all" full-
+#     replace patterns (RF-INTERV-05 DHCP relay): the module diffs against
+#     a config SNAPSHOT taken before the batch runs, so it skips re-adding
+#     a line that's "already there" without accounting for an earlier "no"
+#     line in the SAME batch that's about to remove it -- net effect, only
+#     the last item of a multi-line full-replace survives. Callers that
+#     need every line sent unconditionally (full-replace intents) pass
+#     "none" here.
 #   commands (list[str]) — exec-mode commands to run (reads, or `write`).
 #   device  (str) — diagnostic only.
 
@@ -25,6 +36,7 @@
       cisco.ios.ios_config:
         parents: "{{ parents | default(omit) }}"
         lines: "{{ lines }}"
+        match: "{{ match | default(omit) }}"
 
     - name: Run commands
       when: commands is defined

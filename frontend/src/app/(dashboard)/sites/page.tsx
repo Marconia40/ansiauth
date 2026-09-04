@@ -7,13 +7,8 @@ import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
 import { RequireRole } from '@/components/RequireRole';
-import { getSites, createSite, updateSite, deleteSite } from '@/services/api';
+import { getSites, createSite, updateSite, deleteSite, extractMessage } from '@/services/api';
 import type { Site, SiteUpdate } from '@/types/site';
-
-function extractMessage(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { detail?: string; message?: string } }; message?: string } | null;
-  return e?.response?.data?.detail ?? e?.response?.data?.message ?? e?.message ?? fallback;
-}
 
 function normalizeSites(data: unknown): Site[] {
   if (Array.isArray(data)) return data as Site[];
