@@ -19,6 +19,7 @@ _PLAYBOOK = "vendors/cisco/run.yml"
 _STATUS_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _SWITCHPORT_INDEX = 2
+_STORM_INDEX = 3
 
 
 class CiscoVendor(VendorDriver):
@@ -112,8 +113,9 @@ class CiscoVendor(VendorDriver):
         status = stdouts[_STATUS_INDEX] if len(stdouts) > _STATUS_INDEX else ""
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         switchport = stdouts[_SWITCHPORT_INDEX] if len(stdouts) > _SWITCHPORT_INDEX else ""
+        storm = stdouts[_STORM_INDEX] if len(stdouts) > _STORM_INDEX else ""
         try:
-            ports = CiscoPortParser.parse_ports(status, description, switchport)
+            ports = CiscoPortParser.parse_ports(status, description, switchport, storm)
         except Exception as exc:
             raise RuntimeError(f"Cannot determine port state on device '{device.name}': {exc}") from exc
         return ports

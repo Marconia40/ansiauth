@@ -44,6 +44,25 @@ function speedLabel(_port: Port): string {
   return '—';
 }
 
+/** OFF cuando el device confirmó que no hay storm-control; el porcentaje
+ * cuando lo hay; ON sin % si el device lo tiene configurado en pps/bps
+ * (nuestro write path solo produce percent, esto solo pasa con configs
+ * preexistentes); "—" si el parser no matcheo la salida (no inventar). */
+function stormControlLabel(port: Port): string {
+  if (port.storm_control_enabled === false) return 'OFF';
+  if (port.storm_control_enabled === true) {
+    if (port.storm_control_threshold === null || port.storm_control_threshold === undefined) {
+      return 'ON';
+    }
+    // Redondear los decimales cuando son .00 para mostrar "10%" en vez de
+    // "10.00%" -- match visual con lo que muestra Cisco al operador.
+    const t = port.storm_control_threshold;
+    const shown = Number.isInteger(t) ? String(t) : t.toFixed(2);
+    return `${shown}%`;
+  }
+  return '—';
+}
+
 export function PortDetailCard({ port, emptyLabel }: Props) {
   if (!port) {
     return (
@@ -70,6 +89,11 @@ export function PortDetailCard({ port, emptyLabel }: Props) {
         <DetailRow
           label="ALLOWED VLANS"
           value={allowedLabel(port)}
+          className="md:col-span-2"
+        />
+        <DetailRow
+          label="STORM CONTROL"
+          value={stormControlLabel(port)}
           className="md:col-span-2"
         />
       </ul>

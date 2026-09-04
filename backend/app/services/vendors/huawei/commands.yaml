@@ -92,6 +92,15 @@ list_ports:
       - "display interface brief"
       - "display interface description"
       - "display port vlan"
+      # 4to comando: bulk-read del storm-control. `display current-
+      # configuration interface` dumpea la config completa de TODAS las
+      # interfaces (incluyendo las líneas "storm control ..." cuando
+      # están seteadas). Ausencia de línea "storm control" en la sección
+      # de un puerto = disabled. Un solo comando cubre todos los puertos,
+      # mismo criterio que los otros 3 bulk reads. Alternativa (no
+      # implementada acá): "display storm-control", que no está en todas
+      # las versiones de VRP -- current-configuration siempre está.
+      - "display current-configuration interface"
 
 # Todo comando de puertos de acá en adelante sustituye {interface} en la
 # primera línea ("interface {interface}") -- 2 devices reales confirman

@@ -73,6 +73,8 @@ def _puerto_to_orm(p: "Puerto"):
         interface=p.interface, device=p.device, description=p.description,
         admin_up=p.admin_up, mode=p.mode, access_vlan=p.access_vlan,
         allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
+        storm_control_enabled=p.storm_control_enabled,
+        storm_control_threshold=p.storm_control_threshold,
         operational_up=p.operational_up, speed=p.speed, duplex=p.duplex,
     )
 
@@ -83,6 +85,8 @@ def _puerto_to_domain(row) -> "Puerto":
         interface=row.interface, device=row.device, description=row.description,
         admin_up=row.admin_up, mode=row.mode, access_vlan=row.access_vlan,
         allowed_vlans=row.allowed_vlans, poe_enabled=row.poe_enabled,
+        storm_control_enabled=row.storm_control_enabled,
+        storm_control_threshold=row.storm_control_threshold,
         operational_up=row.operational_up, speed=row.speed, duplex=row.duplex,
     )
 

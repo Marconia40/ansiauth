@@ -41,6 +41,12 @@ list_ports:
       - "show interfaces status"
       - "show interfaces description"
       - "show interfaces switchport"
+      # 4to comando: bulk-read del storm-control. Un tabla por puerto
+      # (Interface / Filter State / Trap State / Upper / Lower / Current);
+      # "Forwarding" o "Blocking" = enabled, "inactive" = disabled,
+      # Upper = porcentaje configurado. Un solo comando cubre todos los
+      # puertos, mismo criterio que los 3 anteriores.
+      - "show storm-control broadcast"
 
 update_port_description:
   set:

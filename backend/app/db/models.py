@@ -5,6 +5,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -140,6 +141,11 @@ class DevicePortModel(Base):
     access_vlan = Column(Integer, nullable=True)
     allowed_vlans = Column(JSON, nullable=True)  # lista de int
     poe_enabled = Column(Boolean, nullable=True)
+    # storm_control_threshold es percent (0-100). None con enabled=True
+    # significa "prendido pero en pps/bps" -- config preexistente al
+    # sistema, nuestro write siempre produce percent-form.
+    storm_control_enabled = Column(Boolean, nullable=True)
+    storm_control_threshold = Column(Float, nullable=True)
     # Read-only, provienen del getter del driver, no de escrituras del usuario.
     operational_up = Column(Boolean, nullable=True)
     speed = Column(String, nullable=True)

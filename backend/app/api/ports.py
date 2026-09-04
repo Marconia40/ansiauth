@@ -114,6 +114,8 @@ def list_ports(
                 name=p.interface, description=p.description, admin_up=p.admin_up,
                 operational_up=p.operational_up, mode=p.mode or "unknown", access_vlan=p.access_vlan,
                 allowed_vlans=p.allowed_vlans,
+                storm_control_enabled=p.storm_control_enabled,
+                storm_control_threshold=p.storm_control_threshold,
             ).model_dump()
             for p in puertos
         ],

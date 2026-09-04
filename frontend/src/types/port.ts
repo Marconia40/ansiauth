@@ -11,6 +11,12 @@ export interface Port {
   mode: PortMode;
   access_vlan: number | null;
   allowed_vlans: number[] | null;
+  // null cuando el driver no pudo determinar el estado (parser no matcheo
+  // la salida real del equipo, no inventar valor).
+  storm_control_enabled: boolean | null;
+  // Percent 0-100. Null aún con enabled=true cuando el equipo tiene storm
+  // control en pps/bps u otra unidad no-percent (config preexistente).
+  storm_control_threshold: number | null;
 }
 
 // Envelope returned by GET /api/v1/ports/?device=...

@@ -19,6 +19,7 @@ _PLAYBOOK = "vendors/huawei/run.yml"
 _BRIEF_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _PORT_VLAN_INDEX = 2
+_STORM_INDEX = 3
 
 
 class HuaweiVendor(VendorDriver):
@@ -109,8 +110,9 @@ class HuaweiVendor(VendorDriver):
         brief = stdouts[_BRIEF_INDEX] if len(stdouts) > _BRIEF_INDEX else ""
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         port_vlan = stdouts[_PORT_VLAN_INDEX] if len(stdouts) > _PORT_VLAN_INDEX else ""
+        storm = stdouts[_STORM_INDEX] if len(stdouts) > _STORM_INDEX else ""
         try:
-            ports = HuaweiPortParser.parse_ports(brief, description, port_vlan)
+            ports = HuaweiPortParser.parse_ports(brief, description, port_vlan, storm)
         except Exception as exc:
             raise RuntimeError(f"Cannot determine port state on device '{device.name}': {exc}") from exc
         return ports
