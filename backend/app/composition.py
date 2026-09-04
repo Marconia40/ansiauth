@@ -120,7 +120,8 @@ svi_repository = Repository(
 
 def _global_config_to_orm(g: "GlobalConfig"):
     return DeviceGlobalConfigModel(
-        device=g.device, hostname=g.hostname, device_version=g.device_version,
+        device=g.device, hostname=g.hostname, running_config=g.running_config,
+        device_version=g.device_version,
         snmp_enabled=g.snmp_enabled, snmp_version=g.snmp_version,
         snmp_community=g.snmp_community, snmp_permission=g.snmp_permission,
         ntp_server=g.ntp_server, dns_server=g.dns_server,
@@ -132,7 +133,8 @@ def _global_config_to_orm(g: "GlobalConfig"):
 def _global_config_to_domain(row) -> "GlobalConfig":
     from app.models.global_config import GlobalConfig
     return GlobalConfig(
-        device=row.device, hostname=row.hostname, device_version=row.device_version,
+        device=row.device, hostname=row.hostname, running_config=row.running_config,
+        device_version=row.device_version,
         snmp_enabled=row.snmp_enabled, snmp_version=row.snmp_version,
         snmp_community=row.snmp_community, snmp_permission=row.snmp_permission,
         ntp_server=row.ntp_server, dns_server=row.dns_server,

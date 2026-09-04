@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -15,50 +15,91 @@ class GlobalConfigHostnameUpdateRequest(BaseModel):
 
 class GlobalConfigSnmpUpdateRequest(BaseModel):
     """Request body para ``PATCH /global-config/snmp`` (RF-GLOBAL-07).
-    Los 3 campos son opcionales individualmente, pero ``community`` y
-    ``permission`` deben venir juntos -- ambos vendors los fijan en 1 sola
-    línea (ver ``GlobalConfig.validar()``)."""
+    Todos los campos son opcionales individualmente -- ``community`` se
+    fija siempre de solo lectura (ya no hay parámetro de permiso).
+    ``trap_host``/``trap_version`` deben venir juntos. ``trap_source`` no
+    tiene efecto confirmado en Huawei todavía (ver
+    ``HuaweiVendor.set_snmp()``)."""
 
     version: Optional[str] = Field(None, description="Versión SNMP a habilitar (ej. 'v2c'). Solo tiene efecto en VRP.")
-    community: Optional[str] = Field(None, min_length=1, description="Community SNMP a configurar.")
-    permission: Optional[Literal["RO", "RW"]] = Field(None, description="Permiso de la community.")
+    community: Optional[str] = Field(None, min_length=1, description="Community SNMP a configurar (siempre solo lectura).")
+    trap_source: Optional[str] = Field(None, min_length=1, description="Interfaz de administración usada como origen de los traps.")
+    trap_host: Optional[str] = Field(None, min_length=1, description="IP destino de los traps SNMP.")
+    trap_version: Optional[str] = Field(None, min_length=1, description="Versión SNMP del trap-host (ej. '2c'). Requerido junto con trap_host.")
 
     @model_validator(mode="after")
-    def _community_and_permission_together(self) -> "GlobalConfigSnmpUpdateRequest":
-        if (self.community is None) != (self.permission is None):
-            raise ValueError("'community' and 'permission' must be provided together")
-        if self.version is None and self.community is None:
-            raise ValueError("at least one of 'version' or 'community'+'permission' must be provided")
+    def _validate(self) -> "GlobalConfigSnmpUpdateRequest":
+        if (self.trap_host is None) != (self.trap_version is None):
+            raise ValueError("'trap_host' and 'trap_version' must be provided together")
+        if not any((self.version, self.community, self.trap_source, self.trap_host)):
+            raise ValueError("at least one of version, community, trap_source, trap_host+trap_version must be provided")
         return self
 
 
-class GlobalConfigLogServersUpdateRequest(BaseModel):
-    """Request body para ``PATCH /global-config/log-servers`` (RF-GLOBAL-09
-    -- NTP/DNS/Log, el SRS los agrupa en 1 solo use case). Todos opcionales
-    individualmente, al menos 1 debe venir."""
+class GlobalConfigLogServerAddRequest(BaseModel):
+    """Request body para ``POST /global-config/log-servers`` (RF-GLOBAL-09,
+    Log como endpoint propio). ``level`` es opcional y es un ajuste global
+    del device (no por-host, en ninguno de los 2 vendors) -- viaja acá por
+    conveniencia de API."""
 
-    ntp_server: Optional[str] = Field(None, min_length=1, description="Servidor NTP a configurar.")
-    dns_server: Optional[str] = Field(None, min_length=1, description="Servidor DNS a configurar.")
-    log_server: Optional[str] = Field(None, min_length=1, description="Servidor de Syslog a configurar.")
-    log_level: Optional[str] = Field(None, min_length=1, description="Nivel de log a configurar.")
+    server: str = Field(..., min_length=1, description="IP del servidor de Syslog a agregar.")
+    level: Optional[str] = Field(None, min_length=1, description="Nivel de severidad a configurar junto con este server.")
 
-    @model_validator(mode="after")
-    def _at_least_one(self) -> "GlobalConfigLogServersUpdateRequest":
-        if not any((self.ntp_server, self.dns_server, self.log_server, self.log_level)):
-            raise ValueError("at least one of ntp_server, dns_server, log_server, log_level must be provided")
-        if self.log_level is not None and self.log_server is None:
-            raise ValueError("'log_level' requires 'log_server' in the same request")
-        return self
+
+class GlobalConfigLogServerRemoveRequest(BaseModel):
+    """Request body para ``DELETE /global-config/log-servers``."""
+
+    server: str = Field(..., min_length=1, description="IP del servidor de Syslog a sacar.")
 
 
 class GlobalConfigRouteAddRequest(BaseModel):
-    """Request body para ``POST /global-config/routes`` (RF-GLOBAL-06).
-    ``destination`` acepta un host dentro de la red (ej.
-    ``"192.168.99.5/24"``) -- se normaliza a la dirección de red antes de
-    aplicar/comparar (ver ``GlobalConfig._aplicar_route_add()``)."""
+    """Request body para ``POST /global-config/routes`` (RF-GLOBAL-06) Y
+    ``DELETE /global-config/routes`` (mismo shape para agregar/sacar, la
+    diferencia es el verbo HTTP). ``destination`` acepta un host dentro de
+    la red (ej. ``"192.168.99.5/24"``) -- se normaliza a la dirección de
+    red antes de aplicar/comparar (ver ``GlobalConfig._aplicar_route_add()``/
+    ``_aplicar_route_remove()``)."""
 
     destination: str = Field(..., min_length=1, description="Red destino en notación CIDR (ej. '192.168.99.0/24').")
     next_hop: str = Field(..., min_length=1, description="IP del next-hop.")
+
+
+class GlobalConfigNtpAddRequest(BaseModel):
+    """Request body para ``POST /global-config/ntp`` (RF-GLOBAL-09, NTP
+    como endpoint propio). ``prefer`` es opcional y solo tiene efecto
+    confirmado en Cisco."""
+
+    server: str = Field(..., min_length=1, description="IP del servidor NTP a agregar.")
+    prefer: Optional[bool] = Field(None, description="Marca este server como preferido (Cisco). Sin efecto confirmado en Huawei.")
+
+
+class GlobalConfigNtpRemoveRequest(BaseModel):
+    """Request body para ``DELETE /global-config/ntp``."""
+
+    server: str = Field(..., min_length=1, description="IP del servidor NTP a sacar.")
+
+
+class GlobalConfigDnsRequest(BaseModel):
+    """Request body para ``POST /global-config/dns`` (RF-GLOBAL-09, DNS
+    como endpoint propio). Sparse: exactamente 1 de ``server`` (agrega un
+    DNS server, incremental) o ``domain_name`` (setea el domain-name del
+    device, reemplaza el anterior)."""
+
+    server: Optional[str] = Field(None, min_length=1, description="IP de un DNS server a agregar.")
+    domain_name: Optional[str] = Field(None, min_length=1, description="Domain-name a configurar en el device.")
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "GlobalConfigDnsRequest":
+        if (self.server is None) == (self.domain_name is None):
+            raise ValueError("exactly one of 'server' or 'domain_name' must be provided")
+        return self
+
+
+class GlobalConfigDnsRemoveRequest(BaseModel):
+    """Request body para ``DELETE /global-config/dns`` -- solo saca
+    servers (no hay "clear domain_name" en esta vuelta)."""
+
+    server: str = Field(..., min_length=1, description="IP del DNS server a sacar.")
 
 
 class GlobalConfigRead(BaseModel):
@@ -71,6 +112,9 @@ class GlobalConfigRead(BaseModel):
 
     device_version: Optional[str] = Field(
         None, description="Salida de 'show version'/'display version', o null si no se pudo leer.",
+    )
+    running_config: Optional[str] = Field(
+        None, description="Dump completo de 'show running-config'/'display current-configuration', o null si no se pudo leer.",
     )
     hostname: Optional[str] = Field(None, description="Hostname configurado en el device, o null.")
     snmp_enabled: Optional[bool] = Field(

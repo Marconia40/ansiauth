@@ -308,6 +308,7 @@ class CiscoVendor(VendorDriver):
         hostname_output = stdouts[1] if len(stdouts) > 1 else ""
         community_output = stdouts[2] if len(stdouts) > 2 else ""
         route_output = stdouts[3] if len(stdouts) > 3 else ""
+        running_config = stdouts[4] if len(stdouts) > 4 else ""
 
         snmp_commands = self._cargar_comandos()["get_snmp_status"]["primary"]["commands"]
         try:
@@ -333,6 +334,7 @@ class CiscoVendor(VendorDriver):
         )
         config.device = device.name
         config.acls = acls
+        config.running_config = running_config or None
         return config
 
     def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
@@ -341,49 +343,74 @@ class CiscoVendor(VendorDriver):
     def set_snmp(self, cambios: dict, device: Device, password: str) -> dict:
         """RF-GLOBAL-07. IOS clásico (SNMPv1/v2c basado en community) no
         tiene un comando separado para "versión" -- ``cambios["version"]``
-        se ignora acá a propósito (ver comentario en ``commands.yaml``);
-        solo ``community``+``permission`` (siempre juntos, ver
-        ``GlobalConfig.validar()``) disparan un comando real."""
+        se ignora acá a propósito (ver comentario en ``commands.yaml``).
+        ``community`` siempre se fija RO (ya no es parámetro). ``trap_source``
+        y ``trap_host``(+``trap_version``+``trap_host_community``) confirmados
+        en vivo contra f3r9s1 (aplicados idempotentemente contra los valores
+        ya vigentes ahí, sin cambiar nada real)."""
         if "version" in cambios:
             logger.info(
                 "CiscoVendor.set_snmp: 'version' has no distinct IOS community-based "
-                "command, ignoring for device=%s (only community/permission apply)",
+                "command, ignoring for device=%s",
                 device.name,
             )
-        if "community" not in cambios:
-            return {"rc": 0, "stdout": "", "stderr": "", "success": True, "changed": False}
-        return self._aplicar_desde_template(
-            "set_snmp_community",
-            {"community": cambios["community"], "permission": cambios["permission"]},
-            device, password,
-        )
-
-    def set_log_servers(self, cambios: dict, device: Device, password: str) -> dict:
-        """RF-GLOBAL-09. Confirmado en vivo contra cisco01: ``ntp server``,
-        ``ip name-server``, ``logging host``/``logging trap {level}``."""
         resultados = []
-        if "ntp_server" in cambios:
+        if "community" in cambios:
             resultados.append(
-                self._aplicar_desde_template("set_ntp", {"ntp_server": cambios["ntp_server"]}, device, password)
+                self._aplicar_desde_template(
+                    "set_snmp_community", {"community": cambios["community"]}, device, password,
+                )
             )
-        if "dns_server" in cambios:
+        if "trap_source" in cambios:
             resultados.append(
-                self._aplicar_desde_template("set_dns", {"dns_server": cambios["dns_server"]}, device, password)
+                self._aplicar_desde_template(
+                    "set_snmp_trap_source", {"interface": cambios["trap_source"]}, device, password,
+                )
             )
-        if "log_server" in cambios:
-            if "log_level" in cambios:
-                resultados.append(
-                    self._aplicar_desde_template(
-                        "set_log_host_and_level",
-                        {"log_server": cambios["log_server"], "log_level": cambios["log_level"]},
-                        device, password,
-                    )
+        if "trap_host" in cambios:
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_trap_host",
+                    {
+                        "host": cambios["trap_host"], "version": cambios["trap_version"],
+                        "community": cambios["trap_host_community"],
+                    },
+                    device, password,
                 )
-            else:
-                resultados.append(
-                    self._aplicar_desde_template("set_log_host", {"log_server": cambios["log_server"]}, device, password)
-                )
+            )
         return self._combinar_resultados(resultados)
+
+    def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (Log, endpoint propio). Confirmado en vivo contra
+        cisco01: ``logging host {ip}`` + (si viene ``level``) ``logging
+        trap {level}`` -- en IOS el nivel sigue siendo un ajuste global
+        (no por-host), pero viaja en el mismo request por conveniencia de
+        API."""
+        if level:
+            return self._aplicar_desde_template(
+                "set_log_host_and_level", {"log_server": server, "log_level": level}, device, password,
+            )
+        return self._aplicar_desde_template("set_log_host", {"log_server": server}, device, password)
+
+    def remove_log_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (Log, delete). Confirmado en vivo contra cisco01."""
+        return self._aplicar_desde_template("remove_log_host", {"log_server": server}, device, password)
+
+    def get_arp_table(self, include: "str | None", device: Device, password: str) -> str:
+        """Tabla ARP en vivo, sin cache -- primer par de lecturas de esta
+        app así (el resto es cache-first vía ``DeviceSyncService``), la
+        tabla ARP cambia constantemente y cachearla la volvería vieja al
+        instante. ``include`` ya viene validado (charset seguro, sin
+        `\\r`/`\\n`) por el schema antes de llegar acá -- arma el comando
+        en Python porque es el único caso de sufijo opcional de 1 sola
+        pieza (forzarlo a 2 templates YAML es más artificial)."""
+        comando = f"show arp | include {include}" if include else "show arp"
+        return self._leer([comando], device, password)[0]
+
+    def get_mac_table(self, include: "str | None", device: Device, password: str) -> str:
+        """Mismo criterio que ``get_arp_table()``."""
+        comando = f"show mac address-table | include {include}" if include else "show mac address-table"
+        return self._leer([comando], device, password)[0]
 
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
         """RF-GLOBAL-06. Confirmado en vivo contra cisco01: ``ip route
@@ -392,6 +419,40 @@ class CiscoVendor(VendorDriver):
         return self._aplicar_desde_template(
             "set_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
         )
+
+    def remove_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-06 (delete). Confirmado en vivo contra cisco01."""
+        network, mask = self._red_y_mascara(destination)
+        return self._aplicar_desde_template(
+            "remove_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
+        )
+
+    def add_ntp_server(self, server: str, prefer: bool, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (NTP, endpoint propio). Confirmado en vivo contra
+        f3r9s1: ``ntp server {ip} [prefer]``."""
+        op_key = "add_ntp_with_prefer" if prefer else "add_ntp"
+        return self._aplicar_desde_template(op_key, {"server": server}, device, password)
+
+    def remove_ntp_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (NTP, delete). Confirmado en vivo contra f3r9s1 --
+        ``no ntp server {ip}`` saca la entrada aunque se haya agregado con
+        ``prefer`` (no hace falta repetir el sufijo)."""
+        return self._aplicar_desde_template("remove_ntp", {"server": server}, device, password)
+
+    def add_dns_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, endpoint propio). Confirmado en vivo esta
+        sesión: ``ip name-server {ip}``."""
+        return self._aplicar_desde_template("add_dns", {"server": server}, device, password)
+
+    def remove_dns_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, delete). Confirmado en vivo esta sesión."""
+        return self._aplicar_desde_template("remove_dns", {"server": server}, device, password)
+
+    def set_dns_domain(self, domain: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, domain-name). Confirmado en vivo contra
+        f3r9s1 -- IOS normaliza ``ip domain-name`` a ``ip domain name`` en
+        el running-config, pero acepta el alias al escribir."""
+        return self._aplicar_desde_template("set_dns_domain", {"domain": domain}, device, password)
 
     @staticmethod
     def _cidr_a_direccion_y_mascara(cidr: "str | None") -> tuple[str, str]:

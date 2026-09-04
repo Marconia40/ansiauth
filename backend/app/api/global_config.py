@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
-from app.core.exceptions import ValidationError
+from app.core.exceptions import DeviceExecutionError, ValidationError
 from app.core.response import ok
 from app.core.scope import authorize_device, obtener_scope, require_authenticated, require_device
 from app.models.global_config import GlobalConfig
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.device_sync import SyncedResource
 from app.schemas.global_config import (
+    GlobalConfigDnsRemoveRequest,
+    GlobalConfigDnsRequest,
     GlobalConfigHostnameUpdateRequest,
-    GlobalConfigLogServersUpdateRequest,
+    GlobalConfigLogServerAddRequest,
+    GlobalConfigLogServerRemoveRequest,
+    GlobalConfigNtpAddRequest,
+    GlobalConfigNtpRemoveRequest,
     GlobalConfigRead,
     GlobalConfigRouteAddRequest,
     GlobalConfigSnmpUpdateRequest,
@@ -20,6 +25,13 @@ from app.schemas.global_config import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# ARP/MAC `include` viaja tal cual a una línea de comando sobre una sesión
+# SSH interactiva ("show arp | include {include}") -- un "\r"/"\n" adentro
+# podría inyectar un 2do comando en la sesión. Charset conservador que
+# cubre IPs, MACs (forma con puntos de Cisco y con guiones de Huawei) e
+# interfaces, sin espacios/pipes/control chars.
+_ARP_MAC_INCLUDE_RE = r"^[A-Za-z0-9:./_-]{1,64}$"
 
 
 def _authz_device(
@@ -81,6 +93,7 @@ def get_global_config(
         "vendor": dev.vendor,
         **GlobalConfigRead(
             device_version=config.device_version if config else None,
+            running_config=config.running_config if config else None,
             hostname=config.hostname if config else None,
             snmp_enabled=config.snmp_enabled if config else None,
             snmp_version=config.snmp_version if config else None,
@@ -177,14 +190,191 @@ def add_global_config_route(
     return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
+@router.delete(
+    "/routes",
+    status_code=202,
+    summary="Remove a static route",
+    description=(
+        "Remove a static route (RF-GLOBAL-06). Same body shape as `POST "
+        "/routes` (`destination`+`next_hop`, both required to identify the "
+        "exact route). No-op if no route with that exact destination+"
+        "next-hop exists. Executed asynchronously, same job-polling shape "
+        "as the other global-config writes. Requires admin role or higher."
+    ),
+)
+def remove_global_config_route(
+    name: str,
+    data: GlobalConfigRouteAddRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(route_remove=data.model_dump())
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "remove_route")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.post(
+    "/ntp",
+    status_code=202,
+    summary="Add an NTP server",
+    description=(
+        "Add an NTP server (RF-GLOBAL-09, split into its own endpoint). "
+        "`prefer` only has a confirmed effect on Cisco. No no-op detection "
+        "— NTP server reads aren't implemented, the command is always "
+        "sent. Executed asynchronously, same job-polling shape as the "
+        "other global-config writes. Requires admin role or higher."
+    ),
+)
+def add_global_config_ntp(
+    name: str,
+    data: GlobalConfigNtpAddRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(ntp_server_add=data.model_dump(exclude_none=True))
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "add_ntp_server")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.delete(
+    "/ntp",
+    status_code=202,
+    summary="Remove an NTP server",
+    description=(
+        "Remove an NTP server (RF-GLOBAL-09). No no-op detection, same "
+        "reason as the add endpoint. Executed asynchronously, same "
+        "job-polling shape as the other global-config writes. Requires "
+        "admin role or higher."
+    ),
+)
+def remove_global_config_ntp(
+    name: str,
+    data: GlobalConfigNtpRemoveRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(ntp_server_remove=data.model_dump())
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "remove_ntp_server")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.post(
+    "/dns",
+    status_code=202,
+    summary="Add a DNS server or set the domain name",
+    description=(
+        "Add a DNS server OR set the device's domain-name (RF-GLOBAL-09, "
+        "split into its own endpoint) — exactly one of `server`/"
+        "`domain_name` per request. No no-op detection — neither is read "
+        "back today. Executed asynchronously, same job-polling shape as "
+        "the other global-config writes. Requires admin role or higher."
+    ),
+)
+def add_global_config_dns(
+    name: str,
+    data: GlobalConfigDnsRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    if data.server is not None:
+        entidad = GlobalConfig(dns_server_add={"server": data.server})
+        driver_method = "add_dns_server"
+    else:
+        entidad = GlobalConfig(dns_domain_set=data.domain_name)
+        driver_method = "set_dns_domain"
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, driver_method)
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.delete(
+    "/dns",
+    status_code=202,
+    summary="Remove a DNS server",
+    description=(
+        "Remove a DNS server (RF-GLOBAL-09). No no-op detection. Executed "
+        "asynchronously, same job-polling shape as the other "
+        "global-config writes. Requires admin role or higher."
+    ),
+)
+def remove_global_config_dns(
+    name: str,
+    data: GlobalConfigDnsRemoveRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(dns_server_remove={"server": data.server})
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "remove_dns_server")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
 @router.patch(
     "/snmp",
     status_code=202,
     summary="Configure SNMP",
     description=(
-        "Configure SNMP version and/or community+permission (RF-GLOBAL-07). "
-        "`community` and `permission` must be provided together. No-op on "
-        "sub-fields that already match the device's current state. "
+        "Configure SNMP: version, community (always read-only), trap-source "
+        "interface, and/or trap-host+trap-version (RF-GLOBAL-07). "
+        "`trap_host` and `trap_version` must be provided together, and "
+        "`trap_host` needs a resolvable community (either in this same "
+        "request or already configured on the device). No-op on sub-fields "
+        "that already match the device's current state. `trap_source` has "
+        "no confirmed effect on Huawei yet; `trap_host` is not yet "
+        "supported on Huawei (surfaces as a failed job, see job error). "
         "Executed asynchronously, same job-polling shape as the other "
         "global-config writes. Requires admin role or higher."
     ),
@@ -211,28 +401,29 @@ def set_global_config_snmp(
     return ok({"group_job_id": group_job_id, "jobs": jobs})
 
 
-@router.patch(
+@router.post(
     "/log-servers",
     status_code=202,
-    summary="Configure NTP/DNS/Log servers",
+    summary="Add a syslog server",
     description=(
-        "Configure NTP server, DNS server, syslog server and/or log level "
-        "(RF-GLOBAL-09 — the SRS groups these into a single use case). At "
-        "least one sub-field must be provided; no-op on sub-fields that "
-        "already match the device's current state. Executed asynchronously, "
-        "same job-polling shape as the other global-config writes. Requires "
+        "Add a syslog server, optionally setting the severity level "
+        "(RF-GLOBAL-09, split into its own endpoint). `level` is a "
+        "device-global setting on both vendors (not per-host), it just "
+        "travels in the same request for convenience. No no-op detection "
+        "— neither is read back today. Executed asynchronously, same "
+        "job-polling shape as the other global-config writes. Requires "
         "admin role or higher."
     ),
 )
-def set_global_config_log_servers(
+def add_global_config_log_server(
     name: str,
-    data: GlobalConfigLogServersUpdateRequest,
+    data: GlobalConfigLogServerAddRequest,
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import group_operation_runner
 
-    entidad = GlobalConfig(log_servers_update=data.model_dump(exclude_none=True))
+    entidad = GlobalConfig(log_server_add=data.model_dump(exclude_none=True))
     try:
         entidad.validar()
     except ValueError as exc:
@@ -240,7 +431,92 @@ def set_global_config_log_servers(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="admin", device=dev)
-    _require_driver_with(dev, "set_log_servers")
+    _require_driver_with(dev, "add_log_server")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.delete(
+    "/log-servers",
+    status_code=202,
+    summary="Remove a syslog server",
+    description=(
+        "Remove a syslog server (RF-GLOBAL-09). No no-op detection. "
+        "Executed asynchronously, same job-polling shape as the other "
+        "global-config writes. Requires admin role or higher."
+    ),
+)
+def remove_global_config_log_server(
+    name: str,
+    data: GlobalConfigLogServerRemoveRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(log_server_remove={"server": data.server})
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "remove_log_server")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.get(
+    "/arp",
+    summary="Get ARP table",
+    description=(
+        "Read the device's ARP table live (not cached — this table "
+        "changes constantly, caching it would go stale immediately, "
+        "unlike every other GET in this app). `include` is passed as-is "
+        "to the device's own `| include` filter — the caller is expected "
+        "to know what they're searching for, the output isn't parsed. "
+        "Requires observer role or higher."
+    ),
+)
+def get_global_config_arp(
+    name: str,
+    include: "str | None" = Query(default=None, pattern=_ARP_MAC_INCLUDE_RE),
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    _authz_device(scope, name, min_role="observer")
+    dev = require_device(name)
+    _require_driver_with(dev, "get_arp_table")
+    try:
+        output = dev.driver.get_arp_table(include, dev, dev.password)
+    except RuntimeError as exc:
+        raise DeviceExecutionError(str(exc))
+    return ok({"device": dev.name, "output": output})
+
+
+@router.get(
+    "/mac",
+    summary="Get MAC address table",
+    description=(
+        "Read the device's MAC address table live (not cached, same "
+        "reason as `/arp`). `include` is passed as-is to the device's own "
+        "`| include` filter. Requires observer role or higher."
+    ),
+)
+def get_global_config_mac(
+    name: str,
+    include: "str | None" = Query(default=None, pattern=_ARP_MAC_INCLUDE_RE),
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    _authz_device(scope, name, min_role="observer")
+    dev = require_device(name)
+    _require_driver_with(dev, "get_mac_table")
+    try:
+        output = dev.driver.get_mac_table(include, dev, dev.password)
+    except RuntimeError as exc:
+        raise DeviceExecutionError(str(exc))
+    return ok({"device": dev.name, "output": output})

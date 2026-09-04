@@ -874,6 +874,7 @@ get_global_config:
       - "display version"
       - "display current-configuration | include sysname"
       - "display ip routing-table"
+      - "display current-configuration"
 
 # Aparte de get_global_config: "display snmp-agent sys-info" falla con
 # rc != 0 ("Error: SNMP agent is not enabled.") cuando SNMP no está
@@ -940,6 +941,25 @@ set_snmp_community:
         - "snmp-agent community {verbo} {community}"
         - "quit"
 
+# RF-GLOBAL-07 -- confirmado en vivo contra f3r9s2 (aplicado y revertido,
+# no había trap-source configurado antes así que fue una prueba real sin
+# efecto en producción). "trap-host" NO tiene entrada acá a propósito --
+# ver docstring de ``HuaweiVendor.set_snmp()`` (comando real >100
+# caracteres, se corrompe en tránsito sobre esta sesión SSH).
+set_snmp_trap_source:
+  primary:
+    block:
+      - "system-view"
+      - "snmp-agent trap source {interface}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "snmp-agent trap source {interface}"
+        - "quit"
+
 # RF-GLOBAL-09 -- confirmado en vivo contra huawei01. "ntp unicast-server"
 # (SIN "-service", a diferencia del nombre del feature) y "dns server"
 # requieren "dns resolve" antes (habilita la resolución DNS del propio
@@ -947,26 +967,49 @@ set_snmp_community:
 # de severidad del log ("level") va DENTRO de la misma línea que el host
 # de "info-center loghost" -- no es un ajuste global separado como en IOS,
 # por eso hay 2 variantes (con/sin level) en vez de 1 template + 1 aparte.
-set_ntp:
+# NTP como endpoint propio (RF-GLOBAL-09 split) -- "prefer" no tiene
+# equivalente confirmado en VRP (sin device de lab disponible para probar
+# "ntp unicast-server {ip} ?" al momento de esta vuelta) -- el driver lo
+# ignora con un log si viene, mismo criterio que "version" en set_snmp
+# para Cisco. Confirmar en cuanto el lab esté disponible.
+add_ntp:
   primary:
     block:
       - "system-view"
-      - "ntp unicast-server {ntp_server}"
+      - "ntp unicast-server {server}"
       - "commit"
       - "quit"
   alternatives:
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
-        - "ntp unicast-server {ntp_server}"
+        - "ntp unicast-server {server}"
         - "quit"
 
-set_dns:
+remove_ntp:
+  primary:
+    block:
+      - "system-view"
+      - "undo ntp unicast-server {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo ntp unicast-server {server}"
+        - "quit"
+
+# DNS como endpoint propio (RF-GLOBAL-09 split) -- "dns server"/"dns
+# resolve" ya confirmados esta sesión. "dns domain" confirmado en vivo
+# contra f3r9s2 (ya se ve tal cual en su running-config real). "undo dns
+# server" también confirmado (cleanup de pruebas anteriores).
+add_dns:
   primary:
     block:
       - "system-view"
       - "dns resolve"
-      - "dns server {dns_server}"
+      - "dns server {server}"
       - "commit"
       - "quit"
   alternatives:
@@ -974,51 +1017,85 @@ set_dns:
       block:
         - "system-view"
         - "dns resolve"
-        - "dns server {dns_server}"
+        - "dns server {server}"
         - "quit"
 
-set_log_host:
+remove_dns:
   primary:
     block:
       - "system-view"
-      - "info-center loghost {log_server}"
+      - "undo dns server {server}"
       - "commit"
       - "quit"
   alternatives:
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
-        - "info-center loghost {log_server}"
+        - "undo dns server {server}"
         - "quit"
 
-# RF-GLOBAL-09 -- "info-center loghost {ip} level {level}" confirmado
-# contra huawei01 (CE12800 lab), pero RECHAZADO contra f3r9s2 (S-series
-# real): "Error:Too many parameters found at '^' position" -- esta familia
-# de equipos no tiene un sub-comando "level" en la línea del loghost (ver
-# "info-center loghost {ip} ?" contra f3r9s2, no lista "level" como opción,
-# a diferencia de huawei01). f3r9s2 tampoco soporta "commit". La 2da
-# alternativa cubre ese caso real: aplica el host SIN el nivel (mejor que
-# fallar del todo) y sin commit -- confirmado en vivo. El nivel pedido NO
-# se aplica en ese caso; queda visible en el stdout del job para quien
-# audite el resultado, mismo criterio que el resto de esta app (no hay un
-# campo "warning" separado en el resultado, ver notas de sesión).
-set_log_host_and_level:
+set_dns_domain:
   primary:
     block:
       - "system-view"
-      - "info-center loghost {log_server} level {log_level}"
+      - "dns domain {domain}"
       - "commit"
       - "quit"
   alternatives:
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
-        - "info-center loghost {log_server} level {log_level}"
+        - "dns domain {domain}"
         - "quit"
-    - triggered_by_error: "info-center loghost[^\\n]*\\r?\\n\\s*\\^\\r?\\nError:Too many parameters found"
+
+# Log como endpoint propio (RF-GLOBAL-09 split) -- "info-center loghost
+# {ip}" confirmado en vivo. El nivel de severidad se sacó de esta línea
+# (ver ``HuaweiVendor.add_log_server()``): la forma "info-center loghost
+# {ip} level {level}" existe en huawei01 (CE12800 lab) pero f3r9s2
+# (S-series real) la rechaza ("Error:Too many parameters found") -- en vez
+# de mantener 2 variantes con/sin level, ahora el nivel siempre va por
+# ``set_log_channel_level`` (canal 2 = "loghost", confirmado con ``display
+# channel``), que sí funciona en ambos.
+add_log_host:
+  primary:
+    block:
+      - "system-view"
+      - "info-center loghost {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
         - "system-view"
-        - "info-center loghost {log_server}"
+        - "info-center loghost {server}"
+        - "quit"
+
+remove_log_host:
+  primary:
+    block:
+      - "system-view"
+      - "undo info-center loghost {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo info-center loghost {server}"
+        - "quit"
+
+set_log_channel_level:
+  primary:
+    block:
+      - "system-view"
+      - "info-center source default channel 2 log level {level}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "info-center source default channel 2 log level {level}"
         - "quit"
 
 # RF-GLOBAL-06 -- confirmado en vivo contra huawei01. VRP también pide
@@ -1036,6 +1113,23 @@ set_route:
       block:
         - "system-view"
         - "ip route-static {network} {mask} {next_hop}"
+        - "quit"
+
+# RF-GLOBAL-06 (delete) -- mismo comando que set_route con "undo" adelante,
+# ya confirmado en vivo esta sesión (se usó para el cleanup manual de las
+# pruebas de set_route, incluso en f3r9s2 con la alternativa sin commit).
+remove_route:
+  primary:
+    block:
+      - "system-view"
+      - "undo ip route-static {network} {mask} {next_hop}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo ip route-static {network} {mask} {next_hop}"
         - "quit"
 
 # get_svis NO tiene entrada acá a propósito -- confirmado

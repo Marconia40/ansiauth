@@ -379,6 +379,7 @@ class HuaweiVendor(VendorDriver):
         version_output = stdouts[0] if len(stdouts) > 0 else ""
         hostname_output = stdouts[1] if len(stdouts) > 1 else ""
         route_output = stdouts[2] if len(stdouts) > 2 else ""
+        running_config = stdouts[3] if len(stdouts) > 3 else ""
 
         snmp_commands = self._cargar_comandos()["get_snmp_status"]["primary"]["commands"]
         try:
@@ -403,6 +404,7 @@ class HuaweiVendor(VendorDriver):
         )
         config.device = device.name
         config.acls = acls
+        config.running_config = running_config or None
         return config
 
     def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
@@ -411,55 +413,81 @@ class HuaweiVendor(VendorDriver):
     def set_snmp(self, cambios: dict, device: Device, password: str) -> dict:
         """RF-GLOBAL-07. A diferencia de Cisco, VRP sí tiene un comando de
         versión propio (``snmp-agent sys-info version``, aditivo -- ver
-        comentario en ``commands.yaml``) y uno de community separado
-        (``snmp-agent community {read|write} ...``, el verbo YA es el
-        permiso). ``cambios`` puede traer 1 o los 2 -- se ejecutan como 2
-        template calls independientes (cada uno con su propio
-        alternativa "sin commit" para f3r9s2)."""
+        comentario en ``commands.yaml``). ``community`` siempre se fija con
+        el verbo "read" (ya no es parámetro, ver ``GlobalConfig.validar()``).
+        ``trap_source`` confirmado en vivo contra f3r9s2 (``snmp-agent trap
+        source {interface}``). ``trap_host`` NO está soportado todavía --
+        el comando real (``snmp-agent target-host host-name ... trap
+        address udp-domain ... params securityname ... v2c``) es largo
+        (>100 caracteres) y se corrompe en tránsito sobre esta sesión SSH
+        (confirmado en vivo contra f3r9s2: la línea se corta y re-envuelve
+        con una secuencia de control ANSI en medio de una palabra, el
+        device recibe el comando roto y lo rechaza) -- necesita que la
+        conexión Ansible fuerce un ancho de terminal mayor antes de poder
+        confirmarse, fuera de alcance de esta vuelta. Esto se dispara
+        dentro de ``aplicar()`` (o sea DENTRO del job async, después de que
+        el POST ya devolvió 202) -- no hay forma de rechazarlo en la
+        request inicial porque ``GlobalConfig.validar()`` no conoce el
+        vendor. Levanta ``NotImplementedError`` a propósito en vez de
+        mandar el comando roto silenciosamente -- el error queda visible
+        pollendo el job (``GET /jobs/{id}``), mismo lugar donde ya
+        aparecería un error real del device."""
+        if "trap_host" in cambios:
+            raise NotImplementedError(
+                "HuaweiVendor.set_snmp: 'trap_host' not supported yet -- the real VRP command "
+                "gets corrupted in transit over this SSH session for lines this long, see docstring"
+            )
         resultados = []
         if "version" in cambios:
             resultados.append(
                 self._aplicar_desde_template("set_snmp_version", {"version": cambios["version"]}, device, password)
             )
         if "community" in cambios:
-            verbo = "write" if cambios.get("permission") == "RW" else "read"
             resultados.append(
                 self._aplicar_desde_template(
-                    "set_snmp_community", {"verbo": verbo, "community": cambios["community"]}, device, password,
+                    "set_snmp_community", {"verbo": "read", "community": cambios["community"]}, device, password,
+                )
+            )
+        if "trap_source" in cambios:
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_trap_source", {"interface": cambios["trap_source"]}, device, password,
                 )
             )
         return self._combinar_resultados(resultados)
 
-    def set_log_servers(self, cambios: dict, device: Device, password: str) -> dict:
-        """RF-GLOBAL-09. Confirmado en vivo contra huawei01: ``ntp
-        unicast-server``, ``dns resolve``+``dns server``, ``info-center
-        loghost {ip} [level {level}]``. VRP ata el nivel de severidad a la
-        línea del loghost (no es un ajuste global independiente como en
-        IOS) -- por eso ``GlobalConfig.validar()`` exige que ``log_level``
-        venga siempre junto con ``log_server``."""
-        resultados = []
-        if "ntp_server" in cambios:
+    def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (Log, endpoint propio). ``info-center loghost {ip}``
+        confirmado en vivo. El nivel de severidad YA NO va en la misma
+        línea del loghost (esa forma existe en huawei01 pero f3r9s2 la
+        rechaza, "Too many parameters found") -- en cambio usa el
+        mecanismo real de canales de VRP: ``info-center source default
+        channel 2 log level {level}`` (canal 2 = "loghost", nombre fijo
+        estándar en toda la familia VRP, confirmado con ``display
+        channel`` contra f3r9s2) -- confirmado en vivo (idempotente, ya
+        era el valor vigente ahí) contra f3r9s2 también, a diferencia de
+        la forma inline que ese device rechazaba."""
+        resultados = [self._aplicar_desde_template("add_log_host", {"server": server}, device, password)]
+        if level:
             resultados.append(
-                self._aplicar_desde_template("set_ntp", {"ntp_server": cambios["ntp_server"]}, device, password)
+                self._aplicar_desde_template("set_log_channel_level", {"level": level}, device, password)
             )
-        if "dns_server" in cambios:
-            resultados.append(
-                self._aplicar_desde_template("set_dns", {"dns_server": cambios["dns_server"]}, device, password)
-            )
-        if "log_server" in cambios:
-            if "log_level" in cambios:
-                resultados.append(
-                    self._aplicar_desde_template(
-                        "set_log_host_and_level",
-                        {"log_server": cambios["log_server"], "log_level": cambios["log_level"]},
-                        device, password,
-                    )
-                )
-            else:
-                resultados.append(
-                    self._aplicar_desde_template("set_log_host", {"log_server": cambios["log_server"]}, device, password)
-                )
         return self._combinar_resultados(resultados)
+
+    def remove_log_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (Log, delete). Confirmado en vivo contra huawei01."""
+        return self._aplicar_desde_template("remove_log_host", {"server": server}, device, password)
+
+    def get_arp_table(self, include: "str | None", device: Device, password: str) -> str:
+        """Tabla ARP en vivo, sin cache -- ver docstring de
+        ``CiscoVendor.get_arp_table()``, mismo criterio."""
+        comando = f"display arp | include {include}" if include else "display arp"
+        return self._leer([comando], device, password)[0]
+
+    def get_mac_table(self, include: "str | None", device: Device, password: str) -> str:
+        """Mismo criterio que ``get_arp_table()``."""
+        comando = f"display mac-address | include {include}" if include else "display mac-address"
+        return self._leer([comando], device, password)[0]
 
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
         """RF-GLOBAL-06. Confirmado en vivo contra huawei01: ``ip
@@ -468,6 +496,43 @@ class HuaweiVendor(VendorDriver):
         return self._aplicar_desde_template(
             "set_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
         )
+
+    def remove_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-06 (delete). Confirmado en vivo contra huawei01 y f3r9s2."""
+        network, mask = self._red_y_mascara(destination)
+        return self._aplicar_desde_template(
+            "remove_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
+        )
+
+    def add_ntp_server(self, server: str, prefer: bool, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (NTP, endpoint propio). ``prefer`` no tiene
+        equivalente confirmado en VRP -- se ignora con un log (mismo
+        criterio que ``version`` en ``set_snmp`` de Cisco)."""
+        if prefer:
+            logger.info(
+                "HuaweiVendor.add_ntp_server: 'prefer' has no confirmed VRP equivalent, "
+                "ignoring for device=%s",
+                device.name,
+            )
+        return self._aplicar_desde_template("add_ntp", {"server": server}, device, password)
+
+    def remove_ntp_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (NTP, delete). Confirmado en vivo contra huawei01."""
+        return self._aplicar_desde_template("remove_ntp", {"server": server}, device, password)
+
+    def add_dns_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, endpoint propio). Confirmado en vivo esta
+        sesión: ``dns resolve`` + ``dns server {ip}``."""
+        return self._aplicar_desde_template("add_dns", {"server": server}, device, password)
+
+    def remove_dns_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, delete). Confirmado en vivo esta sesión."""
+        return self._aplicar_desde_template("remove_dns", {"server": server}, device, password)
+
+    def set_dns_domain(self, domain: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, domain-name). Confirmado en vivo contra
+        f3r9s2 (idempotente, ya lo tiene configurado)."""
+        return self._aplicar_desde_template("set_dns_domain", {"domain": domain}, device, password)
 
     @staticmethod
     def _cidr_a_direccion_y_mascara(cidr: "str | None") -> tuple[str, str]:

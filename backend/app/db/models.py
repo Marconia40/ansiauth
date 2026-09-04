@@ -185,6 +185,7 @@ class DeviceGlobalConfigModel(Base):
 
     device = Column(String, primary_key=True)
     hostname = Column(String, nullable=True)
+    running_config = Column(Text, nullable=True)  # RF-GLOBAL-01, dump completo de show running-config/display current-configuration
     device_version = Column(String, nullable=True)
     snmp_enabled = Column(Boolean, nullable=True)
     snmp_version = Column(String, nullable=True)

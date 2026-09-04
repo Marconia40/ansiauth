@@ -977,14 +977,59 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement set_snmp yet"
         )
 
-    def set_log_servers(self, cambios: dict, device: Device, password: str) -> dict:
+    def get_arp_table(self, include: "str | None", device: Device, password: str) -> str:
         raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement set_log_servers yet"
+            f"{self.__class__.__name__} does not implement get_arp_table yet"
+        )
+
+    def get_mac_table(self, include: "str | None", device: Device, password: str) -> str:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_mac_table yet"
+        )
+
+    def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement add_log_server yet"
+        )
+
+    def remove_log_server(self, server: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_log_server yet"
         )
 
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement set_route yet"
+        )
+
+    def remove_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_route yet"
+        )
+
+    def add_ntp_server(self, server: str, prefer: bool, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement add_ntp_server yet"
+        )
+
+    def remove_ntp_server(self, server: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_ntp_server yet"
+        )
+
+    def add_dns_server(self, server: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement add_dns_server yet"
+        )
+
+    def remove_dns_server(self, server: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_dns_server yet"
+        )
+
+    def set_dns_domain(self, domain: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_dns_domain yet"
         )
 
     @staticmethod
@@ -1003,7 +1048,7 @@ class VendorDriver(ABC):
 
     @staticmethod
     def _combinar_resultados(resultados: list[dict]) -> dict:
-        """``set_snmp``/``set_log_servers`` pueden disparar más de 1
+        """``set_snmp``/``add_log_server`` pueden disparar más de 1
         template call (1 por sub-campo presente en ``cambios``) -- combina
         esos resultados individuales en 1 solo dict ``{rc, stdout, stderr,
         success}``, mismo shape que devuelve ``_aplicar()``."""
