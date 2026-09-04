@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,9 @@ if TYPE_CHECKING:
     from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
+    from app.models.global_config import GlobalConfig
+
+logger = logging.getLogger(__name__)
 
 _PLAYBOOK = "vendors/huawei/run.yml"
 
@@ -363,6 +367,107 @@ class HuaweiVendor(VendorDriver):
         stdouts = self._leer(commands, device, password)
         from app.services.parsers.svi_parser import parse_vrp_acl_names
         return parse_vrp_acl_names(stdouts[0] if stdouts else "")
+
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+        """RF-GLOBAL-01/02/03/04 (SRS §3.4). "display snmp-agent sys-info"
+        vive en un ``_leer()`` aparte (ver nota en
+        ``commands.yaml: get_snmp_status``) -- mismo motivo que en Cisco:
+        falla con rc != 0 cuando SNMP no está habilitado, y ``_leer()``
+        aborta el batch entero ante el primer comando fallido."""
+        commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        version_output = stdouts[0] if len(stdouts) > 0 else ""
+        hostname_output = stdouts[1] if len(stdouts) > 1 else ""
+        route_output = stdouts[2] if len(stdouts) > 2 else ""
+
+        snmp_commands = self._cargar_comandos()["get_snmp_status"]["primary"]["commands"]
+        try:
+            self._leer(snmp_commands, device, password)
+            snmp_enabled = True
+        except RuntimeError as exc:
+            if "snmp agent is not enabled" in str(exc).lower():
+                snmp_enabled = False
+            else:
+                raise
+
+        try:
+            acls = self.list_acl_names(device, password)
+        except RuntimeError:
+            logger.exception("get_global_config: list_acl_names failed on device=%s, continuing without ACLs", device.name)
+            acls = None
+
+        from app.services.parsers.global_config_parser import HuaweiGlobalConfigParser
+        config = HuaweiGlobalConfigParser.parse(
+            version_output=version_output, hostname_output=hostname_output,
+            route_output=route_output, snmp_enabled=snmp_enabled,
+        )
+        config.device = device.name
+        config.acls = acls
+        return config
+
+    def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("set_hostname", {"hostname": hostname}, device, password)
+
+    def set_snmp(self, cambios: dict, device: Device, password: str) -> dict:
+        """RF-GLOBAL-07. A diferencia de Cisco, VRP sí tiene un comando de
+        versión propio (``snmp-agent sys-info version``, aditivo -- ver
+        comentario en ``commands.yaml``) y uno de community separado
+        (``snmp-agent community {read|write} ...``, el verbo YA es el
+        permiso). ``cambios`` puede traer 1 o los 2 -- se ejecutan como 2
+        template calls independientes (cada uno con su propio
+        alternativa "sin commit" para f3r9s2)."""
+        resultados = []
+        if "version" in cambios:
+            resultados.append(
+                self._aplicar_desde_template("set_snmp_version", {"version": cambios["version"]}, device, password)
+            )
+        if "community" in cambios:
+            verbo = "write" if cambios.get("permission") == "RW" else "read"
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_community", {"verbo": verbo, "community": cambios["community"]}, device, password,
+                )
+            )
+        return self._combinar_resultados(resultados)
+
+    def set_log_servers(self, cambios: dict, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09. Confirmado en vivo contra huawei01: ``ntp
+        unicast-server``, ``dns resolve``+``dns server``, ``info-center
+        loghost {ip} [level {level}]``. VRP ata el nivel de severidad a la
+        línea del loghost (no es un ajuste global independiente como en
+        IOS) -- por eso ``GlobalConfig.validar()`` exige que ``log_level``
+        venga siempre junto con ``log_server``."""
+        resultados = []
+        if "ntp_server" in cambios:
+            resultados.append(
+                self._aplicar_desde_template("set_ntp", {"ntp_server": cambios["ntp_server"]}, device, password)
+            )
+        if "dns_server" in cambios:
+            resultados.append(
+                self._aplicar_desde_template("set_dns", {"dns_server": cambios["dns_server"]}, device, password)
+            )
+        if "log_server" in cambios:
+            if "log_level" in cambios:
+                resultados.append(
+                    self._aplicar_desde_template(
+                        "set_log_host_and_level",
+                        {"log_server": cambios["log_server"], "log_level": cambios["log_level"]},
+                        device, password,
+                    )
+                )
+            else:
+                resultados.append(
+                    self._aplicar_desde_template("set_log_host", {"log_server": cambios["log_server"]}, device, password)
+                )
+        return self._combinar_resultados(resultados)
+
+    def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-06. Confirmado en vivo contra huawei01: ``ip
+        route-static {network} {mask} {next_hop}``."""
+        network, mask = self._red_y_mascara(destination)
+        return self._aplicar_desde_template(
+            "set_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
+        )
 
     @staticmethod
     def _cidr_a_direccion_y_mascara(cidr: "str | None") -> tuple[str, str]:

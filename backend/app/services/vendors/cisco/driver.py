@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 from typing import TYPE_CHECKING
 
 from app.services.parsers.port_parser import CiscoPortParser
@@ -11,6 +12,9 @@ if TYPE_CHECKING:
     from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
+    from app.models.global_config import GlobalConfig
+
+logger = logging.getLogger(__name__)
 
 _PLAYBOOK = "vendors/cisco/run.yml"
 
@@ -290,6 +294,104 @@ class CiscoVendor(VendorDriver):
         stdouts = self._leer(commands, device, password)
         from app.services.parsers.svi_parser import parse_ios_acl_names
         return parse_ios_acl_names(stdouts[0] if stdouts else "")
+
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+        """RF-GLOBAL-01/02/03/04 (SRS §3.4). "show snmp" vive en un
+        ``_leer()`` aparte (ver nota en ``commands.yaml: get_snmp_status``)
+        -- confirmado contra device real que falla con rc != 0 cuando SNMP
+        no está habilitado, y que ``_leer()`` aborta el batch entero ante
+        el primer comando fallido (perdería version/hostname/routes
+        también si viviera en la misma tanda)."""
+        commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        version_output = stdouts[0] if len(stdouts) > 0 else ""
+        hostname_output = stdouts[1] if len(stdouts) > 1 else ""
+        community_output = stdouts[2] if len(stdouts) > 2 else ""
+        route_output = stdouts[3] if len(stdouts) > 3 else ""
+
+        snmp_commands = self._cargar_comandos()["get_snmp_status"]["primary"]["commands"]
+        try:
+            self._leer(snmp_commands, device, password)
+            snmp_enabled = True
+        except RuntimeError as exc:
+            if "snmp agent not enabled" in str(exc).lower():
+                snmp_enabled = False
+            else:
+                raise
+
+        try:
+            acls = self.list_acl_names(device, password)
+        except RuntimeError:
+            logger.exception("get_global_config: list_acl_names failed on device=%s, continuing without ACLs", device.name)
+            acls = None
+
+        from app.services.parsers.global_config_parser import CiscoGlobalConfigParser
+        config = CiscoGlobalConfigParser.parse(
+            version_output=version_output, hostname_output=hostname_output,
+            community_output=community_output, route_output=route_output,
+            snmp_enabled=snmp_enabled,
+        )
+        config.device = device.name
+        config.acls = acls
+        return config
+
+    def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("set_hostname", {"hostname": hostname}, device, password)
+
+    def set_snmp(self, cambios: dict, device: Device, password: str) -> dict:
+        """RF-GLOBAL-07. IOS clásico (SNMPv1/v2c basado en community) no
+        tiene un comando separado para "versión" -- ``cambios["version"]``
+        se ignora acá a propósito (ver comentario en ``commands.yaml``);
+        solo ``community``+``permission`` (siempre juntos, ver
+        ``GlobalConfig.validar()``) disparan un comando real."""
+        if "version" in cambios:
+            logger.info(
+                "CiscoVendor.set_snmp: 'version' has no distinct IOS community-based "
+                "command, ignoring for device=%s (only community/permission apply)",
+                device.name,
+            )
+        if "community" not in cambios:
+            return {"rc": 0, "stdout": "", "stderr": "", "success": True, "changed": False}
+        return self._aplicar_desde_template(
+            "set_snmp_community",
+            {"community": cambios["community"], "permission": cambios["permission"]},
+            device, password,
+        )
+
+    def set_log_servers(self, cambios: dict, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09. Confirmado en vivo contra cisco01: ``ntp server``,
+        ``ip name-server``, ``logging host``/``logging trap {level}``."""
+        resultados = []
+        if "ntp_server" in cambios:
+            resultados.append(
+                self._aplicar_desde_template("set_ntp", {"ntp_server": cambios["ntp_server"]}, device, password)
+            )
+        if "dns_server" in cambios:
+            resultados.append(
+                self._aplicar_desde_template("set_dns", {"dns_server": cambios["dns_server"]}, device, password)
+            )
+        if "log_server" in cambios:
+            if "log_level" in cambios:
+                resultados.append(
+                    self._aplicar_desde_template(
+                        "set_log_host_and_level",
+                        {"log_server": cambios["log_server"], "log_level": cambios["log_level"]},
+                        device, password,
+                    )
+                )
+            else:
+                resultados.append(
+                    self._aplicar_desde_template("set_log_host", {"log_server": cambios["log_server"]}, device, password)
+                )
+        return self._combinar_resultados(resultados)
+
+    def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-06. Confirmado en vivo contra cisco01: ``ip route
+        {network} {mask} {next_hop}``."""
+        network, mask = self._red_y_mascara(destination)
+        return self._aplicar_desde_template(
+            "set_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
+        )
 
     @staticmethod
     def _cidr_a_direccion_y_mascara(cidr: "str | None") -> tuple[str, str]:

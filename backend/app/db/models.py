@@ -91,6 +91,8 @@ class DeviceModel(Base):
     ports_sync_error = Column(Text, nullable=True)
     svis_synced_at = Column(DateTime(timezone=True), nullable=True)
     svis_sync_error = Column(Text, nullable=True)
+    global_config_synced_at = Column(DateTime(timezone=True), nullable=True)
+    global_config_sync_error = Column(Text, nullable=True)
 
     device_group = relationship(
         "DeviceGroupModel",
@@ -167,6 +169,33 @@ class DeviceSVIModel(Base):
     dhcp_relay_servers = Column(JSON, nullable=True)  # lista de str
     # Read-only, viene del getter del driver.
     operational_up = Column(Boolean, nullable=True)
+
+
+class DeviceGlobalConfigModel(Base):
+    """RF-GLOBAL-* (SRS §3.4) — Repository[GlobalConfig]. Singleton por
+    device -- a diferencia de VLAN/Puerto/SVI, acá la identidad ES el
+    device solo (``device`` es la PK completa, no compuesta), no hay
+    colección de sub-elementos. ``routes``/``acls`` van como JSON (no como
+    tablas propias): RF-GLOBAL-06 solo pide alta de rutas, RF-GLOBAL-05
+    hace full-replace de las reglas de una ACL al modificarla -- ninguna de
+    las 2 necesita PK propia por elemento, mismo criterio que
+    ``dhcp_relay_servers`` en ``DeviceSVIModel``."""
+
+    __tablename__ = "device_global_config"
+
+    device = Column(String, primary_key=True)
+    hostname = Column(String, nullable=True)
+    device_version = Column(String, nullable=True)
+    snmp_enabled = Column(Boolean, nullable=True)
+    snmp_version = Column(String, nullable=True)
+    snmp_community = Column(String, nullable=True)
+    snmp_permission = Column(String, nullable=True)
+    ntp_server = Column(String, nullable=True)
+    dns_server = Column(String, nullable=True)
+    log_server = Column(String, nullable=True)
+    log_level = Column(String, nullable=True)
+    routes = Column(JSON, nullable=True)  # lista de dict (destino/mask/next-hop/interfaz)
+    acls = Column(JSON, nullable=True)  # lista de str (nombres) o dict (nombre+reglas)
 
 
 class JobModel(Base):

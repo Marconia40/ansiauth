@@ -41,10 +41,11 @@ _MAX_ERROR_LEN = 2000
 
 
 class DeviceSyncService:
-    def __init__(self, vlan_repo, puerto_repo, svi_repo, coordinator):
+    def __init__(self, vlan_repo, puerto_repo, svi_repo, global_config_repo, coordinator):
         self._vlans = vlan_repo                        # Repository[VLAN]
         self._ports = puerto_repo                      # Repository[Puerto]
         self._interfaces = svi_repo        # Repository[SVI]
+        self._global_config = global_config_repo        # Repository[GlobalConfig]
         self._coordinator = coordinator                # RedisCoordinator
 
     def sync_vlans(self, device: "Device") -> None:
@@ -144,11 +145,31 @@ class DeviceSyncService:
             device.name, len(nuevas), len(existentes_ids - nuevas_ids),
         )
 
+    def sync_global_config(self, device: "Device") -> None:
+        """Full-refresh de la configuración global de *device* hacia
+        ``device_global_config``. A diferencia de VLAN/Puerto/SVI es un
+        singleton (1 fila por device, no una colección con diff de
+        agregados/removidos) -- ``Repository.add()`` ya es upsert
+        (``session.merge()``), así que alcanza con sobreescribir la fila."""
+        try:
+            with self._coordinator.bloquear(device.name, timeout=_LOCK_TIMEOUT_S):
+                config = device.driver.get_global_config(device, device.password)
+        except Exception as exc:
+            logger.exception("sync_global_config failed device=%s", device.name)
+            self._marcar_error(device.name, "global_config_sync_error", str(exc))
+            raise
+
+        config.device = device.name
+        self._global_config.add(config)
+
+        self._marcar_ok(device.name, "global_config_synced_at", "global_config_sync_error")
+        logger.info("sync_global_config OK device=%s", device.name)
+
     def metadata(
         self, device_name: str, scope: str,
     ) -> tuple[Optional[datetime], Optional[str]]:
         """Return ``(synced_at, sync_error)`` para *scope* ∈
-        {"vlans","ports","svis"}.
+        {"vlans","ports","svis","global_config"}.
 
         Consultado por los GET cache-first para poblar el envelope
         ``{data, synced_at, sync_error, sync_in_progress}`` sin que el
@@ -164,10 +185,14 @@ class DeviceSyncService:
                 DeviceModel.svis_synced_at,
                 DeviceModel.svis_sync_error,
             ),
+            "global_config": (
+                DeviceModel.global_config_synced_at,
+                DeviceModel.global_config_sync_error,
+            ),
         }
         if scope not in cols:
             raise ValueError(
-                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports / svis)"
+                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports / svis / global_config)"
             )
         col_ts, col_err = cols[scope]
         with get_session() as session:

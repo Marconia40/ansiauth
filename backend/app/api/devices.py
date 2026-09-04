@@ -253,6 +253,36 @@ def refresh_device_svis(
     return ok({"device": name, "scope": "svis", "task_id": result.id})
 
 
+@router.post(
+    "/{name}/global-config/refresh",
+    status_code=202,
+    summary="Refresh device global configuration cache",
+    description=(
+        "Trigger a background sync of *device*'s global configuration "
+        "cache from the equipment (version, hostname, SNMP status, "
+        "routing table, ACL names — RF-GLOBAL-01/02/03/04). Returns "
+        "immediately with the task id; the frontend polls "
+        "`GET /api/v1/devices/{name}/global-config` and watches "
+        "`synced_at` / `sync_in_progress` to detect completion. "
+        "Requires observer role or higher on the device — same criterion "
+        "as reading the global configuration."
+    ),
+)
+def refresh_device_global_config(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import inventory
+    from app.tasks import sync_device_task
+
+    if inventory.get(name) is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
+    result = sync_device_task.delay(name, "global_config")
+    return ok({"device": name, "scope": "global_config", "task_id": result.id})
+
+
 @router.delete(
     "/{name}",
     summary="Delete device",

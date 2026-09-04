@@ -10,7 +10,7 @@ etc.) — no hace falta anticipar esas partes acá, cada fase agrega lo suyo.
 from __future__ import annotations
 
 from app.core.repository import Repository
-from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel
+from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel, DeviceGlobalConfigModel
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.device_group_repository import DeviceGroupRepository
 from app.repositories.device_repository import DeviceRepository
@@ -117,6 +117,35 @@ svi_repository = Repository(
     pk_field=("vlan_id", "device"),
 )
 
+
+def _global_config_to_orm(g: "GlobalConfig"):
+    return DeviceGlobalConfigModel(
+        device=g.device, hostname=g.hostname, device_version=g.device_version,
+        snmp_enabled=g.snmp_enabled, snmp_version=g.snmp_version,
+        snmp_community=g.snmp_community, snmp_permission=g.snmp_permission,
+        ntp_server=g.ntp_server, dns_server=g.dns_server,
+        log_server=g.log_server, log_level=g.log_level,
+        routes=g.routes, acls=g.acls,
+    )
+
+
+def _global_config_to_domain(row) -> "GlobalConfig":
+    from app.models.global_config import GlobalConfig
+    return GlobalConfig(
+        device=row.device, hostname=row.hostname, device_version=row.device_version,
+        snmp_enabled=row.snmp_enabled, snmp_version=row.snmp_version,
+        snmp_community=row.snmp_community, snmp_permission=row.snmp_permission,
+        ntp_server=row.ntp_server, dns_server=row.dns_server,
+        log_server=row.log_server, log_level=row.log_level,
+        routes=row.routes, acls=row.acls,
+    )
+
+
+global_config_repository = Repository(
+    DeviceGlobalConfigModel, _global_config_to_domain, _global_config_to_orm,
+    pk_field="device",
+)
+
 job_repository = JobRepository()
 
 role_assignment_repository = RoleAssignmentRepository()
@@ -147,7 +176,10 @@ event_dispatcher.suscribir(AuditListener(audit_repository))
 
 orquestador = Orquestador(
     device_repository,
-    {"vlan": vlan_repository, "puerto": puerto_repository, "svi": svi_repository},
+    {
+        "vlan": vlan_repository, "puerto": puerto_repository, "svi": svi_repository,
+        "global_config": global_config_repository,
+    },
     job_repository, event_dispatcher, redis_coordinator,
 )
 
@@ -161,5 +193,5 @@ inventory = Inventory(
 )
 
 device_sync_service = DeviceSyncService(
-    vlan_repository, puerto_repository, svi_repository, redis_coordinator,
+    vlan_repository, puerto_repository, svi_repository, global_config_repository, redis_coordinator,
 )

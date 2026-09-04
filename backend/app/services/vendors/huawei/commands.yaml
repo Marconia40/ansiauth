@@ -864,6 +864,180 @@ list_acls:
     commands:
       - "display acl all"
 
+# RF-GLOBAL-01/03/08 (SRS §3.4) -- confirmado contra huawei01/f3r9s2
+# reales. "sysname" vía grep no falla si no hay match (vacío, no error) --
+# a diferencia de "display snmp-agent sys-info" (ver get_snmp_status más
+# abajo), por eso vive en la misma tanda.
+get_global_config:
+  primary:
+    commands:
+      - "display version"
+      - "display current-configuration | include sysname"
+      - "display ip routing-table"
+
+# Aparte de get_global_config: "display snmp-agent sys-info" falla con
+# rc != 0 ("Error: SNMP agent is not enabled.") cuando SNMP no está
+# configurado -- confirmado contra huawei01 real (deshabilitado). Mismo
+# motivo que en Cisco (ver get_snmp_status de cisco/commands.yaml) para
+# tenerlo aparte: si viviera en la misma tanda, un device sin SNMP tiraría
+# todo el batch abajo. El formato de la línea de community SNMP en VRP
+# (para cuando SÍ está habilitado) no está confirmado todavía -- ningún
+# device de esta sesión lo tiene activo.
+get_snmp_status:
+  primary:
+    commands:
+      - "display snmp-agent sys-info"
+
+# RF-GLOBAL-08 -- mismo criterio de 2 alternativas (con/sin "commit") que
+# create_vlan/delete_vlan de este mismo archivo.
+set_hostname:
+  primary:
+    block:
+      - "system-view"
+      - "sysname {hostname}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "sysname {hostname}"
+        - "quit"
+
+# RF-GLOBAL-07 -- confirmado en vivo contra huawei01 (lab, CE12800):
+# "snmp-agent sys-info version {v1|v2c|v3}" es ADITIVO (agrega esa versión a
+# las ya habilitadas, no reemplaza -- ver docstring de
+# ``HuaweiVendor.set_snmp()``), y "snmp-agent community {read|write}
+# {community}" (no hay sufijo de permiso como en Cisco, el verbo YA es el
+# permiso). Separados en 2 templates porque la request puede traer solo
+# 1 de los 2 (version sin community, o viceversa) -- el driver decide cuál
+# invocar según qué llegó, mismo criterio 1-call-por-pieza que set_hostname.
+set_snmp_version:
+  primary:
+    block:
+      - "system-view"
+      - "snmp-agent sys-info version {version}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "snmp-agent sys-info version {version}"
+        - "quit"
+
+set_snmp_community:
+  primary:
+    block:
+      - "system-view"
+      - "snmp-agent community {verbo} {community}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "snmp-agent community {verbo} {community}"
+        - "quit"
+
+# RF-GLOBAL-09 -- confirmado en vivo contra huawei01. "ntp unicast-server"
+# (SIN "-service", a diferencia del nombre del feature) y "dns server"
+# requieren "dns resolve" antes (habilita la resolución DNS del propio
+# device, sin eso "dns server" queda configurado pero inactivo). El nivel
+# de severidad del log ("level") va DENTRO de la misma línea que el host
+# de "info-center loghost" -- no es un ajuste global separado como en IOS,
+# por eso hay 2 variantes (con/sin level) en vez de 1 template + 1 aparte.
+set_ntp:
+  primary:
+    block:
+      - "system-view"
+      - "ntp unicast-server {ntp_server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "ntp unicast-server {ntp_server}"
+        - "quit"
+
+set_dns:
+  primary:
+    block:
+      - "system-view"
+      - "dns resolve"
+      - "dns server {dns_server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "dns resolve"
+        - "dns server {dns_server}"
+        - "quit"
+
+set_log_host:
+  primary:
+    block:
+      - "system-view"
+      - "info-center loghost {log_server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "info-center loghost {log_server}"
+        - "quit"
+
+# RF-GLOBAL-09 -- "info-center loghost {ip} level {level}" confirmado
+# contra huawei01 (CE12800 lab), pero RECHAZADO contra f3r9s2 (S-series
+# real): "Error:Too many parameters found at '^' position" -- esta familia
+# de equipos no tiene un sub-comando "level" en la línea del loghost (ver
+# "info-center loghost {ip} ?" contra f3r9s2, no lista "level" como opción,
+# a diferencia de huawei01). f3r9s2 tampoco soporta "commit". La 2da
+# alternativa cubre ese caso real: aplica el host SIN el nivel (mejor que
+# fallar del todo) y sin commit -- confirmado en vivo. El nivel pedido NO
+# se aplica en ese caso; queda visible en el stdout del job para quien
+# audite el resultado, mismo criterio que el resto de esta app (no hay un
+# campo "warning" separado en el resultado, ver notas de sesión).
+set_log_host_and_level:
+  primary:
+    block:
+      - "system-view"
+      - "info-center loghost {log_server} level {log_level}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "info-center loghost {log_server} level {log_level}"
+        - "quit"
+    - triggered_by_error: "info-center loghost[^\\n]*\\r?\\n\\s*\\^\\r?\\nError:Too many parameters found"
+      block:
+        - "system-view"
+        - "info-center loghost {log_server}"
+        - "quit"
+
+# RF-GLOBAL-06 -- confirmado en vivo contra huawei01. VRP también pide
+# máscara punteada acá (mismo criterio que Cisco, ver
+# ``VendorDriver._red_y_mascara()``).
+set_route:
+  primary:
+    block:
+      - "system-view"
+      - "ip route-static {network} {mask} {next_hop}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "ip route-static {network} {mask} {next_hop}"
+        - "quit"
+
 # get_svis NO tiene entrada acá a propósito -- confirmado
 # contra el device real de lab que "display current-configuration
 # interface Vlanif" sin número es rechazado ("Error: Wrong parameter

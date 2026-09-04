@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import ipaddress
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
+    from app.models.global_config import GlobalConfig
 
 logger = logging.getLogger(__name__)
 
@@ -959,3 +961,57 @@ class VendorDriver(ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_svis yet"
         )
+
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_global_config yet"
+        )
+
+    def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_hostname yet"
+        )
+
+    def set_snmp(self, cambios: dict, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_snmp yet"
+        )
+
+    def set_log_servers(self, cambios: dict, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_log_servers yet"
+        )
+
+    def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_route yet"
+        )
+
+    @staticmethod
+    def _red_y_mascara(cidr: str) -> tuple[str, str]:
+        """``"192.168.99.5/24"`` → ``("192.168.99.0", "255.255.255.0")`` --
+        a diferencia de ``CiscoVendor._cidr_a_direccion_y_mascara()`` (que
+        preserva la dirección de host, correcto para ``ip address`` de una
+        interfaz), acá se necesita la dirección DE RED (``ip route``/``ip
+        route-static`` piden red+máscara, no un host dentro de la red) --
+        ``strict=False`` para no rechazar un CIDR con bits de host
+        prendidos, se los pisa. Compartido por ``set_route`` de ambos
+        vendors (los 2 confirmados en vivo que piden máscara punteada, no
+        largo de prefijo)."""
+        red = ipaddress.ip_network(cidr, strict=False)
+        return str(red.network_address), str(red.netmask)
+
+    @staticmethod
+    def _combinar_resultados(resultados: list[dict]) -> dict:
+        """``set_snmp``/``set_log_servers`` pueden disparar más de 1
+        template call (1 por sub-campo presente en ``cambios``) -- combina
+        esos resultados individuales en 1 solo dict ``{rc, stdout, stderr,
+        success}``, mismo shape que devuelve ``_aplicar()``."""
+        if not resultados:
+            return {"rc": 0, "stdout": "", "stderr": "", "success": True, "changed": False}
+        return {
+            "rc": max(r.get("rc", 0) for r in resultados),
+            "stdout": "\n".join(r.get("stdout", "") for r in resultados),
+            "stderr": "\n".join(r.get("stderr", "") for r in resultados if r.get("stderr")),
+            "success": all(r.get("success") for r in resultados),
+        }

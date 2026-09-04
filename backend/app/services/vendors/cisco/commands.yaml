@@ -281,3 +281,77 @@ list_acls:
   primary:
     commands:
       - "show access-lists"
+
+# RF-GLOBAL-01/03/07 (SRS §3.4) -- confirmado contra cisco01/f3r9s1
+# reales. "show running-config | include snmp-server community" no falla
+# si no hay ninguna configurada (devuelve vacío, no error) -- a diferencia
+# de "show snmp" (ver get_snmp_status más abajo), por eso vive acá en la
+# misma tanda y no aparte.
+get_global_config:
+  primary:
+    commands:
+      - "show version"
+      - "show running-config | include hostname"
+      - "show running-config | include snmp-server community"
+      - "show ip route"
+
+# Aparte de get_global_config: "show snmp" falla con rc != 0
+# ("%SNMP agent not enabled") cuando SNMP no está configurado -- confirmado
+# contra cisco01 real (deshabilitado) y f3r9s1 real (habilitado). Si viviera
+# en la misma tanda que el resto, un device sin SNMP tiraría todo el batch
+# abajo y se perdería version/hostname/routes también (confirmado: _leer()
+# aborta el batch entero ante el primer comando fallido). El driver
+# (get_global_config()) atrapa el RuntimeError acá y lo traduce a
+# snmp_enabled=False en vez de propagar el error.
+get_snmp_status:
+  primary:
+    commands:
+      - "show snmp"
+
+# RF-GLOBAL-08 -- "hostname" es un comando de nivel global, no anidado
+# bajo ninguna interfaz (mismo criterio que delete_vlan: "lines" sin
+# "parents").
+set_hostname:
+  primary:
+    lines: ["hostname {hostname}"]
+
+# RF-GLOBAL-07 -- confirmado en vivo contra cisco01: "snmp-server community
+# {community} {permission}" habilita SNMP y fija la community en 1 sola
+# línea. No hay entrada "set_snmp_version" acá a propósito -- IOS clásico
+# (SNMPv1/v2c basado en community) no tiene un comando separado para fijar
+# la versión, ambas se aceptan implícitamente en cuanto hay una community
+# configurada (ver ``CiscoVendor.set_snmp()``, que ignora "version" para
+# este vendor).
+set_snmp_community:
+  primary:
+    lines: ["snmp-server community {community} {permission}"]
+
+# RF-GLOBAL-09 -- confirmado en vivo contra cisco01. "logging trap
+# {level}" es un ajuste global independiente del host en IOS (a diferencia
+# de VRP, donde va atado a la línea del loghost) -- igual se manda como
+# parte de la misma llamada que "logging host" acá porque
+# ``GlobalConfig.validar()`` exige que ``log_level`` venga siempre junto
+# con ``log_server`` (mismo criterio en los 2 vendors, aunque solo VRP lo
+# necesite técnicamente).
+set_ntp:
+  primary:
+    lines: ["ntp server {ntp_server}"]
+
+set_dns:
+  primary:
+    lines: ["ip name-server {dns_server}"]
+
+set_log_host:
+  primary:
+    lines: ["logging host {log_server}"]
+
+set_log_host_and_level:
+  primary:
+    lines: ["logging host {log_server}", "logging trap {log_level}"]
+
+# RF-GLOBAL-06 -- confirmado en vivo contra cisco01. IOS pide máscara
+# punteada, no CIDR ni largo de prefijo (``network``/``mask`` ya vienen
+# convertidos desde el driver, ver ``VendorDriver._red_y_mascara()``).
+set_route:
+  primary:
+    lines: ["ip route {network} {mask} {next_hop}"]
