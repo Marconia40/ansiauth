@@ -8,13 +8,17 @@ interface Props {
   rows: SviRow[];
   isLoading: boolean;
   isError: boolean;
+  /** Optional -- if omitted, the Actions column is hidden. Passed by callers
+   * that mount an edit modal. */
+  onEdit?: (row: SviRow) => void;
 }
 
 /** Tabla de SVIs. Columna "Device" solo cuando el scope agrupa múltiples
  * devices (site/group/org); en device scope se oculta porque sería
  * redundante -- todas las filas serían del mismo device. */
-export function SVITable({ scope, rows, isLoading, isError }: Props) {
+export function SVITable({ scope, rows, isLoading, isError, onEdit }: Props) {
   const showDeviceColumn = scope.kind !== 'device';
+  const showActions = Boolean(onEdit);
 
   if (isLoading) {
     return <p className="text-sm italic text-muted py-6">Loading virtual interfaces…</p>;
@@ -45,6 +49,9 @@ export function SVITable({ scope, rows, isLoading, isError }: Props) {
             <th className="text-left font-semibold px-4 py-2">IPv6</th>
             <th className="text-left font-semibold px-4 py-2 w-32">ACL (in / out)</th>
             <th className="text-left font-semibold px-4 py-2 w-24">DHCP Relay</th>
+            {showActions && (
+              <th className="text-right font-semibold px-4 py-2 w-20">Actions</th>
+            )}
           </tr>
         </thead>
         <tbody className="divide-y divide-panel-border">
@@ -77,6 +84,17 @@ export function SVITable({ scope, rows, isLoading, isError }: Props) {
               <td className="px-4 py-2 text-text">
                 <DhcpRelayCell servers={row.dhcpRelayServers} />
               </td>
+              {showActions && (
+                <td className="px-4 py-2 text-right">
+                  <button
+                    type="button"
+                    onClick={() => onEdit?.(row)}
+                    className="rounded border border-panel-border text-xs font-semibold uppercase tracking-wider text-text px-2 py-1 hover:bg-panel-elev transition"
+                  >
+                    Edit
+                  </button>
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

@@ -7,9 +7,10 @@ import type { Scope } from './ScopeDashboard';
 import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
 import { SVITable } from './SVITable';
-import { useScopeSvis } from './scopeSvis';
+import { useScopeSvis, type SviRow } from './scopeSvis';
 import { SVICreateModal } from './SVICreateModal';
 import { SVIRemoveModal } from './SVIRemoveModal';
+import { SVIEditModal } from './SVIEditModal';
 
 interface Props {
   scope: Scope;
@@ -25,6 +26,7 @@ export function SVITab({ scope, deviceName }: Props) {
 
   const [openCreate, setOpenCreate] = useState(false);
   const [openRemove, setOpenRemove] = useState(false);
+  const [editRow, setEditRow] = useState<SviRow | null>(null);
   const [toast, setToast] = useState<Toast>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -78,6 +80,7 @@ export function SVITab({ scope, deviceName }: Props) {
           rows={rows}
           isLoading={isLoading}
           isError={isError}
+          onEdit={setEditRow}
         />
       </Panel>
 
@@ -93,6 +96,12 @@ export function SVITab({ scope, deviceName }: Props) {
         onClose={() => setOpenRemove(false)}
         scope={scope}
         rows={rows}
+        onDone={(msg, tone) => setToast({ msg, tone })}
+      />
+      <SVIEditModal
+        open={editRow !== null}
+        onClose={() => setEditRow(null)}
+        row={editRow}
         onDone={(msg, tone) => setToast({ msg, tone })}
       />
 
