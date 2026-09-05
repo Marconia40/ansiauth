@@ -864,6 +864,73 @@ list_acls:
     commands:
       - "display acl all"
 
+# RF-GLOBAL-05 -- confirmado en vivo contra huawei01 (crear ACL Advanced
+# de prueba, agregarle 4 reglas variadas, sacar 1 puntual, borrarla
+# completa). "acl name {name} advance" crea la ACL Advanced con nombre si
+# no existía Y agrega las reglas si ya existía -- mismo comando para
+# "crear"/"agregar reglas" (mismo criterio que Cisco). "rule_lines" ya
+# viene formateado por ``HuaweiVendor.formatear_regla_acl()`` -- ojo que
+# ese formateo OMITE "source any"/"destination any" (no los escribe) para
+# que coincida con cómo VRP los devuelve al leer (confirmado en vivo: un
+# endpoint "any" desaparece completo de la línea, no queda "source any"
+# ni nada equivalente -- si no se replica esto, la detección de no-op
+# nunca matchea).
+create_or_update_acl:
+  primary:
+    block:
+      - "system-view"
+      - "acl name {name} advance"
+    repeat:
+      over: "rule_lines"
+      line: "{item}"
+    trailer: ["quit", "commit", "quit"]
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "acl name {name} advance"
+      repeat:
+        over: "rule_lines"
+        line: "{item}"
+      trailer: ["quit", "quit"]
+
+# "undo rule {regla exacta, sin número de secuencia}" adentro del contexto
+# de la ACL saca esa entrada puntual -- confirmado en vivo.
+remove_acl_rules:
+  primary:
+    block:
+      - "system-view"
+      - "acl name {name} advance"
+    repeat:
+      over: "rule_lines"
+      line: "undo {item}"
+    trailer: ["quit", "commit", "quit"]
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "acl name {name} advance"
+      repeat:
+        over: "rule_lines"
+        line: "undo {item}"
+      trailer: ["quit", "quit"]
+
+# "undo acl name {name}" desde system-view borra la ACL completa -- no
+# hace falta entrar a su contexto primero. Confirmado en vivo.
+delete_acl:
+  primary:
+    block:
+      - "system-view"
+      - "undo acl name {name}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo acl name {name}"
+        - "quit"
+
 # RF-GLOBAL-01/03/08 (SRS §3.4) -- confirmado contra huawei01/f3r9s2
 # reales. "sysname" vía grep no falla si no hay match (vacío, no error) --
 # a diferencia de "display snmp-agent sys-info" (ver get_snmp_status más

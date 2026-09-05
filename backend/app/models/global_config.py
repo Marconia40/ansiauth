@@ -76,7 +76,17 @@ class GlobalConfig:
     dns_domain_set: str | None = None
     log_server_add: dict | None = None
     log_server_remove: dict | None = None
-    acl_upsert: dict | None = None
+    # RF-GLOBAL-05. ``acl_create``: {"name": str, "rules": list[rule-dict]}
+    # -- crea la ACL si no existe, agrega las reglas si ya existe (mismo
+    # comando sirve para ambos casos). ``acl_rule_remove``: mismo shape,
+    # saca las reglas indicadas. ``acl_delete``: nombre de la ACL a borrar
+    # completa. A diferencia de NTP/DNS/log (1 valor por request), acá se
+    # acepta una LISTA de reglas -- una ACL real se puebla con muchas
+    # reglas de una (ver ejemplo real del usuario, 18 reglas), armar 1
+    # bloque de comando con todas es más barato que 1 request por regla.
+    acl_create: dict | None = None
+    acl_rule_remove: dict | None = None
+    acl_delete: str | None = None
     # -- solo lectura, poblado por reconciliar()/el parser --
     running_config: str | None = None
     device_version: str | None = None
@@ -116,7 +126,8 @@ class GlobalConfig:
         campos = (
             "hostname", "snmp_config", "route_add", "route_remove",
             "ntp_server_add", "ntp_server_remove", "dns_server_add", "dns_server_remove",
-            "dns_domain_set", "log_server_add", "log_server_remove", "acl_upsert",
+            "dns_domain_set", "log_server_add", "log_server_remove",
+            "acl_create", "acl_rule_remove", "acl_delete",
         )
         return {c for c in campos if getattr(self, c) is not None}
 
@@ -129,7 +140,7 @@ class GlobalConfig:
                 "at least one mutation field must be provided "
                 "(hostname, snmp_config, route_add, route_remove, ntp_server_add, "
                 "ntp_server_remove, dns_server_add, dns_server_remove, dns_domain_set, "
-                "log_server_add, log_server_remove, acl_upsert)"
+                "log_server_add, log_server_remove, acl_create, acl_rule_remove, acl_delete)"
             )
         if self.hostname is not None:
             _validate_hostname(self.hostname)
@@ -185,6 +196,28 @@ class GlobalConfig:
                 raise ValueError("dns_server_remove: 'server' is required")
         if self.dns_domain_set is not None and not self.dns_domain_set.strip():
             raise ValueError("dns_domain_set: must not be empty")
+        if self.acl_create is not None:
+            self._validar_acl_dict("acl_create", self.acl_create)
+        if self.acl_rule_remove is not None:
+            self._validar_acl_dict("acl_rule_remove", self.acl_rule_remove)
+        if self.acl_delete is not None and not self.acl_delete.strip():
+            raise ValueError("acl_delete: must not be empty")
+
+    @staticmethod
+    def _validar_acl_dict(nombre_campo: str, valor: dict) -> None:
+        """Shape compartido por ``acl_create``/``acl_rule_remove`` --
+        ambos son ``{"name": str, "rules": list[dict]}``. La forma de
+        cada regla individual (action/protocol/source/destination/port)
+        ya la valida el schema de Pydantic en la API antes de llegar
+        acá -- mismo criterio que ``_validar_route_dict()``."""
+        claves_validas = {"name", "rules"}
+        desconocidas = set(valor) - claves_validas
+        if desconocidas:
+            raise ValueError(f"{nombre_campo}: unknown keys {sorted(desconocidas)} (valid: {sorted(claves_validas)})")
+        if not valor.get("name"):
+            raise ValueError(f"{nombre_campo}: 'name' is required")
+        if not valor.get("rules"):
+            raise ValueError(f"{nombre_campo}: 'rules' must be a non-empty list")
 
     @staticmethod
     def _validar_route_dict(nombre_campo: str, valor: dict) -> None:
@@ -211,8 +244,13 @@ class GlobalConfig:
         """Estado actual de la configuración global de *device*, leído en
         vivo -- mismo criterio que ``SVI.reconciliar()``: una escritura
         necesita el estado real del momento, no la cache que sirve
-        ``GET /global-config``."""
-        actual = device.driver.get_global_config(device, device.password)
+        ``GET /global-config``. ``incluir_arp_mac=False`` -- ninguna
+        escritura necesita ese dato para su no-op detection, y son 2
+        conexiones SSH menos en un camino que ya de por sí abre varias
+        (confirmado en vivo contra huawei01, 5 líneas VTY: sin este ahorro,
+        una escritura de ACL se quedaba sin sesiones -- "Channel
+        closed")."""
+        actual = device.driver.get_global_config(device, device.password, incluir_arp_mac=False)
         return {"existed": actual is not None, "actual": actual}
 
     def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
@@ -248,6 +286,12 @@ class GlobalConfig:
             return self._aplicar_log_server_add(device)
         if campo == "log_server_remove":
             return self._aplicar_log_server_remove(device)
+        if campo == "acl_create":
+            return self._aplicar_acl_create(device, pre_state)
+        if campo == "acl_rule_remove":
+            return self._aplicar_acl_rule_remove(device, pre_state)
+        if campo == "acl_delete":
+            return self._aplicar_acl_delete(device)
         raise ValueError(f"GlobalConfig.aplicar(): no hay driver call para el campo {campo!r} todavía")
 
     def _noop_resultado(self, accion: str, **extra: object) -> dict:
@@ -414,6 +458,75 @@ class GlobalConfig:
         lectura de domain-name implementada."""
         resultado = device.driver.set_dns_domain(self.dns_domain_set, device, device.password)
         return {**resultado, "accion": "configurar_dns_domain"}
+
+    @staticmethod
+    def _reglas_acl_actuales(actual: "GlobalConfig | None", name: str) -> list[str]:
+        """Reglas crudas (con el prefijo de secuencia/número que agrega
+        cada vendor al leerlas, ej. "10 permit ..."/"rule 5 permit ...")
+        de la ACL *name* según el último ``reconciliar()``, o ``[]`` si la
+        ACL no existe todavía."""
+        if actual is None or not actual.acls:
+            return []
+        acl = next((a for a in actual.acls if a.get("name") == name), None)
+        return acl.get("rules", []) if acl is not None else []
+
+    @staticmethod
+    def _regla_ya_presente(regla_formateada: str, reglas_actuales: list[str]) -> bool:
+        """*regla_formateada* (sin prefijo de secuencia, la arma
+        ``driver.formatear_regla_acl()``) está presente si alguna regla
+        actual TERMINA con ese texto -- el prefijo que agrega cada vendor
+        al leer (número de secuencia Cisco, "rule N" Huawei) siempre va
+        ANTES del contenido real de la regla, nunca lo interrumpe."""
+        return any(actual_line.endswith(regla_formateada) for actual_line in reglas_actuales)
+
+    def _aplicar_acl_create(self, device: "Device", pre_state: "dict | None" = None) -> dict:
+        """RF-GLOBAL-05. Crea la ACL si no existe, agrega las reglas
+        nuevas si ya existe (mismo comando de driver sirve para ambos
+        casos). No-op por regla -- las que ya estén configuradas tal cual
+        no se re-envían; si TODAS ya están, no-op completo."""
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
+        actual = estado.get("actual")
+        name = self.acl_create["name"]
+        reglas_actuales = self._reglas_acl_actuales(actual, name)
+        rule_lines = [
+            formateada for r in self.acl_create["rules"]
+            if not self._regla_ya_presente(formateada := device.driver.formatear_regla_acl(r), reglas_actuales)
+        ]
+        if not rule_lines:
+            return self._noop_resultado("crear_o_extender_acl")
+        resultado = device.driver.create_or_update_acl(name, rule_lines, device, device.password)
+        return {**resultado, "accion": "crear_o_extender_acl"}
+
+    def _aplicar_acl_rule_remove(self, device: "Device", pre_state: "dict | None" = None) -> dict:
+        """RF-GLOBAL-05 (delete de reglas puntuales). Solo se mandan las
+        reglas que SÍ están actualmente en la ACL -- sacar algo que no
+        está no debería ser un error (mismo criterio de idempotencia que
+        el resto de esta clase)."""
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
+        actual = estado.get("actual")
+        name = self.acl_rule_remove["name"]
+        reglas_actuales = self._reglas_acl_actuales(actual, name)
+        rule_lines = [
+            formateada for r in self.acl_rule_remove["rules"]
+            if self._regla_ya_presente(formateada := device.driver.formatear_regla_acl(r), reglas_actuales)
+        ]
+        if not rule_lines:
+            return self._noop_resultado("sacar_reglas_acl")
+        resultado = device.driver.remove_acl_rules(name, rule_lines, device, device.password)
+        return {**resultado, "accion": "sacar_reglas_acl"}
+
+    def _aplicar_acl_delete(self, device: "Device") -> dict:
+        """RF-GLOBAL-05 (delete de la ACL completa). No-op si la ACL ya
+        no existe (chequea existencia por nombre, no por tener reglas --
+        una ACL con 0 reglas sigue existiendo como objeto en el device,
+        ver "IP-Adm-V4-Int-ACL-global" real en f3r9s1)."""
+        estado = self.reconciliar(device)
+        actual = estado.get("actual")
+        existe = actual is not None and actual.acls and any(a.get("name") == self.acl_delete for a in actual.acls)
+        if not existe:
+            return self._noop_resultado("borrar_acl")
+        resultado = device.driver.delete_acl(self.acl_delete, device, device.password)
+        return {**resultado, "accion": "borrar_acl"}
 
     def repositorio(self) -> str:
         return "global_config"

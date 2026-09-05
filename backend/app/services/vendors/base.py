@@ -959,6 +959,42 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement list_acls yet"
         )
 
+    # ── RF-GLOBAL-05 (ACLs -- crear/agregar reglas/borrar) ────────────────────
+    # Solo ACLs extended (Cisco) / advanced (Huawei) -- las standard/basic ya
+    # existentes (ej. acceso-vty/acceso-snmp) siguen siendo de solo lectura.
+
+    def formatear_regla_acl(self, rule: dict) -> str:
+        """Traduce 1 regla vendor-agnóstica (``GlobalConfigAclRule``, dict
+        con action/protocol/source/destination/port) a la línea CLI real
+        de este vendor -- SIN ejecutar nada (pura, sin I/O). La usa
+        ``GlobalConfig._aplicar_acl_create()``/``_aplicar_acl_rule_remove()``
+        para no-op detection (comparar contra las reglas ya leídas en
+        ``actual.acls``) antes de mandarle nada al driver de escritura."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement formatear_regla_acl yet"
+        )
+
+    def create_or_update_acl(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """Crea la ACL *name* si no existe, agrega *rule_lines* (ya
+        formateadas por ``formatear_regla_acl()``) si ya existe -- mismo
+        comando sirve para ambos casos en Cisco/Huawei (entrar al contexto
+        de la ACL la crea si no estaba)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement create_or_update_acl yet"
+        )
+
+    def remove_acl_rules(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """Saca *rule_lines* (ya formateadas) de la ACL *name*."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_acl_rules yet"
+        )
+
+    def delete_acl(self, name: str, device: Device, password: str) -> dict:
+        """Borra la ACL *name* completa."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement delete_acl yet"
+        )
+
     def set_svi_dhcp_relay(
         self, vlan_id: int, servers: list[str], device: Device, password: str,
     ) -> dict:
@@ -974,7 +1010,17 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement get_svis yet"
         )
 
-    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+    def get_global_config(self, device: Device, password: str, *, incluir_arp_mac: bool = True) -> "GlobalConfig":
+        """``incluir_arp_mac=False`` salta las 2 lecturas de ARP/MAC --
+        ``GlobalConfig.reconciliar()`` (usado por las escrituras para
+        no-op detection) las pasa en ``False`` porque ninguna escritura
+        necesita esos datos, y cada lectura de más es 1 conexión SSH más
+        en un camino que en devices con pocas líneas VTY (ej. huawei01,
+        5 líneas) ya se queda sin sesiones -- confirmado en vivo que
+        agregar ARP/MAC al sync (vuelta anterior) hizo que
+        ``create_or_update_acl`` fallara con "Channel closed" ahí. El
+        sync completo (``DeviceSyncService``, lo que sirve ``GET /arp``/
+        ``GET /mac``) sigue llamando con el default ``True``."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_global_config yet"
         )
@@ -1061,6 +1107,17 @@ class VendorDriver(ABC):
         largo de prefijo)."""
         red = ipaddress.ip_network(cidr, strict=False)
         return str(red.network_address), str(red.netmask)
+
+    @staticmethod
+    def _red_y_wildcard(cidr: str) -> tuple[str, str]:
+        """``"172.28.138.0/24"`` → ``("172.28.138.0", "0.0.0.255")`` -- la
+        wildcard mask que usan las ACLs (Cisco confirmado en vivo; Huawei
+        Advanced ACL usa el mismo concepto, sintaxis exacta sin confirmar
+        todavía, ver RF-GLOBAL-05). Es el INVERSO de la netmask normal que
+        devuelve ``_red_y_mascara()`` -- ``ipaddress`` ya expone eso
+        directo vía ``.hostmask``, no hace falta invertir a mano."""
+        red = ipaddress.ip_network(cidr, strict=False)
+        return str(red.network_address), str(red.hostmask)
 
     @staticmethod
     def _combinar_resultados(resultados: list[dict]) -> dict:

@@ -318,7 +318,61 @@ class CiscoVendor(VendorDriver):
         from app.services.parsers.svi_parser import parse_ios_acls
         return parse_ios_acls(stdouts[0] if stdouts else "")
 
-    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+    def _formatear_endpoint_acl(self, endpoint: dict) -> str:
+        if endpoint.get("any"):
+            return "any"
+        if endpoint.get("host"):
+            return f"host {endpoint['host']}"
+        network, wildcard = self._red_y_wildcard(endpoint["network"])
+        return f"{network} {wildcard}"
+
+    def formatear_regla_acl(self, rule: dict) -> str:
+        """RF-GLOBAL-05. Arma la línea CLI real de IOS a partir de una
+        regla vendor-agnóstica (``GlobalConfigAclRule``) -- confirmado en
+        vivo contra cisco01: ``{action} {protocol} {source} {destination}
+        [{port}]``, con ``source``/``destination`` resueltos a ``any`` /
+        ``host {ip}`` / ``{network} {wildcard}`` (wildcard = inverso de la
+        netmask, ver ``_red_y_wildcard()``). Sin secuencia -- IOS la
+        auto-asigna al no incluirla."""
+        partes = [
+            rule["action"], rule["protocol"],
+            self._formatear_endpoint_acl(rule["source"]),
+            self._formatear_endpoint_acl(rule["destination"]),
+        ]
+        port = rule.get("port")
+        if port:
+            if port["operator"] == "range":
+                partes.append(f"range {port['value']} {port['value2']}")
+            else:
+                partes.append(f"eq {port['value']}")
+        return " ".join(partes)
+
+    def create_or_update_acl(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """RF-GLOBAL-05. Confirmado en vivo contra cisco01: entrar a ``ip
+        access-list extended {name}`` crea la ACL si no existía, y agrega
+        las líneas si ya existía -- mismo comando sirve para "crear" y
+        "agregar reglas". Usa el mecanismo ``repeat`` de
+        ``_ejecutar_paso()`` (ya existente, compartido con
+        ``set_svi_dhcp_relay``) para mandar N reglas en 1 solo bloque de
+        comando en vez de N round-trips."""
+        return self._aplicar_desde_template(
+            "create_or_update_acl", {"name": name, "rule_lines": rule_lines}, device, password,
+        )
+
+    def remove_acl_rules(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """RF-GLOBAL-05 (delete de reglas puntuales). Confirmado en vivo
+        contra cisco01: ``no {regla exacta}`` adentro del contexto de la
+        ACL saca esa entrada puntual."""
+        return self._aplicar_desde_template(
+            "remove_acl_rules", {"name": name, "rule_lines": rule_lines}, device, password,
+        )
+
+    def delete_acl(self, name: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-05 (delete de la ACL completa). Confirmado en vivo
+        contra cisco01: ``no ip access-list extended {name}``."""
+        return self._aplicar_desde_template("delete_acl", {"name": name}, device, password)
+
+    def get_global_config(self, device: Device, password: str, *, incluir_arp_mac: bool = True) -> "GlobalConfig":
         """RF-GLOBAL-01/02/03/04 (SRS §3.4). "show snmp" vive en un
         ``_leer()`` aparte (ver nota en ``commands.yaml: get_snmp_status``)
         -- confirmado contra device real que falla con rc != 0 cuando SNMP
@@ -329,7 +383,12 @@ class CiscoVendor(VendorDriver):
         del sync sigue (mismo criterio, no todo-o-nada). ARP/MAC se
         agregaron al cache recién -- antes eran la única lectura en vivo
         por-request de toda la app, el usuario pidió sumarlas al sync tras
-        notar la latencia de pagar una sesión SSH nueva por cada GET."""
+        notar la latencia de pagar una sesión SSH nueva por cada GET.
+        ``incluir_arp_mac=False`` (usado por ``GlobalConfig.reconciliar()``,
+        ver docstring en ``VendorDriver``) las salta -- ninguna escritura
+        necesita ese dato para su no-op detection, y son 2 conexiones SSH
+        menos en el camino de escritura (importa en devices con pocas
+        líneas VTY)."""
         commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
         version_output = stdouts[0] if len(stdouts) > 0 else ""
@@ -354,17 +413,17 @@ class CiscoVendor(VendorDriver):
             logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
             acls = None
 
-        try:
-            arp_table = self.get_arp_table(device, password)
-        except RuntimeError:
-            logger.exception("get_global_config: get_arp_table failed on device=%s, continuing without ARP", device.name)
-            arp_table = None
+        arp_table = mac_table = None
+        if incluir_arp_mac:
+            try:
+                arp_table = self.get_arp_table(device, password)
+            except RuntimeError:
+                logger.exception("get_global_config: get_arp_table failed on device=%s, continuing without ARP", device.name)
 
-        try:
-            mac_table = self.get_mac_table(device, password)
-        except RuntimeError:
-            logger.exception("get_global_config: get_mac_table failed on device=%s, continuing without MAC", device.name)
-            mac_table = None
+            try:
+                mac_table = self.get_mac_table(device, password)
+            except RuntimeError:
+                logger.exception("get_global_config: get_mac_table failed on device=%s, continuing without MAC", device.name)
 
         from app.services.parsers.global_config_parser import CiscoGlobalConfigParser
         config = CiscoGlobalConfigParser.parse(

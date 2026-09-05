@@ -282,6 +282,35 @@ list_acls:
     commands:
       - "show access-lists"
 
+# RF-GLOBAL-05 -- confirmado en vivo contra cisco01 (crear ACL de prueba
+# con 4 reglas variadas, agregarle 1 más, sacar 1 puntual, borrarla
+# completa). "ip access-list extended {name}" crea la ACL si no existía Y
+# agrega las líneas si ya existía -- mismo comando para "crear"/"agregar
+# reglas", solo cambia qué hay en "rule_lines" (armadas en Python por
+# ``CiscoVendor.formatear_regla_acl()``, no acá -- son texto CLI ya
+# completo, no hay placeholders individuales por regla).
+create_or_update_acl:
+  primary:
+    parents: "ip access-list extended {name}"
+    lines: []
+    repeat:
+      over: "rule_lines"
+      line: "{item}"
+
+# "no {regla exacta, sin número de secuencia}" adentro del contexto de la
+# ACL saca esa entrada puntual -- confirmado en vivo.
+remove_acl_rules:
+  primary:
+    parents: "ip access-list extended {name}"
+    lines: []
+    repeat:
+      over: "rule_lines"
+      line: "no {item}"
+
+delete_acl:
+  primary:
+    lines: ["no ip access-list extended {name}"]
+
 # RF-GLOBAL-01/03/07 (SRS §3.4) -- confirmado contra cisco01/f3r9s1
 # reales. "show running-config | include snmp-server community" no falla
 # si no hay ninguna configurada (devuelve vacío, no error) -- a diferencia

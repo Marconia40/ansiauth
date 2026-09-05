@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -218,6 +218,91 @@ class GlobalConfigAclInfo(BaseModel):
     rules: list[str] = Field(
         default_factory=list, description="Reglas de la ACL, 1 línea cruda por regla (formato vendor-específico).",
     )
+
+
+class GlobalConfigAclRuleEndpoint(BaseModel):
+    """``source``/``destination`` de una regla de ACL (RF-GLOBAL-05) --
+    sparse, exactamente 1 de los 3. ``network`` acepta CIDR (ej.
+    '172.28.138.0/24'), no wildcard cruda -- el driver de cada vendor
+    calcula la wildcard mask (Cisco) o el formato que corresponda (Huawei,
+    sin confirmar todavía) a partir de la CIDR."""
+
+    any: Optional[bool] = Field(None, description="True para 'any' (cualquier origen/destino).")
+    host: Optional[str] = Field(None, min_length=1, description="1 solo host (ej. '192.0.2.5').")
+    network: Optional[str] = Field(None, min_length=1, description="Red en notación CIDR (ej. '172.28.138.0/24').")
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "GlobalConfigAclRuleEndpoint":
+        provided = [v for v in (self.any, self.host, self.network) if v not in (None, False)]
+        if len(provided) != 1:
+            raise ValueError("exactly one of 'any', 'host', 'network' must be provided")
+        return self
+
+
+class GlobalConfigAclRulePort(BaseModel):
+    """Puerto/rango de una regla de ACL -- solo ``eq``/``range`` por ahora
+    (alcance confirmado con el usuario; ``gt``/``lt``/``neq`` quedan
+    afuera de esta vuelta). Sin restricción de protocolo del lado del
+    schema (ej. mandar esto con protocol='ip') -- si el device lo
+    rechaza, el error real queda visible en el job, mismo criterio que el
+    resto de la app."""
+
+    operator: Literal["eq", "range"] = Field(..., description="'eq' (puerto/servicio único) o 'range' (rango).")
+    value: str = Field(..., min_length=1, description="Puerto/servicio (ej. 'bootps', '443') o inicio del rango.")
+    value2: Optional[str] = Field(None, min_length=1, description="Fin del rango. Requerido solo si operator='range'.")
+
+    @model_validator(mode="after")
+    def _range_needs_value2(self) -> "GlobalConfigAclRulePort":
+        if self.operator == "range" and not self.value2:
+            raise ValueError("'value2' is required when operator='range'")
+        if self.operator == "eq" and self.value2:
+            raise ValueError("'value2' is only valid when operator='range'")
+        return self
+
+
+class GlobalConfigAclRule(BaseModel):
+    """1 regla de ACL (RF-GLOBAL-05) -- shape vendor-agnóstico, cada
+    driver la traduce a su sintaxis real (ver
+    ``CiscoVendor._formatear_regla_acl()``). ``protocol`` es un string
+    libre (ej. 'ip'/'tcp'/'udp'/'icmp'/número) sin enum -- mismo criterio
+    que ``logging.level``/``snmp.version``, el device es la autoridad de
+    qué protocolo es válido, no esta app."""
+
+    action: Literal["permit", "deny"]
+    protocol: str = Field(..., min_length=1)
+    source: GlobalConfigAclRuleEndpoint
+    destination: GlobalConfigAclRuleEndpoint
+    port: Optional[GlobalConfigAclRulePort] = Field(
+        None, description="Puerto/rango opcional (típicamente solo tiene sentido con tcp/udp).",
+    )
+
+
+class GlobalConfigAclCreateRequest(BaseModel):
+    """Request body para ``POST /global-config/acls`` (RF-GLOBAL-05).
+    Crea la ACL si no existe; si ya existe, agrega las reglas nuevas
+    (mismo comando sirve para ambos casos -- entrar al contexto de una
+    ACL extended/advanced la crea si no estaba). No-op por regla: las que
+    ya estén configuradas tal cual no se re-envían (ver
+    ``GlobalConfig._aplicar_acl_create()``)."""
+
+    name: str = Field(..., min_length=1, description="Nombre de la ACL a crear o extender.")
+    rules: list[GlobalConfigAclRule] = Field(..., min_length=1, description="Reglas a agregar (al menos 1).")
+
+
+class GlobalConfigAclRuleRemoveRequest(BaseModel):
+    """Request body para ``DELETE /global-config/acls/rules`` -- mismo
+    shape que ``GlobalConfigAclCreateRequest``, saca las reglas indicadas
+    (no-op para las que no estén configuradas)."""
+
+    name: str = Field(..., min_length=1, description="Nombre de la ACL de la que sacar reglas.")
+    rules: list[GlobalConfigAclRule] = Field(..., min_length=1, description="Reglas a sacar (al menos 1).")
+
+
+class GlobalConfigAclDeleteRequest(BaseModel):
+    """Request body para ``DELETE /global-config/acls`` -- borra la ACL
+    completa (todas sus reglas)."""
+
+    name: str = Field(..., min_length=1, description="Nombre de la ACL a borrar completa.")
 
 
 class GlobalConfigRead(BaseModel):

@@ -11,6 +11,9 @@ from app.models.global_config import GlobalConfig
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.device_sync import SyncedResource
 from app.schemas.global_config import (
+    GlobalConfigAclCreateRequest,
+    GlobalConfigAclDeleteRequest,
+    GlobalConfigAclRuleRemoveRequest,
     GlobalConfigDnsInfo,
     GlobalConfigDnsRemoveRequest,
     GlobalConfigDnsRequest,
@@ -570,6 +573,113 @@ def remove_global_config_log_server(
     dev = require_device(name)
     _authz_device(scope, name, min_role="admin", device=dev)
     _require_driver_with(dev, "remove_log_server")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.post(
+    "/acls",
+    status_code=202,
+    summary="Create an ACL or add rules to it",
+    description=(
+        "Create a new ACL (RF-GLOBAL-05) or add rules to an existing one — "
+        "same operation either way, since entering the ACL's config context "
+        "creates it if it doesn't exist yet. Only extended (Cisco) / "
+        "advanced (Huawei) ACLs are supported here — the protocol/"
+        "destination/port fields need that ACL type; existing standard/"
+        "basic ACLs stay read-only. Per-rule no-op detection: rules already "
+        "present (compared against the live ACL content) are skipped, only "
+        "genuinely new ones are sent. Executed asynchronously, same "
+        "job-polling shape as the other global-config writes. Requires "
+        "admin role or higher."
+    ),
+)
+def create_or_update_global_config_acl(
+    name: str,
+    data: GlobalConfigAclCreateRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(acl_create=data.model_dump())
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "create_or_update_acl")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.delete(
+    "/acls/rules",
+    status_code=202,
+    summary="Remove specific rules from an ACL",
+    description=(
+        "Remove specific rules from an ACL (RF-GLOBAL-05) — same body "
+        "shape as `POST /acls`. Per-rule no-op detection: only rules "
+        "currently present in the ACL are removed, the rest are skipped "
+        "(removing something that isn't there isn't an error). Executed "
+        "asynchronously, same job-polling shape as the other global-config "
+        "writes. Requires admin role or higher."
+    ),
+)
+def remove_global_config_acl_rules(
+    name: str,
+    data: GlobalConfigAclRuleRemoveRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(acl_rule_remove=data.model_dump())
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "remove_acl_rules")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.delete(
+    "/acls",
+    status_code=202,
+    summary="Delete an ACL",
+    description=(
+        "Delete an entire ACL (RF-GLOBAL-05), all its rules included. "
+        "No-op if the ACL doesn't exist. Executed asynchronously, same "
+        "job-polling shape as the other global-config writes. Requires "
+        "admin role or higher."
+    ),
+)
+def delete_global_config_acl(
+    name: str,
+    data: GlobalConfigAclDeleteRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(acl_delete=data.name)
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "delete_acl")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
