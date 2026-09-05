@@ -308,6 +308,16 @@ class CiscoVendor(VendorDriver):
         from app.services.parsers.svi_parser import parse_ios_acl_names
         return parse_ios_acl_names(stdouts[0] if stdouts else "")
 
+    def list_acls(self, device: Device, password: str) -> list[dict]:
+        """Como ``list_acl_names`` pero con las reglas de cada ACL (mismo
+        comando ``show access-lists``, no dispara una lectura aparte) --
+        RF-GLOBAL-01/04, pedido tras ver la respuesta con ``acls`` como
+        solo nombres."""
+        commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        from app.services.parsers.svi_parser import parse_ios_acls
+        return parse_ios_acls(stdouts[0] if stdouts else "")
+
     def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
         """RF-GLOBAL-01/02/03/04 (SRS §3.4). "show snmp" vive en un
         ``_leer()`` aparte (ver nota en ``commands.yaml: get_snmp_status``)
@@ -334,16 +344,16 @@ class CiscoVendor(VendorDriver):
                 raise
 
         try:
-            acls = self.list_acl_names(device, password)
+            acls = self.list_acls(device, password)
         except RuntimeError:
-            logger.exception("get_global_config: list_acl_names failed on device=%s, continuing without ACLs", device.name)
+            logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
             acls = None
 
         from app.services.parsers.global_config_parser import CiscoGlobalConfigParser
         config = CiscoGlobalConfigParser.parse(
             version_output=version_output, hostname_output=hostname_output,
             community_output=community_output, route_output=route_output,
-            snmp_enabled=snmp_enabled,
+            running_config_output=running_config, snmp_enabled=snmp_enabled,
         )
         config.device = device.name
         config.acls = acls

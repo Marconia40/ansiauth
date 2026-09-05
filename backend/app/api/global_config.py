@@ -11,17 +11,22 @@ from app.models.global_config import GlobalConfig
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.device_sync import SyncedResource
 from app.schemas.global_config import (
+    GlobalConfigDnsInfo,
     GlobalConfigDnsRemoveRequest,
     GlobalConfigDnsRequest,
     GlobalConfigHostnameUpdateRequest,
+    GlobalConfigLoggingInfo,
     GlobalConfigLogServerAddRequest,
     GlobalConfigLogServerRemoveRequest,
     GlobalConfigNtpAddRequest,
+    GlobalConfigNtpInfo,
     GlobalConfigNtpRemoveRequest,
     GlobalConfigRead,
+    GlobalConfigRunningConfigRead,
     GlobalConfigRouteAddRequest,
-    GlobalConfigVersionRead,
+    GlobalConfigSnmpInfo,
     GlobalConfigSnmpUpdateRequest,
+    GlobalConfigVersionRead,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,15 +76,17 @@ def _require_driver_with(device: "Device", method_name: str):
     "/",
     summary="Get global configuration",
     description=(
-        "Retrieve the device's actual configuration (running_config), "
-        "hostname, SNMP status, routing table and ACL names "
-        "(RF-GLOBAL-01/03/04 — the 'consultar configuración general' half "
-        "of RF-GLOBAL-01). Device version lives in its own "
-        "`GET .../version` (the 'y/o versión' half). Cache-first — reads "
-        "from the synced cache (populated on device registration, manual "
-        "refresh, or after a write), not live from the equipment. "
-        "Requires observer role or higher; site-scoped users may only "
-        "query devices in their allowed sites."
+        "Retrieve the device's configured settings — hostname, SNMP, "
+        "NTP/DNS/log servers, routing table and ACL names "
+        "(RF-GLOBAL-01/02/03/04). The full raw config dump and the device "
+        "version each live in their own endpoint (`GET .../running-config`, "
+        "`GET .../version`) — kept out of here since they're the heaviest "
+        "part of the response and conceptually distinct from these "
+        "individual settings. Cache-first — reads from the synced cache "
+        "(populated on device registration, manual refresh, or after a "
+        "write), not live from the equipment. Requires observer role or "
+        "higher; site-scoped users may only query devices in their "
+        "allowed sites."
     ),
 )
 def get_global_config(
@@ -96,16 +103,20 @@ def get_global_config(
         "device": dev.name,
         "vendor": dev.vendor,
         **GlobalConfigRead(
-            running_config=config.running_config.splitlines() if config and config.running_config else None,
             hostname=config.hostname if config else None,
-            snmp_enabled=config.snmp_enabled if config else None,
-            snmp_version=config.snmp_version if config else None,
-            snmp_community=config.snmp_community if config else None,
-            snmp_permission=config.snmp_permission if config else None,
-            ntp_server=config.ntp_server if config else None,
-            dns_server=config.dns_server if config else None,
-            log_server=config.log_server if config else None,
-            log_level=config.log_level if config else None,
+            snmp=GlobalConfigSnmpInfo(
+                enabled=config.snmp_enabled if config else None,
+                version=config.snmp_version if config else None,
+                community=config.snmp_community if config else None,
+                permission=config.snmp_permission if config else None,
+                trap_hosts=config.snmp_trap_hosts if config else None,
+            ),
+            ntp=GlobalConfigNtpInfo(servers=config.ntp_servers if config else None),
+            dns=GlobalConfigDnsInfo(servers=config.dns_servers if config else None),
+            logging=GlobalConfigLoggingInfo(
+                servers=config.log_servers if config else None,
+                level=config.log_level if config else None,
+            ),
             routes=config.routes if config else None,
             acls=config.acls if config else None,
         ).model_dump(),
@@ -147,6 +158,47 @@ def get_global_config_version(
         "device": dev.name,
         "vendor": dev.vendor,
         **GlobalConfigVersionRead(**info).model_dump(),
+    }
+    synced_at, sync_error = device_sync_service.metadata(name, "global_config")
+    envelope = SyncedResource(
+        data=payload,
+        synced_at=synced_at,
+        sync_error=sync_error,
+        sync_in_progress=redis_coordinator.esta_ocupado(name),
+    ).model_dump(mode="json")
+    return ok(envelope)
+
+
+@router.get(
+    "/running-config",
+    summary="Get the device's full running-config",
+    description=(
+        "Retrieve the device's full configuration dump ('show "
+        "running-config'/'display current-configuration') as a list of "
+        "lines, with the leading metadata lines stripped (RF-GLOBAL-01, "
+        "the 'consultar configuración general' half of the use case — "
+        "kept in its own endpoint since it's the heaviest part of the "
+        "response and conceptually distinct from `GET /`'s individual "
+        "settings). Cache-first, same underlying sync as `GET /` — this "
+        "doesn't trigger a separate read. Requires observer role or higher."
+    ),
+)
+def get_global_config_running_config(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import device_sync_service, global_config_repository, redis_coordinator
+
+    _authz_device(scope, name, min_role="observer")
+    dev = require_device(name)
+    config = global_config_repository.get(name)
+    payload = {
+        "device": dev.name,
+        "vendor": dev.vendor,
+        **GlobalConfigRunningConfigRead(
+            running_config=config.running_config.splitlines() if config and config.running_config else None,
+        ).model_dump(),
     }
     synced_at, sync_error = device_sync_service.metadata(name, "global_config")
     envelope = SyncedResource(

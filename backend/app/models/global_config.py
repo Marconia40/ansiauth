@@ -54,10 +54,12 @@ class GlobalConfig:
     son el mismo patrón para rutas estáticas.
 
     Los campos de solo-lectura con el mismo nombre base (``snmp_version``,
-    ``ntp_server``, etc.) muestran el último valor conocido -- poblados por
-    ``reconciliar()``/el parser cuando existe lectura implementada para
-    ellos (SNMP sí, ver RF-GLOBAL-02; NTP/DNS/Log el SRS no pide "consultar"
-    aparte, quedan sin poblar hasta que haga falta)."""
+    ``ntp_servers``, etc.) se extraen del ``running_config`` -- poblados por
+    ``reconciliar()``/el parser. ``ntp_servers``/``dns_servers``/
+    ``log_servers`` son listas (puede haber más de 1 configurado, ej. varios
+    ``ip name-server``) a diferencia de ``snmp_version``/``snmp_community``
+    que son 1 solo valor. ``acls`` es una lista de dict (nombre/tipo/reglas
+    de cada ACL), no solo nombres -- ver ``list_acls()`` en cada driver."""
 
     device: str = ""
     # -- escritura, campo simple --
@@ -82,12 +84,21 @@ class GlobalConfig:
     snmp_version: str | None = None
     snmp_community: str | None = None
     snmp_permission: str | None = None
-    ntp_server: str | None = None
-    dns_server: str | None = None
-    log_server: str | None = None
+    snmp_trap_hosts: list[str] | None = None
+    # Cisco: no aplica, siempre None (el trap_host es 1 comando explícito
+    # sin ACL asociada, ver ``set_snmp()``). Huawei: nombre de la ACL atada
+    # al agente vía "snmp-agent acl {nombre}" -- transiente, solo se usa
+    # dentro de ``_aplicar_snmp_config()``/``set_snmp()`` para saber a qué
+    # ACL agregarle una regla al escribir un nuevo trap_host (no se
+    # persiste en cache/DB, se resuelve en vivo vía ``reconciliar()`` en
+    # cada escritura, igual que el resto de las validaciones de no-op).
+    snmp_acl_name: str | None = None
+    ntp_servers: list[str] | None = None
+    dns_servers: list[str] | None = None
+    log_servers: list[str] | None = None
     log_level: str | None = None
     routes: list[dict] | None = None
-    acls: list[str] | None = None
+    acls: list[dict] | None = None
 
     @property
     def mutation_fields(self) -> set[str]:
@@ -246,12 +257,18 @@ class GlobalConfig:
         ``community`` (siempre RO, el permiso ya no es parámetro),
         ``trap_source`` y ``trap_host``+``trap_version`` -- solo se
         reenvían al driver los sub-campos que difieren del estado actual.
-        ``trap_host`` arma un comando que además necesita la community (IOS
-        ``snmp-server host {ip} version {v} {community}`` y el equivalente
-        VRP la llevan en la misma línea) -- si no vino en esta misma
-        request, se usa la ya conocida vía ``reconciliar()``; si no hay
-        ninguna, error explícito (no tiene sentido armar un trap-host sin
-        community resuelta)."""
+        ``trap_host`` se resuelve de 2 formas posibles según lo que
+        ``reconciliar()`` haya encontrado en ``actual.snmp_acl_name``:
+        - Si HAY una ACL atada al agente SNMP (Huawei con ``snmp-agent acl
+          {nombre}`` configurado) -- se manda ``trap_host_acl_name`` al
+          driver, que agrega una regla ``permit source`` a esa ACL (no
+          necesita community, es una operación de ACL, no de SNMP en sí).
+        - Si NO hay ACL (Cisco, o Huawei sin ninguna atada) -- arma un
+          comando que necesita la community (IOS ``snmp-server host {ip}
+          version {v} {community}`` y el equivalente VRP la llevan en la
+          misma línea): si no vino en esta misma request, usa la ya
+          conocida vía ``reconciliar()``; si no hay ninguna, error
+          explícito."""
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         cambios = {}
@@ -266,15 +283,22 @@ class GlobalConfig:
             cambios["trap_source"] = trap_source
         trap_host, trap_version = self.snmp_config.get("trap_host"), self.snmp_config.get("trap_version")
         if trap_host is not None:
-            community_para_trap = community or (actual.snmp_community if actual is not None else None)
-            if not community_para_trap:
-                raise ValueError(
-                    "snmp_config: 'trap_host' requires a resolvable community "
-                    "(either in this same request or already configured on the device)"
-                )
-            cambios["trap_host"] = trap_host
-            cambios["trap_version"] = trap_version
-            cambios["trap_host_community"] = community_para_trap
+            acl_name = actual.snmp_acl_name if actual is not None else None
+            if acl_name is not None:
+                cambios["trap_host"] = trap_host
+                cambios["trap_version"] = trap_version
+                cambios["trap_host_acl_name"] = acl_name
+            else:
+                community_para_trap = community or (actual.snmp_community if actual is not None else None)
+                if not community_para_trap:
+                    raise ValueError(
+                        "snmp_config: 'trap_host' requires a resolvable community "
+                        "(either in this same request or already configured on the device), "
+                        "unless the device already has an ACL bound to its SNMP agent"
+                    )
+                cambios["trap_host"] = trap_host
+                cambios["trap_version"] = trap_version
+                cambios["trap_host_community"] = community_para_trap
         if not cambios:
             return self._noop_resultado("configurar_snmp")
         resultado = device.driver.set_snmp(cambios, device, device.password)
@@ -346,9 +370,10 @@ class GlobalConfig:
         return {**resultado, "accion": "eliminar_ruta"}
 
     def _aplicar_ntp_add(self, device: "Device") -> dict:
-        """RF-GLOBAL-09 (NTP, split). Sin no-op detection -- no hay lectura
-        de NTP servers implementada (mismo gap ya documentado para SNMP
-        community en Huawei), se manda el comando directo."""
+        """RF-GLOBAL-09 (NTP, split). Sin no-op detection -- aunque
+        ``ntp_servers`` ya se puede leer, comparar contra un alta
+        incremental de a 1 no está implementado (fuera de alcance de esta
+        vuelta), se manda el comando directo."""
         resultado = device.driver.add_ntp_server(
             self.ntp_server_add["server"], self.ntp_server_add.get("prefer") or False, device, device.password,
         )
@@ -362,7 +387,8 @@ class GlobalConfig:
 
     def _aplicar_dns_add(self, device: "Device") -> dict:
         """RF-GLOBAL-09 (DNS, split). Sin no-op detection, mismo criterio
-        que NTP (no hay lectura de DNS servers implementada)."""
+        que NTP -- ``dns_servers`` ya se puede leer pero no se compara
+        contra el alta incremental."""
         resultado = device.driver.add_dns_server(self.dns_server_add["server"], device, device.password)
         return {**resultado, "accion": "agregar_dns"}
 
@@ -391,9 +417,10 @@ class GlobalConfig:
             "snmp_version": self.snmp_version,
             "snmp_community": self.snmp_community,
             "snmp_permission": self.snmp_permission,
-            "ntp_server": self.ntp_server,
-            "dns_server": self.dns_server,
-            "log_server": self.log_server,
+            "snmp_trap_hosts": self.snmp_trap_hosts,
+            "ntp_servers": self.ntp_servers,
+            "dns_servers": self.dns_servers,
+            "log_servers": self.log_servers,
             "log_level": self.log_level,
             "routes": self.routes,
             "acls": self.acls,

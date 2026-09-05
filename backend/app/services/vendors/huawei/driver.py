@@ -377,6 +377,18 @@ class HuaweiVendor(VendorDriver):
         from app.services.parsers.svi_parser import parse_vrp_acl_names
         return parse_vrp_acl_names(stdouts[0] if stdouts else "")
 
+    def list_acls(self, device: Device, password: str) -> list[dict]:
+        """Como ``list_acl_names`` pero con las reglas de cada ACL (mismo
+        comando ``display acl all``, no dispara una lectura aparte) --
+        RF-GLOBAL-01/04, pedido tras ver la respuesta con ``acls`` como
+        solo nombres. ``get_global_config()`` también usa este resultado
+        para resolver ``snmp.trap_hosts`` en este vendor -- ver nota en
+        ``set_snmp()``/``HuaweiGlobalConfigParser.parse()``."""
+        commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        from app.services.parsers.svi_parser import parse_vrp_acls
+        return parse_vrp_acls(stdouts[0] if stdouts else "")
+
     def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
         """RF-GLOBAL-01/02/03/04 (SRS §3.4). "display snmp-agent sys-info"
         vive en un ``_leer()`` aparte (ver nota en
@@ -401,15 +413,16 @@ class HuaweiVendor(VendorDriver):
                 raise
 
         try:
-            acls = self.list_acl_names(device, password)
+            acls = self.list_acls(device, password)
         except RuntimeError:
-            logger.exception("get_global_config: list_acl_names failed on device=%s, continuing without ACLs", device.name)
+            logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
             acls = None
 
         from app.services.parsers.global_config_parser import HuaweiGlobalConfigParser
         config = HuaweiGlobalConfigParser.parse(
             version_output=version_output, hostname_output=hostname_output,
-            route_output=route_output, snmp_enabled=snmp_enabled,
+            route_output=route_output, running_config_output=running_config,
+            snmp_enabled=snmp_enabled, acls=acls,
         )
         config.device = device.name
         config.acls = acls
@@ -440,7 +453,15 @@ class HuaweiVendor(VendorDriver):
         vendor. Levanta ``NotImplementedError`` a propósito en vez de
         mandar el comando roto silenciosamente -- el error queda visible
         pollendo el job (``GET /jobs/{id}``), mismo lugar donde ya
-        aparecería un error real del device."""
+        aparecería un error real del device. Sin ``target-host`` leíble,
+        ``snmp.trap_hosts`` en la lectura (``get_global_config()``) NO
+        viene de un comando de trap real acá -- se resuelve cruzando
+        ``snmp-agent acl {nombre}`` (la ACL atada al agente SNMP) contra
+        ``acls`` (ver ``HuaweiGlobalConfigParser.parse()``), tomando TODOS
+        los ``permit source`` de esa ACL. Confirmado en vivo que la ACL
+        ``acceso-snmp`` lista exactamente las mismas IPs que el
+        ``trap_host`` de Cisco en el mismo par de devices -- pedido
+        explícito del usuario tras notar la coincidencia."""
         if "trap_host" in cambios:
             raise NotImplementedError(
                 "HuaweiVendor.set_snmp: 'trap_host' not supported yet -- the real VRP command "

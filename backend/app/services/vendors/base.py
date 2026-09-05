@@ -940,11 +940,23 @@ class VendorDriver(ABC):
         """Names/numbers of every ACL configured on the device -- used by
         the API layer (RF-INTERV-04's "ACL previamente creada... e
         identificador válido" precondition) to reject binding an ACL that
-        doesn't exist, before enqueueing the job. Minimal read, not the
-        full RF-GLOBAL-04 (details of each ACL's rules) -- out of scope
-        here."""
+        doesn't exist, before enqueueing the job. Minimal read -- see
+        ``list_acls()`` for the full RF-GLOBAL-04 version (each ACL's
+        rules too, used by ``get_global_config()``)."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement list_acl_names yet"
+        )
+
+    def list_acls(self, device: Device, password: str) -> list[dict]:
+        """Like ``list_acl_names()`` but with each ACL's raw rules too
+        (RF-GLOBAL-01/04 -- "el contenido de cada una", requested after
+        seeing ``get_global_config()``'s ``acls`` field with just names).
+        Shape: ``[{"name": str, "type": str, "rules": list[str]}, ...]``,
+        rules kept as raw lines (not further parsed into source/dest/
+        protocol) -- same command as ``list_acl_names()``, no extra
+        device read."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement list_acls yet"
         )
 
     def set_svi_dhcp_relay(

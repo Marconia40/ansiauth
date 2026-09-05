@@ -191,12 +191,13 @@ class DeviceGlobalConfigModel(Base):
     snmp_version = Column(String, nullable=True)
     snmp_community = Column(String, nullable=True)
     snmp_permission = Column(String, nullable=True)
-    ntp_server = Column(String, nullable=True)
-    dns_server = Column(String, nullable=True)
-    log_server = Column(String, nullable=True)
+    snmp_trap_hosts = Column(JSON, nullable=True)  # lista de str. Cisco: IPs de "snmp-server host"; Huawei: hosts permitidos por la ACL atada al agente ("snmp-agent acl"), target-host en sí no tiene lectura
+    ntp_servers = Column(JSON, nullable=True)  # lista de str, puede haber más de 1 configurado
+    dns_servers = Column(JSON, nullable=True)  # lista de str, puede haber más de 1 configurado
+    log_servers = Column(JSON, nullable=True)  # lista de str, puede haber más de 1 configurado
     log_level = Column(String, nullable=True)
     routes = Column(JSON, nullable=True)  # lista de dict (destino/mask/next-hop/interfaz)
-    acls = Column(JSON, nullable=True)  # lista de str (nombres) o dict (nombre+reglas)
+    acls = Column(JSON, nullable=True)  # lista de dict (nombre/tipo/reglas)
 
 
 class JobModel(Base):

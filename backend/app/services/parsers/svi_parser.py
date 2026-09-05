@@ -385,18 +385,96 @@ def parse_ios_acl_names(show_access_lists_output: str) -> list[str]:
     ]
 
 
-# Confirmado contra config real de producción, ambos casos: ACLs numeradas
-# ("Advanced ACL 3000, 8 rules") y con nombre ("Basic Name ACL
-# acceso-snmp, 2 rules" -- la palabra "Name" de más solo aparece cuando la
-# ACL tiene nombre, no número). "Total nonempty ACL number is 0" (caso
-# vacío) confirmado aparte contra el device real de lab.
+# Como ``_IOS_ACL_HEADER`` pero con grupos separados para tipo/nombre --
+# usado por ``parse_ios_acls()`` (RF-GLOBAL-01/04, contenido completo de
+# cada ACL pedido por el usuario tras ver la respuesta plana). Se mantiene
+# como regex aparte en vez de tocar ``_IOS_ACL_HEADER`` para no arriesgar
+# ``parse_ios_acl_names()`` (ya confirmado en vivo, usado también por
+# ``svis.py`` para la precondición "ACL previamente creada").
+_IOS_ACL_HEADER_FULL = re.compile(r"^(Standard|Extended) IP access list (\S+)", re.IGNORECASE)
+
+
+def parse_ios_acls(show_access_lists_output: str) -> list[dict]:
+    """Mismo alcance que ``parse_ios_acl_names`` (solo ACLs IPv4, IPv6
+    queda fuera) pero devuelve también las reglas de cada una tal cual las
+    imprime el device (sin re-estructurar cada regla en source/dest/
+    protocolo -- alcance explícitamente pedido: "que se vea el contenido
+    de cada una", no una ACL completamente parseada). Cualquier línea sin
+    sangría que no matchea un header (ej. "IPv6 access list ...") corta la
+    ACL en curso para no atribuirle reglas de otra sección."""
+    acls: list[dict] = []
+    current: dict | None = None
+    for raw in show_access_lists_output.splitlines():
+        line = strip_ansi(raw).rstrip()
+        if not line.strip():
+            continue
+        m = _IOS_ACL_HEADER_FULL.match(line)
+        if m:
+            current = {"name": m.group(2), "type": m.group(1).lower(), "rules": []}
+            acls.append(current)
+        elif current is not None and line[:1].isspace():
+            current["rules"].append(line.strip())
+        else:
+            current = None
+    return acls
+
+
+# Confirmado contra config real de producción, 3 formatos distintos según
+# plataforma/firmware: ACLs numeradas puras ("Advanced ACL 3000, 8 rules"),
+# con nombre y la palabra "Name" de más ("Basic Name ACL acceso-snmp, 2
+# rules") y con nombre SIN "Name" pero con el número interno de grupo
+# pegado atrás ("Basic ACL acceso-snmp 2998, 2 rules" -- confirmado contra
+# f3r9s2 real, este formato hacía que el regex viejo (que esperaba 1 solo
+# token entre "ACL" y la coma) nunca matcheara nada ahí, así que
+# ``acls`` volvía siempre `[]` aunque el device sí tuviera ACLs). El
+# primer token entre "ACL" y la coma es siempre el nombre/número real que
+# el usuario reconoce; un 2do token (cuando existe) es el ID interno de
+# grupo VRP, se descarta. "Total nonempty ACL number is 0" (caso vacío)
+# confirmado aparte contra el device real de lab.
 _VRP_ACL_HEADER = re.compile(
-    r"^(?:Basic|Advanced|Ethernet frame|User)\s+(?:Name\s+)?ACL\s+(\S+?),", re.IGNORECASE,
+    r"^(?:Basic|Advanced|Ethernet frame|User)\s+(?:Name\s+)?ACL\s+(.+?),", re.IGNORECASE,
 )
 
 
 def parse_vrp_acl_names(display_acl_all_output: str) -> list[str]:
-    return [
-        m.group(1) for raw in display_acl_all_output.splitlines()
-        if (m := _VRP_ACL_HEADER.match(strip_ansi(raw).rstrip()))
-    ]
+    nombres = []
+    for raw in display_acl_all_output.splitlines():
+        m = _VRP_ACL_HEADER.match(strip_ansi(raw).rstrip())
+        if m:
+            nombres.append(m.group(1).split()[0])
+    return nombres
+
+
+# Como ``_VRP_ACL_HEADER`` pero con grupos separados para tipo/nombre/ID
+# interno (descartado) -- usado por ``parse_vrp_acls()``, mismo criterio
+# que ``_IOS_ACL_HEADER_FULL`` (regex aparte para no arriesgar
+# ``parse_vrp_acl_names()``, ya confirmado en vivo y usado por
+# ``svis.py``). Confirmado en vivo contra f3r9s2 real: "Basic ACL
+# acceso-snmp 2998, 2 rules" seguido de "Acl's step is 5" (metadata, no es
+# una regla) y las reglas mismas ("rule 5 permit source 172.19.19.46 0").
+_VRP_ACL_HEADER_FULL = re.compile(
+    r"^(Basic|Advanced|Ethernet frame|User)\s+(?:Name\s+)?ACL\s+(\S+)(?:\s+\d+)?,", re.IGNORECASE,
+)
+_VRP_ACL_RULE_LINE = re.compile(r"^rule\s+\d+\b", re.IGNORECASE)
+
+
+def parse_vrp_acls(display_acl_all_output: str) -> list[dict]:
+    """Mismo alcance que ``parse_vrp_acl_names`` pero con las reglas de
+    cada ACL, tal cual las imprime el device (ver docstring de
+    ``parse_ios_acls`` -- mismo criterio de "contenido crudo", no
+    estructurado). Descarta "Acl's step is N" (metadata de numeración, no
+    una regla) y la línea de encabezado global ("Total nonempty ACL
+    number is N")."""
+    acls: list[dict] = []
+    current: dict | None = None
+    for raw in display_acl_all_output.splitlines():
+        line = strip_ansi(raw).strip()
+        if not line:
+            continue
+        m = _VRP_ACL_HEADER_FULL.match(line)
+        if m:
+            current = {"name": m.group(2), "type": m.group(1).lower(), "rules": []}
+            acls.append(current)
+        elif current is not None and _VRP_ACL_RULE_LINE.match(line):
+            current["rules"].append(line)
+    return acls

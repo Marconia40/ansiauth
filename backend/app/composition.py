@@ -124,8 +124,9 @@ def _global_config_to_orm(g: "GlobalConfig"):
         device_version=g.device_version,
         snmp_enabled=g.snmp_enabled, snmp_version=g.snmp_version,
         snmp_community=g.snmp_community, snmp_permission=g.snmp_permission,
-        ntp_server=g.ntp_server, dns_server=g.dns_server,
-        log_server=g.log_server, log_level=g.log_level,
+        snmp_trap_hosts=g.snmp_trap_hosts,
+        ntp_servers=g.ntp_servers, dns_servers=g.dns_servers,
+        log_servers=g.log_servers, log_level=g.log_level,
         routes=g.routes, acls=g.acls,
     )
 
@@ -137,8 +138,9 @@ def _global_config_to_domain(row) -> "GlobalConfig":
         device_version=row.device_version,
         snmp_enabled=row.snmp_enabled, snmp_version=row.snmp_version,
         snmp_community=row.snmp_community, snmp_permission=row.snmp_permission,
-        ntp_server=row.ntp_server, dns_server=row.dns_server,
-        log_server=row.log_server, log_level=row.log_level,
+        snmp_trap_hosts=row.snmp_trap_hosts,
+        ntp_servers=row.ntp_servers, dns_servers=row.dns_servers,
+        log_servers=row.log_servers, log_level=row.log_level,
         routes=row.routes, acls=row.acls,
     )
 

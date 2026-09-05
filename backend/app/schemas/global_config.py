@@ -106,29 +106,24 @@ class GlobalConfigVersionRead(BaseModel):
     """Wire-format para ``GET /global-config/version`` (RF-GLOBAL-01, la
     mitad "y/o versión" del use case, separada de la config a pedido del
     usuario). Mismo cache que el resto -- no dispara una lectura nueva.
-    ``software_version``/``model``/``serial_number``/``uptime`` son
-    best-effort (ver ``parse_version_info()``, el formato de 'show
-    version'/'display version' varía mucho incluso dentro del mismo
-    vendor) -- ``raw`` siempre viene completo por si alguno da ``null``."""
+    ``software_version``/``model``/``uptime`` son best-effort (ver
+    ``parse_version_info()``, el formato de 'show version'/'display
+    version' varía mucho incluso dentro del mismo vendor). ``raw`` y
+    ``serial_number`` se sacaron de la respuesta a pedido del usuario --
+    ``parse_version_info()`` los sigue calculando internamente, solo no
+    se exponen acá."""
 
-    raw: Optional[str] = Field(None, description="Salida completa y sin procesar de 'show version'/'display version'.")
     software_version: Optional[str] = Field(None, description="Versión de software extraída (best-effort).")
     model: Optional[str] = Field(None, description="Modelo de hardware extraído (best-effort).")
-    serial_number: Optional[str] = Field(None, description="Número de serie extraído (best-effort, no siempre presente en VRP).")
     uptime: Optional[str] = Field(None, description="Uptime tal cual lo reporta el device (best-effort).")
 
 
-class GlobalConfigRead(BaseModel):
-    """Wire-format representation de "Configuración Global" (SRS §3.4,
-    RF-GLOBAL-01/02/03/04) returned by ``GET /global-config``.
-
-    Mirrors ``app.models.global_config.GlobalConfig`` field-for-field
-    (solo los campos de lectura -- los de escritura todavía no tienen
-    endpoint, ver plan). ``device_version`` NO va acá a propósito -- RF-GLOBAL-01
-    describe "consultar configuración general Y/O versión" como 2 cosas, y
-    el usuario pidió separarlas: versión vive en su propio
-    ``GET /global-config/version`` (``GlobalConfigVersionRead``), este
-    endpoint queda enfocado solo en la config real del device."""
+class GlobalConfigRunningConfigRead(BaseModel):
+    """Wire-format para ``GET /global-config/running-config`` -- separado
+    del resto a pedido del usuario (el dump completo es lo más pesado de
+    la respuesta y conceptualmente distinto de "los ajustes puntuales que
+    configuramos", que quedan en ``GET /global-config/``). Mismo cache que
+    el resto -- no dispara una lectura nueva."""
 
     running_config: Optional[list[str]] = Field(
         None,
@@ -139,24 +134,124 @@ class GlobalConfigRead(BaseModel):
             "GlobalConfig.running_config)."
         ),
     )
-    hostname: Optional[str] = Field(None, description="Hostname configurado en el device, o null.")
-    snmp_enabled: Optional[bool] = Field(
+
+
+class GlobalConfigSnmpInfo(BaseModel):
+    """Sub-objeto SNMP de ``GET /global-config`` -- agrupado a pedido del
+    usuario (la respuesta plana con 4 campos ``snmp_*`` sueltos mezclados
+    con hostname/routes/acls "no se veía bien")."""
+
+    enabled: Optional[bool] = Field(
         None, description="True si SNMP está habilitado en el device, False si no, null si no se pudo determinar.",
     )
-    snmp_version: Optional[str] = Field(None, description="Versión de SNMP, o null.")
-    snmp_community: Optional[str] = Field(
-        None, description="Community SNMP configurada, o null (incluye el caso SNMP deshabilitado).",
+    version: Optional[str] = Field(
+        None,
+        description=(
+            "Versión SNMP -- en VRP viene de 'snmp-agent sys-info version' (puede ser "
+            "más de 1, ej. 'v2c v3'); en IOS clásico no hay ajuste de versión "
+            "independiente, se toma de la línea de trap-host si hay una configurada. "
+            "Null si no se pudo determinar ninguna."
+        ),
     )
-    snmp_permission: Optional[str] = Field(
-        None, description="Permiso de la community ('RO'/'RW'), o null.",
+    community: Optional[str] = Field(
+        None,
+        description=(
+            "Community SNMP configurada, o null (incluye el caso SNMP deshabilitado). "
+            "En Huawei siempre da null aunque haya una configurada -- VRP la guarda cifrada, "
+            "no se puede revertir del lado del parser."
+        ),
     )
-    ntp_server: Optional[str] = Field(None, description="Servidor NTP configurado, o null.")
-    dns_server: Optional[str] = Field(None, description="Servidor DNS configurado, o null.")
-    log_server: Optional[str] = Field(None, description="Servidor de Syslog configurado, o null.")
-    log_level: Optional[str] = Field(None, description="Nivel de log configurado, o null.")
+    permission: Optional[str] = Field(None, description="Permiso de la community ('RO'/'RW'), o null.")
+    trap_hosts: Optional[list[str]] = Field(
+        None,
+        description=(
+            "En Cisco, IPs destino reales de los traps SNMP ('snmp-server host', puede haber "
+            "más de 1 línea). En Huawei no hay trap-host leíble ('snmp-agent target-host' no "
+            "tiene lectura implementada) -- se toman en cambio TODOS los hosts permitidos por "
+            "la ACL que 'snmp-agent acl {nombre}' ata al agente SNMP (misma ACL que aparece "
+            "en 'acls'). Null si no hay ninguno configurado o no se pudo resolver."
+        ),
+    )
+
+
+class GlobalConfigNtpInfo(BaseModel):
+    """Sub-objeto NTP -- ver nota de ``GlobalConfigSnmpInfo``."""
+
+    servers: Optional[list[str]] = Field(
+        None, description="Servidores NTP configurados (todos, no solo el primero), o null.",
+    )
+
+
+class GlobalConfigDnsInfo(BaseModel):
+    """Sub-objeto DNS -- mismo criterio que ``GlobalConfigNtpInfo``."""
+
+    servers: Optional[list[str]] = Field(
+        None, description="Servidores DNS configurados (todos, no solo el primero), o null.",
+    )
+
+
+class GlobalConfigLoggingInfo(BaseModel):
+    """Sub-objeto de logging -- mismo criterio que ``GlobalConfigNtpInfo``."""
+
+    servers: Optional[list[str]] = Field(
+        None, description="Servidores de Syslog configurados (todos, no solo el primero), o null.",
+    )
+    level: Optional[str] = Field(None, description="Nivel de log configurado, o null.")
+
+
+class GlobalConfigAclInfo(BaseModel):
+    """1 ACL dentro de ``GlobalConfigRead.acls`` -- reshape pedido por el
+    usuario tras ver la respuesta con ``acls`` como solo nombres ("la acl
+    debería especificar el contenido de cada una"). ``rules`` queda como
+    líneas crudas tal cual las imprime el device (no se re-estructura cada
+    regla en source/dest/protocolo/etc. -- alcance explícitamente pedido,
+    ver ``list_acls()`` en cada driver)."""
+
+    name: str = Field(..., description="Nombre o número de la ACL.")
+    type: Optional[str] = Field(
+        None,
+        description=(
+            "Tipo de ACL tal cual lo reporta el device -- 'standard'/'extended' en Cisco, "
+            "'basic'/'advanced'/'ethernet frame'/'user' en Huawei."
+        ),
+    )
+    rules: list[str] = Field(
+        default_factory=list, description="Reglas de la ACL, 1 línea cruda por regla (formato vendor-específico).",
+    )
+
+
+class GlobalConfigRead(BaseModel):
+    """Wire-format representation de "Configuración Global" (SRS §3.4,
+    RF-GLOBAL-01/02/03/04) returned by ``GET /global-config``.
+
+    Los campos relacionados van agrupados en sub-objetos (``snmp``/``ntp``/
+    ``dns``/``logging``) en vez de todos sueltos al mismo nivel que
+    ``hostname``/``routes``/``acls`` -- reshape pedido por el usuario tras
+    ver la respuesta plana original. ``device_version``/``running_config``
+    NO van acá a propósito -- versión vive en su propio ``GET
+    /global-config/version`` (RF-GLOBAL-01 describe "consultar
+    configuración general Y/O versión" como 2 cosas) y el dump completo de
+    running-config vive en su propio ``GET /global-config/running-config``
+    (es lo más pesado de la respuesta, y conceptualmente distinto de "los
+    ajustes puntuales" que sí quedan acá) -- ambos separados a pedido del
+    usuario."""
+
+    hostname: Optional[str] = Field(None, description="Hostname configurado en el device, o null.")
+    snmp: GlobalConfigSnmpInfo = Field(default_factory=GlobalConfigSnmpInfo)
+    ntp: GlobalConfigNtpInfo = Field(default_factory=GlobalConfigNtpInfo)
+    dns: GlobalConfigDnsInfo = Field(default_factory=GlobalConfigDnsInfo)
+    logging: GlobalConfigLoggingInfo = Field(default_factory=GlobalConfigLoggingInfo)
     routes: Optional[list[dict]] = Field(
-        None, description="Tabla de ruteo (destino/next-hop/interfaz), o null si no se pudo leer.",
+        None,
+        description=(
+            "Tabla de ruteo (destino/next_hop/interfaz), o null si no se pudo leer. "
+            "next_hop/interfaz son individualmente null según el tipo de ruta -- una "
+            "conectada no tiene next_hop (por definición, sale directo por la interfaz), "
+            "y una ruta estática vía next-hop puede no traer interfaz si el device no la "
+            "resuelve en el 'show ip route'/'display ip routing-table' (confirmado en vivo, "
+            "no es un gap del parser)."
+        ),
     )
-    acls: Optional[list[str]] = Field(
-        None, description="Nombres/números de las ACLs configuradas en el device, o null.",
+    acls: Optional[list[GlobalConfigAclInfo]] = Field(
+        None, description="ACLs configuradas en el device, con sus reglas, o null.",
     )
