@@ -198,6 +198,8 @@ class DeviceGlobalConfigModel(Base):
     log_level = Column(String, nullable=True)
     routes = Column(JSON, nullable=True)  # lista de dict (destino/mask/next-hop/interfaz)
     acls = Column(JSON, nullable=True)  # lista de dict (nombre/tipo/reglas)
+    arp_table = Column(JSON, nullable=True)  # lista de dict (ip/mac/interface/vlan/type/age), tabla completa sin filtrar
+    mac_table = Column(JSON, nullable=True)  # lista de dict (mac/vlan/interface/type), tabla completa sin filtrar
 
 
 class JobModel(Base):

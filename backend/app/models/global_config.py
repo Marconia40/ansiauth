@@ -99,6 +99,17 @@ class GlobalConfig:
     log_level: str | None = None
     routes: list[dict] | None = None
     acls: list[dict] | None = None
+    # ARP/MAC -- agregadas al cache/sync a pedido del usuario (eran la
+    # única lectura 100% en vivo de toda la app, cada GET pagaba el
+    # overhead completo de una sesión SSH/Ansible nueva). Se aceptan
+    # "desactualizadas hasta el próximo sync" a cambio de que el GET sea
+    # instantáneo -- mismo trade-off que el resto del cache de esta app.
+    # Se leen SIEMPRE completas (sin ``include``) durante el sync -- el
+    # filtro ``include`` de ``GET /arp``/``GET /mac`` ahora se aplica del
+    # lado de la API sobre estos datos ya cacheados, no como un pipe en el
+    # device (ver ``api/global_config.py``).
+    arp_table: list[dict] | None = None
+    mac_table: list[dict] | None = None
 
     @property
     def mutation_fields(self) -> set[str]:
@@ -424,6 +435,8 @@ class GlobalConfig:
             "log_level": self.log_level,
             "routes": self.routes,
             "acls": self.acls,
+            "arp_table": self.arp_table,
+            "mac_table": self.mac_table,
         }
 
     @classmethod

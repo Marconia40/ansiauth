@@ -32,12 +32,25 @@ from app.schemas.global_config import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# ARP/MAC `include` viaja tal cual a una línea de comando sobre una sesión
-# SSH interactiva ("show arp | include {include}") -- un "\r"/"\n" adentro
-# podría inyectar un 2do comando en la sesión. Charset conservador que
-# cubre IPs, MACs (forma con puntos de Cisco y con guiones de Huawei) e
-# interfaces, sin espacios/pipes/control chars.
+# ARP/MAC `include` -- filtro de sub-string sobre las filas ya cacheadas
+# (ver ``get_global_config_arp``/``_mac``). Ya NO viaja a una línea de
+# comando sobre SSH (ARP/MAC se agregaron al cache, dejaron de leerse en
+# vivo por request) -- el charset conservador se mantiene igual por
+# higiene de API, no por necesidad de evitar inyección de comandos.
 _ARP_MAC_INCLUDE_RE = r"^[A-Za-z0-9:./_-]{1,64}$"
+
+
+def _filtrar_entradas_arp_mac(entries: "list[dict] | None", include: "str | None") -> "list[dict] | None":
+    """Sub-string case-insensitive contra todos los valores de cada fila
+    (mismo espíritu que el `| include` del device que reemplaza, pero
+    corriendo en Python sobre datos ya cacheados en vez de en el device)."""
+    if entries is None or not include:
+        return entries
+    needle = include.lower()
+    return [
+        entry for entry in entries
+        if needle in " ".join(str(v) for v in entry.values() if v is not None).lower()
+    ]
 
 
 def _authz_device(
@@ -566,13 +579,17 @@ def remove_global_config_log_server(
     "/arp",
     summary="Get ARP table",
     description=(
-        "Read the device's ARP table live (not cached — this table "
-        "changes constantly, caching it would go stale immediately, "
-        "unlike every other GET in this app), parsed into structured rows "
+        "Retrieve the device's ARP table, parsed into structured rows "
         "(`ip`, `mac`, `interface`, `vlan`, `type`, `age` — fields not "
-        "reported by a given vendor come back `null`). `include` is "
-        "optional and still passed as-is to the device's own `| include` "
-        "filter before parsing, if you want to narrow the table server-side. "
+        "reported by a given vendor come back `null`). Cache-first, same "
+        "underlying sync as `GET /` — this used to be the only live, "
+        "uncached read in this app (the table changes constantly), but "
+        "paid the full cost of a new SSH/Ansible session on every request; "
+        "now it's read in full during the regular sync and served from "
+        "cache like everything else, accepting staleness between syncs in "
+        "exchange for an instant response. `include` is optional and now "
+        "filters the cached rows in Python (case-insensitive substring "
+        "match across all fields) instead of piping through the device. "
         "Requires observer role or higher."
     ),
 )
@@ -582,25 +599,36 @@ def get_global_config_arp(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import device_sync_service, global_config_repository, redis_coordinator
+
     _authz_device(scope, name, min_role="observer")
     dev = require_device(name)
-    _require_driver_with(dev, "get_arp_table")
-    try:
-        entries = dev.driver.get_arp_table(include, dev, dev.password)
-    except RuntimeError as exc:
-        raise DeviceExecutionError(str(exc))
-    return ok({"device": dev.name, "entries": entries})
+    config = global_config_repository.get(name)
+    payload = {
+        "device": dev.name,
+        "vendor": dev.vendor,
+        "entries": _filtrar_entradas_arp_mac(config.arp_table if config else None, include),
+    }
+    synced_at, sync_error = device_sync_service.metadata(name, "global_config")
+    envelope = SyncedResource(
+        data=payload,
+        synced_at=synced_at,
+        sync_error=sync_error,
+        sync_in_progress=redis_coordinator.esta_ocupado(name),
+    ).model_dump(mode="json")
+    return ok(envelope)
 
 
 @router.get(
     "/mac",
     summary="Get MAC address table",
     description=(
-        "Read the device's MAC address table live (not cached, same "
-        "reason as `/arp`), parsed into structured rows (`mac`, `vlan`, "
-        "`interface`, `type`). `include` is optional and still passed "
-        "as-is to the device's own `| include` filter before parsing. "
-        "Requires observer role or higher."
+        "Retrieve the device's MAC address table, parsed into structured "
+        "rows (`mac`, `vlan`, `interface`, `type`). Cache-first, same "
+        "criteria as `/arp` (see its description for why this changed from "
+        "a live read). `include` filters the cached rows in Python "
+        "(case-insensitive substring match across all fields). Requires "
+        "observer role or higher."
     ),
 )
 def get_global_config_mac(
@@ -609,11 +637,21 @@ def get_global_config_mac(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
+    from app.composition import device_sync_service, global_config_repository, redis_coordinator
+
     _authz_device(scope, name, min_role="observer")
     dev = require_device(name)
-    _require_driver_with(dev, "get_mac_table")
-    try:
-        entries = dev.driver.get_mac_table(include, dev, dev.password)
-    except RuntimeError as exc:
-        raise DeviceExecutionError(str(exc))
-    return ok({"device": dev.name, "entries": entries})
+    config = global_config_repository.get(name)
+    payload = {
+        "device": dev.name,
+        "vendor": dev.vendor,
+        "entries": _filtrar_entradas_arp_mac(config.mac_table if config else None, include),
+    }
+    synced_at, sync_error = device_sync_service.metadata(name, "global_config")
+    envelope = SyncedResource(
+        data=payload,
+        synced_at=synced_at,
+        sync_error=sync_error,
+        sync_in_progress=redis_coordinator.esta_ocupado(name),
+    ).model_dump(mode="json")
+    return ok(envelope)

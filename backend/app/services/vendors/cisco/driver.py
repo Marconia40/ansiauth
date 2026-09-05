@@ -324,7 +324,12 @@ class CiscoVendor(VendorDriver):
         -- confirmado contra device real que falla con rc != 0 cuando SNMP
         no está habilitado, y que ``_leer()`` aborta el batch entero ante
         el primer comando fallido (perdería version/hostname/routes
-        también si viviera en la misma tanda)."""
+        también si viviera en la misma tanda). ACLs/ARP/MAC son 3 lecturas
+        más, cada 1 con su propio try/except -- si alguna falla, el resto
+        del sync sigue (mismo criterio, no todo-o-nada). ARP/MAC se
+        agregaron al cache recién -- antes eran la única lectura en vivo
+        por-request de toda la app, el usuario pidió sumarlas al sync tras
+        notar la latencia de pagar una sesión SSH nueva por cada GET."""
         commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
         version_output = stdouts[0] if len(stdouts) > 0 else ""
@@ -349,6 +354,18 @@ class CiscoVendor(VendorDriver):
             logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
             acls = None
 
+        try:
+            arp_table = self.get_arp_table(device, password)
+        except RuntimeError:
+            logger.exception("get_global_config: get_arp_table failed on device=%s, continuing without ARP", device.name)
+            arp_table = None
+
+        try:
+            mac_table = self.get_mac_table(device, password)
+        except RuntimeError:
+            logger.exception("get_global_config: get_mac_table failed on device=%s, continuing without MAC", device.name)
+            mac_table = None
+
         from app.services.parsers.global_config_parser import CiscoGlobalConfigParser
         config = CiscoGlobalConfigParser.parse(
             version_output=version_output, hostname_output=hostname_output,
@@ -357,6 +374,8 @@ class CiscoVendor(VendorDriver):
         )
         config.device = device.name
         config.acls = acls
+        config.arp_table = arp_table
+        config.mac_table = mac_table
         config.running_config = strip_known_preamble(running_config, _RUNNING_CONFIG_PREAMBLE, separador="!") or None
         return config
 
@@ -419,29 +438,25 @@ class CiscoVendor(VendorDriver):
         """RF-GLOBAL-09 (Log, delete). Confirmado en vivo contra cisco01."""
         return self._aplicar_desde_template("remove_log_host", {"log_server": server}, device, password)
 
-    def get_arp_table(self, include: "str | None", device: Device, password: str) -> list[dict]:
-        """Tabla ARP en vivo, sin cache -- primer par de lecturas de esta
-        app así (el resto es cache-first vía ``DeviceSyncService``), la
-        tabla ARP cambia constantemente y cachearla la volvería vieja al
-        instante. ``include`` ya viene validado (charset seguro, sin
-        `\\r`/`\\n`) por el schema antes de llegar acá -- arma el comando
-        en Python porque es el único caso de sufijo opcional de 1 sola
-        pieza (forzarlo a 2 templates YAML es más artificial). Parseado a
-        filas estructuradas (RF-GLOBAL fuera de alcance, pedido del
-        usuario) -- confirmado en vivo contra f3r9s1, ver
-        ``arp_mac_parser.py``."""
+    def get_arp_table(self, device: Device, password: str) -> list[dict]:
+        """RF-GLOBAL fuera de alcance, pedido del usuario. Se lee completa
+        (sin filtro) durante ``get_global_config()`` y se cachea -- dejó de
+        ser lectura en vivo por request (única excepción a cache-first que
+        tenía esta app) porque cada ``GET /arp`` pagaba el overhead
+        completo de una sesión SSH/Ansible nueva; ``include`` ahora filtra
+        en Python sobre el resultado ya cacheado (ver
+        ``api/global_config.py``). Parseado a filas estructuradas,
+        confirmado en vivo contra f3r9s1, ver ``arp_mac_parser.py``."""
         from app.services.parsers.arp_mac_parser import parse_cisco_arp
 
-        comando = f"show arp | include {include}" if include else "show arp"
-        raw = self._leer([comando], device, password)[0]
+        raw = self._leer(["show arp"], device, password)[0]
         return parse_cisco_arp(raw)
 
-    def get_mac_table(self, include: "str | None", device: Device, password: str) -> list[dict]:
+    def get_mac_table(self, device: Device, password: str) -> list[dict]:
         """Mismo criterio que ``get_arp_table()``."""
         from app.services.parsers.arp_mac_parser import parse_cisco_mac
 
-        comando = f"show mac address-table | include {include}" if include else "show mac address-table"
-        raw = self._leer([comando], device, password)[0]
+        raw = self._leer(["show mac address-table"], device, password)[0]
         return parse_cisco_mac(raw)
 
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:

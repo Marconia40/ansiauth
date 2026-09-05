@@ -128,6 +128,7 @@ def _global_config_to_orm(g: "GlobalConfig"):
         ntp_servers=g.ntp_servers, dns_servers=g.dns_servers,
         log_servers=g.log_servers, log_level=g.log_level,
         routes=g.routes, acls=g.acls,
+        arp_table=g.arp_table, mac_table=g.mac_table,
     )
 
 
@@ -142,6 +143,7 @@ def _global_config_to_domain(row) -> "GlobalConfig":
         ntp_servers=row.ntp_servers, dns_servers=row.dns_servers,
         log_servers=row.log_servers, log_level=row.log_level,
         routes=row.routes, acls=row.acls,
+        arp_table=row.arp_table, mac_table=row.mac_table,
     )
 
 

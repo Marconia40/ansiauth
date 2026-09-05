@@ -989,12 +989,16 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement set_snmp yet"
         )
 
-    def get_arp_table(self, include: "str | None", device: Device, password: str) -> "list[dict]":
+    def get_arp_table(self, device: Device, password: str) -> "list[dict]":
+        """Tabla completa, sin filtrar -- se lee durante ``get_global_config()``
+        y se cachea; ``include`` ahora se aplica del lado de la API sobre
+        los datos ya cacheados (ver ``api/global_config.py``), no acá."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_arp_table yet"
         )
 
-    def get_mac_table(self, include: "str | None", device: Device, password: str) -> "list[dict]":
+    def get_mac_table(self, device: Device, password: str) -> "list[dict]":
+        """Como ``get_arp_table()`` -- tabla completa, sin filtrar."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_mac_table yet"
         )

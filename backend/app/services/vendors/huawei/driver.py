@@ -394,7 +394,12 @@ class HuaweiVendor(VendorDriver):
         vive en un ``_leer()`` aparte (ver nota en
         ``commands.yaml: get_snmp_status``) -- mismo motivo que en Cisco:
         falla con rc != 0 cuando SNMP no está habilitado, y ``_leer()``
-        aborta el batch entero ante el primer comando fallido."""
+        aborta el batch entero ante el primer comando fallido. ACLs/ARP/MAC
+        son 3 lecturas más, cada 1 con su propio try/except (mismo
+        criterio: si alguna falla, el resto del sync sigue). ARP/MAC se
+        agregaron al cache recién -- antes eran la única lectura en vivo
+        por-request de toda la app, el usuario pidió sumarlas al sync tras
+        notar la latencia de pagar una sesión SSH nueva por cada GET."""
         commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
         version_output = stdouts[0] if len(stdouts) > 0 else ""
@@ -418,6 +423,18 @@ class HuaweiVendor(VendorDriver):
             logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
             acls = None
 
+        try:
+            arp_table = self.get_arp_table(device, password)
+        except RuntimeError:
+            logger.exception("get_global_config: get_arp_table failed on device=%s, continuing without ARP", device.name)
+            arp_table = None
+
+        try:
+            mac_table = self.get_mac_table(device, password)
+        except RuntimeError:
+            logger.exception("get_global_config: get_mac_table failed on device=%s, continuing without MAC", device.name)
+            mac_table = None
+
         from app.services.parsers.global_config_parser import HuaweiGlobalConfigParser
         config = HuaweiGlobalConfigParser.parse(
             version_output=version_output, hostname_output=hostname_output,
@@ -426,6 +443,8 @@ class HuaweiVendor(VendorDriver):
         )
         config.device = device.name
         config.acls = acls
+        config.arp_table = arp_table
+        config.mac_table = mac_table
         config.running_config = strip_known_preamble(running_config, _RUNNING_CONFIG_PREAMBLE) or None
         return config
 
@@ -508,23 +527,23 @@ class HuaweiVendor(VendorDriver):
         """RF-GLOBAL-09 (Log, delete). Confirmado en vivo contra huawei01."""
         return self._aplicar_desde_template("remove_log_host", {"server": server}, device, password)
 
-    def get_arp_table(self, include: "str | None", device: Device, password: str) -> list[dict]:
-        """Tabla ARP en vivo, sin cache -- ver docstring de
-        ``CiscoVendor.get_arp_table()``, mismo criterio. Parseado a filas
-        estructuradas -- confirmado en vivo contra f3r9s2 (formato de 2
-        líneas por fila, ver ``arp_mac_parser.py``)."""
+    def get_arp_table(self, device: Device, password: str) -> list[dict]:
+        """Ver docstring de ``CiscoVendor.get_arp_table()``, mismo
+        criterio -- se lee completa (sin filtro) durante
+        ``get_global_config()`` y se cachea, dejó de ser lectura en vivo
+        por request. Parseado a filas estructuradas -- confirmado en vivo
+        contra f3r9s2 (formato de 2 líneas por fila, ver
+        ``arp_mac_parser.py``)."""
         from app.services.parsers.arp_mac_parser import parse_huawei_arp
 
-        comando = f"display arp | include {include}" if include else "display arp"
-        raw = self._leer([comando], device, password)[0]
+        raw = self._leer(["display arp"], device, password)[0]
         return parse_huawei_arp(raw)
 
-    def get_mac_table(self, include: "str | None", device: Device, password: str) -> list[dict]:
+    def get_mac_table(self, device: Device, password: str) -> list[dict]:
         """Mismo criterio que ``get_arp_table()``."""
         from app.services.parsers.arp_mac_parser import parse_huawei_mac
 
-        comando = f"display mac-address | include {include}" if include else "display mac-address"
-        raw = self._leer([comando], device, password)[0]
+        raw = self._leer(["display mac-address"], device, password)[0]
         return parse_huawei_mac(raw)
 
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
