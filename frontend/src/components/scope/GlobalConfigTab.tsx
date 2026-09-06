@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { PlaceholderPanel } from './Panel';
 import { GlobalConfigOverview } from './GlobalConfigOverview';
 import { GlobalConfigRoutes } from './GlobalConfigRoutes';
+import { GlobalConfigAcls } from './GlobalConfigAcls';
 
 interface Props {
   deviceName: string;
@@ -41,6 +42,8 @@ export function GlobalConfigTab({ deviceName }: Props) {
         <GlobalConfigOverview deviceName={deviceName} />
       ) : section === 'routes' ? (
         <GlobalConfigRoutes deviceName={deviceName} />
+      ) : section === 'acls' ? (
+        <GlobalConfigAcls deviceName={deviceName} />
       ) : (
         <PlaceholderPanel
           label={`${SECTIONS.find((s) => s.key === section)?.label ?? section} — coming in the next block (${deviceName}).`}
