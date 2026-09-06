@@ -13,9 +13,9 @@ forma de preguntar "¿esta prendido? ¿en que %?" para un puerto dado.
   (pps/bps); nuestro write path solo produce percent-form asi que
   eso solo ocurre con configs preexistentes.
 
-Revision ID: l6msp11_port_storm_control
-Revises: k5msp10_svis
-Create Date: 2026-09-04 22:00:00.000000
+Revision ID: r12msp17_port_storm_control
+Revises: q11msp16_device_logs
+Create Date: 2026-09-06 00:00:00.000000
 
 """
 from typing import Sequence, Union
@@ -24,8 +24,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "l6msp11_port_storm_control"
-down_revision: Union[str, Sequence[str], None] = "k5msp10_svis"
+revision: str = "r12msp17_port_storm_control"
+down_revision: Union[str, Sequence[str], None] = "q11msp16_device_logs"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

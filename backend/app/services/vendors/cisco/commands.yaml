@@ -287,3 +287,158 @@ list_acls:
   primary:
     commands:
       - "show access-lists"
+
+# RF-GLOBAL-05 -- confirmado en vivo contra cisco01 (crear ACL de prueba
+# con 4 reglas variadas, agregarle 1 más, sacar 1 puntual, borrarla
+# completa). "ip access-list extended {name}" crea la ACL si no existía Y
+# agrega las líneas si ya existía -- mismo comando para "crear"/"agregar
+# reglas", solo cambia qué hay en "rule_lines" (armadas en Python por
+# ``CiscoVendor.formatear_regla_acl()``, no acá -- son texto CLI ya
+# completo, no hay placeholders individuales por regla).
+create_or_update_acl:
+  primary:
+    parents: "ip access-list extended {name}"
+    lines: []
+    repeat:
+      over: "rule_lines"
+      line: "{item}"
+
+# "no {regla exacta, sin número de secuencia}" adentro del contexto de la
+# ACL saca esa entrada puntual -- confirmado en vivo.
+remove_acl_rules:
+  primary:
+    parents: "ip access-list extended {name}"
+    lines: []
+    repeat:
+      over: "rule_lines"
+      line: "no {item}"
+
+delete_acl:
+  primary:
+    lines: ["no ip access-list extended {name}"]
+
+# RF-GLOBAL-01/03/07 (SRS §3.4) -- confirmado contra cisco01/f3r9s1
+# reales. "show running-config | include snmp-server community" no falla
+# si no hay ninguna configurada (devuelve vacío, no error) -- a diferencia
+# de "show snmp" (ver get_snmp_status más abajo), por eso vive acá en la
+# misma tanda y no aparte.
+get_global_config:
+  primary:
+    commands:
+      - "show version"
+      - "show running-config | include hostname"
+      - "show running-config | include snmp-server community"
+      - "show ip route"
+      - "show running-config"
+
+# Aparte de get_global_config: "show snmp" falla con rc != 0
+# ("%SNMP agent not enabled") cuando SNMP no está configurado -- confirmado
+# contra cisco01 real (deshabilitado) y f3r9s1 real (habilitado). Si viviera
+# en la misma tanda que el resto, un device sin SNMP tiraría todo el batch
+# abajo y se perdería version/hostname/routes también (confirmado: _leer()
+# aborta el batch entero ante el primer comando fallido). El driver
+# (get_global_config()) atrapa el RuntimeError acá y lo traduce a
+# snmp_enabled=False en vez de propagar el error.
+get_snmp_status:
+  primary:
+    commands:
+      - "show snmp"
+
+# RF-GLOBAL-08 -- "hostname" es un comando de nivel global, no anidado
+# bajo ninguna interfaz (mismo criterio que delete_vlan: "lines" sin
+# "parents").
+set_hostname:
+  primary:
+    lines: ["hostname {hostname}"]
+
+# RF-GLOBAL-07 -- confirmado en vivo contra cisco01: "snmp-server community
+# {community} {permission}" habilita SNMP y fija la community en 1 sola
+# línea. No hay entrada "set_snmp_version" acá a propósito -- IOS clásico
+# (SNMPv1/v2c basado en community) no tiene un comando separado para fijar
+# la versión, ambas se aceptan implícitamente en cuanto hay una community
+# configurada (ver ``CiscoVendor.set_snmp()``, que ignora "version" para
+# este vendor).
+set_snmp_community:
+  primary:
+    lines: ["snmp-server community {community} RO"]
+
+# RF-GLOBAL-07 -- confirmado en vivo contra f3r9s1 (aplicado idempotente
+# contra los valores ya vigentes ahí, config real de producción). "source"
+# es la interfaz de administración del device (ver config real: "snmp-server
+# trap-source Vlan156"). "trap-host" necesita la community en texto plano
+# en la misma línea (IOS la re-cifra/oculta al mostrarla, no al recibirla).
+set_snmp_trap_source:
+  primary:
+    lines: ["snmp-server trap-source {interface}"]
+
+set_snmp_trap_host:
+  primary:
+    lines: ["snmp-server host {host} version {version} {community}"]
+
+# DNS como endpoint propio (RF-GLOBAL-09 split) -- "ip name-server"
+# ya confirmado esta sesión; "no ip name-server" también (con la salvedad
+# ya documentada de que IOS a veces responde con un mensaje que Ansible
+# toma como error aunque el comando sí aplicó -- ver nota de sesión sobre
+# f3r9s1). "ip domain-name" confirmado en vivo contra f3r9s1 -- IOS lo
+# normaliza a "ip domain name" (2 palabras) en el running-config, pero
+# acepta el alias con guión al escribir.
+add_dns:
+  primary:
+    lines: ["ip name-server {server}"]
+
+remove_dns:
+  primary:
+    lines: ["no ip name-server {server}"]
+
+set_dns_domain:
+  primary:
+    lines: ["ip domain-name {domain}"]
+
+# Log como endpoint propio (RF-GLOBAL-09 split) -- confirmado en vivo
+# contra cisco01. "logging trap {level}" es un ajuste global independiente
+# del host en IOS (a diferencia de VRP, donde va atado a la línea del
+# loghost) -- igual viaja en la misma request que "logging host" por
+# conveniencia de API. "no logging host" confirmado (con la salvedad ya
+# documentada de que IOS a veces responde con un mensaje que Ansible toma
+# como error aunque el comando sí aplicó).
+set_log_host:
+  primary:
+    lines: ["logging host {log_server}"]
+
+set_log_host_and_level:
+  primary:
+    lines: ["logging host {log_server}", "logging trap {log_level}"]
+
+remove_log_host:
+  primary:
+    lines: ["no logging host {log_server}"]
+
+# RF-GLOBAL-06 -- confirmado en vivo contra cisco01. IOS pide máscara
+# punteada, no CIDR ni largo de prefijo (``network``/``mask`` ya vienen
+# convertidos desde el driver, ver ``VendorDriver._red_y_mascara()``).
+set_route:
+  primary:
+    lines: ["ip route {network} {mask} {next_hop}"]
+
+# RF-GLOBAL-06 (delete) -- mismo comando que set_route con "no" adelante,
+# ya confirmado en vivo esta sesión (se usó para el cleanup manual de las
+# pruebas de set_route).
+remove_route:
+  primary:
+    lines: ["no ip route {network} {mask} {next_hop}"]
+
+# RF-GLOBAL-09 (NTP, endpoint propio) -- confirmado en vivo contra f3r9s1:
+# "ntp server {ip} prefer" (con o sin "prefer") y "no ntp server {ip}" (el
+# remove NO necesita "prefer" para matchear, confirmado quitando una
+# entrada agregada CON prefer usando el comando sin el sufijo).
+add_ntp_with_prefer:
+  primary:
+    lines: ["ntp server {server} prefer"]
+
+add_ntp:
+  primary:
+    lines: ["ntp server {server}"]
+
+remove_ntp:
+  primary:
+    lines: ["no ntp server {server}"]

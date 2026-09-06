@@ -92,6 +92,18 @@ class DeviceModel(Base):
     ports_sync_error = Column(Text, nullable=True)
     svis_synced_at = Column(DateTime(timezone=True), nullable=True)
     svis_sync_error = Column(Text, nullable=True)
+    global_config_synced_at = Column(DateTime(timezone=True), nullable=True)
+    global_config_sync_error = Column(Text, nullable=True)
+    # ARP/MAC quedaron con su propio scope de sync a pedido del usuario --
+    # no van en "all" (alta de device) porque pueden traer muchísima info
+    # y no hacen falta para ninguna escritura; solo se sincronizan cuando
+    # alguien pide explícitamente ``POST .../arp-mac/refresh``.
+    arp_mac_synced_at = Column(DateTime(timezone=True), nullable=True)
+    arp_mac_sync_error = Column(Text, nullable=True)
+    # Logs -- mismo criterio que ARP/MAC arriba, scope de sync propio,
+    # afuera de "all".
+    logs_synced_at = Column(DateTime(timezone=True), nullable=True)
+    logs_sync_error = Column(Text, nullable=True)
 
     device_group = relationship(
         "DeviceGroupModel",
@@ -173,6 +185,69 @@ class DeviceSVIModel(Base):
     dhcp_relay_servers = Column(JSON, nullable=True)  # lista de str
     # Read-only, viene del getter del driver.
     operational_up = Column(Boolean, nullable=True)
+
+
+class DeviceGlobalConfigModel(Base):
+    """RF-GLOBAL-* (SRS §3.4) — Repository[GlobalConfig]. Singleton por
+    device -- a diferencia de VLAN/Puerto/SVI, acá la identidad ES el
+    device solo (``device`` es la PK completa, no compuesta), no hay
+    colección de sub-elementos. ``routes``/``acls`` van como JSON (no como
+    tablas propias): RF-GLOBAL-06 solo pide alta de rutas, RF-GLOBAL-05
+    hace full-replace de las reglas de una ACL al modificarla -- ninguna de
+    las 2 necesita PK propia por elemento, mismo criterio que
+    ``dhcp_relay_servers`` en ``DeviceSVIModel``."""
+
+    __tablename__ = "device_global_config"
+
+    device = Column(String, primary_key=True)
+    hostname = Column(String, nullable=True)
+    running_config = Column(Text, nullable=True)  # RF-GLOBAL-01, dump completo de show running-config/display current-configuration
+    device_version = Column(String, nullable=True)
+    snmp_enabled = Column(Boolean, nullable=True)
+    snmp_version = Column(String, nullable=True)
+    snmp_community = Column(String, nullable=True)
+    snmp_permission = Column(String, nullable=True)
+    snmp_trap_hosts = Column(JSON, nullable=True)  # lista de str. Cisco: IPs de "snmp-server host"; Huawei: hosts permitidos por la ACL atada al agente ("snmp-agent acl"), target-host en sí no tiene lectura
+    ntp_servers = Column(JSON, nullable=True)  # lista de str, puede haber más de 1 configurado
+    dns_servers = Column(JSON, nullable=True)  # lista de str, puede haber más de 1 configurado
+    log_servers = Column(JSON, nullable=True)  # lista de str, puede haber más de 1 configurado
+    log_level = Column(String, nullable=True)
+    routes = Column(JSON, nullable=True)  # lista de dict (destino/mask/next-hop/interfaz)
+    acls = Column(JSON, nullable=True)  # lista de dict (nombre/tipo/reglas)
+
+
+class DeviceArpMacModel(Base):
+    """Repository[ArpMacTables]. Separada de ``DeviceGlobalConfigModel`` a
+    pedido del usuario -- ARP/MAC no hace falta para ninguna escritura
+    (no pasa por ``reconciliar()``) y "puede traer muchísima info", así
+    que tiene su propio sync específico (``DeviceSyncService.sync_arp_mac()``,
+    scope ``"arp_mac"`` -- NO forma parte de ``sync_device_task(..., "all")``,
+    hay que pedirlo explícito vía ``POST .../arp-mac/refresh``). Estar en
+    tabla propia evita además que un sync de global_config (que ya no
+    trae estos datos) pise estas columnas con NULL -- ``Repository.add()``
+    hace ``session.merge()`` del objeto completo, así que compartir fila
+    con algo sincronizado por un camino distinto es un riesgo real, no
+    solo una cuestión de prolijidad."""
+
+    __tablename__ = "device_arp_mac"
+
+    device = Column(String, primary_key=True)
+    arp_table = Column(JSON, nullable=True)  # lista de dict (ip/mac/interface/vlan/type/age), tabla completa sin filtrar
+    mac_table = Column(JSON, nullable=True)  # lista de dict (mac/vlan/interface/type), tabla completa sin filtrar
+
+
+class DeviceLogsModel(Base):
+    """Repository[DeviceLogs]. Mismo criterio que ``DeviceArpMacModel`` --
+    tabla/scope de sync propios (``"logs"``, tampoco forma parte de
+    ``"all"``), pedido por el usuario "de la misma forma que las tablas
+    mac y arp". ``log_output`` queda Text (no JSON) -- mismo criterio que
+    ``DeviceGlobalConfigModel.running_config``, es texto crudo multi-línea,
+    no filas tabulares."""
+
+    __tablename__ = "device_logs"
+
+    device = Column(String, primary_key=True)
+    log_output = Column(Text, nullable=True)
 
 
 class JobModel(Base):

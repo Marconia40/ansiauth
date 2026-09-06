@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import ipaddress
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
+    from app.models.global_config import GlobalConfig
 
 logger = logging.getLogger(__name__)
 
@@ -938,11 +940,59 @@ class VendorDriver(ABC):
         """Names/numbers of every ACL configured on the device -- used by
         the API layer (RF-INTERV-04's "ACL previamente creada... e
         identificador válido" precondition) to reject binding an ACL that
-        doesn't exist, before enqueueing the job. Minimal read, not the
-        full RF-GLOBAL-04 (details of each ACL's rules) -- out of scope
-        here."""
+        doesn't exist, before enqueueing the job. Minimal read -- see
+        ``list_acls()`` for the full RF-GLOBAL-04 version (each ACL's
+        rules too, used by ``get_global_config()``)."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement list_acl_names yet"
+        )
+
+    def list_acls(self, device: Device, password: str) -> list[dict]:
+        """Like ``list_acl_names()`` but with each ACL's raw rules too
+        (RF-GLOBAL-01/04 -- "el contenido de cada una", requested after
+        seeing ``get_global_config()``'s ``acls`` field with just names).
+        Shape: ``[{"name": str, "type": str, "rules": list[str]}, ...]``,
+        rules kept as raw lines (not further parsed into source/dest/
+        protocol) -- same command as ``list_acl_names()``, no extra
+        device read."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement list_acls yet"
+        )
+
+    # ── RF-GLOBAL-05 (ACLs -- crear/agregar reglas/borrar) ────────────────────
+    # Solo ACLs extended (Cisco) / advanced (Huawei) -- las standard/basic ya
+    # existentes (ej. acceso-vty/acceso-snmp) siguen siendo de solo lectura.
+
+    def formatear_regla_acl(self, rule: dict) -> str:
+        """Traduce 1 regla vendor-agnóstica (``GlobalConfigAclRule``, dict
+        con action/protocol/source/destination/port) a la línea CLI real
+        de este vendor -- SIN ejecutar nada (pura, sin I/O). La usa
+        ``GlobalConfig._aplicar_acl_create()``/``_aplicar_acl_rule_remove()``
+        para no-op detection (comparar contra las reglas ya leídas en
+        ``actual.acls``) antes de mandarle nada al driver de escritura."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement formatear_regla_acl yet"
+        )
+
+    def create_or_update_acl(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """Crea la ACL *name* si no existe, agrega *rule_lines* (ya
+        formateadas por ``formatear_regla_acl()``) si ya existe -- mismo
+        comando sirve para ambos casos en Cisco/Huawei (entrar al contexto
+        de la ACL la crea si no estaba)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement create_or_update_acl yet"
+        )
+
+    def remove_acl_rules(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """Saca *rule_lines* (ya formateadas) de la ACL *name*."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_acl_rules yet"
+        )
+
+    def delete_acl(self, name: str, device: Device, password: str) -> dict:
+        """Borra la ACL *name* completa."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement delete_acl yet"
         )
 
     def set_svi_dhcp_relay(
@@ -959,3 +1009,137 @@ class VendorDriver(ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_svis yet"
         )
+
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+        """ARP/MAC NO viven acá -- tienen su propio método
+        (``get_arp_table()``/``get_mac_table()``) y su propio scope de
+        sync (``DeviceSyncService.sync_arp_mac()``), a pedido del usuario:
+        no hacen falta para ninguna escritura y pueden traer muchísima
+        info, así que su sync es específico en vez de venir pegado acá
+        (confirmado en vivo que traerlos acá hacía que devices con pocas
+        líneas VTY, ej. huawei01 con 5, se quedaran sin sesiones para
+        escribir -- "Channel closed")."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_global_config yet"
+        )
+
+    def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_hostname yet"
+        )
+
+    def set_snmp(self, cambios: dict, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_snmp yet"
+        )
+
+    def get_arp_table(self, device: Device, password: str) -> "list[dict]":
+        """Tabla completa, sin filtrar -- se lee durante ``get_global_config()``
+        y se cachea; ``include`` ahora se aplica del lado de la API sobre
+        los datos ya cacheados (ver ``api/global_config.py``), no acá."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_arp_table yet"
+        )
+
+    def get_mac_table(self, device: Device, password: str) -> "list[dict]":
+        """Como ``get_arp_table()`` -- tabla completa, sin filtrar."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_mac_table yet"
+        )
+
+    def get_log_buffer(self, device: Device, password: str) -> str:
+        """Log buffer local del device, texto crudo (sin parsear a
+        entradas -- mismo criterio que ``running_config``, el formato de
+        cada línea varía demasiado para forzar una estructura). Fuera de
+        RF-GLOBAL-01..09, pedido del usuario "de la misma forma que las
+        tablas mac y arp" -- mismo scope de sync propio (``"logs"``, ver
+        ``DeviceSyncService.sync_logs()``), afuera de ``reconciliar()`` y
+        de ``"all"``."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_log_buffer yet"
+        )
+
+    def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement add_log_server yet"
+        )
+
+    def remove_log_server(self, server: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_log_server yet"
+        )
+
+    def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_route yet"
+        )
+
+    def remove_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_route yet"
+        )
+
+    def add_ntp_server(self, server: str, prefer: bool, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement add_ntp_server yet"
+        )
+
+    def remove_ntp_server(self, server: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_ntp_server yet"
+        )
+
+    def add_dns_server(self, server: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement add_dns_server yet"
+        )
+
+    def remove_dns_server(self, server: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement remove_dns_server yet"
+        )
+
+    def set_dns_domain(self, domain: str, device: Device, password: str) -> dict:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement set_dns_domain yet"
+        )
+
+    @staticmethod
+    def _red_y_mascara(cidr: str) -> tuple[str, str]:
+        """``"192.168.99.5/24"`` → ``("192.168.99.0", "255.255.255.0")`` --
+        a diferencia de ``CiscoVendor._cidr_a_direccion_y_mascara()`` (que
+        preserva la dirección de host, correcto para ``ip address`` de una
+        interfaz), acá se necesita la dirección DE RED (``ip route``/``ip
+        route-static`` piden red+máscara, no un host dentro de la red) --
+        ``strict=False`` para no rechazar un CIDR con bits de host
+        prendidos, se los pisa. Compartido por ``set_route`` de ambos
+        vendors (los 2 confirmados en vivo que piden máscara punteada, no
+        largo de prefijo)."""
+        red = ipaddress.ip_network(cidr, strict=False)
+        return str(red.network_address), str(red.netmask)
+
+    @staticmethod
+    def _red_y_wildcard(cidr: str) -> tuple[str, str]:
+        """``"172.28.138.0/24"`` → ``("172.28.138.0", "0.0.0.255")`` -- la
+        wildcard mask que usan las ACLs (Cisco confirmado en vivo; Huawei
+        Advanced ACL usa el mismo concepto, sintaxis exacta sin confirmar
+        todavía, ver RF-GLOBAL-05). Es el INVERSO de la netmask normal que
+        devuelve ``_red_y_mascara()`` -- ``ipaddress`` ya expone eso
+        directo vía ``.hostmask``, no hace falta invertir a mano."""
+        red = ipaddress.ip_network(cidr, strict=False)
+        return str(red.network_address), str(red.hostmask)
+
+    @staticmethod
+    def _combinar_resultados(resultados: list[dict]) -> dict:
+        """``set_snmp``/``add_log_server`` pueden disparar más de 1
+        template call (1 por sub-campo presente en ``cambios``) -- combina
+        esos resultados individuales en 1 solo dict ``{rc, stdout, stderr,
+        success}``, mismo shape que devuelve ``_aplicar()``."""
+        if not resultados:
+            return {"rc": 0, "stdout": "", "stderr": "", "success": True, "changed": False}
+        return {
+            "rc": max(r.get("rc", 0) for r in resultados),
+            "stdout": "\n".join(r.get("stdout", "") for r in resultados),
+            "stderr": "\n".join(r.get("stderr", "") for r in resultados if r.get("stderr")),
+            "success": all(r.get("success") for r in resultados),
+        }

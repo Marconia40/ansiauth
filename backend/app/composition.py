@@ -10,7 +10,7 @@ etc.) — no hace falta anticipar esas partes acá, cada fase agrega lo suyo.
 from __future__ import annotations
 
 from app.core.repository import Repository
-from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel
+from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel, DeviceGlobalConfigModel, DeviceArpMacModel, DeviceLogsModel
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.device_group_repository import DeviceGroupRepository
 from app.repositories.device_repository import DeviceRepository
@@ -122,6 +122,69 @@ svi_repository = Repository(
     pk_field=("vlan_id", "device"),
 )
 
+
+def _global_config_to_orm(g: "GlobalConfig"):
+    return DeviceGlobalConfigModel(
+        device=g.device, hostname=g.hostname, running_config=g.running_config,
+        device_version=g.device_version,
+        snmp_enabled=g.snmp_enabled, snmp_version=g.snmp_version,
+        snmp_community=g.snmp_community, snmp_permission=g.snmp_permission,
+        snmp_trap_hosts=g.snmp_trap_hosts,
+        ntp_servers=g.ntp_servers, dns_servers=g.dns_servers,
+        log_servers=g.log_servers, log_level=g.log_level,
+        routes=g.routes, acls=g.acls,
+    )
+
+
+def _global_config_to_domain(row) -> "GlobalConfig":
+    from app.models.global_config import GlobalConfig
+    return GlobalConfig(
+        device=row.device, hostname=row.hostname, running_config=row.running_config,
+        device_version=row.device_version,
+        snmp_enabled=row.snmp_enabled, snmp_version=row.snmp_version,
+        snmp_community=row.snmp_community, snmp_permission=row.snmp_permission,
+        snmp_trap_hosts=row.snmp_trap_hosts,
+        ntp_servers=row.ntp_servers, dns_servers=row.dns_servers,
+        log_servers=row.log_servers, log_level=row.log_level,
+        routes=row.routes, acls=row.acls,
+    )
+
+
+global_config_repository = Repository(
+    DeviceGlobalConfigModel, _global_config_to_domain, _global_config_to_orm,
+    pk_field="device",
+)
+
+
+def _arp_mac_to_orm(a: "ArpMacTables"):
+    return DeviceArpMacModel(device=a.device, arp_table=a.arp_table, mac_table=a.mac_table)
+
+
+def _arp_mac_to_domain(row) -> "ArpMacTables":
+    from app.models.arp_mac import ArpMacTables
+    return ArpMacTables(device=row.device, arp_table=row.arp_table, mac_table=row.mac_table)
+
+
+arp_mac_repository = Repository(
+    DeviceArpMacModel, _arp_mac_to_domain, _arp_mac_to_orm,
+    pk_field="device",
+)
+
+
+def _device_logs_to_orm(l: "DeviceLogs"):
+    return DeviceLogsModel(device=l.device, log_output=l.log_output)
+
+
+def _device_logs_to_domain(row) -> "DeviceLogs":
+    from app.models.device_logs import DeviceLogs
+    return DeviceLogs(device=row.device, log_output=row.log_output)
+
+
+device_logs_repository = Repository(
+    DeviceLogsModel, _device_logs_to_domain, _device_logs_to_orm,
+    pk_field="device",
+)
+
 job_repository = JobRepository()
 
 role_assignment_repository = RoleAssignmentRepository()
@@ -152,7 +215,10 @@ event_dispatcher.suscribir(AuditListener(audit_repository))
 
 orquestador = Orquestador(
     device_repository,
-    {"vlan": vlan_repository, "puerto": puerto_repository, "svi": svi_repository},
+    {
+        "vlan": vlan_repository, "puerto": puerto_repository, "svi": svi_repository,
+        "global_config": global_config_repository,
+    },
     job_repository, event_dispatcher, redis_coordinator,
 )
 
@@ -166,7 +232,8 @@ inventory = Inventory(
 )
 
 device_sync_service = DeviceSyncService(
-    vlan_repository, puerto_repository, svi_repository, redis_coordinator,
+    vlan_repository, puerto_repository, svi_repository, global_config_repository, redis_coordinator,
+    arp_mac_repository, device_logs_repository,
 )
 
 dashboard_service = DashboardService(redis_coordinator)

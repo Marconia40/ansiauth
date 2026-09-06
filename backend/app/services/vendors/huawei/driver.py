@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 from typing import TYPE_CHECKING
 
+from app.services.parsers._common import strip_known_preamble
 from app.services.parsers.port_parser import HuaweiPortParser, expandir_nombre_interfaz
 from app.services.vendors.base import VendorDriver
 
@@ -12,6 +14,9 @@ if TYPE_CHECKING:
     from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
+    from app.models.global_config import GlobalConfig
+
+logger = logging.getLogger(__name__)
 
 _PLAYBOOK = "vendors/huawei/run.yml"
 
@@ -20,6 +25,14 @@ _BRIEF_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _PORT_VLAN_INDEX = 2
 _STORM_INDEX = 3
+
+# RF-GLOBAL-01 -- línea de metadata al principio de "display
+# current-configuration" que no es config real, confirmada en vivo contra
+# f3r9s2 ("!Software Version ..."). Un "!"/"#" suelto de separador real del
+# config no matchea esto, queda intacto.
+_RUNNING_CONFIG_PREAMBLE = [
+    r"^!Software Version.*$",
+]
 
 
 class HuaweiVendor(VendorDriver):
@@ -365,6 +378,303 @@ class HuaweiVendor(VendorDriver):
         stdouts = self._leer(commands, device, password)
         from app.services.parsers.svi_parser import parse_vrp_acl_names
         return parse_vrp_acl_names(stdouts[0] if stdouts else "")
+
+    def list_acls(self, device: Device, password: str) -> list[dict]:
+        """Como ``list_acl_names`` pero con las reglas de cada ACL (mismo
+        comando ``display acl all``, no dispara una lectura aparte) --
+        RF-GLOBAL-01/04, pedido tras ver la respuesta con ``acls`` como
+        solo nombres. ``get_global_config()`` también usa este resultado
+        para resolver ``snmp.trap_hosts`` en este vendor -- ver nota en
+        ``set_snmp()``/``HuaweiGlobalConfigParser.parse()``."""
+        commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        from app.services.parsers.svi_parser import parse_vrp_acls
+        return parse_vrp_acls(stdouts[0] if stdouts else "")
+
+    def _formatear_endpoint_acl(self, direction: str, endpoint: dict) -> "str | None":
+        """*direction* ∈ {"source", "destination"}. ``None`` si el
+        endpoint es ``any`` -- confirmado en vivo contra huawei01 que VRP
+        OMITE la cláusula entera (ni "source any" ni nada equivalente)
+        tanto al escribir (``rule permit icmp`` sin más ya es any/any)
+        como al leer de vuelta, así que no escribirla es lo que hace que
+        el no-op detection matchee después."""
+        if endpoint.get("any"):
+            return None
+        if endpoint.get("host"):
+            return f"{direction} {endpoint['host']} 0"
+        network, wildcard = self._red_y_wildcard(endpoint["network"])
+        return f"{direction} {network} {wildcard}"
+
+    def formatear_regla_acl(self, rule: dict) -> str:
+        """RF-GLOBAL-05. Arma el contenido de una regla (sin el prefijo
+        ``rule`` que exige VRP al escribir) a partir de una regla
+        vendor-agnóstica: ``{action} {protocol} [source {net} {wildcard}]
+        [destination {net} {wildcard}] [destination-port eq|range ...]``.
+        Se mantiene SIN ``rule`` a propósito -- esta misma string la usa
+        ``GlobalConfig._regla_ya_presente()`` para no-op detection
+        comparando por sufijo contra las reglas ya leídas (``"rule 5
+        permit ..."``), y ``rule {N} `` es justo el prefijo variable que
+        hay que poder recortar (Cisco es análogo con su número de
+        secuencia). ``create_or_update_acl()``/``remove_acl_rules()``
+        agregan el ``rule`` real recién al armar el comando de escritura
+        -- confirmado en vivo que VRP lo exige ahí (``rule permit ...``,
+        no ``permit ...`` suelto, "Unrecognized command" si falta). A
+        diferencia de Cisco, el puerto SIEMPRE usa la keyword
+        ``destination-port`` explícita (no un ``eq``/``range`` sueltos al
+        final) -- alcance de esta vuelta cubre solo el caso "puerto de
+        destino" (mismo que el ejemplo real del usuario), no
+        ``source-port``."""
+        partes = [rule["action"], rule["protocol"]]
+        origen = self._formatear_endpoint_acl("source", rule["source"])
+        if origen:
+            partes.append(origen)
+        destino = self._formatear_endpoint_acl("destination", rule["destination"])
+        if destino:
+            partes.append(destino)
+        port = rule.get("port")
+        if port:
+            if port["operator"] == "range":
+                partes.append(f"destination-port range {port['value']} {port['value2']}")
+            else:
+                partes.append(f"destination-port eq {port['value']}")
+        return " ".join(partes)
+
+    def create_or_update_acl(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """RF-GLOBAL-05. Confirmado en vivo contra huawei01/f3r9s2: entrar
+        a ``acl name {name} advance`` crea la ACL Advanced con nombre si
+        no existía, y agrega las líneas si ya existía. Antepone ``rule ``
+        a cada línea (``formatear_regla_acl()`` lo deja afuera a
+        propósito, ver esa docstring) -- confirmado en vivo que VRP
+        rechaza ``permit ...``/``deny ...`` sueltos ("Unrecognized
+        command"), el verbo real de alta es ``rule permit/deny ...``.
+
+        Bug de corrupción de terminal (mismo que bloqueaba ``trap_host``
+        en ``set_snmp()``) -- RESUELTO vía ``screen-width 512`` al
+        principio de la sesión (ver ``commands.yaml``): confirmado en
+        vivo contra f3r9s2 que la regla que antes se corrompía
+        (``destination-port eq 443``, con un nombre de ACL que empujaba
+        el prompt+línea sobre el ancho de la terminal) ahora aplica
+        limpia. ``screen-width`` no persiste en el running-config
+        (confirmado en vivo) y no existe en todas las familias VRP --
+        huawei01 (CE12800) lo rechaza, la 1ra alternativa del YAML cubre
+        ese caso reintentando sin él."""
+        rule_lines = [f"rule {linea}" for linea in rule_lines]
+        return self._aplicar_desde_template(
+            "create_or_update_acl", {"name": name, "rule_lines": rule_lines}, device, password,
+        )
+
+    def remove_acl_rules(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """RF-GLOBAL-05 (delete de reglas puntuales). Confirmado en vivo
+        contra huawei01/f3r9s2: ``undo rule {regla exacta}`` adentro del
+        contexto de la ACL saca esa entrada puntual -- mismo criterio de
+        anteponer ``rule`` que ``create_or_update_acl()``, ver esa
+        docstring (acá el YAML antepone ``undo`` encima)."""
+        rule_lines = [f"rule {linea}" for linea in rule_lines]
+        return self._aplicar_desde_template(
+            "remove_acl_rules", {"name": name, "rule_lines": rule_lines}, device, password,
+        )
+
+    def delete_acl(self, name: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-05 (delete de la ACL completa). Confirmado en vivo
+        contra huawei01: ``undo acl name {name}`` desde system-view, sin
+        necesidad de entrar al contexto de la ACL primero."""
+        return self._aplicar_desde_template("delete_acl", {"name": name}, device, password)
+
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+        """RF-GLOBAL-01/02/03/04 (SRS §3.4). "display snmp-agent sys-info"
+        vive en un ``_leer()`` aparte (ver nota en
+        ``commands.yaml: get_snmp_status``) -- mismo motivo que en Cisco:
+        falla con rc != 0 cuando SNMP no está habilitado, y ``_leer()``
+        aborta el batch entero ante el primer comando fallido. ACLs es 1
+        lectura más, con su propio try/except. ARP/MAC NO viven acá --
+        tienen su propio scope de sync (``ArpMacTables``/
+        ``sync_arp_mac()``), a pedido del usuario."""
+        commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        version_output = stdouts[0] if len(stdouts) > 0 else ""
+        hostname_output = stdouts[1] if len(stdouts) > 1 else ""
+        route_output = stdouts[2] if len(stdouts) > 2 else ""
+        running_config = stdouts[3] if len(stdouts) > 3 else ""
+
+        snmp_commands = self._cargar_comandos()["get_snmp_status"]["primary"]["commands"]
+        try:
+            self._leer(snmp_commands, device, password)
+            snmp_enabled = True
+        except RuntimeError as exc:
+            if "snmp agent is not enabled" in str(exc).lower():
+                snmp_enabled = False
+            else:
+                raise
+
+        try:
+            acls = self.list_acls(device, password)
+        except RuntimeError:
+            logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
+            acls = None
+
+        from app.services.parsers.global_config_parser import HuaweiGlobalConfigParser
+        config = HuaweiGlobalConfigParser.parse(
+            version_output=version_output, hostname_output=hostname_output,
+            route_output=route_output, running_config_output=running_config,
+            snmp_enabled=snmp_enabled, acls=acls,
+        )
+        config.device = device.name
+        config.acls = acls
+        config.running_config = strip_known_preamble(running_config, _RUNNING_CONFIG_PREAMBLE) or None
+        return config
+
+    def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("set_hostname", {"hostname": hostname}, device, password)
+
+    def set_snmp(self, cambios: dict, device: Device, password: str) -> dict:
+        """RF-GLOBAL-07. A diferencia de Cisco, VRP sí tiene un comando de
+        versión propio (``snmp-agent sys-info version``, aditivo -- ver
+        comentario en ``commands.yaml``). ``community`` siempre se fija con
+        el verbo "read" (ya no es parámetro, ver ``GlobalConfig.validar()``).
+        ``trap_source`` confirmado en vivo contra f3r9s2 (``snmp-agent trap
+        source {interface}``). ``trap_host`` NO está soportado todavía --
+        el comando real (``snmp-agent target-host host-name ... trap
+        address udp-domain ... params securityname ... v2c``) es largo
+        (>100 caracteres) y se corrompe en tránsito sobre esta sesión SSH
+        (confirmado en vivo contra f3r9s2: la línea se corta y re-envuelve
+        con una secuencia de control ANSI en medio de una palabra, el
+        device recibe el comando roto y lo rechaza) -- necesita que la
+        conexión Ansible fuerce un ancho de terminal mayor antes de poder
+        confirmarse, fuera de alcance de esta vuelta. Esto se dispara
+        dentro de ``aplicar()`` (o sea DENTRO del job async, después de que
+        el POST ya devolvió 202) -- no hay forma de rechazarlo en la
+        request inicial porque ``GlobalConfig.validar()`` no conoce el
+        vendor. Levanta ``NotImplementedError`` a propósito en vez de
+        mandar el comando roto silenciosamente -- el error queda visible
+        pollendo el job (``GET /jobs/{id}``), mismo lugar donde ya
+        aparecería un error real del device. Sin ``target-host`` leíble,
+        ``snmp.trap_hosts`` en la lectura (``get_global_config()``) NO
+        viene de un comando de trap real acá -- se resuelve cruzando
+        ``snmp-agent acl {nombre}`` (la ACL atada al agente SNMP) contra
+        ``acls`` (ver ``HuaweiGlobalConfigParser.parse()``), tomando TODOS
+        los ``permit source`` de esa ACL. Confirmado en vivo que la ACL
+        ``acceso-snmp`` lista exactamente las mismas IPs que el
+        ``trap_host`` de Cisco en el mismo par de devices -- pedido
+        explícito del usuario tras notar la coincidencia."""
+        if "trap_host" in cambios:
+            raise NotImplementedError(
+                "HuaweiVendor.set_snmp: 'trap_host' not supported yet -- the real VRP command "
+                "gets corrupted in transit over this SSH session for lines this long, see docstring"
+            )
+        resultados = []
+        if "version" in cambios:
+            resultados.append(
+                self._aplicar_desde_template("set_snmp_version", {"version": cambios["version"]}, device, password)
+            )
+        if "community" in cambios:
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_community", {"verbo": "read", "community": cambios["community"]}, device, password,
+                )
+            )
+        if "trap_source" in cambios:
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_trap_source", {"interface": cambios["trap_source"]}, device, password,
+                )
+            )
+        return self._combinar_resultados(resultados)
+
+    def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (Log, endpoint propio). ``info-center loghost {ip}``
+        confirmado en vivo. El nivel de severidad YA NO va en la misma
+        línea del loghost (esa forma existe en huawei01 pero f3r9s2 la
+        rechaza, "Too many parameters found") -- en cambio usa el
+        mecanismo real de canales de VRP: ``info-center source default
+        channel 2 log level {level}`` (canal 2 = "loghost", nombre fijo
+        estándar en toda la familia VRP, confirmado con ``display
+        channel`` contra f3r9s2) -- confirmado en vivo (idempotente, ya
+        era el valor vigente ahí) contra f3r9s2 también, a diferencia de
+        la forma inline que ese device rechazaba."""
+        resultados = [self._aplicar_desde_template("add_log_host", {"server": server}, device, password)]
+        if level:
+            resultados.append(
+                self._aplicar_desde_template("set_log_channel_level", {"level": level}, device, password)
+            )
+        return self._combinar_resultados(resultados)
+
+    def remove_log_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (Log, delete). Confirmado en vivo contra huawei01."""
+        return self._aplicar_desde_template("remove_log_host", {"server": server}, device, password)
+
+    def get_arp_table(self, device: Device, password: str) -> list[dict]:
+        """Ver docstring de ``CiscoVendor.get_arp_table()``, mismo
+        criterio -- se lee completa (sin filtro) durante
+        ``get_global_config()`` y se cachea, dejó de ser lectura en vivo
+        por request. Parseado a filas estructuradas -- confirmado en vivo
+        contra f3r9s2 (formato de 2 líneas por fila, ver
+        ``arp_mac_parser.py``)."""
+        from app.services.parsers.arp_mac_parser import parse_huawei_arp
+
+        raw = self._leer(["display arp"], device, password)[0]
+        return parse_huawei_arp(raw)
+
+    def get_mac_table(self, device: Device, password: str) -> list[dict]:
+        """Mismo criterio que ``get_arp_table()``."""
+        from app.services.parsers.arp_mac_parser import parse_huawei_mac
+
+        raw = self._leer(["display mac-address"], device, password)[0]
+        return parse_huawei_mac(raw)
+
+    def get_log_buffer(self, device: Device, password: str) -> str:
+        """RF-GLOBAL fuera de alcance, pedido del usuario "de la misma
+        forma que las tablas mac y arp". Confirmado en vivo contra
+        f3r9s2: ``display logbuffer`` funciona limpio de punta a punta
+        (~100 mil caracteres, 512 mensajes, sin cortes) -- a diferencia
+        de Cisco (ver ``CiscoVendor.get_log_buffer()``), acá no hizo
+        falta ningún exclude ni workaround."""
+        raw = self._leer(["display logbuffer"], device, password)[0]
+        return raw.strip()
+
+    def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-06. Confirmado en vivo contra huawei01: ``ip
+        route-static {network} {mask} {next_hop}``."""
+        network, mask = self._red_y_mascara(destination)
+        return self._aplicar_desde_template(
+            "set_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
+        )
+
+    def remove_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-06 (delete). Confirmado en vivo contra huawei01 y f3r9s2."""
+        network, mask = self._red_y_mascara(destination)
+        return self._aplicar_desde_template(
+            "remove_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
+        )
+
+    def add_ntp_server(self, server: str, prefer: bool, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (NTP, endpoint propio). ``prefer`` no tiene
+        equivalente confirmado en VRP -- se ignora con un log (mismo
+        criterio que ``version`` en ``set_snmp`` de Cisco)."""
+        if prefer:
+            logger.info(
+                "HuaweiVendor.add_ntp_server: 'prefer' has no confirmed VRP equivalent, "
+                "ignoring for device=%s",
+                device.name,
+            )
+        return self._aplicar_desde_template("add_ntp", {"server": server}, device, password)
+
+    def remove_ntp_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (NTP, delete). Confirmado en vivo contra huawei01."""
+        return self._aplicar_desde_template("remove_ntp", {"server": server}, device, password)
+
+    def add_dns_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, endpoint propio). Confirmado en vivo esta
+        sesión: ``dns resolve`` + ``dns server {ip}``."""
+        return self._aplicar_desde_template("add_dns", {"server": server}, device, password)
+
+    def remove_dns_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, delete). Confirmado en vivo esta sesión."""
+        return self._aplicar_desde_template("remove_dns", {"server": server}, device, password)
+
+    def set_dns_domain(self, domain: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, domain-name). Confirmado en vivo contra
+        f3r9s2 (idempotente, ya lo tiene configurado)."""
+        return self._aplicar_desde_template("set_dns_domain", {"domain": domain}, device, password)
 
     @staticmethod
     def _cidr_a_direccion_y_mascara(cidr: "str | None") -> tuple[str, str]:

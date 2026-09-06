@@ -873,6 +873,385 @@ list_acls:
     commands:
       - "display acl all"
 
+# RF-GLOBAL-05 -- confirmado en vivo contra huawei01 (crear ACL Advanced
+# de prueba, agregarle 4 reglas variadas, sacar 1 puntual, borrarla
+# completa). "acl name {name} advance" crea la ACL Advanced con nombre si
+# no existía Y agrega las reglas si ya existía -- mismo comando para
+# "crear"/"agregar reglas" (mismo criterio que Cisco). "rule_lines" ya
+# viene formateado por ``HuaweiVendor.formatear_regla_acl()`` -- ojo que
+# ese formateo OMITE "source any"/"destination any" (no los escribe) para
+# que coincida con cómo VRP los devuelve al leer (confirmado en vivo: un
+# endpoint "any" desaparece completo de la línea, no queda "source any"
+# ni nada equivalente -- si no se replica esto, la detección de no-op
+# nunca matchea).
+# "screen-width 512" al principio de la sesión evita el bug de corrupción
+# de terminal (una secuencia ANSI de cursor-izquierda parte el comando a
+# la mitad de una palabra cuando el prompt + la línea de la regla cruzan
+# el ancho de la terminal) -- confirmado en vivo contra f3r9s2 real: sin
+# esto, "rule permit tcp destination 192.0.2.10 0 destination-port eq
+# 443" se corrompía; con "screen-width 512" primero, la misma línea
+# aplica limpia. Confirmado además que NO queda guardado en el
+# running-config (es un ajuste de terminal de la sesión, no config real).
+# "y" contesta el prompt de confirmación ("Warning: This command will
+# change the default screen width. Continue? [Y/N]:").
+#
+# PERO "screen-width" no existe en todas las familias VRP -- confirmado
+# en vivo que huawei01 (CE12800) lo rechaza con "Unrecognized command",
+# mientras que f3r9s2 (S5731) sí lo tiene. La 1ra alternativa cubre esa
+# plataforma (reintenta sin screen-width, con commit -- mismo
+# comportamiento que esta operación tenía antes de este fix). La 2da
+# alternativa cubre la plataforma que SÍ tiene screen-width pero rechaza
+# "commit" (f3r9s2 real) -- reintenta con screen-width, sin commit.
+create_or_update_acl:
+  primary:
+    block:
+      - "screen-width 512"
+      - "y"
+      - "system-view"
+      - "acl name {name} advance"
+    repeat:
+      over: "rule_lines"
+      line: "{item}"
+    trailer: ["quit", "commit", "quit"]
+  alternatives:
+    - triggered_by_error: 'screen-width 512\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "acl name {name} advance"
+      repeat:
+        over: "rule_lines"
+        line: "{item}"
+      trailer: ["quit", "commit", "quit"]
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "screen-width 512"
+        - "y"
+        - "system-view"
+        - "acl name {name} advance"
+      repeat:
+        over: "rule_lines"
+        line: "{item}"
+      trailer: ["quit", "quit"]
+
+# "undo rule {regla exacta, sin número de secuencia}" adentro del contexto
+# de la ACL saca esa entrada puntual -- confirmado en vivo. Mismo
+# criterio de "screen-width 512" + 2 alternativas que
+# ``create_or_update_acl`` -- ver esa nota arriba.
+remove_acl_rules:
+  primary:
+    block:
+      - "screen-width 512"
+      - "y"
+      - "system-view"
+      - "acl name {name} advance"
+    repeat:
+      over: "rule_lines"
+      line: "undo {item}"
+    trailer: ["quit", "commit", "quit"]
+  alternatives:
+    - triggered_by_error: 'screen-width 512\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "acl name {name} advance"
+      repeat:
+        over: "rule_lines"
+        line: "undo {item}"
+      trailer: ["quit", "commit", "quit"]
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "screen-width 512"
+        - "y"
+        - "system-view"
+        - "acl name {name} advance"
+      repeat:
+        over: "rule_lines"
+        line: "undo {item}"
+      trailer: ["quit", "quit"]
+
+# "undo acl name {name}" desde system-view borra la ACL completa -- no
+# hace falta entrar a su contexto primero. Confirmado en vivo.
+delete_acl:
+  primary:
+    block:
+      - "system-view"
+      - "undo acl name {name}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo acl name {name}"
+        - "quit"
+
+# RF-GLOBAL-01/03/08 (SRS §3.4) -- confirmado contra huawei01/f3r9s2
+# reales. "sysname" vía grep no falla si no hay match (vacío, no error) --
+# a diferencia de "display snmp-agent sys-info" (ver get_snmp_status más
+# abajo), por eso vive en la misma tanda.
+get_global_config:
+  primary:
+    commands:
+      - "display version"
+      - "display current-configuration | include sysname"
+      - "display ip routing-table"
+      - "display current-configuration"
+
+# Aparte de get_global_config: "display snmp-agent sys-info" falla con
+# rc != 0 ("Error: SNMP agent is not enabled.") cuando SNMP no está
+# configurado -- confirmado contra huawei01 real (deshabilitado). Mismo
+# motivo que en Cisco (ver get_snmp_status de cisco/commands.yaml) para
+# tenerlo aparte: si viviera en la misma tanda, un device sin SNMP tiraría
+# todo el batch abajo. El formato de la línea de community SNMP en VRP
+# (para cuando SÍ está habilitado) no está confirmado todavía -- ningún
+# device de esta sesión lo tiene activo.
+get_snmp_status:
+  primary:
+    commands:
+      - "display snmp-agent sys-info"
+
+# RF-GLOBAL-08 -- mismo criterio de 2 alternativas (con/sin "commit") que
+# create_vlan/delete_vlan de este mismo archivo.
+set_hostname:
+  primary:
+    block:
+      - "system-view"
+      - "sysname {hostname}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "sysname {hostname}"
+        - "quit"
+
+# RF-GLOBAL-07 -- confirmado en vivo contra huawei01 (lab, CE12800):
+# "snmp-agent sys-info version {v1|v2c|v3}" es ADITIVO (agrega esa versión a
+# las ya habilitadas, no reemplaza -- ver docstring de
+# ``HuaweiVendor.set_snmp()``), y "snmp-agent community {read|write}
+# {community}" (no hay sufijo de permiso como en Cisco, el verbo YA es el
+# permiso). Separados en 2 templates porque la request puede traer solo
+# 1 de los 2 (version sin community, o viceversa) -- el driver decide cuál
+# invocar según qué llegó, mismo criterio 1-call-por-pieza que set_hostname.
+set_snmp_version:
+  primary:
+    block:
+      - "system-view"
+      - "snmp-agent sys-info version {version}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "snmp-agent sys-info version {version}"
+        - "quit"
+
+set_snmp_community:
+  primary:
+    block:
+      - "system-view"
+      - "snmp-agent community {verbo} {community}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "snmp-agent community {verbo} {community}"
+        - "quit"
+
+# RF-GLOBAL-07 -- confirmado en vivo contra f3r9s2 (aplicado y revertido,
+# no había trap-source configurado antes así que fue una prueba real sin
+# efecto en producción). "trap-host" NO tiene entrada acá a propósito --
+# ver docstring de ``HuaweiVendor.set_snmp()`` (comando real >100
+# caracteres, se corrompe en tránsito sobre esta sesión SSH).
+set_snmp_trap_source:
+  primary:
+    block:
+      - "system-view"
+      - "snmp-agent trap source {interface}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "snmp-agent trap source {interface}"
+        - "quit"
+
+# RF-GLOBAL-09 -- confirmado en vivo contra huawei01. "ntp unicast-server"
+# (SIN "-service", a diferencia del nombre del feature) y "dns server"
+# requieren "dns resolve" antes (habilita la resolución DNS del propio
+# device, sin eso "dns server" queda configurado pero inactivo). El nivel
+# de severidad del log ("level") va DENTRO de la misma línea que el host
+# de "info-center loghost" -- no es un ajuste global separado como en IOS,
+# por eso hay 2 variantes (con/sin level) en vez de 1 template + 1 aparte.
+# NTP como endpoint propio (RF-GLOBAL-09 split) -- "prefer" no tiene
+# equivalente confirmado en VRP (sin device de lab disponible para probar
+# "ntp unicast-server {ip} ?" al momento de esta vuelta) -- el driver lo
+# ignora con un log si viene, mismo criterio que "version" en set_snmp
+# para Cisco. Confirmar en cuanto el lab esté disponible.
+add_ntp:
+  primary:
+    block:
+      - "system-view"
+      - "ntp unicast-server {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "ntp unicast-server {server}"
+        - "quit"
+
+remove_ntp:
+  primary:
+    block:
+      - "system-view"
+      - "undo ntp unicast-server {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo ntp unicast-server {server}"
+        - "quit"
+
+# DNS como endpoint propio (RF-GLOBAL-09 split) -- "dns server"/"dns
+# resolve" ya confirmados esta sesión. "dns domain" confirmado en vivo
+# contra f3r9s2 (ya se ve tal cual en su running-config real). "undo dns
+# server" también confirmado (cleanup de pruebas anteriores).
+add_dns:
+  primary:
+    block:
+      - "system-view"
+      - "dns resolve"
+      - "dns server {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "dns resolve"
+        - "dns server {server}"
+        - "quit"
+
+remove_dns:
+  primary:
+    block:
+      - "system-view"
+      - "undo dns server {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo dns server {server}"
+        - "quit"
+
+set_dns_domain:
+  primary:
+    block:
+      - "system-view"
+      - "dns domain {domain}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "dns domain {domain}"
+        - "quit"
+
+# Log como endpoint propio (RF-GLOBAL-09 split) -- "info-center loghost
+# {ip}" confirmado en vivo. El nivel de severidad se sacó de esta línea
+# (ver ``HuaweiVendor.add_log_server()``): la forma "info-center loghost
+# {ip} level {level}" existe en huawei01 (CE12800 lab) pero f3r9s2
+# (S-series real) la rechaza ("Error:Too many parameters found") -- en vez
+# de mantener 2 variantes con/sin level, ahora el nivel siempre va por
+# ``set_log_channel_level`` (canal 2 = "loghost", confirmado con ``display
+# channel``), que sí funciona en ambos.
+add_log_host:
+  primary:
+    block:
+      - "system-view"
+      - "info-center loghost {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "info-center loghost {server}"
+        - "quit"
+
+remove_log_host:
+  primary:
+    block:
+      - "system-view"
+      - "undo info-center loghost {server}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo info-center loghost {server}"
+        - "quit"
+
+set_log_channel_level:
+  primary:
+    block:
+      - "system-view"
+      - "info-center source default channel 2 log level {level}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "info-center source default channel 2 log level {level}"
+        - "quit"
+
+# RF-GLOBAL-06 -- confirmado en vivo contra huawei01. VRP también pide
+# máscara punteada acá (mismo criterio que Cisco, ver
+# ``VendorDriver._red_y_mascara()``).
+set_route:
+  primary:
+    block:
+      - "system-view"
+      - "ip route-static {network} {mask} {next_hop}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "ip route-static {network} {mask} {next_hop}"
+        - "quit"
+
+# RF-GLOBAL-06 (delete) -- mismo comando que set_route con "undo" adelante,
+# ya confirmado en vivo esta sesión (se usó para el cleanup manual de las
+# pruebas de set_route, incluso en f3r9s2 con la alternativa sin commit).
+remove_route:
+  primary:
+    block:
+      - "system-view"
+      - "undo ip route-static {network} {mask} {next_hop}"
+      - "commit"
+      - "quit"
+  alternatives:
+    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo ip route-static {network} {mask} {next_hop}"
+        - "quit"
+
 # get_svis NO tiene entrada acá a propósito -- confirmado
 # contra el device real de lab que "display current-configuration
 # interface Vlanif" sin número es rechazado ("Error: Wrong parameter

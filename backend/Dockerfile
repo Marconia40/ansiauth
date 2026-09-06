@@ -31,6 +31,17 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# ansible-pylibssh fue probado en vivo esta sesión para reemplazar el
+# fallback a paramiko (que tiene un problema de concurrencia real bajo
+# workers concurrentes, ver git blame de este comentario) -- SE REVIRTIÓ:
+# libssh (la base de pylibssh) rechaza por default los algoritmos legacy
+# que usan f3r9s1 (KEX diffie-hellman-group14-sha1, sin nada moderno) y
+# f3r9s2 (host key ssh-rsa) -- confirmado en vivo, pylibssh no logra
+# conectarse a NINGUNO de los 2 devices reales de este entorno. paramiko
+# los acepta sin problema. No instalar pylibssh acá sin antes confirmar
+# que soporta esos algoritmos legacy (ej. configurando opciones KEX/host-key
+# explícitas si libssh lo permite) contra los 2 devices reales.
+
 # Ansible Galaxy collections used by the playbooks.
 RUN ansible-galaxy collection install \
         cisco.ios \
