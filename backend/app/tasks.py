@@ -76,12 +76,14 @@ def sync_device_task(device_name: str, scope: str) -> None:
         device_sync_service.sync_global_config(device)
     elif scope == "arp_mac":
         device_sync_service.sync_arp_mac(device)
+    elif scope == "logs":
+        device_sync_service.sync_logs(device)
     elif scope == "all":
-        # ARP/MAC deliberadamente afuera de "all" -- a pedido del usuario,
-        # no hacen falta para ninguna escritura y pueden traer muchísima
-        # info, así que su sync es específico (ver
-        # ``DeviceSyncService.sync_arp_mac()``), no automático al dar de
-        # alta un device.
+        # ARP/MAC/logs deliberadamente afuera de "all" -- a pedido del
+        # usuario, no hacen falta para ninguna escritura y pueden traer
+        # muchísima info, así que su sync es específico (ver
+        # ``DeviceSyncService.sync_arp_mac()``/``sync_logs()``), no
+        # automático al dar de alta un device.
         errores: list[str] = []
         for nombre, fn in (
             ("vlans", device_sync_service.sync_vlans),
@@ -101,5 +103,5 @@ def sync_device_task(device_name: str, scope: str) -> None:
     else:
         raise ValueError(
             f"sync_device_task: scope inválido {scope!r} "
-            "(esperado: vlans / ports / svis / global_config / arp_mac / all)"
+            "(esperado: vlans / ports / svis / global_config / arp_mac / logs / all)"
         )

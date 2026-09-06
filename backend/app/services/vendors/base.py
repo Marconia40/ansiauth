@@ -1047,6 +1047,18 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement get_mac_table yet"
         )
 
+    def get_log_buffer(self, device: Device, password: str) -> str:
+        """Log buffer local del device, texto crudo (sin parsear a
+        entradas -- mismo criterio que ``running_config``, el formato de
+        cada línea varía demasiado para forzar una estructura). Fuera de
+        RF-GLOBAL-01..09, pedido del usuario "de la misma forma que las
+        tablas mac y arp" -- mismo scope de sync propio (``"logs"``, ver
+        ``DeviceSyncService.sync_logs()``), afuera de ``reconciliar()`` y
+        de ``"all"``."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_log_buffer yet"
+        )
+
     def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement add_log_server yet"

@@ -99,6 +99,10 @@ class DeviceModel(Base):
     # alguien pide explícitamente ``POST .../arp-mac/refresh``.
     arp_mac_synced_at = Column(DateTime(timezone=True), nullable=True)
     arp_mac_sync_error = Column(Text, nullable=True)
+    # Logs -- mismo criterio que ARP/MAC arriba, scope de sync propio,
+    # afuera de "all".
+    logs_synced_at = Column(DateTime(timezone=True), nullable=True)
+    logs_sync_error = Column(Text, nullable=True)
 
     device_group = relationship(
         "DeviceGroupModel",
@@ -224,6 +228,20 @@ class DeviceArpMacModel(Base):
     device = Column(String, primary_key=True)
     arp_table = Column(JSON, nullable=True)  # lista de dict (ip/mac/interface/vlan/type/age), tabla completa sin filtrar
     mac_table = Column(JSON, nullable=True)  # lista de dict (mac/vlan/interface/type), tabla completa sin filtrar
+
+
+class DeviceLogsModel(Base):
+    """Repository[DeviceLogs]. Mismo criterio que ``DeviceArpMacModel`` --
+    tabla/scope de sync propios (``"logs"``, tampoco forma parte de
+    ``"all"``), pedido por el usuario "de la misma forma que las tablas
+    mac y arp". ``log_output`` queda Text (no JSON) -- mismo criterio que
+    ``DeviceGlobalConfigModel.running_config``, es texto crudo multi-línea,
+    no filas tabulares."""
+
+    __tablename__ = "device_logs"
+
+    device = Column(String, primary_key=True)
+    log_output = Column(Text, nullable=True)
 
 
 class JobModel(Base):

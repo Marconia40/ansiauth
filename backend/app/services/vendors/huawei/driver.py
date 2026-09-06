@@ -619,6 +619,16 @@ class HuaweiVendor(VendorDriver):
         raw = self._leer(["display mac-address"], device, password)[0]
         return parse_huawei_mac(raw)
 
+    def get_log_buffer(self, device: Device, password: str) -> str:
+        """RF-GLOBAL fuera de alcance, pedido del usuario "de la misma
+        forma que las tablas mac y arp". Confirmado en vivo contra
+        f3r9s2: ``display logbuffer`` funciona limpio de punta a punta
+        (~100 mil caracteres, 512 mensajes, sin cortes) -- a diferencia
+        de Cisco (ver ``CiscoVendor.get_log_buffer()``), acá no hizo
+        falta ningún exclude ni workaround."""
+        raw = self._leer(["display logbuffer"], device, password)[0]
+        return raw.strip()
+
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
         """RF-GLOBAL-06. Confirmado en vivo contra huawei01: ``ip
         route-static {network} {mask} {next_hop}``."""

@@ -498,6 +498,27 @@ class CiscoVendor(VendorDriver):
         raw = self._leer(["show mac address-table"], device, password)[0]
         return parse_cisco_mac(raw)
 
+    def get_log_buffer(self, device: Device, password: str) -> str:
+        """RF-GLOBAL fuera de alcance, pedido del usuario "de la misma
+        forma que las tablas mac y arp". El ``exclude`` es necesario, NO
+        opcional -- confirmado en vivo contra f3r9s1 que ``show logging``
+        solo (o filtrado por cualquier otra cosa, ej. ``| include %``)
+        corta la lectura a la mitad de una palabra y falla. Descartado
+        timeout/tamaño como causa (probado con 3x el timeout normal,
+        corte en el mismo punto exacto) -- el corte coincide siempre con
+        una línea ``%PARSER-5-CFGLOG_LOGGEDCMD`` (IOS logea el texto
+        completo de cada comando de configuración aplicado, incluye los
+        propios de esta app, algunos largos) -- esa línea específica
+        rompe la sesión SSH interactiva de esta lectura, mismo tipo de
+        problema que la corrupción de terminal ya documentada en Huawei
+        pero acá el contenido problemático lo genera el device, no
+        nosotros. Confirmado en vivo que excluyéndola la lectura
+        funciona limpia (~44 mil caracteres sin cortes) -- de paso, esas
+        líneas son ruido de auditoría (ya lo tenemos en nuestro propio
+        audit trail), no eventos operativos reales."""
+        raw = self._leer(["show logging | exclude CFGLOG_LOGGEDCMD"], device, password)[0]
+        return raw.strip()
+
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
         """RF-GLOBAL-06. Confirmado en vivo contra cisco01: ``ip route
         {network} {mask} {next_hop}``."""

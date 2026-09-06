@@ -41,13 +41,14 @@ _MAX_ERROR_LEN = 2000
 
 
 class DeviceSyncService:
-    def __init__(self, vlan_repo, puerto_repo, svi_repo, global_config_repo, coordinator, arp_mac_repo):
+    def __init__(self, vlan_repo, puerto_repo, svi_repo, global_config_repo, coordinator, arp_mac_repo, device_logs_repo):
         self._vlans = vlan_repo                        # Repository[VLAN]
         self._ports = puerto_repo                      # Repository[Puerto]
         self._interfaces = svi_repo        # Repository[SVI]
         self._global_config = global_config_repo        # Repository[GlobalConfig]
         self._coordinator = coordinator                # RedisCoordinator
         self._arp_mac = arp_mac_repo                    # Repository[ArpMacTables]
+        self._device_logs = device_logs_repo            # Repository[DeviceLogs]
 
     def sync_vlans(self, device: "Device") -> None:
         """Full-refresh de las VLANs de *device* desde el equipo hacia
@@ -191,11 +192,31 @@ class DeviceSyncService:
         self._marcar_ok(device.name, "arp_mac_synced_at", "arp_mac_sync_error")
         logger.info("sync_arp_mac OK device=%s", device.name)
 
+    def sync_logs(self, device: "Device") -> None:
+        """Full-refresh del log buffer local de *device* hacia
+        ``device_logs`` -- mismo criterio que ``sync_arp_mac()`` (scope
+        propio, afuera de ``"all"``, pedido por el usuario "de la misma
+        forma que las tablas mac y arp")."""
+        from app.models.device_logs import DeviceLogs
+
+        try:
+            with self._coordinator.bloquear(device.name, timeout=_LOCK_TIMEOUT_S):
+                log_output = device.driver.get_log_buffer(device, device.password)
+        except Exception as exc:
+            logger.exception("sync_logs failed device=%s", device.name)
+            self._marcar_error(device.name, "logs_sync_error", str(exc))
+            raise
+
+        self._device_logs.add(DeviceLogs(device=device.name, log_output=log_output))
+
+        self._marcar_ok(device.name, "logs_synced_at", "logs_sync_error")
+        logger.info("sync_logs OK device=%s", device.name)
+
     def metadata(
         self, device_name: str, scope: str,
     ) -> tuple[Optional[datetime], Optional[str]]:
         """Return ``(synced_at, sync_error)`` para *scope* ∈
-        {"vlans","ports","svis","global_config","arp_mac"}.
+        {"vlans","ports","svis","global_config","arp_mac","logs"}.
 
         Consultado por los GET cache-first para poblar el envelope
         ``{data, synced_at, sync_error, sync_in_progress}`` sin que el
@@ -219,10 +240,14 @@ class DeviceSyncService:
                 DeviceModel.arp_mac_synced_at,
                 DeviceModel.arp_mac_sync_error,
             ),
+            "logs": (
+                DeviceModel.logs_synced_at,
+                DeviceModel.logs_sync_error,
+            ),
         }
         if scope not in cols:
             raise ValueError(
-                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports / svis / global_config / arp_mac)"
+                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports / svis / global_config / arp_mac / logs)"
             )
         col_ts, col_err = cols[scope]
         with get_session() as session:

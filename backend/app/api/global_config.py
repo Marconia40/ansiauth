@@ -768,3 +768,46 @@ def get_global_config_mac(
         sync_in_progress=redis_coordinator.esta_ocupado(name),
     ).model_dump(mode="json")
     return ok(envelope)
+
+
+@router.get(
+    "/logs",
+    summary="Get the device's local log buffer",
+    description=(
+        "Retrieve the device's local log buffer (`show logging`/"
+        "`display logbuffer`) as a list of lines. Cache-first, with its "
+        "own `logs` sync scope (same criterion as `/arp`/`/mac` — not "
+        "needed for any write, can be a lot of data, so it's not synced "
+        "automatically; call `POST .../global-config/logs/refresh` to "
+        "(re)populate it). On Cisco, config-audit lines "
+        "(`%PARSER-5-CFGLOG_LOGGEDCMD`, which echo back the full text of "
+        "every applied config command) are excluded at the source — "
+        "confirmed live that a long logged command breaks this app's "
+        "interactive SSH read otherwise, and those lines are audit noise "
+        "already covered by this app's own audit trail anyway, not real "
+        "operational events. Requires observer role or higher."
+    ),
+)
+def get_global_config_logs(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import device_logs_repository, device_sync_service, redis_coordinator
+
+    _authz_device(scope, name, min_role="observer")
+    dev = require_device(name)
+    logs = device_logs_repository.get(name)
+    payload = {
+        "device": dev.name,
+        "vendor": dev.vendor,
+        "log_lines": logs.log_output.splitlines() if logs and logs.log_output else None,
+    }
+    synced_at, sync_error = device_sync_service.metadata(name, "logs")
+    envelope = SyncedResource(
+        data=payload,
+        synced_at=synced_at,
+        sync_error=sync_error,
+        sync_in_progress=redis_coordinator.esta_ocupado(name),
+    ).model_dump(mode="json")
+    return ok(envelope)

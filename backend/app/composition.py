@@ -10,7 +10,7 @@ etc.) — no hace falta anticipar esas partes acá, cada fase agrega lo suyo.
 from __future__ import annotations
 
 from app.core.repository import Repository
-from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel, DeviceGlobalConfigModel, DeviceArpMacModel
+from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel, DeviceGlobalConfigModel, DeviceArpMacModel, DeviceLogsModel
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.device_group_repository import DeviceGroupRepository
 from app.repositories.device_repository import DeviceRepository
@@ -165,6 +165,21 @@ arp_mac_repository = Repository(
     pk_field="device",
 )
 
+
+def _device_logs_to_orm(l: "DeviceLogs"):
+    return DeviceLogsModel(device=l.device, log_output=l.log_output)
+
+
+def _device_logs_to_domain(row) -> "DeviceLogs":
+    from app.models.device_logs import DeviceLogs
+    return DeviceLogs(device=row.device, log_output=row.log_output)
+
+
+device_logs_repository = Repository(
+    DeviceLogsModel, _device_logs_to_domain, _device_logs_to_orm,
+    pk_field="device",
+)
+
 job_repository = JobRepository()
 
 role_assignment_repository = RoleAssignmentRepository()
@@ -213,5 +228,5 @@ inventory = Inventory(
 
 device_sync_service = DeviceSyncService(
     vlan_repository, puerto_repository, svi_repository, global_config_repository, redis_coordinator,
-    arp_mac_repository,
+    arp_mac_repository, device_logs_repository,
 )
