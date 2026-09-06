@@ -253,6 +253,100 @@ def refresh_device_svis(
     return ok({"device": name, "scope": "svis", "task_id": result.id})
 
 
+@router.post(
+    "/{name}/global-config/refresh",
+    status_code=202,
+    summary="Refresh device global configuration cache",
+    description=(
+        "Trigger a background sync of *device*'s global configuration "
+        "cache from the equipment (version, hostname, SNMP status, "
+        "routing table, ACL names — RF-GLOBAL-01/02/03/04). Returns "
+        "immediately with the task id; the frontend polls "
+        "`GET /api/v1/devices/{name}/global-config` and watches "
+        "`synced_at` / `sync_in_progress` to detect completion. "
+        "Requires observer role or higher on the device — same criterion "
+        "as reading the global configuration."
+    ),
+)
+def refresh_device_global_config(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import inventory
+    from app.tasks import sync_device_task
+
+    if inventory.get(name) is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
+    result = sync_device_task.delay(name, "global_config")
+    return ok({"device": name, "scope": "global_config", "task_id": result.id})
+
+
+@router.post(
+    "/{name}/global-config/arp-mac/refresh",
+    status_code=202,
+    summary="Refresh device ARP/MAC table cache",
+    description=(
+        "Trigger a background sync of *device*'s ARP and MAC address "
+        "table cache from the equipment. Separate scope from "
+        "`global-config/refresh` on purpose — ARP/MAC aren't needed for "
+        "any write's no-op check and can be a lot of data, so they're not "
+        "synced automatically on device registration or as part of a "
+        "general refresh; this is the only way to (re)populate them. "
+        "Returns immediately with the task id; the frontend polls "
+        "`GET /api/v1/devices/{name}/global-config/arp` (or `/mac`) and "
+        "watches `synced_at` / `sync_in_progress` to detect completion. "
+        "Requires observer role or higher on the device — same criterion "
+        "as reading the tables."
+    ),
+)
+def refresh_device_arp_mac(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import inventory
+    from app.tasks import sync_device_task
+
+    if inventory.get(name) is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
+    result = sync_device_task.delay(name, "arp_mac")
+    return ok({"device": name, "scope": "arp_mac", "task_id": result.id})
+
+
+@router.post(
+    "/{name}/global-config/logs/refresh",
+    status_code=202,
+    summary="Refresh device log buffer cache",
+    description=(
+        "Trigger a background sync of *device*'s local log buffer "
+        "(`show logging`/`display logbuffer`) from the equipment. Same "
+        "criterion as `arp-mac/refresh` — not needed for any write's "
+        "no-op check and can be a lot of data, so it's not synced "
+        "automatically on device registration or as part of a general "
+        "refresh. Returns immediately with the task id; the frontend "
+        "polls `GET /api/v1/devices/{name}/global-config/logs` and "
+        "watches `synced_at` / `sync_in_progress` to detect completion. "
+        "Requires observer role or higher on the device."
+    ),
+)
+def refresh_device_logs(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import inventory
+    from app.tasks import sync_device_task
+
+    if inventory.get(name) is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
+    result = sync_device_task.delay(name, "logs")
+    return ok({"device": name, "scope": "logs", "task_id": result.id})
+
+
 @router.delete(
     "/{name}",
     summary="Delete device",

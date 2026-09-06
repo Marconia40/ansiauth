@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 from typing import TYPE_CHECKING
 
+from app.services.parsers._common import strip_known_preamble
 from app.services.parsers.port_parser import CiscoPortParser
 from app.services.vendors.base import VendorDriver
 
@@ -11,6 +13,9 @@ if TYPE_CHECKING:
     from app.models.svi import SVI
     from app.models.port import Puerto
     from app.models.vlan import VLAN
+    from app.models.global_config import GlobalConfig
+
+logger = logging.getLogger(__name__)
 
 _PLAYBOOK = "vendors/cisco/run.yml"
 
@@ -19,6 +24,18 @@ _PLAYBOOK = "vendors/cisco/run.yml"
 _STATUS_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _SWITCHPORT_INDEX = 2
+
+# RF-GLOBAL-01 -- líneas de metadata al principio de "show running-config"
+# que no son config real, confirmadas en vivo contra f3r9s1 ("Building
+# configuration...", "Current configuration : N bytes", los 2 comentarios
+# de "Last configuration change"/"NVRAM config last updated"). Un "!" suelto
+# de separador real del config NO matchea ninguno de estos, queda intacto.
+_RUNNING_CONFIG_PREAMBLE = [
+    r"^Building configuration\.\.\.\s*$",
+    r"^Current configuration\s*:.*bytes\s*$",
+    r"^!\s*Last configuration change.*$",
+    r"^!\s*NVRAM config last updated.*$",
+]
 
 
 class CiscoVendor(VendorDriver):
@@ -290,6 +307,259 @@ class CiscoVendor(VendorDriver):
         stdouts = self._leer(commands, device, password)
         from app.services.parsers.svi_parser import parse_ios_acl_names
         return parse_ios_acl_names(stdouts[0] if stdouts else "")
+
+    def list_acls(self, device: Device, password: str) -> list[dict]:
+        """Como ``list_acl_names`` pero con las reglas de cada ACL (mismo
+        comando ``show access-lists``, no dispara una lectura aparte) --
+        RF-GLOBAL-01/04, pedido tras ver la respuesta con ``acls`` como
+        solo nombres."""
+        commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        from app.services.parsers.svi_parser import parse_ios_acls
+        return parse_ios_acls(stdouts[0] if stdouts else "")
+
+    def _formatear_endpoint_acl(self, endpoint: dict) -> str:
+        if endpoint.get("any"):
+            return "any"
+        if endpoint.get("host"):
+            return f"host {endpoint['host']}"
+        network, wildcard = self._red_y_wildcard(endpoint["network"])
+        return f"{network} {wildcard}"
+
+    def formatear_regla_acl(self, rule: dict) -> str:
+        """RF-GLOBAL-05. Arma la línea CLI real de IOS a partir de una
+        regla vendor-agnóstica (``GlobalConfigAclRule``) -- confirmado en
+        vivo contra cisco01: ``{action} {protocol} {source} {destination}
+        [{port}]``, con ``source``/``destination`` resueltos a ``any`` /
+        ``host {ip}`` / ``{network} {wildcard}`` (wildcard = inverso de la
+        netmask, ver ``_red_y_wildcard()``). Sin secuencia -- IOS la
+        auto-asigna al no incluirla."""
+        partes = [
+            rule["action"], rule["protocol"],
+            self._formatear_endpoint_acl(rule["source"]),
+            self._formatear_endpoint_acl(rule["destination"]),
+        ]
+        port = rule.get("port")
+        if port:
+            if port["operator"] == "range":
+                partes.append(f"range {port['value']} {port['value2']}")
+            else:
+                partes.append(f"eq {port['value']}")
+        return " ".join(partes)
+
+    def create_or_update_acl(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """RF-GLOBAL-05. Confirmado en vivo contra cisco01: entrar a ``ip
+        access-list extended {name}`` crea la ACL si no existía, y agrega
+        las líneas si ya existía -- mismo comando sirve para "crear" y
+        "agregar reglas". Usa el mecanismo ``repeat`` de
+        ``_ejecutar_paso()`` (ya existente, compartido con
+        ``set_svi_dhcp_relay``) para mandar N reglas en 1 solo bloque de
+        comando en vez de N round-trips."""
+        return self._aplicar_desde_template(
+            "create_or_update_acl", {"name": name, "rule_lines": rule_lines}, device, password,
+        )
+
+    def remove_acl_rules(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
+        """RF-GLOBAL-05 (delete de reglas puntuales). Confirmado en vivo
+        contra cisco01: ``no {regla exacta}`` adentro del contexto de la
+        ACL saca esa entrada puntual."""
+        return self._aplicar_desde_template(
+            "remove_acl_rules", {"name": name, "rule_lines": rule_lines}, device, password,
+        )
+
+    def delete_acl(self, name: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-05 (delete de la ACL completa). Confirmado en vivo
+        contra cisco01: ``no ip access-list extended {name}``."""
+        return self._aplicar_desde_template("delete_acl", {"name": name}, device, password)
+
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+        """RF-GLOBAL-01/02/03/04 (SRS §3.4). "show snmp" vive en un
+        ``_leer()`` aparte (ver nota en ``commands.yaml: get_snmp_status``)
+        -- confirmado contra device real que falla con rc != 0 cuando SNMP
+        no está habilitado, y que ``_leer()`` aborta el batch entero ante
+        el primer comando fallido (perdería version/hostname/routes
+        también si viviera en la misma tanda). ACLs es 1 lectura más, con
+        su propio try/except (si falla, el resto sigue). ARP/MAC NO viven
+        acá -- tienen su propio scope de sync (``ArpMacTables``/
+        ``sync_arp_mac()``), a pedido del usuario (no hacen falta para
+        ninguna escritura, y pueden traer muchísima info)."""
+        commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
+        stdouts = self._leer(commands, device, password)
+        version_output = stdouts[0] if len(stdouts) > 0 else ""
+        hostname_output = stdouts[1] if len(stdouts) > 1 else ""
+        community_output = stdouts[2] if len(stdouts) > 2 else ""
+        route_output = stdouts[3] if len(stdouts) > 3 else ""
+        running_config = stdouts[4] if len(stdouts) > 4 else ""
+
+        snmp_commands = self._cargar_comandos()["get_snmp_status"]["primary"]["commands"]
+        try:
+            self._leer(snmp_commands, device, password)
+            snmp_enabled = True
+        except RuntimeError as exc:
+            if "snmp agent not enabled" in str(exc).lower():
+                snmp_enabled = False
+            else:
+                raise
+
+        try:
+            acls = self.list_acls(device, password)
+        except RuntimeError:
+            logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
+            acls = None
+
+        from app.services.parsers.global_config_parser import CiscoGlobalConfigParser
+        config = CiscoGlobalConfigParser.parse(
+            version_output=version_output, hostname_output=hostname_output,
+            community_output=community_output, route_output=route_output,
+            running_config_output=running_config, snmp_enabled=snmp_enabled,
+        )
+        config.device = device.name
+        config.acls = acls
+        config.running_config = strip_known_preamble(running_config, _RUNNING_CONFIG_PREAMBLE, separador="!") or None
+        return config
+
+    def set_hostname(self, hostname: str, device: Device, password: str) -> dict:
+        return self._aplicar_desde_template("set_hostname", {"hostname": hostname}, device, password)
+
+    def set_snmp(self, cambios: dict, device: Device, password: str) -> dict:
+        """RF-GLOBAL-07. IOS clásico (SNMPv1/v2c basado en community) no
+        tiene un comando separado para "versión" -- ``cambios["version"]``
+        se ignora acá a propósito (ver comentario en ``commands.yaml``).
+        ``community`` siempre se fija RO (ya no es parámetro). ``trap_source``
+        y ``trap_host``(+``trap_version``+``trap_host_community``) confirmados
+        en vivo contra f3r9s1 (aplicados idempotentemente contra los valores
+        ya vigentes ahí, sin cambiar nada real)."""
+        if "version" in cambios:
+            logger.info(
+                "CiscoVendor.set_snmp: 'version' has no distinct IOS community-based "
+                "command, ignoring for device=%s",
+                device.name,
+            )
+        resultados = []
+        if "community" in cambios:
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_community", {"community": cambios["community"]}, device, password,
+                )
+            )
+        if "trap_source" in cambios:
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_trap_source", {"interface": cambios["trap_source"]}, device, password,
+                )
+            )
+        if "trap_host" in cambios:
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_trap_host",
+                    {
+                        "host": cambios["trap_host"], "version": cambios["trap_version"],
+                        "community": cambios["trap_host_community"],
+                    },
+                    device, password,
+                )
+            )
+        return self._combinar_resultados(resultados)
+
+    def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (Log, endpoint propio). Confirmado en vivo contra
+        cisco01: ``logging host {ip}`` + (si viene ``level``) ``logging
+        trap {level}`` -- en IOS el nivel sigue siendo un ajuste global
+        (no por-host), pero viaja en el mismo request por conveniencia de
+        API."""
+        if level:
+            return self._aplicar_desde_template(
+                "set_log_host_and_level", {"log_server": server, "log_level": level}, device, password,
+            )
+        return self._aplicar_desde_template("set_log_host", {"log_server": server}, device, password)
+
+    def remove_log_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (Log, delete). Confirmado en vivo contra cisco01."""
+        return self._aplicar_desde_template("remove_log_host", {"log_server": server}, device, password)
+
+    def get_arp_table(self, device: Device, password: str) -> list[dict]:
+        """RF-GLOBAL fuera de alcance, pedido del usuario. Se lee completa
+        (sin filtro) durante ``get_global_config()`` y se cachea -- dejó de
+        ser lectura en vivo por request (única excepción a cache-first que
+        tenía esta app) porque cada ``GET /arp`` pagaba el overhead
+        completo de una sesión SSH/Ansible nueva; ``include`` ahora filtra
+        en Python sobre el resultado ya cacheado (ver
+        ``api/global_config.py``). Parseado a filas estructuradas,
+        confirmado en vivo contra f3r9s1, ver ``arp_mac_parser.py``."""
+        from app.services.parsers.arp_mac_parser import parse_cisco_arp
+
+        raw = self._leer(["show arp"], device, password)[0]
+        return parse_cisco_arp(raw)
+
+    def get_mac_table(self, device: Device, password: str) -> list[dict]:
+        """Mismo criterio que ``get_arp_table()``."""
+        from app.services.parsers.arp_mac_parser import parse_cisco_mac
+
+        raw = self._leer(["show mac address-table"], device, password)[0]
+        return parse_cisco_mac(raw)
+
+    def get_log_buffer(self, device: Device, password: str) -> str:
+        """RF-GLOBAL fuera de alcance, pedido del usuario "de la misma
+        forma que las tablas mac y arp". El ``exclude`` es necesario, NO
+        opcional -- confirmado en vivo contra f3r9s1 que ``show logging``
+        solo (o filtrado por cualquier otra cosa, ej. ``| include %``)
+        corta la lectura a la mitad de una palabra y falla. Descartado
+        timeout/tamaño como causa (probado con 3x el timeout normal,
+        corte en el mismo punto exacto) -- el corte coincide siempre con
+        una línea ``%PARSER-5-CFGLOG_LOGGEDCMD`` (IOS logea el texto
+        completo de cada comando de configuración aplicado, incluye los
+        propios de esta app, algunos largos) -- esa línea específica
+        rompe la sesión SSH interactiva de esta lectura, mismo tipo de
+        problema que la corrupción de terminal ya documentada en Huawei
+        pero acá el contenido problemático lo genera el device, no
+        nosotros. Confirmado en vivo que excluyéndola la lectura
+        funciona limpia (~44 mil caracteres sin cortes) -- de paso, esas
+        líneas son ruido de auditoría (ya lo tenemos en nuestro propio
+        audit trail), no eventos operativos reales."""
+        raw = self._leer(["show logging | exclude CFGLOG_LOGGEDCMD"], device, password)[0]
+        return raw.strip()
+
+    def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-06. Confirmado en vivo contra cisco01: ``ip route
+        {network} {mask} {next_hop}``."""
+        network, mask = self._red_y_mascara(destination)
+        return self._aplicar_desde_template(
+            "set_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
+        )
+
+    def remove_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-06 (delete). Confirmado en vivo contra cisco01."""
+        network, mask = self._red_y_mascara(destination)
+        return self._aplicar_desde_template(
+            "remove_route", {"network": network, "mask": mask, "next_hop": next_hop}, device, password,
+        )
+
+    def add_ntp_server(self, server: str, prefer: bool, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (NTP, endpoint propio). Confirmado en vivo contra
+        f3r9s1: ``ntp server {ip} [prefer]``."""
+        op_key = "add_ntp_with_prefer" if prefer else "add_ntp"
+        return self._aplicar_desde_template(op_key, {"server": server}, device, password)
+
+    def remove_ntp_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (NTP, delete). Confirmado en vivo contra f3r9s1 --
+        ``no ntp server {ip}`` saca la entrada aunque se haya agregado con
+        ``prefer`` (no hace falta repetir el sufijo)."""
+        return self._aplicar_desde_template("remove_ntp", {"server": server}, device, password)
+
+    def add_dns_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, endpoint propio). Confirmado en vivo esta
+        sesión: ``ip name-server {ip}``."""
+        return self._aplicar_desde_template("add_dns", {"server": server}, device, password)
+
+    def remove_dns_server(self, server: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, delete). Confirmado en vivo esta sesión."""
+        return self._aplicar_desde_template("remove_dns", {"server": server}, device, password)
+
+    def set_dns_domain(self, domain: str, device: Device, password: str) -> dict:
+        """RF-GLOBAL-09 (DNS, domain-name). Confirmado en vivo contra
+        f3r9s1 -- IOS normaliza ``ip domain-name`` a ``ip domain name`` en
+        el running-config, pero acepta el alias al escribir."""
+        return self._aplicar_desde_template("set_dns_domain", {"domain": domain}, device, password)
 
     @staticmethod
     def _cidr_a_direccion_y_mascara(cidr: "str | None") -> tuple[str, str]:

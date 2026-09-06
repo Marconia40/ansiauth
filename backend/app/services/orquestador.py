@@ -197,15 +197,38 @@ class Orquestador:
             # real de Ansible, ACÁ no corresponde rollback (deshacer un
             # cambio exitoso en el device por un problema de guardado local
             # sería peor que el problema original).
-            try:
-                self._repos[recurso.repositorio()].add(recurso)
-            except Exception:
-                logger.exception(
-                    "Tracking write failed for %s on device=%s after the device "
-                    "change already succeeded -- NOT rolled back (the change is "
-                    "real and wanted), only the local tracking row failed to save.",
-                    recurso.repositorio(), device_name,
-                )
+            #
+            # Bug real encontrado por el usuario: escribió NTP en Huawei
+            # (POST /global-config/ntp) y el siguiente GET /global-config
+            # devolvió TODO null (hostname, snmp, rutas, acls -- no solo
+            # ntp). Causa: para VLAN/Puerto/Svi, `recurso` es la
+            # representación completa del ítem que se acaba de tocar (ej.
+            # VLAN(vlan_id, device, name) YA es todo lo que hay que
+            # cachear para esa VLAN), así que escribirlo acá directo es
+            # correcto. GlobalConfig es un singleton por device que
+            # representa MUCHOS campos a la vez (hostname/snmp/ntp/dns/
+            # rutas/acls...), pero el objeto que llega a esta escritura
+            # solo tiene seteado el campo que se está escribiendo (ej.
+            # `ntp_server_add`) -- todos los demás quedan en su default
+            # de dataclass (``None``). `Repository.add()` hace
+            # ``session.merge()`` del objeto ENTERO, así que mandarlo acá
+            # tal cual pisa la fila cacheada completa con nulls, salvo el
+            # campo que se acaba de escribir (que ni siquiera es una
+            # columna de lectura -- ``ntp_server_add`` no es
+            # ``ntp_servers``). El sync post-write de abajo es lo que
+            # repuebla la fila con el estado real leído del device -- acá
+            # no hay nada útil que trackear mientras tanto, al revés que
+            # VLAN/Puerto/SVI.
+            if recurso.repositorio() != "global_config":
+                try:
+                    self._repos[recurso.repositorio()].add(recurso)
+                except Exception:
+                    logger.exception(
+                        "Tracking write failed for %s on device=%s after the device "
+                        "change already succeeded -- NOT rolled back (the change is "
+                        "real and wanted), only the local tracking row failed to save.",
+                        recurso.repositorio(), device_name,
+                    )
             job.marcar_completado(resultado)
             self._jobs.add(job)
             try:
@@ -225,7 +248,12 @@ class Orquestador:
             # broker no está, la escritura ya fue exitosa, sólo perdemos la
             # actualización proactiva de cache -- el usuario puede darle
             # refresh manual desde POST /devices/{name}/{vlans,ports}/refresh.
-            _SCOPE_POR_REPO = {"vlan": "vlans", "puerto": "ports", "svi": "svis"}
+            # "global_config" faltaba acá -- por eso el bug de arriba dejaba
+            # la fila en null "para siempre" (hasta un refresh manual) en vez
+            # de autocorregirse en unos segundos como el resto: sin esta
+            # entrada, ninguna escritura de Configuración Global disparaba el
+            # sync post-write que repuebla la fila con el estado real.
+            _SCOPE_POR_REPO = {"vlan": "vlans", "puerto": "ports", "svi": "svis", "global_config": "global_config"}
             sync_scope = _SCOPE_POR_REPO.get(recurso.repositorio())
             if sync_scope is not None:
                 # Coalesce del sync post-write cuando llega un burst de N jobs
