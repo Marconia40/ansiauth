@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { PlaceholderPanel } from './Panel';
+import { GlobalConfigOverview } from './GlobalConfigOverview';
 
 interface Props {
   deviceName: string;
@@ -35,9 +36,13 @@ export function GlobalConfigTab({ deviceName }: Props) {
   return (
     <div className="flex flex-col gap-4">
       <SubTabStrip current={section} onSelect={setSection} />
-      <PlaceholderPanel
-        label={`${SECTIONS.find((s) => s.key === section)?.label ?? section} — coming in the next block (${deviceName}).`}
-      />
+      {section === 'overview' ? (
+        <GlobalConfigOverview deviceName={deviceName} />
+      ) : (
+        <PlaceholderPanel
+          label={`${SECTIONS.find((s) => s.key === section)?.label ?? section} — coming in the next block (${deviceName}).`}
+        />
+      )}
     </div>
   );
 }
