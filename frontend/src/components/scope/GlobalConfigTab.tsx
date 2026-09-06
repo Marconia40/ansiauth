@@ -5,6 +5,7 @@ import { PlaceholderPanel } from './Panel';
 import { GlobalConfigOverview } from './GlobalConfigOverview';
 import { GlobalConfigRoutes } from './GlobalConfigRoutes';
 import { GlobalConfigAcls } from './GlobalConfigAcls';
+import { GlobalConfigArpMac } from './GlobalConfigArpMac';
 
 interface Props {
   deviceName: string;
@@ -44,6 +45,8 @@ export function GlobalConfigTab({ deviceName }: Props) {
         <GlobalConfigRoutes deviceName={deviceName} />
       ) : section === 'acls' ? (
         <GlobalConfigAcls deviceName={deviceName} />
+      ) : section === 'arp-mac' ? (
+        <GlobalConfigArpMac deviceName={deviceName} />
       ) : (
         <PlaceholderPanel
           label={`${SECTIONS.find((s) => s.key === section)?.label ?? section} — coming in the next block (${deviceName}).`}
