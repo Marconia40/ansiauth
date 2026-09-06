@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getGlobalConfigSynced,
@@ -14,6 +14,8 @@ import type {
 } from '@/types/global-config';
 import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
+import { HostnameEditModal } from './HostnameEditModal';
+import { SnmpEditModal } from './SnmpEditModal';
 
 interface Props {
   deviceName: string;
@@ -58,6 +60,16 @@ export function GlobalConfigOverview({ deviceName }: Props) {
     configQuery.data?.sync_error ?? versionQuery.data?.sync_error ?? null;
 
   const [refreshing, setRefreshing] = useState(false);
+  const [openHostname, setOpenHostname] = useState(false);
+  const [openSnmp, setOpenSnmp] = useState(false);
+  const [toast, setToast] = useState<{ msg: string; tone: 'ok' | 'error' } | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
   async function handleRefresh() {
     setRefreshing(true);
     try {
@@ -105,7 +117,10 @@ export function GlobalConfigOverview({ deviceName }: Props) {
         </div>
       )}
 
-      <Panel title="About device">
+      <Panel
+        title="About device"
+        actions={<EditPill label="Edit hostname" onClick={() => setOpenHostname(true)} />}
+      >
         <ul className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
           <DetailRow label="HOSTNAME" value={renderScalar(config?.hostname)} />
           <DetailRow label="MODEL" value={renderScalar(version?.model)} />
@@ -118,7 +133,10 @@ export function GlobalConfigOverview({ deviceName }: Props) {
       </Panel>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Panel title="SNMP">
+        <Panel
+          title="SNMP"
+          actions={<EditPill label="Edit SNMP" onClick={() => setOpenSnmp(true)} />}
+        >
           <ul className="flex flex-col gap-2 text-sm">
             <DetailRow label="ENABLED" value={renderBool(config?.snmp.enabled)} />
             <DetailRow label="VERSION" value={renderScalar(config?.snmp.version)} />
@@ -157,7 +175,44 @@ export function GlobalConfigOverview({ deviceName }: Props) {
           </div>
         </Panel>
       </div>
+
+      <HostnameEditModal
+        open={openHostname}
+        onClose={() => setOpenHostname(false)}
+        deviceName={deviceName}
+        currentHostname={config?.hostname ?? null}
+        onDone={(msg, tone) => setToast({ msg, tone })}
+      />
+      <SnmpEditModal
+        open={openSnmp}
+        onClose={() => setOpenSnmp(false)}
+        deviceName={deviceName}
+        currentSnmp={config?.snmp ?? null}
+        onDone={(msg, tone) => setToast({ msg, tone })}
+      />
+
+      {toast && (
+        <div
+          className={`fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm ${
+            toast.tone === 'ok' ? 'bg-success text-white' : 'bg-danger text-white'
+          }`}
+        >
+          {toast.msg}
+        </div>
+      )}
     </div>
+  );
+}
+
+function EditPill({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="text-xs font-semibold uppercase tracking-wider text-info hover:brightness-125 transition-colors"
+    >
+      {label}
+    </button>
   );
 }
 
