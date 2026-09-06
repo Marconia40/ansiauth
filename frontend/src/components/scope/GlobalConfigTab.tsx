@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { PlaceholderPanel } from './Panel';
 import { GlobalConfigOverview } from './GlobalConfigOverview';
+import { GlobalConfigRoutes } from './GlobalConfigRoutes';
 
 interface Props {
   deviceName: string;
@@ -38,6 +39,8 @@ export function GlobalConfigTab({ deviceName }: Props) {
       <SubTabStrip current={section} onSelect={setSection} />
       {section === 'overview' ? (
         <GlobalConfigOverview deviceName={deviceName} />
+      ) : section === 'routes' ? (
+        <GlobalConfigRoutes deviceName={deviceName} />
       ) : (
         <PlaceholderPanel
           label={`${SECTIONS.find((s) => s.key === section)?.label ?? section} — coming in the next block (${deviceName}).`}
