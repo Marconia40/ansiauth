@@ -1,11 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { PlaceholderPanel } from './Panel';
 import { GlobalConfigOverview } from './GlobalConfigOverview';
 import { GlobalConfigRoutes } from './GlobalConfigRoutes';
 import { GlobalConfigAcls } from './GlobalConfigAcls';
 import { GlobalConfigArpMac } from './GlobalConfigArpMac';
+import { GlobalConfigLogs } from './GlobalConfigLogs';
+import { GlobalConfigRunningConfig } from './GlobalConfigRunningConfig';
 
 interface Props {
   deviceName: string;
@@ -47,10 +48,10 @@ export function GlobalConfigTab({ deviceName }: Props) {
         <GlobalConfigAcls deviceName={deviceName} />
       ) : section === 'arp-mac' ? (
         <GlobalConfigArpMac deviceName={deviceName} />
+      ) : section === 'logs' ? (
+        <GlobalConfigLogs deviceName={deviceName} />
       ) : (
-        <PlaceholderPanel
-          label={`${SECTIONS.find((s) => s.key === section)?.label ?? section} — coming in the next block (${deviceName}).`}
-        />
+        <GlobalConfigRunningConfig deviceName={deviceName} />
       )}
     </div>
   );
