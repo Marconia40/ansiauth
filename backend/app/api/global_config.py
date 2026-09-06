@@ -691,16 +691,19 @@ def delete_global_config_acl(
     description=(
         "Retrieve the device's ARP table, parsed into structured rows "
         "(`ip`, `mac`, `interface`, `vlan`, `type`, `age` — fields not "
-        "reported by a given vendor come back `null`). Cache-first, same "
-        "underlying sync as `GET /` — this used to be the only live, "
-        "uncached read in this app (the table changes constantly), but "
-        "paid the full cost of a new SSH/Ansible session on every request; "
-        "now it's read in full during the regular sync and served from "
-        "cache like everything else, accepting staleness between syncs in "
-        "exchange for an instant response. `include` is optional and now "
-        "filters the cached rows in Python (case-insensitive substring "
-        "match across all fields) instead of piping through the device. "
-        "Requires observer role or higher."
+        "reported by a given vendor come back `null`). Cache-first, but "
+        "with its OWN sync scope (`arp-mac`) separate from `GET /` — ARP/"
+        "MAC used to be the only live, uncached read in this app (the "
+        "table changes constantly), then got folded into the general "
+        "sync, but that meant every write's no-op check (which doesn't "
+        "need this data) paid for it too, and a device with a huge table "
+        "would bloat every other global-config read. Now it's synced "
+        "independently via `POST .../global-config/arp-mac/refresh` — not "
+        "part of device registration or the general refresh, has to be "
+        "requested explicitly. `include` is optional and filters the "
+        "cached rows in Python (case-insensitive substring match across "
+        "all fields) instead of piping through the device. Requires "
+        "observer role or higher."
     ),
 )
 def get_global_config_arp(
@@ -709,17 +712,17 @@ def get_global_config_arp(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_sync_service, global_config_repository, redis_coordinator
+    from app.composition import arp_mac_repository, device_sync_service, redis_coordinator
 
     _authz_device(scope, name, min_role="observer")
     dev = require_device(name)
-    config = global_config_repository.get(name)
+    tablas = arp_mac_repository.get(name)
     payload = {
         "device": dev.name,
         "vendor": dev.vendor,
-        "entries": _filtrar_entradas_arp_mac(config.arp_table if config else None, include),
+        "entries": _filtrar_entradas_arp_mac(tablas.arp_table if tablas else None, include),
     }
-    synced_at, sync_error = device_sync_service.metadata(name, "global_config")
+    synced_at, sync_error = device_sync_service.metadata(name, "arp_mac")
     envelope = SyncedResource(
         data=payload,
         synced_at=synced_at,
@@ -734,9 +737,9 @@ def get_global_config_arp(
     summary="Get MAC address table",
     description=(
         "Retrieve the device's MAC address table, parsed into structured "
-        "rows (`mac`, `vlan`, `interface`, `type`). Cache-first, same "
-        "criteria as `/arp` (see its description for why this changed from "
-        "a live read). `include` filters the cached rows in Python "
+        "rows (`mac`, `vlan`, `interface`, `type`). Cache-first with its "
+        "own `arp-mac` sync scope, same criteria as `/arp` (see its "
+        "description). `include` filters the cached rows in Python "
         "(case-insensitive substring match across all fields). Requires "
         "observer role or higher."
     ),
@@ -747,17 +750,17 @@ def get_global_config_mac(
     current_user: dict = Depends(require_authenticated),
     scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import device_sync_service, global_config_repository, redis_coordinator
+    from app.composition import arp_mac_repository, device_sync_service, redis_coordinator
 
     _authz_device(scope, name, min_role="observer")
     dev = require_device(name)
-    config = global_config_repository.get(name)
+    tablas = arp_mac_repository.get(name)
     payload = {
         "device": dev.name,
         "vendor": dev.vendor,
-        "entries": _filtrar_entradas_arp_mac(config.mac_table if config else None, include),
+        "entries": _filtrar_entradas_arp_mac(tablas.mac_table if tablas else None, include),
     }
-    synced_at, sync_error = device_sync_service.metadata(name, "global_config")
+    synced_at, sync_error = device_sync_service.metadata(name, "arp_mac")
     envelope = SyncedResource(
         data=payload,
         synced_at=synced_at,

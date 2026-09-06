@@ -109,17 +109,12 @@ class GlobalConfig:
     log_level: str | None = None
     routes: list[dict] | None = None
     acls: list[dict] | None = None
-    # ARP/MAC -- agregadas al cache/sync a pedido del usuario (eran la
-    # única lectura 100% en vivo de toda la app, cada GET pagaba el
-    # overhead completo de una sesión SSH/Ansible nueva). Se aceptan
-    # "desactualizadas hasta el próximo sync" a cambio de que el GET sea
-    # instantáneo -- mismo trade-off que el resto del cache de esta app.
-    # Se leen SIEMPRE completas (sin ``include``) durante el sync -- el
-    # filtro ``include`` de ``GET /arp``/``GET /mac`` ahora se aplica del
-    # lado de la API sobre estos datos ya cacheados, no como un pipe en el
-    # device (ver ``api/global_config.py``).
-    arp_table: list[dict] | None = None
-    mac_table: list[dict] | None = None
+    # ARP/MAC NO viven acá -- tienen su propio dominio/tabla/repository
+    # (``app.models.arp_mac.ArpMacTables``) y su propio scope de sync
+    # (``"arp_mac"``), a pedido del usuario: no hacen falta para ninguna
+    # escritura (no deberían pesar en ``reconciliar()``) y pueden traer
+    # muchísima info, así que su sync es específico -- no forma parte de
+    # ``"all"`` ni de este objeto.
 
     @property
     def mutation_fields(self) -> set[str]:
@@ -244,13 +239,15 @@ class GlobalConfig:
         """Estado actual de la configuración global de *device*, leído en
         vivo -- mismo criterio que ``SVI.reconciliar()``: una escritura
         necesita el estado real del momento, no la cache que sirve
-        ``GET /global-config``. ``incluir_arp_mac=False`` -- ninguna
-        escritura necesita ese dato para su no-op detection, y son 2
-        conexiones SSH menos en un camino que ya de por sí abre varias
-        (confirmado en vivo contra huawei01, 5 líneas VTY: sin este ahorro,
-        una escritura de ACL se quedaba sin sesiones -- "Channel
-        closed")."""
-        actual = device.driver.get_global_config(device, device.password, incluir_arp_mac=False)
+        ``GET /global-config``. ``get_global_config()`` ya no trae ARP/MAC
+        en absoluto (tienen su propio dominio/sync, ver
+        ``app.models.arp_mac.ArpMacTables``) -- ninguna escritura los
+        necesitaba para su no-op detection, así que sacarlos de acá no
+        les saca nada útil, solo 2 conexiones SSH menos en un camino que
+        ya de por sí abre varias (confirmado en vivo contra huawei01, 5
+        líneas VTY: sin este ahorro, una escritura de ACL se quedaba sin
+        sesiones -- "Channel closed")."""
+        actual = device.driver.get_global_config(device, device.password)
         return {"existed": actual is not None, "actual": actual}
 
     def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
@@ -470,14 +467,28 @@ class GlobalConfig:
         acl = next((a for a in actual.acls if a.get("name") == name), None)
         return acl.get("rules", []) if acl is not None else []
 
-    @staticmethod
-    def _regla_ya_presente(regla_formateada: str, reglas_actuales: list[str]) -> bool:
+    # Contador de hits que cada vendor le pega a una regla ya leída --
+    # Cisco solo lo agrega cuando ya hubo tráfico real ("(25556818
+    # matches)", ausente en una regla recién creada); Huawei lo agrega
+    # SIEMPRE, incluso en 0 ("(0 times matched)") -- confirmado en vivo
+    # que sin sacarlo, la comparación por sufijo nunca matchea ninguna
+    # regla de Huawei (ni siquiera la recién creada), rompiendo el no-op
+    # detection por completo.
+    _SUFIJO_CONTADOR_RE = re.compile(r"\s*\((?:\d+ matches?|\d+ times? matched)\)\s*$", re.IGNORECASE)
+
+    @classmethod
+    def _regla_ya_presente(cls, regla_formateada: str, reglas_actuales: list[str]) -> bool:
         """*regla_formateada* (sin prefijo de secuencia, la arma
         ``driver.formatear_regla_acl()``) está presente si alguna regla
         actual TERMINA con ese texto -- el prefijo que agrega cada vendor
         al leer (número de secuencia Cisco, "rule N" Huawei) siempre va
-        ANTES del contenido real de la regla, nunca lo interrumpe."""
-        return any(actual_line.endswith(regla_formateada) for actual_line in reglas_actuales)
+        ANTES del contenido real de la regla, nunca lo interrumpe. Se
+        saca el contador de hits (ver ``_SUFIJO_CONTADOR_RE``) antes de
+        comparar, si lo hay."""
+        return any(
+            cls._SUFIJO_CONTADOR_RE.sub("", actual_line).endswith(regla_formateada)
+            for actual_line in reglas_actuales
+        )
 
     def _aplicar_acl_create(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """RF-GLOBAL-05. Crea la ACL si no existe, agrega las reglas
@@ -548,8 +559,6 @@ class GlobalConfig:
             "log_level": self.log_level,
             "routes": self.routes,
             "acls": self.acls,
-            "arp_table": self.arp_table,
-            "mac_table": self.mac_table,
         }
 
     @classmethod

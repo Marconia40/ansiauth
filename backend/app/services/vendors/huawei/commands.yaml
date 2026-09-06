@@ -875,9 +875,29 @@ list_acls:
 # endpoint "any" desaparece completo de la línea, no queda "source any"
 # ni nada equivalente -- si no se replica esto, la detección de no-op
 # nunca matchea).
+# "screen-width 512" al principio de la sesión evita el bug de corrupción
+# de terminal (una secuencia ANSI de cursor-izquierda parte el comando a
+# la mitad de una palabra cuando el prompt + la línea de la regla cruzan
+# el ancho de la terminal) -- confirmado en vivo contra f3r9s2 real: sin
+# esto, "rule permit tcp destination 192.0.2.10 0 destination-port eq
+# 443" se corrompía; con "screen-width 512" primero, la misma línea
+# aplica limpia. Confirmado además que NO queda guardado en el
+# running-config (es un ajuste de terminal de la sesión, no config real).
+# "y" contesta el prompt de confirmación ("Warning: This command will
+# change the default screen width. Continue? [Y/N]:").
+#
+# PERO "screen-width" no existe en todas las familias VRP -- confirmado
+# en vivo que huawei01 (CE12800) lo rechaza con "Unrecognized command",
+# mientras que f3r9s2 (S5731) sí lo tiene. La 1ra alternativa cubre esa
+# plataforma (reintenta sin screen-width, con commit -- mismo
+# comportamiento que esta operación tenía antes de este fix). La 2da
+# alternativa cubre la plataforma que SÍ tiene screen-width pero rechaza
+# "commit" (f3r9s2 real) -- reintenta con screen-width, sin commit.
 create_or_update_acl:
   primary:
     block:
+      - "screen-width 512"
+      - "y"
       - "system-view"
       - "acl name {name} advance"
     repeat:
@@ -885,8 +905,18 @@ create_or_update_acl:
       line: "{item}"
     trailer: ["quit", "commit", "quit"]
   alternatives:
+    - triggered_by_error: 'screen-width 512\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "acl name {name} advance"
+      repeat:
+        over: "rule_lines"
+        line: "{item}"
+      trailer: ["quit", "commit", "quit"]
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
+        - "screen-width 512"
+        - "y"
         - "system-view"
         - "acl name {name} advance"
       repeat:
@@ -895,10 +925,14 @@ create_or_update_acl:
       trailer: ["quit", "quit"]
 
 # "undo rule {regla exacta, sin número de secuencia}" adentro del contexto
-# de la ACL saca esa entrada puntual -- confirmado en vivo.
+# de la ACL saca esa entrada puntual -- confirmado en vivo. Mismo
+# criterio de "screen-width 512" + 2 alternativas que
+# ``create_or_update_acl`` -- ver esa nota arriba.
 remove_acl_rules:
   primary:
     block:
+      - "screen-width 512"
+      - "y"
       - "system-view"
       - "acl name {name} advance"
     repeat:
@@ -906,8 +940,18 @@ remove_acl_rules:
       line: "undo {item}"
     trailer: ["quit", "commit", "quit"]
   alternatives:
+    - triggered_by_error: 'screen-width 512\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "acl name {name} advance"
+      repeat:
+        over: "rule_lines"
+        line: "undo {item}"
+      trailer: ["quit", "commit", "quit"]
     - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
       block:
+        - "screen-width 512"
+        - "y"
         - "system-view"
         - "acl name {name} advance"
       repeat:

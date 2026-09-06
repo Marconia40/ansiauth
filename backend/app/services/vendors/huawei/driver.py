@@ -404,14 +404,24 @@ class HuaweiVendor(VendorDriver):
         return f"{direction} {network} {wildcard}"
 
     def formatear_regla_acl(self, rule: dict) -> str:
-        """RF-GLOBAL-05. Arma la línea CLI real de VRP a partir de una
-        regla vendor-agnóstica -- confirmado en vivo contra huawei01:
-        ``{action} {protocol} [source {net} {wildcard}] [destination
-        {net} {wildcard}] [destination-port eq|range ...]``. A diferencia
-        de Cisco, el puerto SIEMPRE usa la keyword ``destination-port``
-        explícita (no un ``eq``/``range`` sueltos al final) -- alcance de
-        esta vuelta cubre solo el caso "puerto de destino" (mismo que el
-        ejemplo real del usuario), no ``source-port``."""
+        """RF-GLOBAL-05. Arma el contenido de una regla (sin el prefijo
+        ``rule`` que exige VRP al escribir) a partir de una regla
+        vendor-agnóstica: ``{action} {protocol} [source {net} {wildcard}]
+        [destination {net} {wildcard}] [destination-port eq|range ...]``.
+        Se mantiene SIN ``rule`` a propósito -- esta misma string la usa
+        ``GlobalConfig._regla_ya_presente()`` para no-op detection
+        comparando por sufijo contra las reglas ya leídas (``"rule 5
+        permit ..."``), y ``rule {N} `` es justo el prefijo variable que
+        hay que poder recortar (Cisco es análogo con su número de
+        secuencia). ``create_or_update_acl()``/``remove_acl_rules()``
+        agregan el ``rule`` real recién al armar el comando de escritura
+        -- confirmado en vivo que VRP lo exige ahí (``rule permit ...``,
+        no ``permit ...`` suelto, "Unrecognized command" si falta). A
+        diferencia de Cisco, el puerto SIEMPRE usa la keyword
+        ``destination-port`` explícita (no un ``eq``/``range`` sueltos al
+        final) -- alcance de esta vuelta cubre solo el caso "puerto de
+        destino" (mismo que el ejemplo real del usuario), no
+        ``source-port``."""
         partes = [rule["action"], rule["protocol"]]
         origen = self._formatear_endpoint_acl("source", rule["source"])
         if origen:
@@ -428,33 +438,36 @@ class HuaweiVendor(VendorDriver):
         return " ".join(partes)
 
     def create_or_update_acl(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
-        """RF-GLOBAL-05. Confirmado en vivo contra huawei01: entrar a
-        ``acl name {name} advance`` crea la ACL Advanced con nombre si no
-        existía, y agrega las líneas si ya existía.
+        """RF-GLOBAL-05. Confirmado en vivo contra huawei01/f3r9s2: entrar
+        a ``acl name {name} advance`` crea la ACL Advanced con nombre si
+        no existía, y agrega las líneas si ya existía. Antepone ``rule ``
+        a cada línea (``formatear_regla_acl()`` lo deja afuera a
+        propósito, ver esa docstring) -- confirmado en vivo que VRP
+        rechaza ``permit ...``/``deny ...`` sueltos ("Unrecognized
+        command"), el verbo real de alta es ``rule permit/deny ...``.
 
-        LIMITACIÓN CONOCIDA (best-effort, no se intenta resolver acá):
-        mismo bug de corrupción de terminal ya documentado en
-        ``set_snmp()`` (``trap_host``) -- una secuencia ANSI de
-        cursor-izquierda parte un comando a la mitad de una palabra
-        cuando el prompt (que incluye el nombre de la ACL) + la línea de
-        la regla cruzan cierto ancho de línea en esta sesión SSH.
-        Confirmado en vivo: NO es simplemente "reglas largas fallan" --
-        una regla de 62 caracteres se corrompió mientras otra de 103
-        caracteres (con un nombre de ACL más corto, prompt más corto) no
-        -- depende de la combinación prompt+línea, no de un largo fijo,
-        así que no hay un límite seguro que validar acá de antemano. El
-        device rechaza el comando corrupto en vez de aplicarlo mal (sin
-        riesgo de dato incorrecto), el error real queda visible en el job
-        (``GET /jobs/{id}``)."""
+        Bug de corrupción de terminal (mismo que bloqueaba ``trap_host``
+        en ``set_snmp()``) -- RESUELTO vía ``screen-width 512`` al
+        principio de la sesión (ver ``commands.yaml``): confirmado en
+        vivo contra f3r9s2 que la regla que antes se corrompía
+        (``destination-port eq 443``, con un nombre de ACL que empujaba
+        el prompt+línea sobre el ancho de la terminal) ahora aplica
+        limpia. ``screen-width`` no persiste en el running-config
+        (confirmado en vivo) y no existe en todas las familias VRP --
+        huawei01 (CE12800) lo rechaza, la 1ra alternativa del YAML cubre
+        ese caso reintentando sin él."""
+        rule_lines = [f"rule {linea}" for linea in rule_lines]
         return self._aplicar_desde_template(
             "create_or_update_acl", {"name": name, "rule_lines": rule_lines}, device, password,
         )
 
     def remove_acl_rules(self, name: str, rule_lines: list[str], device: Device, password: str) -> dict:
         """RF-GLOBAL-05 (delete de reglas puntuales). Confirmado en vivo
-        contra huawei01: ``undo {regla exacta}`` adentro del contexto de
-        la ACL saca esa entrada puntual. Mismo riesgo de corrupción de
-        terminal que ``create_or_update_acl()`` -- ver esa docstring."""
+        contra huawei01/f3r9s2: ``undo rule {regla exacta}`` adentro del
+        contexto de la ACL saca esa entrada puntual -- mismo criterio de
+        anteponer ``rule`` que ``create_or_update_acl()``, ver esa
+        docstring (acá el YAML antepone ``undo`` encima)."""
+        rule_lines = [f"rule {linea}" for linea in rule_lines]
         return self._aplicar_desde_template(
             "remove_acl_rules", {"name": name, "rule_lines": rule_lines}, device, password,
         )
@@ -465,22 +478,15 @@ class HuaweiVendor(VendorDriver):
         necesidad de entrar al contexto de la ACL primero."""
         return self._aplicar_desde_template("delete_acl", {"name": name}, device, password)
 
-    def get_global_config(self, device: Device, password: str, *, incluir_arp_mac: bool = True) -> "GlobalConfig":
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
         """RF-GLOBAL-01/02/03/04 (SRS §3.4). "display snmp-agent sys-info"
         vive en un ``_leer()`` aparte (ver nota en
         ``commands.yaml: get_snmp_status``) -- mismo motivo que en Cisco:
         falla con rc != 0 cuando SNMP no está habilitado, y ``_leer()``
-        aborta el batch entero ante el primer comando fallido. ACLs/ARP/MAC
-        son 3 lecturas más, cada 1 con su propio try/except (mismo
-        criterio: si alguna falla, el resto del sync sigue). ARP/MAC se
-        agregaron al cache recién -- antes eran la única lectura en vivo
-        por-request de toda la app, el usuario pidió sumarlas al sync tras
-        notar la latencia de pagar una sesión SSH nueva por cada GET.
-        ``incluir_arp_mac=False`` (usado por ``GlobalConfig.reconciliar()``)
-        las salta -- confirmado en vivo contra huawei01 (5 líneas VTY) que
-        sin esto, una escritura de ACL (que necesita reconciliar() para
-        no-op detection MÁS su propia conexión de escritura) se queda sin
-        sesiones y falla con "Channel closed"."""
+        aborta el batch entero ante el primer comando fallido. ACLs es 1
+        lectura más, con su propio try/except. ARP/MAC NO viven acá --
+        tienen su propio scope de sync (``ArpMacTables``/
+        ``sync_arp_mac()``), a pedido del usuario."""
         commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
         version_output = stdouts[0] if len(stdouts) > 0 else ""
@@ -504,18 +510,6 @@ class HuaweiVendor(VendorDriver):
             logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
             acls = None
 
-        arp_table = mac_table = None
-        if incluir_arp_mac:
-            try:
-                arp_table = self.get_arp_table(device, password)
-            except RuntimeError:
-                logger.exception("get_global_config: get_arp_table failed on device=%s, continuing without ARP", device.name)
-
-            try:
-                mac_table = self.get_mac_table(device, password)
-            except RuntimeError:
-                logger.exception("get_global_config: get_mac_table failed on device=%s, continuing without MAC", device.name)
-
         from app.services.parsers.global_config_parser import HuaweiGlobalConfigParser
         config = HuaweiGlobalConfigParser.parse(
             version_output=version_output, hostname_output=hostname_output,
@@ -524,8 +518,6 @@ class HuaweiVendor(VendorDriver):
         )
         config.device = device.name
         config.acls = acls
-        config.arp_table = arp_table
-        config.mac_table = mac_table
         config.running_config = strip_known_preamble(running_config, _RUNNING_CONFIG_PREAMBLE) or None
         return config
 

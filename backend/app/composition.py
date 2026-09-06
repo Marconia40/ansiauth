@@ -10,7 +10,7 @@ etc.) — no hace falta anticipar esas partes acá, cada fase agrega lo suyo.
 from __future__ import annotations
 
 from app.core.repository import Repository
-from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel, DeviceGlobalConfigModel
+from app.db.models import DeviceVlanModel, DevicePortModel, DeviceSVIModel, DeviceGlobalConfigModel, DeviceArpMacModel
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.device_group_repository import DeviceGroupRepository
 from app.repositories.device_repository import DeviceRepository
@@ -128,7 +128,6 @@ def _global_config_to_orm(g: "GlobalConfig"):
         ntp_servers=g.ntp_servers, dns_servers=g.dns_servers,
         log_servers=g.log_servers, log_level=g.log_level,
         routes=g.routes, acls=g.acls,
-        arp_table=g.arp_table, mac_table=g.mac_table,
     )
 
 
@@ -143,12 +142,26 @@ def _global_config_to_domain(row) -> "GlobalConfig":
         ntp_servers=row.ntp_servers, dns_servers=row.dns_servers,
         log_servers=row.log_servers, log_level=row.log_level,
         routes=row.routes, acls=row.acls,
-        arp_table=row.arp_table, mac_table=row.mac_table,
     )
 
 
 global_config_repository = Repository(
     DeviceGlobalConfigModel, _global_config_to_domain, _global_config_to_orm,
+    pk_field="device",
+)
+
+
+def _arp_mac_to_orm(a: "ArpMacTables"):
+    return DeviceArpMacModel(device=a.device, arp_table=a.arp_table, mac_table=a.mac_table)
+
+
+def _arp_mac_to_domain(row) -> "ArpMacTables":
+    from app.models.arp_mac import ArpMacTables
+    return ArpMacTables(device=row.device, arp_table=row.arp_table, mac_table=row.mac_table)
+
+
+arp_mac_repository = Repository(
+    DeviceArpMacModel, _arp_mac_to_domain, _arp_mac_to_orm,
     pk_field="device",
 )
 
@@ -200,4 +213,5 @@ inventory = Inventory(
 
 device_sync_service = DeviceSyncService(
     vlan_repository, puerto_repository, svi_repository, global_config_repository, redis_coordinator,
+    arp_mac_repository,
 )

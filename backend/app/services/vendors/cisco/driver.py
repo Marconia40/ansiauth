@@ -372,23 +372,17 @@ class CiscoVendor(VendorDriver):
         contra cisco01: ``no ip access-list extended {name}``."""
         return self._aplicar_desde_template("delete_acl", {"name": name}, device, password)
 
-    def get_global_config(self, device: Device, password: str, *, incluir_arp_mac: bool = True) -> "GlobalConfig":
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
         """RF-GLOBAL-01/02/03/04 (SRS §3.4). "show snmp" vive en un
         ``_leer()`` aparte (ver nota en ``commands.yaml: get_snmp_status``)
         -- confirmado contra device real que falla con rc != 0 cuando SNMP
         no está habilitado, y que ``_leer()`` aborta el batch entero ante
         el primer comando fallido (perdería version/hostname/routes
-        también si viviera en la misma tanda). ACLs/ARP/MAC son 3 lecturas
-        más, cada 1 con su propio try/except -- si alguna falla, el resto
-        del sync sigue (mismo criterio, no todo-o-nada). ARP/MAC se
-        agregaron al cache recién -- antes eran la única lectura en vivo
-        por-request de toda la app, el usuario pidió sumarlas al sync tras
-        notar la latencia de pagar una sesión SSH nueva por cada GET.
-        ``incluir_arp_mac=False`` (usado por ``GlobalConfig.reconciliar()``,
-        ver docstring en ``VendorDriver``) las salta -- ninguna escritura
-        necesita ese dato para su no-op detection, y son 2 conexiones SSH
-        menos en el camino de escritura (importa en devices con pocas
-        líneas VTY)."""
+        también si viviera en la misma tanda). ACLs es 1 lectura más, con
+        su propio try/except (si falla, el resto sigue). ARP/MAC NO viven
+        acá -- tienen su propio scope de sync (``ArpMacTables``/
+        ``sync_arp_mac()``), a pedido del usuario (no hacen falta para
+        ninguna escritura, y pueden traer muchísima info)."""
         commands = self._cargar_comandos()["get_global_config"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)
         version_output = stdouts[0] if len(stdouts) > 0 else ""
@@ -413,18 +407,6 @@ class CiscoVendor(VendorDriver):
             logger.exception("get_global_config: list_acls failed on device=%s, continuing without ACLs", device.name)
             acls = None
 
-        arp_table = mac_table = None
-        if incluir_arp_mac:
-            try:
-                arp_table = self.get_arp_table(device, password)
-            except RuntimeError:
-                logger.exception("get_global_config: get_arp_table failed on device=%s, continuing without ARP", device.name)
-
-            try:
-                mac_table = self.get_mac_table(device, password)
-            except RuntimeError:
-                logger.exception("get_global_config: get_mac_table failed on device=%s, continuing without MAC", device.name)
-
         from app.services.parsers.global_config_parser import CiscoGlobalConfigParser
         config = CiscoGlobalConfigParser.parse(
             version_output=version_output, hostname_output=hostname_output,
@@ -433,8 +415,6 @@ class CiscoVendor(VendorDriver):
         )
         config.device = device.name
         config.acls = acls
-        config.arp_table = arp_table
-        config.mac_table = mac_table
         config.running_config = strip_known_preamble(running_config, _RUNNING_CONFIG_PREAMBLE, separador="!") or None
         return config
 

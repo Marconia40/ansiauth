@@ -1010,17 +1010,15 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement get_svis yet"
         )
 
-    def get_global_config(self, device: Device, password: str, *, incluir_arp_mac: bool = True) -> "GlobalConfig":
-        """``incluir_arp_mac=False`` salta las 2 lecturas de ARP/MAC --
-        ``GlobalConfig.reconciliar()`` (usado por las escrituras para
-        no-op detection) las pasa en ``False`` porque ninguna escritura
-        necesita esos datos, y cada lectura de más es 1 conexión SSH más
-        en un camino que en devices con pocas líneas VTY (ej. huawei01,
-        5 líneas) ya se queda sin sesiones -- confirmado en vivo que
-        agregar ARP/MAC al sync (vuelta anterior) hizo que
-        ``create_or_update_acl`` fallara con "Channel closed" ahí. El
-        sync completo (``DeviceSyncService``, lo que sirve ``GET /arp``/
-        ``GET /mac``) sigue llamando con el default ``True``."""
+    def get_global_config(self, device: Device, password: str) -> "GlobalConfig":
+        """ARP/MAC NO viven acá -- tienen su propio método
+        (``get_arp_table()``/``get_mac_table()``) y su propio scope de
+        sync (``DeviceSyncService.sync_arp_mac()``), a pedido del usuario:
+        no hacen falta para ninguna escritura y pueden traer muchísima
+        info, así que su sync es específico en vez de venir pegado acá
+        (confirmado en vivo que traerlos acá hacía que devices con pocas
+        líneas VTY, ej. huawei01 con 5, se quedaran sin sesiones para
+        escribir -- "Channel closed")."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement get_global_config yet"
         )

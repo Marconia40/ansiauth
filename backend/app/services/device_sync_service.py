@@ -41,12 +41,13 @@ _MAX_ERROR_LEN = 2000
 
 
 class DeviceSyncService:
-    def __init__(self, vlan_repo, puerto_repo, svi_repo, global_config_repo, coordinator):
+    def __init__(self, vlan_repo, puerto_repo, svi_repo, global_config_repo, coordinator, arp_mac_repo):
         self._vlans = vlan_repo                        # Repository[VLAN]
         self._ports = puerto_repo                      # Repository[Puerto]
         self._interfaces = svi_repo        # Repository[SVI]
         self._global_config = global_config_repo        # Repository[GlobalConfig]
         self._coordinator = coordinator                # RedisCoordinator
+        self._arp_mac = arp_mac_repo                    # Repository[ArpMacTables]
 
     def sync_vlans(self, device: "Device") -> None:
         """Full-refresh de las VLANs de *device* desde el equipo hacia
@@ -165,11 +166,36 @@ class DeviceSyncService:
         self._marcar_ok(device.name, "global_config_synced_at", "global_config_sync_error")
         logger.info("sync_global_config OK device=%s", device.name)
 
+    def sync_arp_mac(self, device: "Device") -> None:
+        """Full-refresh de las tablas ARP/MAC de *device* hacia
+        ``device_arp_mac`` -- scope de sync propio, separado de
+        ``global_config`` a pedido del usuario: no hace falta para
+        ninguna escritura (no pasa por ``reconciliar()`` de nada) y puede
+        traer muchísima info, así que no forma parte de ``"all"`` (alta de
+        device) ni del sync general -- solo corre cuando alguien pide
+        explícitamente ``POST .../arp-mac/refresh``. Singleton igual que
+        ``sync_global_config`` (1 fila por device, upsert directo)."""
+        from app.models.arp_mac import ArpMacTables
+
+        try:
+            with self._coordinator.bloquear(device.name, timeout=_LOCK_TIMEOUT_S):
+                arp_table = device.driver.get_arp_table(device, device.password)
+                mac_table = device.driver.get_mac_table(device, device.password)
+        except Exception as exc:
+            logger.exception("sync_arp_mac failed device=%s", device.name)
+            self._marcar_error(device.name, "arp_mac_sync_error", str(exc))
+            raise
+
+        self._arp_mac.add(ArpMacTables(device=device.name, arp_table=arp_table, mac_table=mac_table))
+
+        self._marcar_ok(device.name, "arp_mac_synced_at", "arp_mac_sync_error")
+        logger.info("sync_arp_mac OK device=%s", device.name)
+
     def metadata(
         self, device_name: str, scope: str,
     ) -> tuple[Optional[datetime], Optional[str]]:
         """Return ``(synced_at, sync_error)`` para *scope* ∈
-        {"vlans","ports","svis","global_config"}.
+        {"vlans","ports","svis","global_config","arp_mac"}.
 
         Consultado por los GET cache-first para poblar el envelope
         ``{data, synced_at, sync_error, sync_in_progress}`` sin que el
@@ -189,10 +215,14 @@ class DeviceSyncService:
                 DeviceModel.global_config_synced_at,
                 DeviceModel.global_config_sync_error,
             ),
+            "arp_mac": (
+                DeviceModel.arp_mac_synced_at,
+                DeviceModel.arp_mac_sync_error,
+            ),
         }
         if scope not in cols:
             raise ValueError(
-                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports / svis / global_config)"
+                f"metadata(): scope inválido {scope!r} (esperado: vlans / ports / svis / global_config / arp_mac)"
             )
         col_ts, col_err = cols[scope]
         with get_session() as session:
