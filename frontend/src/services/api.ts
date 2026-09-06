@@ -44,6 +44,28 @@ import type {
   SVIOperationResult,
 } from '@/types/svi';
 import type { DashboardSummary, DashboardSummaryParams } from '@/types/dashboard';
+import type {
+  AclCreateRequest,
+  AclDeleteRequest,
+  AclRuleRemoveRequest,
+  ArpTableRead,
+  DeviceLogsRead,
+  DnsAddRequest,
+  DnsRemoveRequest,
+  GlobalConfigOperationResult,
+  GlobalConfigRead,
+  GlobalConfigRunningConfigRead,
+  GlobalConfigVersionRead,
+  HostnameUpdateRequest,
+  LogServerAddRequest,
+  LogServerRemoveRequest,
+  MacTableRead,
+  NtpAddRequest,
+  NtpRemoveRequest,
+  RouteAddRequest,
+  RouteRemoveRequest,
+  SnmpUpdateRequest,
+} from '@/types/global-config';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -955,4 +977,299 @@ export async function setSystemAdmin(
       { is_system_admin: isSystemAdmin },
     ),
   );
+}
+
+// ── Global Configuration ─────────────────────────────────────────────────────
+// Same cache-first / SyncedResource pattern as VLANs/Ports/SVIs. Writes are
+// async (202) and return the same group_job_id + jobs[] envelope the rest of
+// the app already knows how to poll.
+
+/** GET /devices/{name}/global-config/ — hostname / SNMP / NTP / DNS / logging
+ * / routes / ACLs. Cache-first; no live device read. */
+export async function getGlobalConfigSynced(
+  device: string,
+): Promise<SyncedResource<GlobalConfigRead>> {
+  return unwrap<SyncedResource<GlobalConfigRead>>(
+    client.get<ApiResponse<SyncedResource<GlobalConfigRead>>>(
+      `/devices/${device}/global-config/`,
+    ),
+  );
+}
+
+/** GET /devices/{name}/global-config/version — software_version / model /
+ * uptime. Shares the same underlying `global_config` sync as the main GET. */
+export async function getGlobalConfigVersionSynced(
+  device: string,
+): Promise<SyncedResource<GlobalConfigVersionRead>> {
+  return unwrap<SyncedResource<GlobalConfigVersionRead>>(
+    client.get<ApiResponse<SyncedResource<GlobalConfigVersionRead>>>(
+      `/devices/${device}/global-config/version`,
+    ),
+  );
+}
+
+/** GET /devices/{name}/global-config/running-config — full config dump as
+ * a list of lines. Shares the `global_config` sync scope. */
+export async function getGlobalConfigRunningConfigSynced(
+  device: string,
+): Promise<SyncedResource<GlobalConfigRunningConfigRead>> {
+  return unwrap<SyncedResource<GlobalConfigRunningConfigRead>>(
+    client.get<ApiResponse<SyncedResource<GlobalConfigRunningConfigRead>>>(
+      `/devices/${device}/global-config/running-config`,
+    ),
+  );
+}
+
+/** GET /devices/{name}/global-config/arp — cache-first. Has its OWN sync
+ * scope (`arp_mac`), separate from the general refresh. Not populated on
+ * device registration; the user has to call the arp-mac refresh at least
+ * once for entries to show up. `include` filters cached rows server-side
+ * (case-insensitive substring across all fields). */
+export async function getArpTable(
+  device: string,
+  include?: string,
+): Promise<SyncedResource<ArpTableRead>> {
+  return unwrap<SyncedResource<ArpTableRead>>(
+    client.get<ApiResponse<SyncedResource<ArpTableRead>>>(
+      `/devices/${device}/global-config/arp`,
+      { params: include ? { include } : {} },
+    ),
+  );
+}
+
+/** GET /devices/{name}/global-config/mac — same `arp_mac` sync scope as
+ * getArpTable(). */
+export async function getMacTable(
+  device: string,
+  include?: string,
+): Promise<SyncedResource<MacTableRead>> {
+  return unwrap<SyncedResource<MacTableRead>>(
+    client.get<ApiResponse<SyncedResource<MacTableRead>>>(
+      `/devices/${device}/global-config/mac`,
+      { params: include ? { include } : {} },
+    ),
+  );
+}
+
+/** GET /devices/{name}/global-config/logs — local log buffer as a list of
+ * lines. Has its own `logs` sync scope, same criterion as ARP/MAC — has to
+ * be refreshed explicitly the first time. */
+export async function getDeviceLogsSynced(
+  device: string,
+): Promise<SyncedResource<DeviceLogsRead>> {
+  return unwrap<SyncedResource<DeviceLogsRead>>(
+    client.get<ApiResponse<SyncedResource<DeviceLogsRead>>>(
+      `/devices/${device}/global-config/logs`,
+    ),
+  );
+}
+
+/** POST /devices/{name}/global-config/refresh — queues the general
+ * global-config sync (hostname / snmp / ntp / dns / logging / routes / acls /
+ * version / running-config, all one scope). ARP/MAC and logs have their own
+ * refresh endpoints below. */
+export async function refreshDeviceGlobalConfig(
+  device: string,
+): Promise<{ device: string; scope: 'global_config'; task_id: string }> {
+  return unwrap<{ device: string; scope: 'global_config'; task_id: string }>(
+    client.post<ApiResponse<{ device: string; scope: 'global_config'; task_id: string }>>(
+      `/devices/${device}/global-config/refresh`,
+    ),
+  );
+}
+
+/** POST /devices/{name}/global-config/arp-mac/refresh — separate sync
+ * scope on purpose (ARP/MAC can be huge and aren't needed for any write's
+ * no-op check). Poll getArpTable/getMacTable for `sync_in_progress`. */
+export async function refreshDeviceArpMac(
+  device: string,
+): Promise<{ device: string; scope: 'arp_mac'; task_id: string }> {
+  return unwrap<{ device: string; scope: 'arp_mac'; task_id: string }>(
+    client.post<ApiResponse<{ device: string; scope: 'arp_mac'; task_id: string }>>(
+      `/devices/${device}/global-config/arp-mac/refresh`,
+    ),
+  );
+}
+
+/** POST /devices/{name}/global-config/logs/refresh — separate `logs` sync
+ * scope, same criterion as ARP/MAC. */
+export async function refreshDeviceLogs(
+  device: string,
+): Promise<{ device: string; scope: 'logs'; task_id: string }> {
+  return unwrap<{ device: string; scope: 'logs'; task_id: string }>(
+    client.post<ApiResponse<{ device: string; scope: 'logs'; task_id: string }>>(
+      `/devices/${device}/global-config/logs/refresh`,
+    ),
+  );
+}
+
+// ── Global Config writes (all 202, admin role required) ──────────────────────
+
+export async function setGlobalConfigHostname(
+  device: string,
+  body: HostnameUpdateRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.patch<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/hostname`,
+      body,
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function setGlobalConfigSnmp(
+  device: string,
+  body: SnmpUpdateRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.patch<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/snmp`,
+      body,
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function addGlobalConfigRoute(
+  device: string,
+  body: RouteAddRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.post<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/routes`,
+      body,
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function removeGlobalConfigRoute(
+  device: string,
+  body: RouteRemoveRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.delete<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/routes`,
+      { data: body },
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function addGlobalConfigNtp(
+  device: string,
+  body: NtpAddRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.post<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/ntp`,
+      body,
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function removeGlobalConfigNtp(
+  device: string,
+  body: NtpRemoveRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.delete<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/ntp`,
+      { data: body },
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function addGlobalConfigDns(
+  device: string,
+  body: DnsAddRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.post<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/dns`,
+      body,
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function removeGlobalConfigDns(
+  device: string,
+  body: DnsRemoveRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.delete<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/dns`,
+      { data: body },
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function addGlobalConfigLogServer(
+  device: string,
+  body: LogServerAddRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.post<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/log-servers`,
+      body,
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function removeGlobalConfigLogServer(
+  device: string,
+  body: LogServerRemoveRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.delete<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/log-servers`,
+      { data: body },
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function createOrUpdateGlobalConfigAcl(
+  device: string,
+  body: AclCreateRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.post<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/acls`,
+      body,
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function removeGlobalConfigAclRules(
+  device: string,
+  body: AclRuleRemoveRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.delete<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/acls/rules`,
+      { data: body },
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function deleteGlobalConfigAcl(
+  device: string,
+  body: AclDeleteRequest,
+): Promise<GlobalConfigOperationResult> {
+  const result = await unwrap<GlobalConfigOperationResult>(
+    client.delete<ApiResponse<GlobalConfigOperationResult>>(
+      `/devices/${device}/global-config/acls`,
+      { data: body },
+    ),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
