@@ -16,6 +16,9 @@ import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
 import { HostnameEditModal } from './HostnameEditModal';
 import { SnmpEditModal } from './SnmpEditModal';
+import { NtpEditModal } from './NtpEditModal';
+import { DnsEditModal } from './DnsEditModal';
+import { LoggingEditModal } from './LoggingEditModal';
 
 interface Props {
   deviceName: string;
@@ -62,6 +65,9 @@ export function GlobalConfigOverview({ deviceName }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [openHostname, setOpenHostname] = useState(false);
   const [openSnmp, setOpenSnmp] = useState(false);
+  const [openNtp, setOpenNtp] = useState(false);
+  const [openDns, setOpenDns] = useState(false);
+  const [openLogging, setOpenLogging] = useState(false);
   const [toast, setToast] = useState<{ msg: string; tone: 'ok' | 'error' } | null>(null);
 
   useEffect(() => {
@@ -155,15 +161,24 @@ export function GlobalConfigOverview({ deviceName }: Props) {
           </ul>
         </Panel>
 
-        <Panel title="NTP">
+        <Panel
+          title="NTP"
+          actions={<EditPill label="Edit NTP" onClick={() => setOpenNtp(true)} />}
+        >
           <ServerList servers={config?.ntp.servers ?? null} />
         </Panel>
 
-        <Panel title="DNS">
+        <Panel
+          title="DNS"
+          actions={<EditPill label="Edit DNS" onClick={() => setOpenDns(true)} />}
+        >
           <ServerList servers={config?.dns.servers ?? null} />
         </Panel>
 
-        <Panel title="Logging">
+        <Panel
+          title="Logging"
+          actions={<EditPill label="Edit logging" onClick={() => setOpenLogging(true)} />}
+        >
           <ul className="flex flex-col gap-2 text-sm">
             <DetailRow label="LEVEL" value={renderScalar(config?.logging.level)} />
           </ul>
@@ -188,6 +203,28 @@ export function GlobalConfigOverview({ deviceName }: Props) {
         onClose={() => setOpenSnmp(false)}
         deviceName={deviceName}
         currentSnmp={config?.snmp ?? null}
+        onDone={(msg, tone) => setToast({ msg, tone })}
+      />
+      <NtpEditModal
+        open={openNtp}
+        onClose={() => setOpenNtp(false)}
+        deviceName={deviceName}
+        currentServers={config?.ntp.servers ?? null}
+        onDone={(msg, tone) => setToast({ msg, tone })}
+      />
+      <DnsEditModal
+        open={openDns}
+        onClose={() => setOpenDns(false)}
+        deviceName={deviceName}
+        currentServers={config?.dns.servers ?? null}
+        onDone={(msg, tone) => setToast({ msg, tone })}
+      />
+      <LoggingEditModal
+        open={openLogging}
+        onClose={() => setOpenLogging(false)}
+        deviceName={deviceName}
+        currentServers={config?.logging.servers ?? null}
+        currentLevel={config?.logging.level ?? null}
         onDone={(msg, tone) => setToast({ msg, tone })}
       />
 
