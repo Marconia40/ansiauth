@@ -92,6 +92,15 @@ list_ports:
       - "display interface brief"
       - "display interface description"
       - "display port vlan"
+      # 4to comando: bulk-read del storm-control. `display current-
+      # configuration interface` dumpea la config completa de TODAS las
+      # interfaces (incluyendo las líneas "storm control ..." cuando
+      # están seteadas). Ausencia de línea "storm control" en la sección
+      # de un puerto = disabled. Un solo comando cubre todos los puertos,
+      # mismo criterio que los otros 3 bulk reads. Alternativa (no
+      # implementada acá): "display storm-control", que no está en todas
+      # las versiones de VRP -- current-configuration siempre está.
+      - "display current-configuration interface"
 
 # Todo comando de puertos de acá en adelante sustituye {interface} en la
 # primera línea ("interface {interface}") -- 2 devices reales confirman
@@ -711,13 +720,19 @@ set_svi_ipv6:
           - "quit"
           - "quit"
 
-# Confirmado contra config real de producción -- el orden de
-# "traffic-filter" cambia según si la ACL es numerada o con nombre:
-#   traffic-filter inbound acl 3002                           (numerada)
-#   traffic-filter acl servers-admin-dc2-vlan830 inbound       (con nombre)
-# driver.py decide "set_numeric" vs "set_named" según acl_name.isdigit().
-# Asigna una ACL que ya existe en el device, no la crea (RF-GLOBAL-04,
-# aparte).
+# Confirmado EN VIVO contra f3r9s2 real (probado con "traffic-filter ?" /
+# "acl ?" en el contexto de la interfaz, y aplicado + verificado por
+# "display current-configuration interface" antes de revertir): el orden
+# de "traffic-filter" es SIEMPRE "{direction}bound acl ..." -- lo que
+# cambia entre numerada y con nombre es que una ACL con nombre necesita el
+# keyword literal "name" antes del nombre (una numerada no):
+#   traffic-filter inbound acl 3002                  (numerada)
+#   traffic-filter inbound acl name test-acl          (con nombre)
+# El comentario anterior ("traffic-filter acl {nombre} {direction}bound")
+# estaba mal -- esa forma no existe, el device la rechaza con "Wrong
+# parameter"/"Unrecognized command" según dónde se corte. driver.py decide
+# "set_numeric" vs "set_named" según acl_name.isdigit(). Asigna una ACL
+# que ya existe en el device, no la crea (RF-GLOBAL-04, aparte).
 set_svi_acl:
   set_numeric:
     primary:
@@ -732,24 +747,41 @@ set_svi_acl:
           - "quit"
   set_named:
     primary:
-      block: ["system-view", "interface Vlanif{vlan_id}", "traffic-filter acl {acl_name} {direction}bound", "commit", "quit", "quit"]
+      block: ["system-view", "interface Vlanif{vlan_id}", "traffic-filter {direction}bound acl name {acl_name}", "commit", "quit", "quit"]
     alternatives:
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
           - "interface Vlanif{vlan_id}"
-          - "traffic-filter acl {acl_name} {direction}bound"
+          - "traffic-filter {direction}bound acl name {acl_name}"
           - "quit"
           - "quit"
-  clear:
+  # "undo traffic-filter {direction}bound" solo (sin la ACL) -- lo que
+  # tenía este bloque antes -- es "Incomplete command": confirmado en vivo
+  # que VRP exige repetir la referencia EXACTA que está atada, mismo
+  # keyword "name" que en el set (driver.py decide clear_numeric/
+  # clear_named sobre el valor ACTUAL leído por reconciliar(), no sobre el
+  # nuevo valor vacío que dispara el clear).
+  clear_numeric:
     primary:
-      block: ["system-view", "interface Vlanif{vlan_id}", "undo traffic-filter {direction}bound", "commit", "quit", "quit"]
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo traffic-filter {direction}bound acl {acl_name}", "commit", "quit", "quit"]
     alternatives:
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         block:
           - "system-view"
           - "interface Vlanif{vlan_id}"
-          - "undo traffic-filter {direction}bound"
+          - "undo traffic-filter {direction}bound acl {acl_name}"
+          - "quit"
+          - "quit"
+  clear_named:
+    primary:
+      block: ["system-view", "interface Vlanif{vlan_id}", "undo traffic-filter {direction}bound acl name {acl_name}", "commit", "quit", "quit"]
+    alternatives:
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface Vlanif{vlan_id}"
+          - "undo traffic-filter {direction}bound acl name {acl_name}"
           - "quit"
           - "quit"
 

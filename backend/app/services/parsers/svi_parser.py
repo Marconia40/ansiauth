@@ -199,11 +199,18 @@ _VRP_IPV4 = re.compile(r"^\s*ip address\s+(\S+)\s+(\S+)\s*$")
 # Confirmado contra config real de producción: CIDR de un tirón, igual que
 # Cisco -- no separado addr+prefix-length como el IPv4 de esta plataforma.
 _VRP_IPV6 = re.compile(r"^\s*ipv6 address\s+(\S+)\s*$")
-# El orden de traffic-filter cambia según numerada vs con nombre --
-# confirmado contra config real: "traffic-filter inbound acl 3002" para
-# numeradas, "traffic-filter acl <nombre> inbound" para ACLs con nombre.
+# Confirmado EN VIVO contra f3r9s2 real (ver huawei/driver.py::set_svi_acl
+# y huawei/commands.yaml para el detalle de cómo se probó): el orden es
+# SIEMPRE "traffic-filter {direction} acl ..." -- lo que cambia entre
+# numerada y con nombre es el keyword "name" antes del nombre:
+# "traffic-filter inbound acl 3002" (numerada) vs. "traffic-filter inbound
+# acl name test-acl" (con nombre). La forma anterior acá ("traffic-filter
+# acl <nombre> inbound") era la sintaxis vieja/incorrecta que motivó el
+# fix -- nunca hizo match contra una config real, por eso el bug de lectura
+# (acl_in/acl_out con nombre siempre volvía None) pasó desapercibido junto
+# con el bug de escritura original.
 _VRP_ACL_NUMERIC = re.compile(r"^\s*traffic-filter\s+(inbound|outbound)\s+acl\s+(\S+)\s*$", re.IGNORECASE)
-_VRP_ACL_NAMED = re.compile(r"^\s*traffic-filter\s+acl\s+(\S+)\s+(inbound|outbound)\s*$", re.IGNORECASE)
+_VRP_ACL_NAMED = re.compile(r"^\s*traffic-filter\s+(inbound|outbound)\s+acl\s+name\s+(\S+)\s*$", re.IGNORECASE)
 # Confirmado contra config real de producción: "dhcp relay server-ip <ip>"
 # por cada server (forma directa). La forma alternativa por "server group"
 # (huawei/commands.yaml: set_svi_dhcp_relay, 2da alternativa -- la única
@@ -338,10 +345,10 @@ class HuaweiSVIParser(SVIParser):
                 continue
             m = _VRP_ACL_NAMED.match(line)
             if m:
-                if m.group(2).lower() == "inbound":
-                    actual.acl_in = m.group(1)
+                if m.group(1).lower() == "inbound":
+                    actual.acl_in = m.group(2)
                 else:
-                    actual.acl_out = m.group(1)
+                    actual.acl_out = m.group(2)
                 continue
             m = _VRP_HELPER.match(line)
             if m:

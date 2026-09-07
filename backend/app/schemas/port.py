@@ -50,6 +50,24 @@ class PortRead(BaseModel):
             "Null for access ports or when the device does not expose this."
         ),
     )
+    storm_control_enabled: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether storm-control is administratively enabled on this port. "
+            "Null when the driver could not determine the state (e.g. the "
+            "device returned no matching lines, or the platform expresses it "
+            "in a form the parser doesn't yet recognise)."
+        ),
+    )
+    storm_control_threshold: Optional[float] = Field(
+        None,
+        description=(
+            "Storm-control threshold in percent (0-100). Null when unknown, "
+            "or when storm-control is configured in a non-percent unit like "
+            "pps/bps -- our write path only produces percent-form, so that "
+            "only happens with configs preexisting to this system."
+        ),
+    )
 
 
 class _PortTargetRequest(BaseModel):

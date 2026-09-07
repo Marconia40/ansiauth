@@ -21,6 +21,7 @@ from app.repositories.site_repository import SiteRepository
 from app.repositories.user_repository import UserRepository
 from app.services.audit_listener import AuditListener
 from app.services.cleanup_scheduler import CleanupScheduler
+from app.services.dashboard_service import DashboardService
 from app.services.device_sync_service import DeviceSyncService
 from app.services.event_dispatcher import EventDispatcher
 from app.services.group_operation_runner import GroupOperationRunner
@@ -72,6 +73,8 @@ def _puerto_to_orm(p: "Puerto"):
         interface=p.interface, device=p.device, description=p.description,
         admin_up=p.admin_up, mode=p.mode, access_vlan=p.access_vlan,
         allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
+        storm_control_enabled=p.storm_control_enabled,
+        storm_control_threshold=p.storm_control_threshold,
         operational_up=p.operational_up, speed=p.speed, duplex=p.duplex,
     )
 
@@ -82,6 +85,8 @@ def _puerto_to_domain(row) -> "Puerto":
         interface=row.interface, device=row.device, description=row.description,
         admin_up=row.admin_up, mode=row.mode, access_vlan=row.access_vlan,
         allowed_vlans=row.allowed_vlans, poe_enabled=row.poe_enabled,
+        storm_control_enabled=row.storm_control_enabled,
+        storm_control_threshold=row.storm_control_threshold,
         operational_up=row.operational_up, speed=row.speed, duplex=row.duplex,
     )
 
@@ -230,3 +235,5 @@ device_sync_service = DeviceSyncService(
     vlan_repository, puerto_repository, svi_repository, global_config_repository, redis_coordinator,
     arp_mac_repository, device_logs_repository,
 )
+
+dashboard_service = DashboardService(redis_coordinator)

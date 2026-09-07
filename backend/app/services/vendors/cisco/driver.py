@@ -24,6 +24,7 @@ _PLAYBOOK = "vendors/cisco/run.yml"
 _STATUS_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _SWITCHPORT_INDEX = 2
+_STORM_INDEX = 3
 
 # RF-GLOBAL-01 -- líneas de metadata al principio de "show running-config"
 # que no son config real, confirmadas en vivo contra f3r9s1 ("Building
@@ -129,8 +130,9 @@ class CiscoVendor(VendorDriver):
         status = stdouts[_STATUS_INDEX] if len(stdouts) > _STATUS_INDEX else ""
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         switchport = stdouts[_SWITCHPORT_INDEX] if len(stdouts) > _SWITCHPORT_INDEX else ""
+        storm = stdouts[_STORM_INDEX] if len(stdouts) > _STORM_INDEX else ""
         try:
-            ports = CiscoPortParser.parse_ports(status, description, switchport)
+            ports = CiscoPortParser.parse_ports(status, description, switchport, storm)
         except Exception as exc:
             raise RuntimeError(f"Cannot determine port state on device '{device.name}': {exc}") from exc
         return ports
@@ -271,7 +273,11 @@ class CiscoVendor(VendorDriver):
 
     def set_svi_acl(
         self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
+        *, current_acl_name: "str | None" = None,
     ) -> dict:
+        # current_acl_name unused -- "no ip access-group {direction}" clears
+        # whatever is bound without needing to name it (only 1 ACL per
+        # direction can ever be bound). See base.py's docstring.
         variant = "clear" if not acl_name else "set"
         return self._aplicar_desde_template(
             "set_svi_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},

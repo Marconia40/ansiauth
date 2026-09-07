@@ -12,7 +12,7 @@ export function LoadingSpinner({ size = 'md' }: Props) {
   return (
     <div className="flex items-center justify-center">
       <div
-        className={`${sizes[size]} animate-spin rounded-full border-gray-300 border-t-blue-600`}
+        className={`${sizes[size]} animate-spin rounded-full border-panel-border border-t-info`}
       />
     </div>
   );

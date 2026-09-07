@@ -248,9 +248,18 @@ class SVI:
         valor = self.acl_in if campo == "acl_in" else self.acl_out
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if actual is not None and getattr(actual, campo) == valor:
+        actual_valor = getattr(actual, campo) if actual is not None else None
+        # "" (clear) contra None (nada atado en el device) es el mismo
+        # estado -- sin esta normalización, un clear pedido sobre una
+        # dirección que ya no tiene nada atado no se detectaba como no-op
+        # (None != "") y llegaba al driver sin ACL de referencia para el
+        # "undo".
+        if actual is not None and (actual_valor or None) == (valor or None):
             return self._noop_resultado("configurar_acl_svi")
-        resultado = device.driver.set_svi_acl(self.vlan_id, direccion, valor, device, device.password)
+        resultado = device.driver.set_svi_acl(
+            self.vlan_id, direccion, valor, device, device.password,
+            current_acl_name=actual_valor,
+        )
         return {**resultado, "accion": "configurar_acl_svi"}
 
     @staticmethod

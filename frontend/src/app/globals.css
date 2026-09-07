@@ -1,26 +1,82 @@
 @import "tailwindcss";
 
+/*
+ * Design tokens — single source of truth for the redesign palette.
+ * Change a hex here and every component reflowing the token updates.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Surfaces */
+  --color-app-bg: #2f353a;          /* full-app background */
+  --color-panel: #3d434a;           /* card / panel background */
+  --color-panel-elev: #464c53;      /* elevated card / hover */
+  --color-panel-border: #565c63;    /* divider on panels */
+
+  /* Sidebar */
+  --color-sidebar-bg: #363b41;
+  --color-sidebar-hover: #454b52;
+  --color-sidebar-active: #2f4b7c;
+
+  /* Topbar */
+  --color-header-bg: #2f4b7c;       /* header azul */
+  --color-header-fg: #f2f4f7;
+
+  /* Text */
+  --color-text: #e6e8ea;            /* primary text on dark bg */
+  --color-text-muted: #9aa1a8;      /* secondary / meta */
+  --color-text-inverse: #1c1f22;    /* text on light backgrounds */
+
+  /* Accents (pasteles) */
+  --color-accent-success: #7fb069;
+  --color-accent-danger:  #d9645d;
+  --color-accent-warning: #e8b04a;
+  --color-accent-info:    #6c9bd1;
+
+  /* Focus */
+  --color-focus: #f2c14e;           /* borde amarillo del puerto seleccionado */
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  /* Expose CSS vars as Tailwind color utilities.
+     Usage: bg-app, bg-panel, text-muted, border-panel, etc. */
+  --color-app: var(--color-app-bg);
+  --color-panel: var(--color-panel);
+  --color-panel-elev: var(--color-panel-elev);
+  --color-panel-border: var(--color-panel-border);
+
+  --color-sidebar: var(--color-sidebar-bg);
+  --color-sidebar-hover: var(--color-sidebar-hover);
+  --color-sidebar-active: var(--color-sidebar-active);
+
+  --color-header: var(--color-header-bg);
+  --color-header-fg: var(--color-header-fg);
+
+  --color-text: var(--color-text);
+  --color-muted: var(--color-text-muted);
+  --color-inverse: var(--color-text-inverse);
+
+  --color-success: var(--color-accent-success);
+  --color-danger:  var(--color-accent-danger);
+  --color-warning: var(--color-accent-warning);
+  --color-info:    var(--color-accent-info);
+
+  --color-focus:   var(--color-focus);
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html, body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-app-bg);
+  color: var(--color-text);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Login screen keeps a lighter surface so the auth form stands out. */
+body.auth-surface {
+  background: #f4f5f7;
+  color: var(--color-text-inverse);
 }

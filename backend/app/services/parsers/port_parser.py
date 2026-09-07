@@ -73,11 +73,15 @@ class HuaweiPortParser(PortParser):
 
     @classmethod
     def parse_ports(
-        cls, brief_output: str, description_output: str, port_vlan_output: str,
+        cls,
+        brief_output: str,
+        description_output: str,
+        port_vlan_output: str,
+        storm_output: str = "",
     ) -> list[Puerto]:
-        """Combine three VRP read commands into a normalized port inventory.
+        """Combine four VRP read commands into a normalized port inventory.
 
-        The three inputs are independent — any of them may be empty or missing
+        The four inputs are independent — any of them may be empty or missing
         fields without breaking the others.  Per-port fields are merged by
         interface name; gaps are filled with ``None`` (never invented).
 
@@ -92,6 +96,11 @@ class HuaweiPortParser(PortParser):
         port_vlan_output:
             Raw stdout of ``display port vlan``.  Source of ``mode``,
             ``access_vlan`` and ``allowed_vlans``.
+        storm_output:
+            Raw stdout of ``display current-configuration interface``.
+            Source of ``storm_control_enabled`` y ``storm_control_threshold``.
+            Default empty string por retrocompat con callers viejos que no lo
+            pasaban -- el sync real siempre lo pasa.
 
         Returns
         -------
@@ -102,6 +111,7 @@ class HuaweiPortParser(PortParser):
         brief_rows = parse_vrp_interface_brief(brief_output) if brief_output else {}
         desc_rows = parse_vrp_interface_description(description_output) if description_output else {}
         vlan_rows = parse_vrp_port_vlan(port_vlan_output) if port_vlan_output else {}
+        storm_rows = parse_vrp_storm_control(storm_output) if storm_output else {}
 
         # Union of port names seen in any of the three sources.
         names = set(brief_rows) | set(desc_rows) | set(vlan_rows)
@@ -111,6 +121,7 @@ class HuaweiPortParser(PortParser):
             brief = brief_rows.get(name)
             vlan = vlan_rows.get(name)
             description = desc_rows.get(name)
+            storm = storm_rows.get(name)
 
             ports.append(
                 Puerto(
@@ -121,6 +132,8 @@ class HuaweiPortParser(PortParser):
                     mode=vlan.mode if vlan else "unknown",
                     access_vlan=vlan.access_vlan if vlan else None,
                     allowed_vlans=vlan.allowed_vlans if vlan else None,
+                    storm_control_enabled=storm.enabled if storm else None,
+                    storm_control_threshold=storm.threshold if storm else None,
                     # Step 1.1 is intentionally limited to the three commands
                     # above; PoE / speed / duplex are not exposed and remain
                     # None per the "do not invent values" rule.
@@ -131,8 +144,8 @@ class HuaweiPortParser(PortParser):
             )
 
         logger.debug(
-            "VRP port parser merged sources: brief=%d desc=%d portvlan=%d → ports=%d",
-            len(brief_rows), len(desc_rows), len(vlan_rows), len(ports),
+            "VRP port parser merged sources: brief=%d desc=%d portvlan=%d storm=%d → ports=%d",
+            len(brief_rows), len(desc_rows), len(vlan_rows), len(storm_rows), len(ports),
         )
         return ports
 
@@ -492,6 +505,96 @@ def parse_vrp_ports(brief_output: str, description_output: str, port_vlan_output
     return HuaweiPortParser.parse_ports(brief_output, description_output, port_vlan_output)
 
 
+# ── Storm control (compartido entre vendors) ────────────────────────────────
+
+@dataclass
+class _StormRow:
+    """Estado de storm-control por interfaz.
+
+    ``enabled=True`` significa que hay al menos una línea storm-control
+    configurada en el device (broadcast o multicast).
+    ``threshold`` es percent 0-100 cuando el device lo expresa así;
+    None cuando está en pps/bps u otra unidad -- el frontend muestra
+    "ON" sin porcentaje en ese caso.
+    """
+    enabled: bool | None
+    threshold: float | None
+
+
+# Matchea la línea "storm control broadcast ..." o "storm-control broadcast
+# ..." en cualquier vendor. Grupo 1 captura el % SI el device lo expresa
+# como "percent N" (Huawei) o "level N.NN" (Cisco run-config); grupo 2
+# como "N.NN%" (Cisco `show storm-control broadcast`). Al menos uno de los
+# dos matchea cuando el device configuró un umbral percent.
+_STORM_LEVEL_PERCENT = re.compile(
+    r"(?:percent|level)\s+(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*%"
+)
+
+
+def parse_vrp_storm_control(output: str) -> dict[str, _StormRow]:
+    """Parse ``display current-configuration interface`` para extraer
+    el estado de storm-control por puerto.
+
+    VRP dumpea la config de cada interfaz en secciones delimitadas por
+    ``#`` con el header ``interface <name>``. Ausencia de línea ``storm
+    control`` en una sección = disabled (False). Presencia = enabled
+    (True); si es ``... percent N`` extraemos threshold, si es pps u
+    otra forma threshold queda None.
+
+    Multiple flavors observados en producción:
+      * ``storm control broadcast min-rate percent 10 max-rate percent 10``
+      * ``storm-control broadcast min-rate percent 10 max-rate percent 10``
+        (hyphenated, alt syntax)
+      * ``storm control broadcast min-rate 100 max-rate 100`` (pps)
+    Todas se parsean como enabled=True; solo las percent-form llenan
+    threshold.
+
+    Returns
+    -------
+    dict[str, _StormRow]
+        Mapping ``interface_name -> _StormRow``. Contiene TODAS las
+        interfaces físicas encontradas en el output, con enabled=False
+        para las que no tienen líneas storm-control.
+    """
+    rows: dict[str, _StormRow] = {}
+    current: str | None = None
+    for line in HuaweiPortParser.clean(output.splitlines()):
+        stripped = line.strip()
+        # Header de sección "interface <name>": arranca sección nueva.
+        if stripped.startswith("interface "):
+            name = stripped.split(None, 1)[1].strip()
+            name = _normalizar_nombre_interfaz(name)
+            if HuaweiPortParser.is_physical_port(name):
+                current = name
+                # Sembramos como False; upgrade a True si vemos una
+                # línea storm control adentro de la sección.
+                rows.setdefault(current, _StormRow(enabled=False, threshold=None))
+            else:
+                current = None
+            continue
+        if current is None:
+            continue
+        # Cierre implícito de sección: separador "#" o comienzo de otro
+        # bloque top-level ("aaa", "user-interface", etc.). En VRP los
+        # niveles anidados de config van con indentación, así que una
+        # línea sin indent que no arranque con "interface" cierra.
+        if stripped == "#" or (line and not line.startswith(" ")):
+            current = None
+            continue
+        # Línea de storm control dentro de la sección actual.
+        if "storm control" in stripped or "storm-control" in stripped:
+            # "storm control action ..." / "... enable trap" no son
+            # umbrales; los ignoramos para el threshold pero igual
+            # cuentan como enabled=True.
+            existing = rows[current]
+            threshold = existing.threshold
+            match = _STORM_LEVEL_PERCENT.search(stripped)
+            if match:
+                threshold = float(match.group(1) or match.group(2))
+            rows[current] = _StormRow(enabled=True, threshold=threshold)
+    return rows
+
+
 # ── Cisco IOS ────────────────────────────────────────────────────────────────
 
 class CiscoPortParser(PortParser):
@@ -523,9 +626,13 @@ class CiscoPortParser(PortParser):
 
     @classmethod
     def parse_ports(
-        cls, status_output: str, description_output: str, switchport_output: str,
+        cls,
+        status_output: str,
+        description_output: str,
+        switchport_output: str,
+        storm_output: str = "",
     ) -> list[Puerto]:
-        """Combine three IOS read commands into a normalized port inventory.
+        """Combine four IOS read commands into a normalized port inventory.
 
         Source-of-truth strategy
         ------------------------
@@ -536,6 +643,8 @@ class CiscoPortParser(PortParser):
         * **Description / admin state / operational state** come from
           ``show interfaces description``.  When that command does not list the
           port (rare), we fall back to ``show interfaces status``.
+        * **Storm-control** comes from ``show storm-control broadcast`` --
+          match por interface name; falta = None (no inventar).
         * **PoE / speed / duplex** are deliberately left as ``None`` per the
           step 1.3 spec.  ``show interfaces status`` does expose speed and
           duplex but populating them is reserved for a future step.
@@ -548,6 +657,10 @@ class CiscoPortParser(PortParser):
             Raw stdout of ``show interfaces description``.
         switchport_output:
             Raw stdout of ``show interfaces switchport``.
+        storm_output:
+            Raw stdout of ``show storm-control broadcast``. Default empty
+            string por retrocompat con callers viejos que no lo pasaban --
+            el sync real siempre lo pasa.
 
         Returns
         -------
@@ -557,6 +670,7 @@ class CiscoPortParser(PortParser):
         status_rows = parse_ios_interface_status(status_output) if status_output else {}
         desc_rows = parse_ios_interface_description(description_output) if description_output else {}
         sw_rows = parse_ios_switchport(switchport_output) if switchport_output else {}
+        storm_rows = parse_ios_storm_control(storm_output) if storm_output else {}
 
         ports: list[Puerto] = []
         # Source of truth for the port set: switchport_output (real L2 ports).
@@ -564,6 +678,7 @@ class CiscoPortParser(PortParser):
             sw = sw_rows[name]
             desc = desc_rows.get(name)
             status = status_rows.get(name)
+            storm = storm_rows.get(name)
 
             if desc is not None:
                 admin_up = desc.admin_up
@@ -587,6 +702,8 @@ class CiscoPortParser(PortParser):
                     mode=sw.mode,
                     access_vlan=sw.access_vlan,
                     allowed_vlans=sw.allowed_vlans,
+                    storm_control_enabled=storm.enabled if storm else None,
+                    storm_control_threshold=storm.threshold if storm else None,
                     # Step 1.3 explicitly leaves these as None.
                     poe_enabled=None,
                     speed=None,
@@ -595,8 +712,8 @@ class CiscoPortParser(PortParser):
             )
 
         logger.debug(
-            "IOS port parser merged sources: status=%d desc=%d switchport=%d → ports=%d",
-            len(status_rows), len(desc_rows), len(sw_rows), len(ports),
+            "IOS port parser merged sources: status=%d desc=%d switchport=%d storm=%d → ports=%d",
+            len(status_rows), len(desc_rows), len(sw_rows), len(storm_rows), len(ports),
         )
         return ports
 
@@ -1064,3 +1181,70 @@ def parse_ios_switchport(output: str) -> dict[str, _SwitchportRow]:
 def parse_ios_ports(status_output: str, description_output: str, switchport_output: str) -> list[Puerto]:
     """Back-compat free-function wrapper — see ``CiscoPortParser.parse_ports``."""
     return CiscoPortParser.parse_ports(status_output, description_output, switchport_output)
+
+
+# ── show storm-control broadcast (Cisco) ────────────────────────────────────
+
+def parse_ios_storm_control(output: str) -> dict[str, _StormRow]:
+    """Parse ``show storm-control broadcast`` output into a per-port row map.
+
+    Layout observado en IOS/IOS-XE::
+
+        Interface  Filter State     Trap State     Upper        Lower        Current
+        --------- ---------------  -------------  -----------  -----------  ----------
+        Gi1/0/1   Forwarding       inactive        10.00%       10.00%       0.00%
+        Gi1/0/2   inactive         inactive        100.00%      100.00%      N/A
+
+    Filter State:
+      * ``Forwarding`` / ``Blocking`` -> enabled=True (config aplicada,
+        el segundo es "pasó el umbral y está bloqueando ahora")
+      * ``inactive`` -> enabled=False (sin config)
+      * ``Link Down`` -> enabled=None (no se puede saber sin traer el
+        running-config; evitar inventar)
+
+    Upper: umbral configurado. Solo cuando termina en ``%`` extraemos
+    threshold; formatos pps/bps quedan como None.
+    """
+    rows: dict[str, _StormRow] = {}
+    in_table = False
+    for line in CiscoPortParser.clean(output.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not in_table:
+            if stripped.startswith("Interface") and "Filter" in stripped:
+                in_table = True
+            continue
+        if stripped.startswith("---"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0]
+        if not CiscoPortParser.is_physical_port(name):
+            continue
+        # Filter State puede ser 1 palabra ("Forwarding", "Blocking",
+        # "inactive") o 2 ("Link Down"). Detectamos por el token que sigue.
+        state_lower = parts[1].lower()
+        if state_lower in ("forwarding", "blocking"):
+            enabled: bool | None = True
+            rest = parts[2:]
+        elif state_lower == "inactive":
+            enabled = False
+            rest = parts[2:]
+        elif state_lower == "link" and len(parts) > 2 and parts[2].lower() == "down":
+            enabled = None
+            rest = parts[3:]
+        else:
+            # Formato no reconocido -- no inventar valor.
+            continue
+        # Upper es el primer valor numérico entre los tokens que quedan.
+        # Buscamos con la misma regex que usamos en VRP; matchea "10.00%".
+        threshold: float | None = None
+        for token in rest:
+            m = _STORM_LEVEL_PERCENT.search(token)
+            if m:
+                threshold = float(m.group(1) or m.group(2))
+                break
+        rows[name] = _StormRow(enabled=enabled, threshold=threshold)
+    return rows
