@@ -173,6 +173,30 @@ def run_playbook(
         rc = 1
         stderr = stderr or "No hosts matched in inventory"
         stdouts = []
+    # Bug real encontrado en vivo contra f3r9s2: el terminal plugin de
+    # Huawei (community.network.ce, deprecado -- ver warnings de ansible)
+    # a veces reporta rc=0/"ok" sin haber detectado un error real que el
+    # device SÍ devolvió (confirmado: el mismo command_block, reintentado,
+    # o bien detecta el error de verdad o aplica limpio con stdout legible
+    # -- nunca volvió a dar esto). Cuando eso pasa, el "stdout" que separa
+    # es literalmente el string "None" (un to_text(None) del propio módulo,
+    # no None de Python) en vez de la salida real -- ninguna escritura
+    # genuinamente exitosa de esta sesión devolvió eso, siempre traen el
+    # eco real de los comandos. No confiar en el rc=0 acá: se fuerza rc=1
+    # con un patrón transitorio (ver _PATRONES_TRANSITORIOS en
+    # orquestador.py) para que pase por el mismo reintento automático que
+    # ya existe para timeouts/desconexiones, en vez de que el job quede
+    # "completed" mintiendo sobre si el comando realmente se aplicó.
+    if rc == 0 and stdout == "None":
+        logger.warning(
+            "Playbook %s: rc=0 but stdout is the literal string 'None' on device=%s "
+            "-- treating as an unreliable read, forcing a retry",
+            playbook, device_label,
+        )
+        rc = 1
+        stderr = "ansible reported success with no readable output (stdout=='None') -- possible read desync, retrying"
+        stdout = ""
+        stdouts = []
     result = {"rc": rc, "stdout": stdout, "stderr": stderr, "stdouts": stdouts}
     logger.debug("Ansible raw result: %s", result)
     if rc != 0:

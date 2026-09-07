@@ -132,58 +132,72 @@ class HuaweiVendor(VendorDriver):
 
     # ── Port mutation operations ──────────────────────────────────────────────
 
-    def update_port_description(self, interface: str, description: str, device: Device, password: str) -> dict:
+    # Cada método de mutación se parte en "resolver_XXX" (decide op_key/
+    # variant/vars -- SIN tocar el device) + el método público de siempre
+    # (que sigue funcionando exactamente igual, solo delega). El resolver
+    # es lo que ``Puerto.resolver_paso()`` llama para armar un paso de
+    # ``aplicar_lote()`` sin ejecutar nada -- la sintaxis vendor-specific
+    # (``expandir_nombre_interfaz``, conversión de threshold a int, etc.)
+    # sigue viviendo acá, no se filtra al modelo de dominio.
+
+    def resolver_update_port_description(self, interface: str, description: str) -> tuple[str, "str | None", dict]:
         variant = "clear" if self._is_description_empty(description) else "set"
-        return self._aplicar_desde_template(
-            "update_port_description",
-            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "description": description},
-            device, password, variant=variant,
-        )
+        vars = {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "description": description}
+        return "update_port_description", variant, vars
+
+    def update_port_description(self, interface: str, description: str, device: Device, password: str) -> dict:
+        op_key, variant, vars = self.resolver_update_port_description(interface, description)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_port_admin_state(self, interface: str, enabled: bool) -> tuple[str, "str | None", dict]:
+        variant = "enabled" if enabled else "disabled"
+        vars = {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)}
+        return "set_port_admin_state", variant, vars
 
     def set_port_admin_state(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
-        variant = "enabled" if enabled else "disabled"
-        return self._aplicar_desde_template(
-            "set_port_admin_state",
-            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)},
-            device, password, variant=variant,
-        )
+        op_key, variant, vars = self.resolver_set_port_admin_state(interface, enabled)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_port_access_vlan(self, interface: str, vlan_id: int) -> tuple[str, "str | None", dict]:
+        vars = {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id}
+        return "set_port_access_vlan", None, vars
 
     def set_port_access_vlan(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template(
-            "set_port_access_vlan",
-            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id},
-            device, password,
-        )
+        op_key, variant, vars = self.resolver_set_port_access_vlan(interface, vlan_id)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_trunk_pvid_vlan(self, interface: str, vlan_id: int) -> tuple[str, "str | None", dict]:
+        vars = {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id}
+        return "set_trunk_pvid_vlan", None, vars
 
     def set_trunk_pvid_vlan(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template(
-            "set_trunk_pvid_vlan",
-            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id},
-            device, password,
-        )
+        op_key, variant, vars = self.resolver_set_trunk_pvid_vlan(interface, vlan_id)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_trunk_allowed_vlans(self, interface: str, vlan_list: list[int]) -> tuple[str, "str | None", dict]:
+        vlan_str = self._compress_vlans_huawei(sorted(set(vlan_list)))
+        vars = {
+            "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
+            "allowed_vlans": vlan_str,
+        }
+        return "set_trunk_allowed_vlans", None, vars
 
     def set_trunk_allowed_vlans(self, interface: str, vlan_list: list[int], device: Device, password: str) -> dict:
-        vlan_str = self._compress_vlans_huawei(sorted(set(vlan_list)))
-        return self._aplicar_desde_template(
-            "set_trunk_allowed_vlans",
-            {
-                "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
-                "allowed_vlans": vlan_str,
-            },
-            device, password,
-        )
+        op_key, variant, vars = self.resolver_set_trunk_allowed_vlans(interface, vlan_list)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_port_poe(self, interface: str, enabled: bool) -> tuple[str, "str | None", dict]:
+        variant = "enabled" if enabled else "disabled"
+        vars = {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)}
+        return "set_port_poe", variant, vars
 
     def set_port_poe(self, interface: str, enabled: bool, device: Device, password: str) -> dict:
-        variant = "enabled" if enabled else "disabled"
-        return self._aplicar_desde_template(
-            "set_port_poe",
-            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)},
-            device, password, variant=variant,
-        )
+        op_key, variant, vars = self.resolver_set_port_poe(interface, enabled)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
-    def set_storm_control(
-        self, interface: str, enabled: bool, threshold: "float | None", device: Device, password: str,
-    ) -> dict:
+    def resolver_set_storm_control(
+        self, interface: str, enabled: bool, threshold: "float | None",
+    ) -> tuple[str, "str | None", dict]:
         # "percent {threshold}" en VRP espera un entero -- confirmado
         # contra un device real: mandarlo como float de Python (ej. "1.0")
         # rompe el comando ("Unrecognized command" con basura de escape de
@@ -195,26 +209,44 @@ class HuaweiVendor(VendorDriver):
             "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
             "threshold": int(threshold) if threshold is not None else None,
         }
-        return self._aplicar_desde_template("set_storm_control", vars, device, password, variant=variant)
+        return "set_storm_control", variant, vars
+
+    def set_storm_control(
+        self, interface: str, enabled: bool, threshold: "float | None", device: Device, password: str,
+    ) -> dict:
+        op_key, variant, vars = self.resolver_set_storm_control(interface, enabled, threshold)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_reset_port(self, interface: str) -> tuple[str, "str | None", dict]:
+        vars = {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)}
+        return "reset_port", None, vars
 
     def reset_port(self, interface: str, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template(
-            "reset_port",
-            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface)},
-            device, password,
-        )
+        op_key, variant, vars = self.resolver_reset_port(interface)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     # ── Mode-change operations ────────────────────────────────────────────────
+
+    def resolver_set_access_mode(self, interface: str, vlan_id: int) -> tuple[str, "str | None", dict]:
+        vars = {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id}
+        return "set_access_mode", None, vars
 
     def set_access_mode(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
         """Set *interface* to access mode with *vlan_id*, atomically —
         ``port link-type access`` + ``port default vlan``, same single
         candidate-config session as every other mutation on this driver."""
-        return self._aplicar_desde_template(
-            "set_access_mode",
-            {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id},
-            device, password,
-        )
+        op_key, variant, vars = self.resolver_set_access_mode(interface, vlan_id)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_trunk_mode(
+        self, interface: str, native_vlan: int, vlan_list: list[int],
+    ) -> tuple[str, "str | None", dict]:
+        vlan_str = self._compress_vlans_huawei(sorted(set(vlan_list)))
+        vars = {
+            "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
+            "native_vlan": native_vlan, "allowed_vlans": vlan_str,
+        }
+        return "set_trunk_mode", None, vars
 
     def set_trunk_mode(
         self, interface: str, native_vlan: int, vlan_list: list[int], device: Device, password: str,
@@ -223,15 +255,8 @@ class HuaweiVendor(VendorDriver):
         *vlan_list*, atomically. *vlan_list* always fully replaces whatever
         the port had before (``undo ... all`` + set) — this is a mode
         change, not an add/remove relative to an existing trunk."""
-        vlan_str = self._compress_vlans_huawei(sorted(set(vlan_list)))
-        return self._aplicar_desde_template(
-            "set_trunk_mode",
-            {
-                "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
-                "native_vlan": native_vlan, "allowed_vlans": vlan_str,
-            },
-            device, password,
-        )
+        op_key, variant, vars = self.resolver_set_trunk_mode(interface, native_vlan, vlan_list)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     # ── VLAN list compression (Fase 2, A2 — movida desde validators/port_validator.py,
     # no es validación, es formato de CLI, específico de este vendor) ────────────
@@ -254,29 +279,43 @@ class HuaweiVendor(VendorDriver):
     def delete_svi(self, vlan_id: int, device: Device, password: str) -> dict:
         return self._aplicar_desde_template("delete_svi", {"vlan_id": vlan_id}, device, password)
 
-    def set_svi_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
+    # Mismo criterio que huawei port driver (ver esa nota): resolver_XXX
+    # (decide op_key/variant/vars, sin tocar el device) + método público.
+
+    def resolver_set_svi_admin_state(self, vlan_id: int, enabled: bool) -> tuple[str, "str | None", dict]:
         variant = "enabled" if enabled else "disabled"
-        return self._aplicar_desde_template(
-            "set_svi_admin_state", {"vlan_id": vlan_id}, device, password, variant=variant,
-        )
+        return "set_svi_admin_state", variant, {"vlan_id": vlan_id}
+
+    def set_svi_admin_state(self, vlan_id: int, enabled: bool, device: Device, password: str) -> dict:
+        op_key, variant, vars = self.resolver_set_svi_admin_state(vlan_id, enabled)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_svi_description(self, vlan_id: int, description: str) -> tuple[str, "str | None", dict]:
+        variant = "clear" if self._is_description_empty(description) else "set"
+        return "set_svi_description", variant, {"vlan_id": vlan_id, "description": description}
 
     def set_svi_description(self, vlan_id: int, description: str, device: Device, password: str) -> dict:
-        variant = "clear" if self._is_description_empty(description) else "set"
-        return self._aplicar_desde_template(
-            "set_svi_description", {"vlan_id": vlan_id, "description": description},
-            device, password, variant=variant,
-        )
+        op_key, variant, vars = self.resolver_set_svi_description(vlan_id, description)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
-    def set_svi_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
+    def resolver_set_svi_ipv4(self, vlan_id: int, ipv4_address: "str | None") -> tuple[str, "str | None", dict]:
         """*ipv4_address* llega en CIDR (``"10.10.10.11/24"``) o ``""``/
         ``None`` para limpiar -- VRP espera dirección + máscara punteada
         separadas, mismo criterio de conversión que Cisco."""
         variant = "clear" if not ipv4_address else "set"
         addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address)
-        return self._aplicar_desde_template(
-            "set_svi_ipv4", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
-            device, password, variant=variant,
-        )
+        return "set_svi_ipv4", variant, {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask}
+
+    def set_svi_ipv4(self, vlan_id: int, ipv4_address: "str | None", device: Device, password: str) -> dict:
+        op_key, variant, vars = self.resolver_set_svi_ipv4(vlan_id, ipv4_address)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_svi_ipv4_secondary(
+        self, vlan_id: int, ipv4_address: "str | None", previous_ipv4_address: "str | None",
+    ) -> tuple[str, "str | None", dict]:
+        variant = "clear" if not ipv4_address else "set"
+        addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address if ipv4_address else previous_ipv4_address)
+        return "set_svi_ipv4_secondary", variant, {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask}
 
     def set_svi_ipv4_secondary(
         self, vlan_id: int, ipv4_address: "str | None", previous_ipv4_address: "str | None",
@@ -286,12 +325,12 @@ class HuaweiVendor(VendorDriver):
         device real). Igual que Cisco, limpiar necesita la dirección
         secundaria actual (*previous_ipv4_address*) para armar "undo ip
         address {addr} {mask} sub"."""
-        variant = "clear" if not ipv4_address else "set"
-        addr, mask = self._cidr_a_direccion_y_mascara(ipv4_address if ipv4_address else previous_ipv4_address)
-        return self._aplicar_desde_template(
-            "set_svi_ipv4_secondary", {"vlan_id": vlan_id, "ipv4_addr": addr, "ipv4_mask": mask},
-            device, password, variant=variant,
-        )
+        op_key, variant, vars = self.resolver_set_svi_ipv4_secondary(vlan_id, ipv4_address, previous_ipv4_address)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_svi_ipv6(self, vlan_id: int, ipv6_address: "str | None") -> tuple[str, "str | None", dict]:
+        variant = "clear" if not ipv6_address else "set"
+        return "set_svi_ipv6", variant, {"vlan_id": vlan_id, "ipv6_address": ipv6_address or ""}
 
     def set_svi_ipv6(self, vlan_id: int, ipv6_address: "str | None", device: Device, password: str) -> dict:
         """Confirmado contra config real de un device de producción (no de
@@ -300,11 +339,8 @@ class HuaweiVendor(VendorDriver):
         (``ip address {addr} {mask}``). Ejemplo real:
         ``ipv6 address 2801:120:832::1/64`` sobre una interfaz con
         ``ipv6 enable`` ya puesto."""
-        variant = "clear" if not ipv6_address else "set"
-        return self._aplicar_desde_template(
-            "set_svi_ipv6", {"vlan_id": vlan_id, "ipv6_address": ipv6_address or ""},
-            device, password, variant=variant,
-        )
+        op_key, variant, vars = self.resolver_set_svi_ipv6(vlan_id, ipv6_address)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def set_svi_acl(
         self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
@@ -329,21 +365,29 @@ class HuaweiVendor(VendorDriver):
         (vacío). Si no hay nada atado (``current_acl_name`` también vacío)
         no hay nada que mandar -- el caller (``SVI._aplicar_acl``) ya lo
         trata como no-op, pero se cubre acá también por las dudas."""
+        if not acl_name and not current_acl_name:
+            return {"rc": 0, "stdout": "", "stderr": "", "success": True}
+        op_key, variant, vars = self.resolver_set_svi_acl(
+            vlan_id, direction, acl_name, current_acl_name=current_acl_name,
+        )
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_set_svi_acl(
+        self, vlan_id: int, direction: str, acl_name: "str | None", *, current_acl_name: "str | None" = None,
+    ) -> tuple[str, "str | None", dict]:
+        """Asume que ya se descartó el caso "nada atado y nada pedido"
+        (ver ``set_svi_acl`` -- ese caso es no-op, el caller ya lo filtra
+        antes de llegar acá vía ``SVI._resolver_acl``)."""
         if not acl_name:
-            if not current_acl_name:
-                return {"rc": 0, "stdout": "", "stderr": "", "success": True}
-            variant = "clear_numeric" if current_acl_name.isdigit() else "clear_named"
-            template_acl_name = current_acl_name
+            variant = "clear_numeric" if (current_acl_name or "").isdigit() else "clear_named"
+            template_acl_name = current_acl_name or ""
         elif acl_name.isdigit():
             variant = "set_numeric"
             template_acl_name = acl_name
         else:
             variant = "set_named"
             template_acl_name = acl_name
-        return self._aplicar_desde_template(
-            "set_svi_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": template_acl_name},
-            device, password, variant=variant,
-        )
+        return "set_svi_acl", variant, {"vlan_id": vlan_id, "direction": direction, "acl_name": template_acl_name}
 
     def set_svi_dhcp_relay(
         self, vlan_id: int, servers: list[str], device: Device, password: str,

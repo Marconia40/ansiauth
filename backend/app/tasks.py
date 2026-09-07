@@ -35,6 +35,25 @@ def ejecutar_task(recurso_dict: dict, tipo_recurso: str, device_name: str, actor
     orquestador.ejecutar(recurso, device_name, actor, job)
 
 
+@celery_app.task(name="ansiauth.orquestador.ejecutar_lote")
+def ejecutar_lote_task(
+    recursos_dict: list[dict], tipo_recurso: str, device_name: str, actor: str, job_id: str,
+) -> None:
+    """Contraparte de ``ejecutar_task`` para batching (ver
+    ``GroupOperationRunner.encolar_lote()``/``Orquestador.ejecutar_lote()``)
+    -- misma reconstrucción de tipo, aplicada a una lista en vez de 1 solo
+    recurso."""
+    from app.composition import job_repository, orquestador
+    from app.models.svi import SVI
+    from app.models.port import Puerto
+
+    _TIPOS = {"puerto": Puerto, "svi": SVI}
+    cls = _TIPOS[tipo_recurso]
+    recursos = [cls(**d) for d in recursos_dict]
+    job = job_repository.get(job_id)
+    orquestador.ejecutar_lote(recursos, device_name, actor, job)
+
+
 @celery_app.task(name="ansiauth.device.sync")
 def sync_device_task(device_name: str, scope: str) -> None:
     """Sincroniza la caché en DB (``device_vlans`` / ``device_ports`` /

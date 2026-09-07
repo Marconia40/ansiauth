@@ -13,6 +13,8 @@ from app.schemas.device_sync import SyncedResource
 from app.schemas.port import (
     PortAccessVlanUpdateRequest,
     PortAdminStateUpdateRequest,
+    PortBatchChangeItem,
+    PortBatchRequest,
     PortDescriptionClearRequest,
     PortDescriptionUpdateRequest,
     PortEnableRequest,
@@ -629,3 +631,84 @@ def reset_port(
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+def expandir_a_puertos(cambio: PortBatchChangeItem) -> list[Puerto]:
+    """1 entrada de ``PortBatchRequest.changes`` -> 1+ ``Puerto``, agrupando
+    los mismos combos que ``Puerto.aplicar()`` ya conoce (``mode``+
+    ``access_vlan``(+``allowed_vlans``) en 1 solo ``Puerto``, storm-control
+    en otro) y 1 ``Puerto`` por campo suelto para el resto -- cada
+    ``Puerto`` resultante pasa por ``Puerto.validar()`` sin cambios, la
+    única pieza nueva es este agrupamiento."""
+    puertos: list[Puerto] = []
+    if cambio.mode is not None:
+        puertos.append(Puerto(
+            interface=cambio.interface, mode=cambio.mode, access_vlan=cambio.access_vlan,
+            allowed_vlans=list(cambio.allowed_vlans) if cambio.allowed_vlans else None,
+        ))
+    else:
+        if cambio.access_vlan is not None:
+            puertos.append(Puerto(interface=cambio.interface, access_vlan=cambio.access_vlan))
+        if cambio.allowed_vlans is not None:
+            puertos.append(Puerto(
+                interface=cambio.interface, allowed_vlans=list(cambio.allowed_vlans),
+                allowed_vlan_operation=cambio.allowed_vlan_operation,
+            ))
+    if cambio.storm_control_enabled is not None:
+        puertos.append(Puerto(
+            interface=cambio.interface, storm_control_enabled=cambio.storm_control_enabled,
+            storm_control_threshold=cambio.storm_control_threshold,
+        ))
+    if cambio.description is not None:
+        puertos.append(Puerto(interface=cambio.interface, description=cambio.description))
+    if cambio.admin_up is not None:
+        puertos.append(Puerto(interface=cambio.interface, admin_up=cambio.admin_up))
+    if cambio.poe_enabled is not None:
+        puertos.append(Puerto(interface=cambio.interface, poe_enabled=cambio.poe_enabled))
+    if not puertos:
+        raise ValueError(f"no changes provided for interface {cambio.interface!r}")
+    return puertos
+
+
+@router.post(
+    "/batch",
+    status_code=202,
+    summary="Batch-update multiple ports (or multiple fields on one port) in 1 connection",
+    description=(
+        "Apply N changes -- across multiple interfaces, multiple fields on "
+        "one interface, or any mix -- in a **single** SSH connection to the "
+        "device instead of one connection per change. Each entry in "
+        "`changes` may carry the full config of one port (multiple fields "
+        "together) or just one field. Field-level no-op detection still "
+        "applies per entry (unchanged values aren't re-sent). If the batch "
+        "fails partway, the whole job fails and rollback attempts to "
+        "restore every entry that did change -- there is no partial-success "
+        "reporting per entry. Executed asynchronously: the response "
+        "carries a `group_job_id` and a single job entry (1 job = 1 "
+        "connection, not 1 per change). Requires operator role or higher; "
+        "site-scoped users may only target devices in their allowed sites."
+    ),
+)
+def batch_update_ports(
+    name: str,
+    data: PortBatchRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    recursos: list[Puerto] = []
+    try:
+        for cambio in data.changes:
+            nuevos = expandir_a_puertos(cambio)
+            for puerto in nuevos:
+                puerto.validar()
+            recursos.extend(nuevos)
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
+
+    group_job_id, job_entry = group_operation_runner.encolar_lote(recursos, name, current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": [job_entry]})

@@ -15,6 +15,7 @@ import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
 import type {
   PortAccessVlanUpdateRequest,
   PortAdminStateUpdateRequest,
+  PortBatchRequest,
   PortDescriptionClearRequest,
   PortDescriptionUpdateRequest,
   PortListResponse,
@@ -30,6 +31,7 @@ import type {
   SVIAclClearRequest,
   SVIAclUpdateRequest,
   SVIAdminStateUpdateRequest,
+  SVIBatchRequest,
   SVICreateRequest,
   SVIDeleteRequest,
   SVIDescriptionClearRequest,
@@ -562,6 +564,19 @@ export async function resetPort(
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
+/** POST /devices/{name}/ports/batch — N changes (across ports, fields, or
+ * both) applied in 1 SSH connection instead of 1 per change. See
+ * PortBatchRequest. */
+export async function batchUpdatePorts(
+  device: string,
+  body: PortBatchRequest,
+): Promise<PortOperationResult> {
+  const result = await unwrap<PortOperationResult>(
+    client.post<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/batch`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
 // ── Virtual interfaces (SVI) ─────────────────────────────────────────────────
 
 export async function getInterfacesVirtuales(device: string): Promise<SVIListResponse> {
@@ -721,6 +736,20 @@ export async function removeSVIDhcpRelay(
 ): Promise<SVIOperationResult> {
   const result = await unwrap<SVIOperationResult>(
     client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/dhcp-relay`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+/** PATCH /devices/{name}/svis/{vlan_id}/batch — N field changes on 1 SVI
+ * applied in 1 SSH connection instead of 1 per field. See SVIBatchRequest.
+ * DHCP relay isn't included, it stays immediate via the 2 functions above. */
+export async function batchUpdateSvi(
+  device: string,
+  vlanId: number,
+  body: SVIBatchRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.patch<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/${vlanId}/batch`, body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }

@@ -114,3 +114,32 @@ export interface PortOperationResult {
   group_job_id: string;
   jobs: PortJobResult[];
 }
+
+// Body for POST /api/v1/devices/{name}/ports/batch. Each entry can carry
+// the FULL config of one port at once (multiple fields together), not just
+// one — the server groups them into as many device-side commands as
+// needed but sends them all in 1 SSH connection instead of 1 per field.
+// Same field set as the individual per-field requests above, just all
+// optional together on one object. dhcp relay has no port-level
+// equivalent (svi-only), not included here.
+export interface PortBatchChangeItem {
+  interface: string;
+  description?: string | null;
+  admin_up?: boolean | null;
+  mode?: 'access' | 'trunk' | null;
+  access_vlan?: number | null;
+  allowed_vlans?: number[] | null;
+  allowed_vlan_operation?: TrunkVlanMode;
+  poe_enabled?: boolean | null;
+  storm_control_enabled?: boolean | null;
+  storm_control_threshold?: number | null;
+}
+
+export interface PortBatchRequest {
+  changes: PortBatchChangeItem[];
+}
+
+// Response shape for POST .../ports/batch is the SAME PortOperationResult
+// as every other port endpoint (`{group_job_id, jobs}`) — `jobs` just
+// always has exactly 1 entry here (1 batch = 1 connection = 1 job), vs.
+// potentially N on the individual endpoints (1 per device fan-out).

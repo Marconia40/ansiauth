@@ -1,19 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import {
-  clearPortDescription,
-  resetPort,
-  setPortAccessMode,
-  setPortAccessVlan,
-  setPortAdminState,
-  setPortPoe,
-  setPortStormControl,
-  setPortTrunkMode,
-  setTrunkAllowedVlans,
-  updatePortDescription,
-} from '@/services/api';
-import { runPortBatch, type BatchResult } from './runPortBatch';
+import { batchUpdatePorts, resetPort } from '@/services/api';
+import { runPortBatch, runPortBatchByDevice, type BatchResult } from './runPortBatch';
 import { PortActionShell } from './PortActionShell';
 import { FieldRow } from './VlanCreateModal';
 import type { PortSelection } from './usePortSelection';
@@ -33,6 +22,11 @@ interface ConfirmProps extends BaseProps {
   action: ConfirmAction;
 }
 
+// `reset` (RF-PUERTO-10) has no batch equivalent -- it's exclusive with
+// every other field server-side, doesn't fit in a `changes` list of
+// specific fields (see runPortBatch.ts's docstring on runPortBatch()).
+// shutdown/undo-shutdown are both just `admin_up`, batchable like any
+// other field.
 const CONFIRM_META: Record<
   ConfirmAction,
   {
@@ -40,7 +34,6 @@ const CONFIRM_META: Record<
     actionLabel: string;
     tone: 'default' | 'danger';
     warning: string;
-    exec: (ref: { device: string; interface: string }) => Promise<unknown>;
   }
 > = {
   shutdown: {
@@ -49,14 +42,12 @@ const CONFIRM_META: Record<
     tone: 'danger',
     warning:
       'Selected ports will be administratively down. Attached hosts lose link immediately.',
-    exec: (ref) => setPortAdminState(ref.device, { interface: ref.interface, enabled: false }),
   },
   'undo-shutdown': {
     title: 'Undo shutdown',
     actionLabel: 'Enable',
     tone: 'default',
     warning: 'Selected ports will be administratively up again.',
-    exec: (ref) => setPortAdminState(ref.device, { interface: ref.interface, enabled: true }),
   },
   reset: {
     title: 'Delete port config',
@@ -64,7 +55,6 @@ const CONFIRM_META: Record<
     tone: 'danger',
     warning:
       'This wipes VLAN / description / PoE / storm-control back to the vendor default. Not reversible.',
-    exec: (ref) => resetPort(ref.device, { interface: ref.interface }),
   },
 };
 
@@ -78,7 +68,20 @@ export function PortConfirmModal({ open, onClose, selection, action, onDone }: C
       selection={selection}
       actionLabel={meta.actionLabel}
       tone={meta.tone}
-      onExecute={(progress) => runPortBatch(selection.refs, meta.exec, { onProgress: progress })}
+      onExecute={(progress) =>
+        action === 'reset'
+          ? runPortBatch(
+              selection.refs,
+              (ref) => resetPort(ref.device, { interface: ref.interface }),
+              { onProgress: progress },
+            )
+          : runPortBatchByDevice(
+              selection.byDevice,
+              () => ({ admin_up: action === 'undo-shutdown' }),
+              (device, changes) => batchUpdatePorts(device, { changes }),
+              { onProgress: progress },
+            )
+      }
       onDone={onDone}
     >
       <p className="text-sm text-warning border border-warning/40 bg-warning/10 rounded px-3 py-2">
@@ -104,15 +107,10 @@ export function PortDescriptionModal({ open, onClose, selection, onDone }: BaseP
       actionLabel="Apply"
       canExecute
       onExecute={(progress) =>
-        runPortBatch(
-          selection.refs,
-          (ref) =>
-            description === ''
-              ? clearPortDescription(ref.device, { interface: ref.interface })
-              : updatePortDescription(ref.device, {
-                  interface: ref.interface,
-                  description,
-                }),
+        runPortBatchByDevice(
+          selection.byDevice,
+          () => ({ description }),
+          (device, changes) => batchUpdatePorts(device, { changes }),
           { onProgress: progress },
         )
       }
@@ -162,21 +160,13 @@ export function PortModeModal({ open, onClose, selection, onDone }: BaseProps) {
       actionLabel="Apply"
       canExecute={canExecute}
       onExecute={(progress) =>
-        runPortBatch(
-          selection.refs,
-          async (ref) => {
-            if (mode === 'access') {
-              return setPortAccessMode(ref.device, {
-                interface: ref.interface,
-                access_vlan: accessParsed,
-              });
-            }
-            return setPortTrunkMode(ref.device, {
-              interface: ref.interface,
-              native_vlan: nativeParsed,
-              allowed_vlans: allowedParsed ?? [],
-            });
-          },
+        runPortBatchByDevice(
+          selection.byDevice,
+          () =>
+            mode === 'access'
+              ? { mode: 'access', access_vlan: accessParsed }
+              : { mode: 'trunk', access_vlan: nativeParsed, allowed_vlans: allowedParsed ?? [] },
+          (device, changes) => batchUpdatePorts(device, { changes }),
           { onProgress: progress },
         )
       }
@@ -254,13 +244,10 @@ export function PortAccessVlanModal({ open, onClose, selection, onDone }: BasePr
       actionLabel="Apply"
       canExecute={canExecute}
       onExecute={(progress) =>
-        runPortBatch(
-          selection.refs,
-          (ref) =>
-            setPortAccessVlan(ref.device, {
-              interface: ref.interface,
-              vlan_id: parsed,
-            }),
+        runPortBatchByDevice(
+          selection.byDevice,
+          () => ({ access_vlan: parsed }),
+          (device, changes) => batchUpdatePorts(device, { changes }),
           { onProgress: progress },
         )
       }
@@ -301,14 +288,10 @@ export function PortTrunkVlansModal({ open, onClose, selection, onDone }: BasePr
       actionLabel="Apply"
       canExecute={canExecute}
       onExecute={(progress) =>
-        runPortBatch(
-          selection.refs,
-          (ref) =>
-            setTrunkAllowedVlans(ref.device, {
-              interface: ref.interface,
-              mode,
-              vlans: parsed ?? [],
-            }),
+        runPortBatchByDevice(
+          selection.byDevice,
+          () => ({ allowed_vlans: parsed ?? [], allowed_vlan_operation: mode }),
+          (device, changes) => batchUpdatePorts(device, { changes }),
           { onProgress: progress },
         )
       }
@@ -360,13 +343,10 @@ export function PortPoeModal({ open, onClose, selection, onDone }: BaseProps) {
       selection={selection}
       actionLabel={enabled ? 'Activate' : 'Deactivate'}
       onExecute={(progress) =>
-        runPortBatch(
-          selection.refs,
-          (ref) =>
-            setPortPoe(ref.device, {
-              interface: ref.interface,
-              enabled,
-            }),
+        runPortBatchByDevice(
+          selection.byDevice,
+          () => ({ poe_enabled: enabled }),
+          (device, changes) => batchUpdatePorts(device, { changes }),
           { onProgress: progress },
         )
       }
@@ -410,14 +390,13 @@ export function PortStormControlModal({ open, onClose, selection, onDone }: Base
       actionLabel="Apply"
       canExecute={canExecute}
       onExecute={(progress) =>
-        runPortBatch(
-          selection.refs,
-          (ref) =>
-            setPortStormControl(ref.device, {
-              interface: ref.interface,
-              enabled,
-              threshold_percent: enabled ? parsedThreshold : null,
-            }),
+        runPortBatchByDevice(
+          selection.byDevice,
+          () => ({
+            storm_control_enabled: enabled,
+            storm_control_threshold: enabled ? parsedThreshold : null,
+          }),
+          (device, changes) => batchUpdatePorts(device, { changes }),
           { onProgress: progress },
         )
       }

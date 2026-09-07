@@ -117,6 +117,10 @@ _PATRONES_TRANSITORIOS: tuple[str, ...] = (
     "socket.timeout",
     "socket.gaierror",
     "ssl.sslerror",
+    # ansible_service.py's rc=0-but-stdout-is-literally-"None" guard --
+    # ver esa nota, mismo criterio: no es un rechazo real del device, es
+    # una lectura que no se pudo confiar, vale la pena reintentar.
+    "possible read desync",
 )
 
 # vlan_execution_service.py:15 -- Ansible exits with rc=4 when hosts are
@@ -393,6 +397,149 @@ class Orquestador:
                             "device=%s scope=%s (%s) -- cache will stay at previous "
                             "synced_at until a manual refresh",
                             device_name, sync_scope, exc,
+                        )
+        finally:
+            if not job.esta_en_estado_terminal():
+                job.asegurar_estado_final()
+                self._jobs.add(job)
+
+    def ejecutar_lote(self, recursos: "list[RecursoGestionable]", device_name: str, actor: str, job: "Job") -> None:
+        """Batching -- N recursos del MISMO tipo sobre el MISMO device en
+        **1 sola conexión** en vez de N (ver ``VendorDriver.aplicar_lote()``
+        y ``RecursoGestionable.resolver_paso()``). No reemplaza
+        ``ejecutar()`` (que sigue siendo el camino de 1 recurso = 1
+        conexión), es un método nuevo -- mismo lock/retry/rollback/eventos/
+        sync post-write que ``ejecutar()``, adaptados a una lista.
+
+        Sin escritura de tracking por-recurso (``_repos[...].add()``) a
+        propósito: cada entrada del lote es una representación PARCIAL (ej.
+        un ``Puerto(interface=X, admin_up=True)`` con todo lo demás en
+        ``None``) -- escribirla pisaría la fila cacheada completa con
+        nulls, mismo bug ya documentado más arriba para ``GlobalConfig``.
+        El sync post-write (al final, sin cambios) es lo que repuebla la
+        fila con el estado real leído del device."""
+        if job.esta_en_estado_terminal():
+            return
+        device = self._device_repo.get(device_name)
+        if device is None:
+            raise NotFoundError(device_name)
+        for recurso in recursos:
+            recurso.device = device_name
+        tipo = recursos[0].repositorio()
+
+        pre_states: "list[dict] | None" = None
+        try:
+            job.marcar_iniciado()
+            self._jobs.add(job)
+            with self._coordinador.bloquear(device_name):
+                self._coordinador.limitar(device_name)
+                for recurso in recursos:
+                    recurso.validar()
+
+                pre_states_holder: dict = {}
+
+                def _reconciliar_lote():
+                    cls = type(recursos[0])
+                    pre_states_holder["value"] = cls.reconciliar_lote(recursos, device)
+                    return {"rc": 0, "stdout": "", "stderr": ""}
+
+                resultado_prestate, _ = self._ejecutar_con_retry(
+                    _reconciliar_lote, job, device_name, max_retries=job.max_retries,
+                )
+                if resultado_prestate.get("rc", 0) != 0:
+                    raise DeviceExecutionError(
+                        resultado_prestate.get("stderr")
+                        or resultado_prestate.get("stdout")
+                        or "Prestate read failed"
+                    )
+                pre_states = pre_states_holder["value"]
+                job.pre_state = {"lote": [_pre_state_json_safe(ps) for ps in pre_states]}
+
+                primer_intento = True
+
+                def _aplicar():
+                    nonlocal primer_intento
+                    if primer_intento:
+                        primer_intento = False
+                        estados = pre_states
+                    else:
+                        # Mismo criterio que ejecutar(): a partir del 2do
+                        # intento releer de verdad (un intento previo puede
+                        # haberse aplicado igual en el device pese al
+                        # timeout).
+                        estados = type(recursos[0]).reconciliar_lote(recursos, device)
+                    pasos = []
+                    for recurso, estado in zip(recursos, estados):
+                        paso = recurso.resolver_paso(device, estado.get("actual"))
+                        if paso is not None:
+                            pasos.append(paso)
+                    if not pasos:
+                        return {"rc": 0, "success": True, "changed": False, "noop": True, "stdout": "", "stderr": ""}
+                    return device.driver.aplicar_lote(pasos, device, device.password, op_label=f"lote_{tipo}")
+
+                resultado, retry_count = self._ejecutar_con_retry(
+                    _aplicar, job, device_name, max_retries=job.max_retries,
+                )
+                if resultado.get("rc", 0) != 0:
+                    raise DeviceExecutionError(resultado.get("stderr") or resultado.get("stdout") or "Execution failed")
+        except Exception as error:
+            rb_performed_total = False
+            rb_resultados: list[tuple[bool, "bool | None"]] = []
+            if pre_states is not None:
+                with self._coordinador.bloquear(device_name):
+                    for recurso, estado in zip(recursos, pre_states):
+                        try:
+                            rb_resultados.append(self._rollback(recurso, estado, device))
+                        except Exception:
+                            logger.exception(
+                                "ejecutar_lote: rollback failed for one entry, "
+                                "continuing with the rest, device=%s", device_name,
+                            )
+                            rb_resultados.append((True, False))
+            rb_performed_total = any(p for p, _s in rb_resultados)
+            rb_success_total = (
+                all(s is not False for _p, s in rb_resultados if _p) if rb_resultados else None
+            )
+            job.marcar_fallido(str(error), rb_performed_total, rb_success_total)
+            self._jobs.add(job)
+            self._eventos.despachar([DomainEvent(
+                "recurso_fallido", recursos[0], device, actor,
+                {"error": str(error), "rollback_performed": rb_performed_total, "rollback_success": rb_success_total,
+                 "lote_size": len(recursos)},
+                exitoso=False,
+            )])
+            raise
+        else:
+            job.marcar_completado(resultado)
+            self._jobs.add(job)
+            try:
+                self._eventos.despachar([DomainEvent(
+                    "recurso_aplicado", recursos[0], device, actor,
+                    {**resultado, "lote_size": len(recursos)},
+                )])
+            except Exception:
+                logger.exception(
+                    "Failed to dispatch recurso_aplicado event for lote on device=%s -- "
+                    "audit trail for this successful change may be incomplete.",
+                    device_name,
+                )
+            _SCOPE_POR_REPO = {"vlan": "vlans", "puerto": "ports", "svi": "svis", "global_config": "global_config"}
+            sync_scope = _SCOPE_POR_REPO.get(tipo)
+            if sync_scope is not None:
+                if self._jobs.hay_otros_activos(device_name, tipo, job.job_id):
+                    logger.debug(
+                        "Orquestador.ejecutar_lote: skipping post-write sync for "
+                        "device=%s scope=%s -- another job on same (device, scope) "
+                        "is still active", device_name, sync_scope,
+                    )
+                else:
+                    try:
+                        from app.tasks import sync_device_task
+                        sync_device_task.delay(device_name, sync_scope)
+                    except Exception as exc:
+                        logger.warning(
+                            "Orquestador.ejecutar_lote: post-write sync enqueue failed for "
+                            "device=%s scope=%s (%s)", device_name, sync_scope, exc,
                         )
         finally:
             if not job.esta_en_estado_terminal():

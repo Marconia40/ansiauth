@@ -150,6 +150,40 @@ class SVIAclClearRequest(_SVITargetRequest):
     direction: Literal["in", "out"] = Field(..., description="Sentido de la ACL a desasignar -- 'in' o 'out'.")
 
 
+class SVIBatchRequest(BaseModel):
+    """Body de ``PATCH /devices/{name}/svis/{vlan_id}/batch`` -- TODOS los
+    campos opcionales juntos en 1 solo objeto (a diferencia de cada
+    endpoint individual, que exige exactamente 1). ``None`` = no tocar,
+    ``""`` = limpiar (mismo criterio que el resto de esta clase),
+    cualquier otro valor = asignar -- mismo significado que ya tiene cada
+    campo en ``app.models.svi.SVI``, no se inventa nada nuevo. DHCP relay
+    queda afuera a propósito (ver ``SVI.resolver_paso()``) -- sigue siendo
+    "fire inmediato" vía ``POST``/``DELETE /svis/dhcp-relay``, no entra al
+    batch. ``vlan_id`` es un segmento de la URL, no va en el body."""
+
+    description: Optional[str] = Field(None, max_length=240)
+    admin_up: Optional[bool] = None
+    ipv4_address: Optional[str] = None
+    ipv4_address_secondary: Optional[str] = None
+    ipv6_address: Optional[str] = None
+    acl_in: Optional[str] = Field(None, description="Nombre/número de ACL, o '' para desasignar.")
+    acl_out: Optional[str] = Field(None, description="Nombre/número de ACL, o '' para desasignar.")
+
+    @field_validator("ipv4_address", "ipv4_address_secondary")
+    @classmethod
+    def _validar_ipv4_o_vacio(cls, v: "str | None") -> "str | None":
+        if v:
+            _validar_cidr(v, 4)
+        return v
+
+    @field_validator("ipv6_address")
+    @classmethod
+    def _validar_ipv6_o_vacio(cls, v: "str | None") -> "str | None":
+        if v:
+            _validar_cidr(v, 6)
+        return v
+
+
 class SVIDhcpRelayAddRequest(_SVITargetRequest):
     """Request body para ``POST /svis/dhcp-relay``
     (RF-INTERV-05) -- agrega 1 server, sin tocar los demás ya configurados.
