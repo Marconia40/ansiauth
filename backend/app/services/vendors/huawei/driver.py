@@ -308,23 +308,40 @@ class HuaweiVendor(VendorDriver):
 
     def set_svi_acl(
         self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
+        *, current_acl_name: "str | None" = None,
     ) -> dict:
-        """Confirmado contra config real: el orden de ``traffic-filter``
-        cambia según si la ACL es numerada o con nombre --
-        ``traffic-filter {direction}bound acl {numero}`` para numeradas
-        (ej. ``traffic-filter inbound acl 3002``), pero
-        ``traffic-filter acl {nombre} {direction}bound`` para ACLs con
-        nombre (ej. ``traffic-filter acl servers-admin-dc2-vlan830
-        inbound``) -- el nombre va pegado a "acl" y la dirección al final,
-        no como en el caso numerado."""
+        """Confirmado EN VIVO contra f3r9s2: el orden de ``traffic-filter``
+        es siempre ``{direction}bound acl ...`` -- lo que cambia entre
+        numerada y con nombre es el keyword ``name`` (obligatorio antes de
+        un nombre, ausente para un número):
+        ``traffic-filter {direction}bound acl {numero}`` (ej.
+        ``traffic-filter inbound acl 3002``) vs.
+        ``traffic-filter {direction}bound acl name {nombre}`` (ej.
+        ``traffic-filter inbound acl name test-acl``). Ver YAML
+        (``set_svi_acl``) para el detalle de cómo se confirmó.
+
+        Para limpiar (``acl_name`` vacío) VRP exige repetir la referencia
+        EXACTA de la ACL que está atada -- confirmado en vivo que ``undo
+        traffic-filter inbound`` solo, sin la ACL, es "Incomplete command".
+        Por eso ``current_acl_name`` (lo que ``reconciliar()`` ya leyó del
+        device) reemplaza a ``acl_name`` para armar el ``undo``, y
+        numerada/con-nombre se decide sobre ESE valor, no sobre el nuevo
+        (vacío). Si no hay nada atado (``current_acl_name`` también vacío)
+        no hay nada que mandar -- el caller (``SVI._aplicar_acl``) ya lo
+        trata como no-op, pero se cubre acá también por las dudas."""
         if not acl_name:
-            variant = "clear"
+            if not current_acl_name:
+                return {"rc": 0, "stdout": "", "stderr": "", "success": True}
+            variant = "clear_numeric" if current_acl_name.isdigit() else "clear_named"
+            template_acl_name = current_acl_name
         elif acl_name.isdigit():
             variant = "set_numeric"
+            template_acl_name = acl_name
         else:
             variant = "set_named"
+            template_acl_name = acl_name
         return self._aplicar_desde_template(
-            "set_svi_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
+            "set_svi_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": template_acl_name},
             device, password, variant=variant,
         )
 

@@ -927,11 +927,21 @@ class VendorDriver(ABC):
 
     def set_svi_acl(
         self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
+        *, current_acl_name: "str | None" = None,
     ) -> dict:
         """Bind (or clear, if *acl_name* is ``""``/``None``) an ACL that
         already exists on the device to *direction* (``"in"``/``"out"``).
         Does not create the ACL itself -- that's RF-GLOBAL-04, out of scope
-        here."""
+        here.
+
+        *current_acl_name* is the ACL currently bound in that direction
+        (from ``reconciliar()``'s ``actual``), passed only for a clear.
+        Cisco's ``no ip access-group {direction}`` doesn't need it (only 1
+        ACL per direction can ever be bound, so the direction alone is
+        unambiguous) but VRP's ``undo traffic-filter`` does -- confirmed
+        live against f3r9s2 that ``undo traffic-filter inbound`` alone is
+        rejected as "Incomplete command", it must repeat the exact ACL
+        reference that was bound."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement set_svi_acl yet"
         )

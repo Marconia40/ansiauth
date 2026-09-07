@@ -273,7 +273,11 @@ class CiscoVendor(VendorDriver):
 
     def set_svi_acl(
         self, vlan_id: int, direction: str, acl_name: "str | None", device: Device, password: str,
+        *, current_acl_name: "str | None" = None,
     ) -> dict:
+        # current_acl_name unused -- "no ip access-group {direction}" clears
+        # whatever is bound without needing to name it (only 1 ACL per
+        # direction can ever be bound). See base.py's docstring.
         variant = "clear" if not acl_name else "set"
         return self._aplicar_desde_template(
             "set_svi_acl", {"vlan_id": vlan_id, "direction": direction, "acl_name": acl_name or ""},
