@@ -88,5 +88,33 @@ services:
       # ── Celery + Redis ──
       REDIS_URL: redis://redis:6379/0
 
+  # Celery Beat: scheduler process that fires periodic tasks
+  # (currently only ``sync_stale_devices_task`` every SYNC_STALE_INTERVAL_MIN
+  # minutes). Runs as its own service so worker concurrency can scale
+  # horizontally without duplicating the scheduler -- if we ran it via
+  # ``celery worker -B`` two workers would fire the same schedule twice.
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ansiauth-beat
+    command: celery -A app.worker.celery_app beat --loglevel=info
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      # Beat doesn't hit Postgres directly (it only enqueues to Redis),
+      # but ``app.worker`` transitively imports app.core.config which
+      # requires DATABASE_URL to be set even if unused.
+      DATABASE_URL: postgresql+psycopg://ansiauth:ansiauth_dev_password@db:5432/ansiauth
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev_jwt_secret_change_me_change_me_change_me}
+      FERNET_KEY: ${FERNET_KEY:-}
+      REDIS_URL: redis://redis:6379/0
+      # Scheduler cadence — matches the constant in app/tasks.py; kept
+      # here so ops can tune it via .env without rebuilding.
+      SYNC_STALE_INTERVAL_MIN: ${SYNC_STALE_INTERVAL_MIN:-20}
+      SYNC_STALE_THRESHOLD_S: ${SYNC_STALE_THRESHOLD_S:-420}
+      SYNC_STALE_STAGGER_S: ${SYNC_STALE_STAGGER_S:-3}
+
 volumes:
   ansiauth-postgres-data:

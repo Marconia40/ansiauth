@@ -255,6 +255,56 @@ class RedisCoordinator:
             else:
                 self._device_timestamps.clear()
 
+    # ── Sync coalescing (avoid duplicate sync_device_task enqueues) ───────
+
+    def hay_sync_pendiente(self, device_name: str, scope: str) -> bool:
+        """True if a ``sync_device_task(device_name, scope)`` was enqueued
+        recently and hasn't started running yet.
+
+        Used before enqueuing to skip duplicates. The marker is cleared
+        when the task starts running (``limpiar_sync_pendiente``) -- past
+        that point re-enqueuing a second task is legitimate, because the
+        already-running one won't reflect state changes that happened
+        after it started.
+
+        Returns ``False`` when Redis is unreachable -- coalescing is a
+        best-effort optimization, not a correctness invariant, so the
+        fallback path just accepts occasional duplicate enqueues.
+        """
+        r = self._get_redis()
+        if r is None:
+            return False
+        try:
+            return bool(r.exists(f"sync_pending:{device_name}:{scope}"))
+        except Exception as exc:
+            logger.warning("Sync coalescing: Redis error (%s), assuming no pending", exc)
+            return False
+
+    def marcar_sync_pendiente(self, device_name: str, scope: str, ttl_s: int = 300) -> None:
+        """Mark a sync as pending so subsequent ``hay_sync_pendiente()``
+        checks skip enqueuing a duplicate. TTL protects against markers
+        that never get cleared (e.g. worker never picks up the task)."""
+        r = self._get_redis()
+        if r is None:
+            return
+        try:
+            r.set(f"sync_pending:{device_name}:{scope}", "1", ex=ttl_s)
+        except Exception as exc:
+            logger.warning("Sync coalescing: Redis error marking pending (%s)", exc)
+
+    def limpiar_sync_pendiente(self, device_name: str, scope: str) -> None:
+        """Clear the pending marker -- called when the task actually starts
+        executing, so a subsequent request that arrives while the task is
+        running can enqueue a fresh follow-up (its state read wouldn't
+        include changes that happened after the running task started)."""
+        r = self._get_redis()
+        if r is None:
+            return
+        try:
+            r.delete(f"sync_pending:{device_name}:{scope}")
+        except Exception as exc:
+            logger.warning("Sync coalescing: Redis error clearing pending (%s)", exc)
+
     # ── SSH-slot semaphore (global concurrency limit) ─────────────────────
 
     @contextmanager

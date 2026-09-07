@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getDashboardSummary, refreshDashboardScope } from '@/services/api';
@@ -9,7 +9,7 @@ import { vendorLabel } from '@/types/device';
 import { Panel } from './Panel';
 import { JobsPieChart, type JobsPieData } from './JobsPieChart';
 import { Pie } from './Pie';
-import { RefreshButton } from './RefreshButton';
+import { LastSyncedLabel } from './LastSyncedLabel';
 
 const VENDOR_COLORS = {
   cisco: 'var(--color-accent-info)',
@@ -86,43 +86,45 @@ export function ScopeDashboard({ scope }: Props) {
     return { ids, discrepancies, namesById };
   }, [summary?.vlans.entries]);
 
-  const [refreshRunning, setRefreshRunning] = useState(false);
-
-  async function handleRefresh() {
-    setRefreshRunning(true);
-    try {
-      // 1 sola request encola vlans+ports+svis para cada device del scope.
-      // Fire and forget: no esperamos las tareas, invalidamos el summary
-      // para que el polling agarre sync_in_progress_count>0 y siga desde
-      // ahí hasta que baje a 0.
-      await refreshDashboardScope(scopeToSummaryParams(scope));
-    } finally {
-      queryClient.invalidateQueries({ queryKey: ['dashboard', 'summary'] });
-      // Invalidar también las envelopes de detalle por si el user tiene
-      // una tab de VLAN/Ports abierta en otro tab del navegador.
-      queryClient.invalidateQueries({ queryKey: ['vlans', 'synced'] });
-      queryClient.invalidateQueries({ queryKey: ['ports', 'synced'] });
-      setRefreshRunning(false);
-    }
-  }
+  // Silent refresh reactivo on-open: al montar (o cambiar de scope), el
+  // backend decide qué devices están stale (default 7 min) y encola sólo
+  // esos, con coalescing. El botón manual se sacó -- el scheduler Celery
+  // Beat (`sync_stale_devices_task`) mantiene el inventory fresco de
+  // fondo cada ~20 min, y este disparador on-open cubre el caso "el user
+  // vuelve al dashboard después de un rato". No mostramos loading global:
+  // el spinner por-device del summary (via `sync_in_progress_count`) ya
+  // señala qué se está refrescando.
+  const scopeKey = JSON.stringify(scopeToSummaryParams(scope));
+  const lastReactiveScope = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastReactiveScope.current === scopeKey) return;
+    lastReactiveScope.current = scopeKey;
+    refreshDashboardScope(scopeToSummaryParams(scope))
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['dashboard', 'summary'] });
+        queryClient.invalidateQueries({ queryKey: ['vlans', 'synced'] });
+        queryClient.invalidateQueries({ queryKey: ['ports', 'synced'] });
+      })
+      .catch(() => {
+        // Silent: refresh reactive es best-effort; el user ya está viendo
+        // la data cacheada. Los errores reales del backend siguen
+        // surfacing via `devices.sync_errors` en el summary.
+      });
+  }, [scopeKey, scope, queryClient]);
 
   const syncInProgress =
     (summary?.devices.sync_in_progress_count ?? 0) > 0;
-  const deviceCount = summary?.devices.total ?? 0;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-end">
-        <RefreshButton
-          onClick={handleRefresh}
-          loading={refreshRunning || syncInProgress}
-          disabled={deviceCount === 0}
+        <LastSyncedLabel
           syncedAt={summary?.devices.last_sync_at ?? null}
           syncError={summary && summary.devices.sync_errors > 0 ? 'Sync error' : null}
           progressLabel={
             syncInProgress
               ? `${summary?.devices.sync_in_progress_count ?? 0} in progress`
-              : undefined
+              : null
           }
         />
       </div>

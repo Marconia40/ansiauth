@@ -94,37 +94,50 @@ def get_dashboard_summary(
     return ok(payload)
 
 
-# Los tres scopes que sync_device_task acepta (ver backend/app/tasks.py).
-# Refresh siempre encola los tres — sincronizar solo uno rara vez tiene
-# sentido desde el dashboard y complica el contrato sin beneficio real.
-_SYNC_SCOPES = ("vlans", "ports", "svis")
-
-
 @router.post(
     "/refresh",
     status_code=202,
-    summary="Refresh sync cache for every device in a scope",
+    summary="Reactive refresh: sync only stale devices in a scope",
     description=(
-        "Encola en Celery una sync de VLANs + ports + SVIs para cada "
-        "device visible dentro del scope. Reemplaza el patrón anterior "
-        "donde el frontend iteraba por device disparando 3 requests por "
-        "cada uno (3N requests). Ahora es 1 sola request → M tareas en "
-        "background (con M = 3 × devices visibles).\n\n"
-        "Params iguales a `/dashboard/summary` (scope + id/name). "
-        "Devuelve 202 con la lista de task_ids encolados. El frontend "
-        "sigue polling `GET /dashboard/summary` — cuando "
-        "`devices.sync_in_progress_count` vuelve a 0 los syncs terminaron."
+        "Encola una sync de VLANs + ports + SVIs (scope ``all``) para "
+        "los devices del scope cuyo último sync es más viejo que "
+        "``stale_threshold_s`` (default 420s = 7 min). Devices frescos "
+        "se omiten silenciosamente. Si un device ya tiene una sync "
+        "pending (coalescing), tampoco se re-encola.\n\n"
+        "El frontend llama este endpoint al abrir el dashboard (refresh "
+        "reactivo). La carga sostenida del inventory la resuelve "
+        "``sync_stale_devices_task`` (Celery Beat, cada ~20 min); este "
+        "endpoint es sólo el disparador on-open que evita mostrar data "
+        "vieja cuando el usuario vuelve al dashboard tras un rato.\n\n"
+        "Params iguales a ``/dashboard/summary`` (scope + id/name). "
+        "Devuelve 202 con lista de task_ids encolados. El frontend "
+        "sigue polling ``GET /dashboard/summary`` — cuando "
+        "``devices.sync_in_progress_count`` vuelve a 0 los syncs "
+        "terminaron."
     ),
 )
 def refresh_dashboard_scope(
     scope: str = Query(..., pattern="^(org|site|group|device)$"),
     id: Optional[int] = Query(default=None, ge=1),
     name: Optional[str] = Query(default=None),
+    stale_threshold_s: int = Query(
+        default=420,
+        ge=0,
+        le=86400,
+        description="Un device se considera 'stale' si su último sync es "
+                    "más viejo que este umbral en segundos (0 fuerza refresh).",
+    ),
     current_user: dict = Depends(require_authenticated),
     visibility_scope: VisibilityScope = Depends(obtener_scope),
 ):
-    from app.composition import dashboard_service
-    from app.tasks import sync_device_task
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func, or_
+
+    from app.composition import dashboard_service, redis_coordinator
+    from app.db.models import DeviceModel
+    from app.db.session import get_session
+    from app.tasks import _encolar_sync_si_no_pendiente
 
     # Misma validación que el summary — mantener contrato consistente.
     if scope in ("site", "group") and id is None:
@@ -144,23 +157,42 @@ def refresh_dashboard_scope(
         raise NotFoundError(f"Scope target '{target}' not found")
 
     device_names, _ = resuelto
+    if not device_names:
+        return ok({"devices_queued": 0, "tasks_dispatched": 0, "tasks": []})
 
-    # Política B (misma que summary): si el user no ve devices dentro del
-    # scope, devolvemos 202 con 0 tareas encoladas en vez de 403. Deja
-    # el frontend deshabilitar el botón basado en devices.total del
-    # summary si prefiere UX más estricta.
-    tareas: list[dict] = []
-    for device_name in sorted(device_names):
-        for sync_scope in _SYNC_SCOPES:
-            result = sync_device_task.delay(device_name, sync_scope)
-            tareas.append({
-                "device": device_name,
-                "scope": sync_scope,
-                "task_id": result.id,
-            })
+    # Filtro de staleness: para cada device, el "último sync" es el MÁS
+    # VIEJO de los 3 core scopes (mismo criterio que
+    # DashboardService._resumen_devices). Si al menos uno es NULL, el
+    # device se considera stale.
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=stale_threshold_s)
+    with get_session() as session:
+        stale_rows = (
+            session.query(DeviceModel.name)
+            .filter(DeviceModel.name.in_(device_names))
+            .filter(
+                or_(
+                    DeviceModel.vlans_synced_at.is_(None),
+                    DeviceModel.ports_synced_at.is_(None),
+                    DeviceModel.svis_synced_at.is_(None),
+                    DeviceModel.vlans_synced_at < threshold,
+                    DeviceModel.ports_synced_at < threshold,
+                    DeviceModel.svis_synced_at < threshold,
+                )
+            )
+            .order_by(DeviceModel.name.asc())
+            .all()
+        )
+    stale_names = [n for (n,) in stale_rows]
+
+    # Encolar sólo los stale, con coalescing (skip si ya hay pending).
+    encolados = 0
+    for device_name in stale_names:
+        if _encolar_sync_si_no_pendiente(device_name, "all"):
+            encolados += 1
 
     return ok({
-        "devices_queued": len(device_names),
-        "tasks_dispatched": len(tareas),
-        "tasks": tareas,
+        "devices_queued": encolados,
+        "devices_skipped_fresh": len(device_names) - len(stale_names),
+        "devices_skipped_coalesced": len(stale_names) - encolados,
+        "tasks_dispatched": encolados,
     })
