@@ -11,6 +11,7 @@ import type { DeviceLogsRead } from '@/types/global-config';
 import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
 import { LineViewer } from './LineViewer';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 
 interface Props {
   deviceName: string;
@@ -31,7 +32,7 @@ export function GlobalConfigLogs({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (q: {
       state: { data?: SyncedResource<DeviceLogsRead> };
-    }) => (q.state.data?.sync_in_progress ? 2000 : false),
+    }) => (q.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const inProgress = Boolean(query.data?.sync_in_progress);

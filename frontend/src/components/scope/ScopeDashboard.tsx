@@ -10,6 +10,7 @@ import { Panel } from './Panel';
 import { JobsPieChart, type JobsPieData } from './JobsPieChart';
 import { Pie } from './Pie';
 import { LastSyncedLabel } from './LastSyncedLabel';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 
 const VENDOR_COLORS = {
   cisco: 'var(--color-accent-info)',
@@ -64,7 +65,7 @@ export function ScopeDashboard({ scope }: Props) {
     staleTime: 60_000,
     refetchInterval: (query) => {
       const data = query.state.data as DashboardSummary | undefined;
-      return data && data.devices.sync_in_progress_count > 0 ? 2000 : false;
+      return data && data.devices.sync_in_progress_count > 0 ? SYNC_POLL_INTERVAL_MS : false;
     },
   });
 

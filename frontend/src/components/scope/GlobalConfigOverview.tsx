@@ -14,6 +14,7 @@ import type {
 } from '@/types/global-config';
 import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 import { HostnameEditModal } from './HostnameEditModal';
 import { SnmpEditModal } from './SnmpEditModal';
 import { NtpEditModal } from './NtpEditModal';
@@ -39,7 +40,7 @@ export function GlobalConfigOverview({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (query: {
       state: { data?: SyncedResource<GlobalConfigRead> };
-    }) => (query.state.data?.sync_in_progress ? 2000 : false),
+    }) => (query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const versionQuery = useQuery({
@@ -48,7 +49,7 @@ export function GlobalConfigOverview({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (query: {
       state: { data?: SyncedResource<GlobalConfigVersionRead> };
-    }) => (query.state.data?.sync_in_progress ? 2000 : false),
+    }) => (query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const config = configQuery.data?.data;

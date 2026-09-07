@@ -10,6 +10,7 @@ import {
 import type { Device } from '@/types/device';
 import type { SVI, SVIListResponse } from '@/types/svi';
 import type { Scope } from './ScopeDashboard';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 
 /** Una fila por (device, vlan_id). A diferencia de VLANs (que se fusionan
  * porque el mismo VLAN ID en distintos devices representa la misma
@@ -62,7 +63,7 @@ export function useScopeSvis(scope: Scope) {
       queryFn: () => getSVIsSynced(name),
       enabled: Boolean(name),
       refetchInterval: (query: { state: { data?: SyncedResource<SVIListResponse> } }) =>
-        query.state.data?.sync_in_progress ? 2000 : false,
+        query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false,
     })),
   });
 
