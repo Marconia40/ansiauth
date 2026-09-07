@@ -328,15 +328,19 @@ class CiscoVendor(VendorDriver):
         op_key, variant, vars = self.resolver_set_svi_acl(vlan_id, direction, acl_name)
         return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
+    def resolver_set_svi_dhcp_relay(
+        self, vlan_id: int, servers: list[str],
+    ) -> "tuple[str, str | None, dict]":
+        return "set_svi_dhcp_relay", None, {"vlan_id": vlan_id, "servers": servers}
+
     def set_svi_dhcp_relay(
         self, vlan_id: int, servers: list[str], device: Device, password: str,
     ) -> dict:
         """Full-replace de la lista de relay servers -- ver YAML
         (``repeat``) para el "no ip helper-address" fijo + 1 línea por
         server, y la nota sobre "match: none" ahí mismo."""
-        return self._aplicar_desde_template(
-            "set_svi_dhcp_relay", {"vlan_id": vlan_id, "servers": servers}, device, password,
-        )
+        op_key, variant, vars = self.resolver_set_svi_dhcp_relay(vlan_id, servers)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def get_svis(self, device: Device, password: str) -> list[SVI]:
         commands = self._cargar_comandos()["get_svis"]["primary"]["commands"]

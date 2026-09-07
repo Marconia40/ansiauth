@@ -610,6 +610,10 @@ def expandir_a_svis(vlan_id: int, cambios: SVIBatchRequest) -> list[SVI]:
         svis.append(SVI(vlan_id=vlan_id, acl_in=cambios.acl_in))
     if cambios.acl_out is not None:
         svis.append(SVI(vlan_id=vlan_id, acl_out=cambios.acl_out))
+    if cambios.dhcp_relay_add is not None:
+        svis.append(SVI(vlan_id=vlan_id, dhcp_relay_add=cambios.dhcp_relay_add))
+    if cambios.dhcp_relay_remove is not None:
+        svis.append(SVI(vlan_id=vlan_id, dhcp_relay_remove=cambios.dhcp_relay_remove))
     if not svis:
         raise ValueError("no changes provided")
     return svis
@@ -621,15 +625,15 @@ def expandir_a_svis(vlan_id: int, cambios: SVIBatchRequest) -> list[SVI]:
     summary="Batch-update multiple fields on one virtual interface in 1 connection",
     description=(
         "Apply N field changes to a single virtual interface (description, "
-        "admin state, IPv4/IPv6, ACL in/out) in a **single** SSH connection "
-        "instead of one connection per field. DHCP relay is not included "
-        "here -- it stays immediate via `POST`/`DELETE .../dhcp-relay`. "
-        "Field-level no-op detection still applies (unchanged values "
-        "aren't re-sent). If the batch fails partway, the whole job fails "
-        "and rollback attempts to restore every field that did change. "
-        "Executed asynchronously: the response carries a `group_job_id` "
-        "and a single job entry. Requires operator role or higher; "
-        "site-scoped users may only target devices in their allowed sites."
+        "admin state, IPv4/IPv6, ACL in/out, and at most 1 DHCP relay "
+        "server add or remove) in a **single** SSH connection instead of "
+        "one connection per field. Field-level no-op detection still "
+        "applies (unchanged values aren't re-sent). If the batch fails "
+        "partway, the whole job fails and rollback attempts to restore "
+        "every field that did change. Executed asynchronously: the "
+        "response carries a `group_job_id` and a single job entry. "
+        "Requires operator role or higher; site-scoped users may only "
+        "target devices in their allowed sites."
     ),
 )
 def batch_update_svi(

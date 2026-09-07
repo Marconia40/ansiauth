@@ -468,6 +468,17 @@ class Orquestador:
                         # haberse aplicado igual en el device pese al
                         # timeout).
                         estados = type(recursos[0]).reconciliar_lote(recursos, device)
+                    # Hook opcional (``Puerto`` no lo implementa, no lo
+                    # necesita): deja que el tipo de recurso corrija el
+                    # "actual" de cada entrada con lo que OTRO recurso del
+                    # MISMO lote está por fijar -- ver
+                    # ``SVI.ajustar_estados_lote()`` (bug real: validar
+                    # dhcp_relay_add/ipv4_address_secondary contra el
+                    # estado leído ANTES del batch, en vez de contra lo que
+                    # el batch mismo está por aplicar).
+                    ajustar = getattr(type(recursos[0]), "ajustar_estados_lote", None)
+                    if ajustar is not None:
+                        estados = ajustar(recursos, estados)
                     pasos = []
                     for recurso, estado in zip(recursos, estados):
                         paso = recurso.resolver_paso(device, estado.get("actual"))

@@ -143,6 +143,10 @@ export interface SVIBatchRequest {
   ipv6_address?: string | null;
   acl_in?: string | null;
   acl_out?: string | null;
+  /** Mutually exclusive with dhcp_relay_remove — at most 1 DHCP relay
+   * change per batch (server-side full-replace, see SVIEditModal). */
+  dhcp_relay_add?: string | null;
+  dhcp_relay_remove?: string | null;
 }
 
 // Response shape for PATCH .../svis/{vlan_id}/batch is the SAME

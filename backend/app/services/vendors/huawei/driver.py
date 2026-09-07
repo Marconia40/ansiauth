@@ -389,6 +389,11 @@ class HuaweiVendor(VendorDriver):
             template_acl_name = acl_name
         return "set_svi_acl", variant, {"vlan_id": vlan_id, "direction": direction, "acl_name": template_acl_name}
 
+    def resolver_set_svi_dhcp_relay(
+        self, vlan_id: int, servers: list[str],
+    ) -> "tuple[str, str | None, dict]":
+        return "set_svi_dhcp_relay", None, {"vlan_id": vlan_id, "servers": servers}
+
     def set_svi_dhcp_relay(
         self, vlan_id: int, servers: list[str], device: Device, password: str,
     ) -> dict:
@@ -396,9 +401,8 @@ class HuaweiVendor(VendorDriver):
         (``repeat``) para el "undo dhcp select relay" fijo + "dhcp select
         relay" (si hay al menos 1 server) + 1 línea por server, y la nota
         sobre la forma alternativa por "server group" ahí mismo."""
-        return self._aplicar_desde_template(
-            "set_svi_dhcp_relay", {"vlan_id": vlan_id, "servers": servers}, device, password,
-        )
+        op_key, variant, vars = self.resolver_set_svi_dhcp_relay(vlan_id, servers)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     _VLANIF_BRIEF_RE = re.compile(r"^Vlanif(\d+)\b", re.MULTILINE)
 

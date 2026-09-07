@@ -22,3 +22,13 @@ class RecursoGestionable(Protocol):
         cambios de comportamiento; ambos reusan la misma lógica de
         no-op/dispatch por debajo, no hay 2 copias."""
         ...
+
+    # ``ajustar_estados_lote(recursos, estados) -> estados`` es OPCIONAL,
+    # no forma parte de este Protocol -- ``Orquestador.ejecutar_lote()`` lo
+    # busca vía ``getattr(tipo, "ajustar_estados_lote", None)`` antes de
+    # llamar ``resolver_paso()`` en cada recurso. Solo lo implementa ``SVI``
+    # hoy (corrige el "actual" de una entrada con lo que OTRA entrada del
+    # MISMO lote está por fijar, para validaciones cross-campo dentro del
+    # mismo batch -- ver ``SVI.ajustar_estados_lote()``). ``Puerto`` no lo
+    # necesita: ningún campo suyo depende del valor nuevo de otro campo del
+    # mismo lote.

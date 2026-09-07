@@ -2,11 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import {
-  addSVIDhcpRelay,
-  batchUpdateSvi,
-  removeSVIDhcpRelay,
-} from '@/services/api';
+import { batchUpdateSvi } from '@/services/api';
 import type { SVIBatchRequest } from '@/types/svi';
 import type { SviRow } from './scopeSvis';
 import { Modal } from './Modal';
@@ -31,13 +27,18 @@ interface Props {
 /** Editor de SVI. Una fila = un (device, vlan_id) unico, asi que el modal
  * opera sobre un solo device. Tabs internas para agrupar campos por dominio
  * (General / IPv4 / IPv6 / ACL / DHCP Relay); el save es global, calcula el
- * delta sobre TODAS las tabs y manda 1 sola llamada a `PATCH .../batch` con
- * todos los campos que cambiaron -- antes eran N llamadas en serie (1 por
- * campo, N conexiones SSH); ahora el server las junta en 1 sola conexión.
- * DHCP relay queda afuera de ese `PATCH .../batch` (el server la sigue
- * tratando como incremental, `POST`/`DELETE .../dhcp-relay`, 1 conexión por
- * server) pero ya NO dispara esas llamadas al tocar +/- -- se encola
- * localmente como el resto de las tabs y recién sale en el mismo Save. */
+ * delta sobre TODAS las tabs (DHCP Relay incluida) y manda 1 sola llamada a
+ * `PATCH .../batch` con todos los campos que cambiaron -- antes eran N
+ * llamadas en serie (1 por campo, N conexiones SSH); ahora el server las
+ * junta en 1 sola conexión, DHCP relay también (`SVI.resolver_paso()` la
+ * batchea igual que cualquier otro campo).
+ * La tab DHCP Relay solo permite 1 cambio (1 add O 1 remove) encolado a la
+ * vez -- `set_svi_dhcp_relay` es un full-replace de la lista completa, no
+ * una mutación aditiva por campo: si se encolaran 2 cambios, cada uno
+ * calcularía su propia "lista final" contra la MISMA lectura previa (no
+ * contra el resultado del otro), y el 2do pisaría al 1ro en silencio.
+ * Limitar a 1 evita ese bug de raíz sin tener que construir el mecanismo
+ * de "plegar N deltas en 1 lista" que sí necesitaría permitir más de 1. */
 export function SVIEditModal({ open, onClose, row, onDone }: Props) {
   const queryClient = useQueryClient();
 
@@ -90,10 +91,31 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
   // Snapshot inicial estable para dirty-check. Reseteado por el useEffect de arriba.
   const initial = row;
 
+  // Delta de DHCP relay — diff local `dhcpServers` (editado por +/-, sin
+  // red) contra `initial.dhcpRelayServers`. Mismo criterio que `pending`
+  // abajo: se calcula, no se dispara, hasta el Save. Como mucho 1 entrada
+  // en total entre `adds`/`removes` (la UI limita a 1 cambio encolado).
+  const dhcpDelta = useMemo(() => {
+    if (!initial) return { adds: [] as string[], removes: [] as string[] };
+    const originalSet = new Set(initial.dhcpRelayServers);
+    const currentSet = new Set(dhcpServers);
+    return {
+      adds: dhcpServers.filter((s) => !originalSet.has(s)),
+      removes: initial.dhcpRelayServers.filter((s) => !currentSet.has(s)),
+    };
+  }, [initial, dhcpServers]);
+
+  // Máx 1 cambio de DHCP relay encolado por Save -- ver docstring del
+  // componente. Evita el bug de colisión de raíz (nunca hay 2 deltas para
+  // plegar) sin construir el mecanismo de plegado.
+  const dhcpTotalDelta = dhcpDelta.adds.length + dhcpDelta.removes.length;
+
   // Delta de campos cambiados -> 1 solo body para PATCH .../batch (antes
   // eran N llamadas individuales en serie, ver docstring del componente).
   // `''` limpia el campo, mismo significado que ya tenía en cada endpoint
   // individual -- no se inventa nada nuevo, solo se junta en 1 objeto.
+  // DHCP relay (`dhcpDelta`) se pliega acá también -- mismo body, misma
+  // conexión.
   const pending = useMemo<{ body: SVIBatchRequest; labels: string[] }>(() => {
     if (!initial) return { body: {}, labels: [] };
     const body: SVIBatchRequest = {};
@@ -141,6 +163,16 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
       labels.push(aOutNext === '' ? 'clear ACL out' : 'set ACL out');
     }
 
+    // Máx 1 entrada entre adds/removes (ver dhcpTotalDelta) -- si hay una,
+    // se pliega en el mismo body.
+    if (dhcpDelta.removes.length > 0) {
+      body.dhcp_relay_remove = dhcpDelta.removes[0];
+      labels.push(`remove DHCP relay ${dhcpDelta.removes[0]}`);
+    } else if (dhcpDelta.adds.length > 0) {
+      body.dhcp_relay_add = dhcpDelta.adds[0];
+      labels.push(`add DHCP relay ${dhcpDelta.adds[0]}`);
+    }
+
     return { body, labels };
   }, [
     initial,
@@ -151,22 +183,10 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
     ipv6,
     aclIn,
     aclOut,
+    dhcpDelta,
   ]);
 
-  // Delta de DHCP relay — diff local `dhcpServers` (editado por +/-, sin
-  // red) contra `initial.dhcpRelayServers`. Mismo criterio que `pending`
-  // arriba: se calcula, no se dispara, hasta el Save.
-  const dhcpDelta = useMemo(() => {
-    if (!initial) return { adds: [] as string[], removes: [] as string[] };
-    const originalSet = new Set(initial.dhcpRelayServers);
-    const currentSet = new Set(dhcpServers);
-    return {
-      adds: dhcpServers.filter((s) => !originalSet.has(s)),
-      removes: initial.dhcpRelayServers.filter((s) => !currentSet.has(s)),
-    };
-  }, [initial, dhcpServers]);
-
-  const totalChanges = pending.labels.length + dhcpDelta.adds.length + dhcpDelta.removes.length;
+  const totalChanges = pending.labels.length;
 
   const dirtyByTab = useMemo(() => {
     if (!initial) {
@@ -199,20 +219,8 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      if (!initial) return;
-      if (Object.keys(pending.body).length > 0) {
-        await batchUpdateSvi(initial.device, initial.vlanId, pending.body);
-      }
-      // DHCP relay sigue siendo 1 request por server (server no soporta
-      // full-replace) -- secuencial, no Promise.all: cada llamada hace su
-      // propio read-modify-write de la lista completa, en paralelo se
-      // pisarían entre si.
-      for (const s of dhcpDelta.removes) {
-        await removeSVIDhcpRelay(initial.device, { vlan_id: initial.vlanId, server: s });
-      }
-      for (const s of dhcpDelta.adds) {
-        await addSVIDhcpRelay(initial.device, { vlan_id: initial.vlanId, server: s });
-      }
+      if (!initial || Object.keys(pending.body).length === 0) return;
+      await batchUpdateSvi(initial.device, initial.vlanId, pending.body);
     },
     onSuccess: () => {
       onDone?.(
@@ -226,6 +234,7 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
   });
 
   function queueAddDhcpServer() {
+    if (dhcpTotalDelta >= 1) return;
     const v = dhcpDraft.trim();
     if (!v) return;
     if (dhcpServers.includes(v)) {
@@ -239,6 +248,11 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
   }
 
   function queueRemoveDhcpServer(s: string) {
+    // Quitar una fila recién agregada (todavía no está en `initial`) es
+    // deshacer el único delta pendiente -- siempre permitido. Quitar una
+    // fila original crea un delta nuevo -- bloqueado si ya hay 1 encolado.
+    const isNewlyAdded = !(initial?.dhcpRelayServers ?? []).includes(s);
+    if (!isNewlyAdded && dhcpTotalDelta >= 1) return;
     setDhcpServers(dhcpServers.filter((x) => x !== s));
   }
 
@@ -308,6 +322,8 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
         {tab === 'dhcp' && (
           <DhcpTab
             servers={dhcpServers}
+            originalServers={initial?.dhcpRelayServers ?? []}
+            addDisabled={dhcpTotalDelta >= 1}
             draft={dhcpDraft}
             onDraftChange={setDhcpDraft}
             adding={dhcpAdding}
@@ -540,6 +556,8 @@ function AclTab({
 
 function DhcpTab({
   servers,
+  originalServers,
+  addDisabled,
   draft,
   onDraftChange,
   adding,
@@ -548,6 +566,8 @@ function DhcpTab({
   onRemove,
 }: {
   servers: string[];
+  originalServers: string[];
+  addDisabled: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
   adding: boolean;
@@ -562,21 +582,26 @@ function DhcpTab({
           DHCP relay servers
         </p>
 
-        {servers.map((s) => (
-          <div key={s} className="flex items-center gap-2">
-            <div className="flex-1 rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text font-mono">
-              {s}
+        {servers.map((s) => {
+          const isNewlyAdded = !originalServers.includes(s);
+          const removeDisabled = addDisabled && !isNewlyAdded;
+          return (
+            <div key={s} className="flex items-center gap-2">
+              <div className="flex-1 rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text font-mono">
+                {s}
+              </div>
+              <button
+                type="button"
+                onClick={() => onRemove(s)}
+                disabled={removeDisabled}
+                aria-label={`Remove relay ${s}`}
+                className="rounded-md border border-danger/50 text-danger px-3 py-2 text-sm leading-none hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              >
+                −
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => onRemove(s)}
-              aria-label={`Remove relay ${s}`}
-              className="rounded-md border border-danger/50 text-danger px-3 py-2 text-sm leading-none hover:bg-danger/10 transition"
-            >
-              −
-            </button>
-          </div>
-        ))}
+          );
+        })}
 
         {adding ? (
           <div className="flex items-center gap-2">
@@ -621,17 +646,25 @@ function DhcpTab({
           <button
             type="button"
             onClick={() => onAddingChange(true)}
-            className="w-full rounded-md border-2 border-dashed border-panel-border px-3 py-2 text-sm text-muted hover:text-text hover:border-muted transition"
+            disabled={addDisabled}
+            className="w-full rounded-md border-2 border-dashed border-panel-border px-3 py-2 text-sm text-muted hover:text-text hover:border-muted disabled:opacity-40 disabled:cursor-not-allowed transition"
           >
             + Add server
           </button>
         )}
       </div>
 
+      {addDisabled && (
+        <p className="text-xs text-warning">
+          Only 1 DHCP relay change can be queued per Save — undo it or Save
+          first before queuing another.
+        </p>
+      )}
+
       <p className="text-xs text-muted italic">
         Queued locally — applied together when you click Save, same as the
-        other tabs (still 1 request per server, not combined into a single
-        connection).
+        other tabs. Only 1 server add/remove per Save (still its own request,
+        not combined into a single connection with the rest).
       </p>
     </div>
   );
