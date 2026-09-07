@@ -27,6 +27,15 @@ _PATRONES_PERMANENTES: tuple[str, ...] = (
     "ambiguous command",
     "bad command",
     "error: invalid",
+    # Tipos de excepción de auth de Paramiko/Netmiko -- llegan como prefijo
+    # del str(exc) (ver _ejecutar_con_retry). Los ponemos como permanentes
+    # antes de _PATRONES_TRANSITORIOS por defensa en profundidad: aunque el
+    # mensaje diga "connection timeout" (que matchearía transitorio), si el
+    # tipo dice AuthenticationException el problema real es de credenciales
+    # y reintentar sólo empeora la situación (ej. lockout tras N intentos).
+    "authenticationexception",
+    "badauthenticationtype",
+    "partialauthentication",
 )
 
 _PATRONES_TRANSITORIOS: tuple[str, ...] = (
@@ -93,6 +102,21 @@ _PATRONES_TRANSITORIOS: tuple[str, ...] = (
     "no existing session",
     "failed to connect",
     "unable to establish",
+    # Nombres de tipo de excepción de Python/Paramiko/Netmiko -- prefijados
+    # al str(exc) por _ejecutar_con_retry (ver el except del retry loop).
+    # Muchas de estas excepciones traen str(exc) vacío o críptico y el
+    # tipo es la única señal léxica disponible. Los tipos de auth
+    # exception NO van acá -- son permanentes (ver _PATRONES_PERMANENTES).
+    "sshexception",
+    "timeouterror",
+    "connectionreseterror",
+    "connectionrefusederror",
+    "connectionabortederror",
+    "eoferror",
+    "netmikotimeoutexception",
+    "socket.timeout",
+    "socket.gaierror",
+    "ssl.sslerror",
 )
 
 # vlan_execution_service.py:15 -- Ansible exits with rc=4 when hosts are
@@ -229,8 +253,36 @@ class Orquestador:
         except Exception as error:
             rb_performed, rb_success = (False, None)
             if pre_state is not None:
+                # Rollback bajo retry corto: si el revert falla por un timeout
+                # transitorio (ej. la sesión SSH que quedó abierta se corta
+                # justo cuando vamos a revertir), un segundo intento suele
+                # ser suficiente. Budget de 1 retry para no bloquear el lock
+                # del device por más de lo mínimo -- el device ya está en un
+                # estado inconsistente y otros jobs esperan atrás. La
+                # semántica de _rollback() se preserva: retorna
+                # (performed, success), guardado por closure.
+                rb_state = {"performed": False, "success": None}
+
+                def _hacer_rollback():
+                    rb_p, rb_s = self._rollback(recurso, pre_state, device)
+                    rb_state["performed"] = rb_p
+                    rb_state["success"] = rb_s
+                    # No-op (nada que revertir) o éxito verificado -> rc=0,
+                    # así no gastamos el retry. Sólo (True, False) -- se
+                    # intentó revertir pero la verificación falló -- se
+                    # trata como retryable.
+                    if not rb_p:
+                        return {"rc": 0, "stdout": "rollback no-op", "stderr": ""}
+                    if rb_s is False:
+                        return {"rc": 1, "stdout": "", "stderr": "rollback verification failed"}
+                    return {"rc": 0, "stdout": "rollback ok", "stderr": ""}
+
                 with self._coordinador.bloquear(device_name):
-                    rb_performed, rb_success = self._rollback(recurso, pre_state, device)
+                    self._ejecutar_con_retry(
+                        _hacer_rollback, job, device_name, max_retries=1,
+                    )
+                rb_performed = rb_state["performed"]
+                rb_success = rb_state["success"]
             job.marcar_fallido(str(error), rb_performed, rb_success)
             self._jobs.add(job)
             self._eventos.despachar([DomainEvent(
@@ -363,7 +415,19 @@ class Orquestador:
         for patron in _PATRONES_TRANSITORIOS:
             if patron in lowered:
                 return RetryDecision(should_retry=True, classification="transient", reason=patron)
-        return RetryDecision(should_retry=False, classification="permanent", reason="unknown error — defaulting to permanent")
+        # Sin match en ninguna tabla -- antes se trataba como permanente y
+        # se mataba el job de un tiro. Cambio: se da UNA sola chance extra
+        # (override=2 => 1 initial + 1 retry), independiente de max_retries.
+        # Motivación: muchos errores transitorios de red/SSH no matchean
+        # ningún pattern conocido (mensajes crípticos, str(exc) vacío) --
+        # gastar 1 retry adicional es barato y evita fallar por prudencia.
+        # Si el error es genuinamente permanente, el 2do intento falla igual
+        # con el mismo mensaje y el job termina como failed.
+        return RetryDecision(
+            should_retry=True, classification="unknown",
+            reason="unknown error — one cautious retry",
+            max_attempts_override=2,
+        )
 
     def _ejecutar_con_retry(
         self, fn, job: "Job", device: str, max_retries: int = 3, retry_base_delay: float = 1.0,
@@ -381,15 +445,56 @@ class Orquestador:
             try:
                 resultado = fn()
             except Exception as exc:
-                resultado = {"rc": 1, "stdout": "", "stderr": str(exc)}
+                # Prefijamos con el tipo (SSHException, TimeoutError,
+                # ConnectionResetError, etc.) porque muchas excepciones de
+                # Paramiko/Netmiko/socket llegan con str(exc)="" o mensajes
+                # crípticos donde el tipo es la única señal léxica. También
+                # embebemos el errno numérico (ETIMEDOUT=110, ECONNRESET=104,
+                # etc.) para que los patterns [errno N] de _PATRONES_TRANSITORIOS
+                # matcheen aun cuando el mensaje del OSError no lo trae
+                # renderizado.
+                tipo = type(exc).__name__
+                mensaje = str(exc) or "<no message>"
+                errno_prefix = ""
+                errno_val = getattr(exc, "errno", None)
+                if isinstance(errno_val, int):
+                    errno_prefix = f"[Errno {errno_val}] "
+                resultado = {"rc": 1, "stdout": "", "stderr": f"{tipo}: {errno_prefix}{mensaje}"}
             if resultado.get("rc") == 0:
                 break
             decision = self._clasificar_error(resultado)
-            if not decision.should_retry or intento >= max_retries:
+            error_texto = ((resultado.get("stderr") or "") + " " + (resultado.get("stdout") or "")).strip()
+            error_short = error_texto[:200]
+            # Tope efectivo: si la clasificación trae un override (típico de
+            # "unknown" -- 1 sola chance extra), lo respetamos aun cuando el
+            # max_retries global sea más alto. Traducción: max_attempts=2
+            # significa "hasta 2 intentos totales" -> effective_max=1 retry
+            # (además del intento inicial que ya se hizo).
+            if decision.max_attempts_override is not None:
+                effective_max = min(max_retries, decision.max_attempts_override - 1)
+            else:
+                effective_max = max_retries
+            if not decision.should_retry:
+                logger.warning(
+                    "Orquestador retry: no reintenta job=%s device=%s attempt=%d classification=%s reason=%s error=%r",
+                    job.job_id, device, intento + 1,
+                    decision.classification, decision.reason, error_short,
+                )
+                break
+            if intento >= effective_max:
+                logger.warning(
+                    "Orquestador retry: agotado job=%s device=%s attempts=%d classification=%s reason=%s error=%r",
+                    job.job_id, device, intento + 1,
+                    decision.classification, decision.reason, error_short,
+                )
                 break
             delay = min(retry_base_delay * (2 ** intento), _MAX_RETRY_DELAY)
             retry_count += 1
-            error_texto = (resultado.get("stderr") or "") + " " + (resultado.get("stdout") or "")
+            logger.info(
+                "Orquestador retry: reintentando job=%s device=%s attempt=%d/%d classification=%s reason=%s delay=%.2fs error=%r",
+                job.job_id, device, intento + 1, effective_max + 1,
+                decision.classification, decision.reason, delay, error_short,
+            )
             job.registrar_reintento(error_texto)
             self._jobs.add(job)
             time.sleep(delay)
