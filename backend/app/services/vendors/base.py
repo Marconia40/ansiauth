@@ -460,6 +460,37 @@ class VendorDriver(ABC):
             None,
         )
 
+    # ── Combined core-state read (VLAN + ports + SVI in fewer SSH sessions) ─
+
+    def read_core_state(
+        self, device: Device, password: str,
+    ) -> tuple[list[VLAN], list[Puerto], list[SVI]]:
+        """Return ``(vlans, ports, svis)`` reading all three from the
+        device with as few SSH sessions as the vendor allows.
+
+        Default implementation calls ``get_vlans``/``list_ports``/
+        ``get_svis`` sequentially -- 3 separate SSH sessions. Concrete
+        vendors override this to consolidate reads: ``CiscoVendor`` fuses
+        the three into a single ``_leer()`` call (1 session);
+        ``HuaweiVendor`` folds them into 2 sessions (VRP requires
+        discovering Vlanif IDs before it can pull their config).
+
+        Used by ``DeviceSyncService.sync_core()`` on the ``scope="all"``
+        path -- reduces the SSH-session cost of a refresh from 3+ to 1-2
+        without changing external contracts. The single-scope entry
+        points (``sync_vlans``/``sync_ports``/``sync_svis``) keep calling
+        the individual methods, so refreshing one scope at a time is
+        unaffected.
+
+        Raises ``RuntimeError`` on any read failure, same as the
+        individual methods -- the caller decides whether to persist the
+        successful parts.
+        """
+        vlans = self.get_vlans(device, password)
+        ports = self.list_ports(device, password)
+        svis = self.get_svis(device, password)
+        return vlans, ports, svis
+
     # ── Port query operation (must be implemented by every driver) ───────────
 
     @abstractmethod

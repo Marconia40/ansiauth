@@ -127,21 +127,13 @@ def sync_device_task(device_name: str, scope: str) -> None:
         # botón, para no arrastrar running-configs completos en el flujo
         # automático (scheduler + reactive). ARP/MAC y logs también
         # afuera por el mismo motivo (siempre lo estuvieron).
-        errores: list[str] = []
-        for nombre, fn in (
-            ("vlans", device_sync_service.sync_vlans),
-            ("ports", device_sync_service.sync_ports),
-            ("svis", device_sync_service.sync_svis),
-        ):
-            try:
-                fn(device)
-            except Exception as exc:
-                errores.append(f"{nombre}: {exc}")
-        if errores:
-            raise RuntimeError(
-                f"sync_device_task[all] device={device_name} partial failure: "
-                + "; ".join(errores)
-            )
+        #
+        # sync_core corre los 3 reads (vlans + ports + svis) en 1 sola
+        # sesión SSH en Cisco / 2 en Huawei, contra las 3-4 sesiones que
+        # las 3 llamadas individuales generaban. La política de fallos
+        # parciales (persistir lo que se leyó OK, marcar error donde no)
+        # queda igual que antes.
+        device_sync_service.sync_core(device)
     else:
         raise ValueError(
             f"sync_device_task: scope inválido {scope!r} "

@@ -390,6 +390,79 @@ class HuaweiVendor(VendorDriver):
         dhcp_groups = HuaweiSVIParser.parse_dhcp_relay_groups(outputs[-1])
         return HuaweiSVIParser.parse_svis(config, brief, dhcp_groups=dhcp_groups)
 
+    def read_core_state(self, device: Device, password: str):
+        """Fuse VLANs + ports + SVIs into 2 SSH sessions (down from 4):
+
+        * Session A -- ``display vlan`` (1) + port cmds (4) + ``display
+          ip interface brief`` (1) = 6 commands in a single ``_leer()``
+          call. The brief output is what tells us which Vlanif interfaces
+          exist -- VRP rejects the bulk ``display current-configuration
+          interface Vlanif`` (no id), so discovery is unavoidable.
+        * Session B -- ``display current-configuration interface
+          Vlanif{id}`` for each discovered id + ``display
+          current-configuration configuration dhcp`` at the end. Same
+          shape as the second call in ``get_svis``.
+
+        Kept at 2 sessions (rather than 1) because a single session
+        would require dynamic-command generation inside the Ansible
+        playbook, which is fragile and hard to test. 4 → 2 sessions is
+        already the same 50% cut we get on Cisco.
+
+        The individual methods stay untouched -- single-scope refreshes
+        keep their current shape.
+        """
+        from app.services.parsers.svi_parser import HuaweiSVIParser
+        from app.services.parsers.vlan_parser import parse_vrp_vlan_display
+
+        cmds = self._cargar_comandos()
+        vlan_cmds = list(cmds["list_vlans"]["primary"]["commands"])
+        port_cmds = list(cmds["list_ports"]["primary"]["commands"])
+
+        # Session A: fold VLAN + ports + Vlanif discovery into one call.
+        session_a = vlan_cmds + port_cmds + ["display ip interface brief"]
+        stdouts_a = self._leer(session_a, device, password)
+
+        v_end = len(vlan_cmds)
+        p_end = v_end + len(port_cmds)
+        vlan_out = stdouts_a[:v_end]
+        port_out = stdouts_a[v_end:p_end]
+        brief = stdouts_a[p_end] if len(stdouts_a) > p_end else ""
+
+        vlans = parse_vrp_vlan_display(vlan_out[0]) if vlan_out else []
+
+        port_brief = port_out[_BRIEF_INDEX] if len(port_out) > _BRIEF_INDEX else ""
+        description = port_out[_DESCRIPTION_INDEX] if len(port_out) > _DESCRIPTION_INDEX else ""
+        port_vlan = port_out[_PORT_VLAN_INDEX] if len(port_out) > _PORT_VLAN_INDEX else ""
+        storm = port_out[_STORM_INDEX] if len(port_out) > _STORM_INDEX else ""
+        try:
+            ports = HuaweiPortParser.parse_ports(port_brief, description, port_vlan, storm)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot determine port state on device '{device.name}': {exc}",
+            ) from exc
+
+        # Session B: per-Vlanif detail + dhcp, discovered from ``brief``.
+        vlan_ids = sorted({int(m) for m in self._VLANIF_BRIEF_RE.findall(brief)})
+        if not vlan_ids:
+            dhcp_config = self._leer(
+                ["display current-configuration configuration dhcp"], device, password,
+            )[0]
+            svis = HuaweiSVIParser.parse_svis(
+                "", brief,
+                dhcp_groups=HuaweiSVIParser.parse_dhcp_relay_groups(dhcp_config),
+            )
+        else:
+            per_iface_commands = [
+                f"display current-configuration interface Vlanif{vid}" for vid in vlan_ids
+            ]
+            per_iface_commands.append("display current-configuration configuration dhcp")
+            outputs = self._leer(per_iface_commands, device, password)
+            config = "\n".join(outputs[:-1])
+            dhcp_groups = HuaweiSVIParser.parse_dhcp_relay_groups(outputs[-1])
+            svis = HuaweiSVIParser.parse_svis(config, brief, dhcp_groups=dhcp_groups)
+
+        return vlans, ports, svis
+
     def list_acl_names(self, device: Device, password: str) -> list[str]:
         commands = self._cargar_comandos()["list_acls"]["primary"]["commands"]
         stdouts = self._leer(commands, device, password)

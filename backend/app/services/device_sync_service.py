@@ -57,6 +57,9 @@ class DeviceSyncService:
         ``devices.vlans_synced_at`` y limpia ``vlans_sync_error``; en
         fallo guarda ``vlans_sync_error`` y NO toca ``vlans_synced_at``
         ni la tabla ``device_vlans``.
+
+        Single-scope path: refresh de VLANs solamente (no toca ports ni
+        SVIs). Para refresh combinado ver ``sync_core()``.
         """
         try:
             with self._coordinator.bloquear(device.name, timeout=_LOCK_TIMEOUT_S):
@@ -66,28 +69,16 @@ class DeviceSyncService:
             self._marcar_error(device.name, "vlans_sync_error", str(exc))
             raise
 
-        # Diff: borrar las que ya no están, upsert de todas las nuevas.
         # add() ya es upsert (session.merge), así que las que ya existían
         # pero cambiaron de nombre quedan actualizadas sin caso especial.
         # remove() explícito para las que desaparecieron del equipo -- si
         # sólo agregara, la fila vieja quedaría stale para siempre.
-        existentes = self._vlans.list(device=device.name)
-        existentes_ids = {v.vlan_id for v in existentes}
-        nuevos_ids = {v.vlan_id for v in nuevos}
-        for vlan_id in existentes_ids - nuevos_ids:
-            self._vlans.remove((vlan_id, device.name))
-        for v in nuevos:
-            # Los parsers (services/parsers/vlan_parser.py) construyen VLAN
-            # sin setear device -- histórico, el único caller previo era
-            # _leer_vlans_en_vivo() que no persistía. Al persistir sí hace
-            # falta: (vlan_id, device) es la PK compuesta.
-            v.device = device.name
-            self._vlans.add(v)
+        removed = self._persistir_vlans(device.name, nuevos)
 
         self._marcar_ok(device.name, "vlans_synced_at", "vlans_sync_error")
         logger.info(
             "sync_vlans OK device=%s persisted=%d removed=%d",
-            device.name, len(nuevos), len(existentes_ids - nuevos_ids),
+            device.name, len(nuevos), removed,
         )
 
     def sync_ports(self, device: "Device") -> None:
@@ -103,20 +94,110 @@ class DeviceSyncService:
             self._marcar_error(device.name, "ports_sync_error", str(exc))
             raise
 
-        existentes = self._ports.list(device=device.name)
-        existentes_ifs = {p.interface for p in existentes}
-        nuevos_ifs = {p.interface for p in nuevos}
-        for interface in existentes_ifs - nuevos_ifs:
-            self._ports.remove((interface, device.name))
-        for p in nuevos:
-            p.device = device.name
-            self._ports.add(p)
+        removed = self._persistir_ports(device.name, nuevos)
 
         self._marcar_ok(device.name, "ports_synced_at", "ports_sync_error")
         logger.info(
             "sync_ports OK device=%s persisted=%d removed=%d",
-            device.name, len(nuevos), len(existentes_ifs - nuevos_ifs),
+            device.name, len(nuevos), removed,
         )
+
+    def sync_core(self, device: "Device") -> None:
+        """Combined VLAN + ports + SVI refresh in a single lock
+        acquisition + single (Cisco) or 2-session (Huawei) SSH read.
+        Replaces the 3 sequential ``sync_vlans``/``sync_ports``/
+        ``sync_svis`` calls when the caller wants all three at once
+        (i.e. ``sync_device_task`` with ``scope="all"``).
+
+        Failure policy (matches the old ``scope="all"`` loop):
+
+        * If the device-side read fails entirely, all three
+          ``*_sync_error`` fields get the same message and the timestamps
+          are left untouched -- the last-known cache stays visible.
+        * If the read succeeds but persisting one scope fails (parser
+          quirk, DB constraint, etc.), the other scopes still get
+          persisted + marked OK, the failing scope's ``sync_error`` is
+          set, and the method re-raises so Celery/observability see the
+          partial failure.
+
+        Single-scope refresh paths (``sync_vlans``/``sync_ports``/
+        ``sync_svis``) are unchanged: they keep their per-scope lock and
+        single-scope playbook call.
+        """
+        try:
+            with self._coordinator.bloquear(device.name, timeout=_LOCK_TIMEOUT_S):
+                vlans, ports, svis = device.driver.read_core_state(device, device.password)
+        except Exception as exc:
+            logger.exception("sync_core read failed device=%s", device.name)
+            msg = str(exc)
+            self._marcar_error(device.name, "vlans_sync_error", msg)
+            self._marcar_error(device.name, "ports_sync_error", msg)
+            self._marcar_error(device.name, "svis_sync_error", msg)
+            raise
+
+        errores: list[str] = []
+        for nombre, err_field, ts_field, persist_fn in (
+            ("vlans", "vlans_sync_error", "vlans_synced_at",
+             lambda: self._persistir_vlans(device.name, vlans)),
+            ("ports", "ports_sync_error", "ports_synced_at",
+             lambda: self._persistir_ports(device.name, ports)),
+            ("svis", "svis_sync_error", "svis_synced_at",
+             lambda: self._persistir_svis(device.name, svis)),
+        ):
+            try:
+                persist_fn()
+                self._marcar_ok(device.name, ts_field, err_field)
+            except Exception as exc:
+                logger.exception("sync_core %s persist failed device=%s", nombre, device.name)
+                self._marcar_error(device.name, err_field, str(exc))
+                errores.append(f"{nombre}: {exc}")
+
+        if errores:
+            raise RuntimeError(
+                f"sync_core device={device.name} partial failure: " + "; ".join(errores)
+            )
+
+        logger.info(
+            "sync_core OK device=%s vlans=%d ports=%d svis=%d",
+            device.name, len(vlans), len(ports), len(svis),
+        )
+
+    # Persist helpers shared between the per-scope sync_* methods (kept
+    # for single-scope callers) and the combined sync_core() path.
+    # Extracted so both share the exact same diff-and-upsert logic.
+
+    def _persistir_vlans(self, device_name: str, nuevos) -> int:
+        existentes = self._vlans.list(device=device_name)
+        existentes_ids = {v.vlan_id for v in existentes}
+        nuevos_ids = {v.vlan_id for v in nuevos}
+        for vlan_id in existentes_ids - nuevos_ids:
+            self._vlans.remove((vlan_id, device_name))
+        for v in nuevos:
+            v.device = device_name
+            self._vlans.add(v)
+        return len(existentes_ids - nuevos_ids)
+
+    def _persistir_ports(self, device_name: str, nuevos) -> int:
+        existentes = self._ports.list(device=device_name)
+        existentes_ifs = {p.interface for p in existentes}
+        nuevos_ifs = {p.interface for p in nuevos}
+        for interface in existentes_ifs - nuevos_ifs:
+            self._ports.remove((interface, device_name))
+        for p in nuevos:
+            p.device = device_name
+            self._ports.add(p)
+        return len(existentes_ifs - nuevos_ifs)
+
+    def _persistir_svis(self, device_name: str, nuevas) -> int:
+        existentes = self._interfaces.list(device=device_name)
+        existentes_ids = {i.vlan_id for i in existentes}
+        nuevas_ids = {i.vlan_id for i in nuevas}
+        for vlan_id in existentes_ids - nuevas_ids:
+            self._interfaces.remove((vlan_id, device_name))
+        for i in nuevas:
+            i.device = device_name
+            self._interfaces.add(i)
+        return len(existentes_ids - nuevas_ids)
 
     def sync_svis(self, device: "Device") -> None:
         """Full-refresh de las SVIs de *device* desde el
@@ -132,19 +213,12 @@ class DeviceSyncService:
             self._marcar_error(device.name, "svis_sync_error", str(exc))
             raise
 
-        existentes = self._interfaces.list(device=device.name)
-        existentes_ids = {i.vlan_id for i in existentes}
-        nuevas_ids = {i.vlan_id for i in nuevas}
-        for vlan_id in existentes_ids - nuevas_ids:
-            self._interfaces.remove((vlan_id, device.name))
-        for i in nuevas:
-            i.device = device.name
-            self._interfaces.add(i)
+        removed = self._persistir_svis(device.name, nuevas)
 
         self._marcar_ok(device.name, "svis_synced_at", "svis_sync_error")
         logger.info(
             "sync_svis OK device=%s persisted=%d removed=%d",
-            device.name, len(nuevas), len(existentes_ids - nuevas_ids),
+            device.name, len(nuevas), removed,
         )
 
     def sync_global_config(self, device: "Device") -> None:
