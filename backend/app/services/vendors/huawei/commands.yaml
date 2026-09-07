@@ -883,6 +883,38 @@ set_svi_dhcp_relay:
           - "interface Vlanif{vlan_id}"
           - "undo dhcp select relay"
       trailer: ["commit", "quit", "quit"]
+    - triggered_by_error: 'dhcp relay (?:binding server group|server group ansiauth-vlan\d+)\r?\n\s*\^\r?\nError: Unrecognized command'
+      # Confirmado en vivo contra f3r9s2 (S5731, VRP V200R022C00SPC500):
+      # el device soporta perfectamente la forma directa ("dhcp select
+      # relay" + "dhcp relay server-ip {ip}", verificado aplicando y
+      # leyendo el running-config resultante) pero NO TIENE en absoluto
+      # el comando "dhcp relay server group" (ni "?" lo reconoce) -- a
+      # diferencia del CE12800 de lab, donde ambas formas coexisten y el
+      # cleanup incondicional de arriba (comentario en `primary`) es
+      # inofensivo. Acá esas 2 líneas de limpieza rechazan con
+      # "Unrecognized command" y tumban el bloque ENTERO antes de llegar
+      # a la línea real -- ni siquiera un simple "agregar 1 servidor"
+      # llega a ejecutarse. Esta alternativa es la forma directa sin
+      # ningún cleanup de "server group" (nada que limpiar en un device
+      # que nunca soportó esa forma). Sin "commit" en el trailer -- 2do
+      # bug encontrado probando en vivo: con "servers" vacío (remove del
+      # único server) el trailer corre TODAVÍA dentro del contexto de
+      # interfaz (``[f3r9s2-Vlanif20]commit``, no llegó a hacer "quit"
+      # antes), y ESTE device específicamente rechaza "commit" ahí adentro
+      # (mismo síntoma que ``alt[0]`` ya cubre para otros devices, pero acá
+      # hacen falta AMBOS fixes a la vez -- el mecanismo de alternatives no
+      # encadena una 2da alternativa sobre el error de la 1ra). Confirmado
+      # con pruebas crudas que "dhcp select relay"/"dhcp relay server-ip"
+      # se aplican y persisten en el running-config sin ningún "commit".
+      block:
+        - "system-view"
+        - "interface Vlanif{vlan_id}"
+        - "undo dhcp select relay"
+      repeat:
+        over: "servers"
+        prefix_if_nonempty: ["dhcp select relay"]
+        line: "dhcp relay server-ip {item}"
+      trailer: ["quit", "quit"]
 
 # RF-INTERV-04's "ACL previamente creada... e identificador válido" --
 # "Total nonempty ACL number is 0" confirmado contra el device real de lab
