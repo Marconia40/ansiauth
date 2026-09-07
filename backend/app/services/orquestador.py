@@ -57,6 +57,42 @@ _PATRONES_TRANSITORIOS: tuple[str, ...] = (
     "transport endpoint",
     "reset by peer",
     "end of file",
+    # SSH session exhaustion -- el caso concreto que motivó esta ronda de
+    # reliability: el device sólo permite N sesiones SSH concurrentes
+    # (típicamente 5-16 en Cisco/Huawei) y cuando N sesiones ya están
+    # tomadas (por nosotros mismos, monitoreo, o alguien conectado por
+    # consola), el N+1 rebota con un mensaje que ninguno de los patterns
+    # de arriba matcheaba -- caía al default "permanent" de la línea 304
+    # y el job moría de un tiro. Todos estos son transitorios de verdad:
+    # esperar unos segundos hasta que otra sesión se cierre y reintentar
+    # es exactamente lo correcto.
+    "unable to open channel",
+    "channel is not open",
+    "channel closed",
+    "session limit",
+    "max allowed sessions",
+    "too many sessions",
+    "ssh_msg_channel_open_failure",
+    "administratively prohibited",
+    "resource temporarily unavailable",
+    # Códigos numéricos de errno crudos (sin nombre simbólico) que llegan
+    # cuando str(exc) es un OSError sin decorar. Los 4 más comunes en
+    # SSH transitorio: ETIMEDOUT=110, ECONNRESET=104, ECONNREFUSED=111,
+    # EHOSTUNREACH=113, EAGAIN=11.
+    "[errno 11]",
+    "[errno 104]",
+    "[errno 110]",
+    "[errno 111]",
+    "[errno 113]",
+    # Otras variantes de red/handshake que ya vimos escapar en producción
+    # sin matchear ningún pattern anterior.
+    "remote host closed",
+    "connection aborted",
+    "handshake",
+    "keepalive",
+    "no existing session",
+    "failed to connect",
+    "unable to establish",
 )
 
 # vlan_execution_service.py:15 -- Ansible exits with rc=4 when hosts are
@@ -128,7 +164,33 @@ class Orquestador:
             with self._coordinador.bloquear(device_name):
                 self._coordinador.limitar(device_name)
                 recurso.validar()
-                pre_state = recurso.reconciliar(device)
+                # reconciliar() abre SSH contra el device para leer el estado
+                # actual (get_vlans/list_ports/show run) -- si el equipo tiene
+                # las sesiones SSH agotadas o el show tarda de más, este
+                # llamado tira excepción y (antes de esta corrección) el job
+                # moría al primer intento sin pasar por ningún retry,
+                # aunque la causa fuera claramente transitoria. Envolverlo
+                # con _ejecutar_con_retry le da las mismas 3 chances que
+                # _aplicar(). Wrapper devuelve rc=0 en éxito y guarda el
+                # pre_state real en el holder de closure -- así el retry loop
+                # (que sólo entiende dicts con rc) trabaja igual que con
+                # aplicar(), y nosotros recuperamos el pre_state acá abajo.
+                pre_state_holder: dict = {}
+
+                def _reconciliar():
+                    pre_state_holder["value"] = recurso.reconciliar(device)
+                    return {"rc": 0, "stdout": "", "stderr": ""}
+
+                resultado_prestate, _ = self._ejecutar_con_retry(
+                    _reconciliar, job, device_name, max_retries=job.max_retries,
+                )
+                if resultado_prestate.get("rc", 0) != 0:
+                    raise DeviceExecutionError(
+                        resultado_prestate.get("stderr")
+                        or resultado_prestate.get("stdout")
+                        or "Prestate read failed"
+                    )
+                pre_state = pre_state_holder["value"]
                 # Bug real encontrado en una revisión de código: pre_state
                 # se calculaba acá y se usaba para el rollback, pero nunca
                 # se escribía de vuelta al Job -- GET /jobs/{id} siempre
