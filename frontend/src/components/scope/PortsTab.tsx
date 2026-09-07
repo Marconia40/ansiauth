@@ -24,6 +24,7 @@ import {
   PortStormControlModal,
   PortTrunkVlansModal,
 } from './PortActionModals';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 
 interface Props {
   scope: Scope;
@@ -60,7 +61,7 @@ export function PortsTab({ scope }: Props) {
       queryFn: () => getPortsSynced(name),
       enabled: Boolean(name),
       refetchInterval: (query: { state: { data?: SyncedResource<PortListResponse> } }) =>
-        query.state.data?.sync_in_progress ? 2000 : false,
+        query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false,
     })),
   });
 

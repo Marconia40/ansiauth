@@ -15,6 +15,7 @@ import type {
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 import { AclCreateOrAddModal } from './AclCreateOrAddModal';
 import { AclRemoveRulesModal } from './AclRemoveRulesModal';
 import { extractMessage } from './VlanCreateModal';
@@ -44,7 +45,7 @@ export function GlobalConfigAcls({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (query: {
       state: { data?: SyncedResource<GlobalConfigRead> };
-    }) => (query.state.data?.sync_in_progress ? 2000 : false),
+    }) => (query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const inProgress = Boolean(configQuery.data?.sync_in_progress);

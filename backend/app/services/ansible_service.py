@@ -104,35 +104,43 @@ def run_playbook(
         extravars,
     )
 
+    # Global SSH-concurrency semaphore: caps the number of ansible-runner
+    # subprocesses in flight across the whole system (server-resource
+    # protection). Not per-device -- that's ``RedisCoordinator.bloquear()``,
+    # taken further up the call chain by the orchestrator/sync services.
+    # Lazy import avoids a circular dependency with app.composition.
+    from app.composition import redis_coordinator
+
     try:
-        r = _runner.run(
-            private_data_dir=ANSIBLE_BASE_PATH,
-            playbook=playbook,
-            inventory=inv,
-            extravars=extravars,
-            quiet=True,
-            # ansible_runner.dump_artifacts() only writes env/extravars (and
-            # envvars/passwords/settings) when the file doesn't already
-            # exist under private_data_dir -- and since this call always
-            # reuses the same private_data_dir across every invocation,
-            # whatever the FIRST call ever wrote there gets referenced via
-            # `-e @env/extravars` on every later call, forever, for any key
-            # the current call doesn't happen to override. Bug real
-            # encontrado verificando otro fix: un env/extravars viejo
-            # (device="sw-review", commands=["show vlan brief"]) quedó
-            # pegado desde una corrida anterior y se coló en llamadas
-            # posteriores que no pasaban "commands" -- una escritura de VLAN
-            # sin ese extravar terminaba igual corriendo ese "show vlan
-            # brief" de más contra el device real, sin loguear nada raro.
-            # suppress_env_files=True hace que extravars se pase siempre
-            # inline (-e '{...}'), nunca por archivo compartido.
-            suppress_env_files=True,
-            envvars={
-                "ANSIBLE_TIMEOUT": _ANSIBLE_TIMEOUT,
-                "ANSIBLE_PERSISTENT_COMMAND_TIMEOUT": _ANSIBLE_PERSISTENT_COMMAND_TIMEOUT,
-                "ANSIBLE_PERSISTENT_CONNECT_TIMEOUT": _ANSIBLE_PERSISTENT_CONNECT_TIMEOUT,
-            },
-        )
+        with redis_coordinator.adquirir_slot():
+            r = _runner.run(
+                private_data_dir=ANSIBLE_BASE_PATH,
+                playbook=playbook,
+                inventory=inv,
+                extravars=extravars,
+                quiet=True,
+                # ansible_runner.dump_artifacts() only writes env/extravars (and
+                # envvars/passwords/settings) when the file doesn't already
+                # exist under private_data_dir -- and since this call always
+                # reuses the same private_data_dir across every invocation,
+                # whatever the FIRST call ever wrote there gets referenced via
+                # `-e @env/extravars` on every later call, forever, for any key
+                # the current call doesn't happen to override. Bug real
+                # encontrado verificando otro fix: un env/extravars viejo
+                # (device="sw-review", commands=["show vlan brief"]) quedó
+                # pegado desde una corrida anterior y se coló en llamadas
+                # posteriores que no pasaban "commands" -- una escritura de VLAN
+                # sin ese extravar terminaba igual corriendo ese "show vlan
+                # brief" de más contra el device real, sin loguear nada raro.
+                # suppress_env_files=True hace que extravars se pase siempre
+                # inline (-e '{...}'), nunca por archivo compartido.
+                suppress_env_files=True,
+                envvars={
+                    "ANSIBLE_TIMEOUT": _ANSIBLE_TIMEOUT,
+                    "ANSIBLE_PERSISTENT_COMMAND_TIMEOUT": _ANSIBLE_PERSISTENT_COMMAND_TIMEOUT,
+                    "ANSIBLE_PERSISTENT_CONNECT_TIMEOUT": _ANSIBLE_PERSISTENT_CONNECT_TIMEOUT,
+                },
+            )
     finally:
         if _temp_inv is not None:
             os.unlink(_temp_inv.name)

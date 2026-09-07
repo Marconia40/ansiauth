@@ -835,14 +835,23 @@ export async function getDashboardSummary(
 }
 
 export interface DashboardRefreshResult {
+  /** Devices whose sync_device_task was actually enqueued. */
   devices_queued: number;
+  /** Devices considered fresh (skipped by staleness filter). */
+  devices_skipped_fresh?: number;
+  /** Devices that already had a pending sync (skipped by coalescing). */
+  devices_skipped_coalesced?: number;
+  /** Same as devices_queued -- kept for backwards compatibility. */
   tasks_dispatched: number;
-  tasks: { device: string; scope: 'vlans' | 'ports' | 'svis'; task_id: string }[];
 }
 
-/** Encola sync de vlans+ports+svis para cada device del scope. Fire and
- * forget: la respuesta trae los task_ids pero el frontend simplemente
- * hace polling del summary hasta que sync_in_progress_count vuelve a 0. */
+/** Reactive-refresh endpoint: pide al backend que sincronice sólo los
+ * devices "stale" del scope (default umbral 7 min), con coalescing para
+ * no re-encolar los que ya tienen una sync pending. Fire and forget: la
+ * UI simplemente hace polling del summary hasta que
+ * ``sync_in_progress_count`` vuelve a 0. Reemplaza al viejo botón manual
+ * de refresh global -- el barrido periódico completo lo hace ahora Celery
+ * Beat (``sync_stale_devices_task``). */
 export async function refreshDashboardScope(
   params: Pick<DashboardSummaryParams, 'scope' | 'id' | 'name'>,
 ): Promise<DashboardRefreshResult> {

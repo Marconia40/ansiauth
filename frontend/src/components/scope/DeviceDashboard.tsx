@@ -18,6 +18,7 @@ import { ChassisGrid, classifyPort } from './ChassisGrid';
 import { PortDetailCard } from './PortDetailCard';
 import { JobsPieChart, type JobsPieData } from './JobsPieChart';
 import { jobsHrefForScope } from './ScopeDashboard';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 
 interface Props {
   deviceName: string;
@@ -39,7 +40,7 @@ export function DeviceDashboard({ deviceName }: Props) {
     queryFn: () => getPortsSynced(deviceName),
     enabled: Boolean(deviceName),
     refetchInterval: (query: { state: { data?: SyncedResource<PortListResponse> } }) =>
-      query.state.data?.sync_in_progress ? 2000 : false,
+      query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false,
   });
 
   // Jobs — last 7 days. Backend filter accepts site_id but not device name in

@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,45 @@ logger = logging.getLogger(__name__)
 MAX_JOBS_PER_WINDOW: int = 30
 WINDOW_SECONDS: float = 60.0
 _REDIS_RECHECK_SECONDS: float = 30.0
+
+# Global SSH-concurrency semaphore — protects SERVER resources
+# (RAM/FDs/ansible-runner processes) against bursts. Distinct from
+# ``bloquear()``, which serializes access per-device: this limit is
+# across the whole system. In normal operation (few devices active
+# simultaneously) it's transparent; only kicks in against runaway bursts.
+# Adjustable via ``MAX_CONCURRENT_SSH`` env var.
+MAX_CONCURRENT_SSH: int = int(os.getenv("MAX_CONCURRENT_SSH", "20"))
+
+# Lease TTL for a claimed slot. If a worker crashes without releasing, the
+# slot is reclaimed automatically after this many seconds -- no manual
+# cleanup path needed. Set well above the longest expected playbook.
+SSH_SLOT_LEASE_S: float = 600.0
+
+# Poll interval when the semaphore is full. Redis has no blocking wait on
+# sorted-set cardinality, so we retry the atomic acquire script.
+SSH_SLOT_POLL_INTERVAL_S: float = 0.2
+
+_SSH_SLOT_KEY = "ssh_semaphore:slots"
+
+# Atomic Lua acquire: (1) evict expired leases, (2) count active, (3) claim
+# if there's room. Runs entirely inside Redis so there's no race window
+# between the check and the claim across workers.
+_SSH_ACQUIRE_LUA = """
+local now = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local maxn = tonumber(ARGV[3])
+local slot_id = ARGV[4]
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - ttl)
+
+local count = redis.call('ZCARD', KEYS[1])
+if count >= maxn then
+    return 0
+end
+
+redis.call('ZADD', KEYS[1], now, slot_id)
+return 1
+"""
 
 
 class RedisCoordinator:
@@ -44,6 +84,9 @@ class RedisCoordinator:
         self._locks: dict[str, threading.Lock] = {}
         self._device_timestamps: dict[str, list[float]] = {}
         self._meta_lock = threading.Lock()
+        # In-process fallback for the SSH slot semaphore, mirrors the
+        # single-process behaviour of ``bloquear()`` when Redis is down.
+        self._ssh_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_SSH)
 
     def _get_redis(self):
         if self._redis_client is not None:
@@ -211,3 +254,122 @@ class RedisCoordinator:
                 self._device_timestamps.pop(device_id, None)
             else:
                 self._device_timestamps.clear()
+
+    # ── Sync coalescing (avoid duplicate sync_device_task enqueues) ───────
+
+    def hay_sync_pendiente(self, device_name: str, scope: str) -> bool:
+        """True if a ``sync_device_task(device_name, scope)`` was enqueued
+        recently and hasn't started running yet.
+
+        Used before enqueuing to skip duplicates. The marker is cleared
+        when the task starts running (``limpiar_sync_pendiente``) -- past
+        that point re-enqueuing a second task is legitimate, because the
+        already-running one won't reflect state changes that happened
+        after it started.
+
+        Returns ``False`` when Redis is unreachable -- coalescing is a
+        best-effort optimization, not a correctness invariant, so the
+        fallback path just accepts occasional duplicate enqueues.
+        """
+        r = self._get_redis()
+        if r is None:
+            return False
+        try:
+            return bool(r.exists(f"sync_pending:{device_name}:{scope}"))
+        except Exception as exc:
+            logger.warning("Sync coalescing: Redis error (%s), assuming no pending", exc)
+            return False
+
+    def marcar_sync_pendiente(self, device_name: str, scope: str, ttl_s: int = 300) -> None:
+        """Mark a sync as pending so subsequent ``hay_sync_pendiente()``
+        checks skip enqueuing a duplicate. TTL protects against markers
+        that never get cleared (e.g. worker never picks up the task)."""
+        r = self._get_redis()
+        if r is None:
+            return
+        try:
+            r.set(f"sync_pending:{device_name}:{scope}", "1", ex=ttl_s)
+        except Exception as exc:
+            logger.warning("Sync coalescing: Redis error marking pending (%s)", exc)
+
+    def limpiar_sync_pendiente(self, device_name: str, scope: str) -> None:
+        """Clear the pending marker -- called when the task actually starts
+        executing, so a subsequent request that arrives while the task is
+        running can enqueue a fresh follow-up (its state read wouldn't
+        include changes that happened after the running task started)."""
+        r = self._get_redis()
+        if r is None:
+            return
+        try:
+            r.delete(f"sync_pending:{device_name}:{scope}")
+        except Exception as exc:
+            logger.warning("Sync coalescing: Redis error clearing pending (%s)", exc)
+
+    # ── SSH-slot semaphore (global concurrency limit) ─────────────────────
+
+    @contextmanager
+    def adquirir_slot(self):
+        """Reserve one of ``MAX_CONCURRENT_SSH`` global SSH slots for the
+        duration of the ``with`` block.
+
+        This is a system-wide cap on concurrent ansible-runner executions
+        -- it protects the SERVER (RAM, FDs, subprocess count), not the
+        target device (``bloquear()`` handles per-device serialization).
+        In normal operation the semaphore is transparent; it kicks in only
+        against runaway bursts (e.g. buggy scheduler, retry cascade).
+
+        Uses a Redis sorted-set with per-slot leases: an acquiring worker
+        adds its ``slot_id`` with the current timestamp as score, the
+        atomic Lua script evicts entries older than ``SSH_SLOT_LEASE_S``
+        before counting -- so if a worker crashes without releasing, its
+        slot is reclaimed automatically once the lease expires.
+
+        Falls back to a per-process ``threading.BoundedSemaphore`` when
+        Redis is unreachable (same coordination scope as ``bloquear()``).
+        """
+        r = self._get_redis()
+        if r is not None:
+            try:
+                slot_id = self._acquire_ssh_slot_redis(r)
+            except Exception as exc:
+                logger.warning(
+                    "SSH slot: Redis acquire failed (%s), falling back to in-process semaphore", exc,
+                )
+            else:
+                try:
+                    yield slot_id
+                finally:
+                    try:
+                        r.zrem(_SSH_SLOT_KEY, slot_id)
+                        logger.debug("SSH slot released slot_id=%s", slot_id)
+                    except Exception as exc:
+                        # Slot will still be reclaimed by lease expiry -- log but don't raise.
+                        logger.warning(
+                            "SSH slot release: Redis error (%s), slot will expire in %ss",
+                            exc, SSH_SLOT_LEASE_S,
+                        )
+                return
+        # Fallback path (Redis down or acquire failed): per-process semaphore.
+        self._ssh_semaphore.acquire()
+        logger.debug("SSH slot acquired (in-process fallback)")
+        try:
+            yield None
+        finally:
+            self._ssh_semaphore.release()
+            logger.debug("SSH slot released (in-process fallback)")
+
+    def _acquire_ssh_slot_redis(self, r) -> str:
+        """Poll the atomic Lua script until a slot is claimed."""
+        while True:
+            slot_id = str(uuid.uuid4())
+            now = time.time()
+            acquired = r.eval(
+                _SSH_ACQUIRE_LUA,
+                1,  # numkeys
+                _SSH_SLOT_KEY,
+                now, SSH_SLOT_LEASE_S, MAX_CONCURRENT_SSH, slot_id,
+            )
+            if acquired == 1:
+                logger.debug("SSH slot acquired slot_id=%s", slot_id)
+                return slot_id
+            time.sleep(SSH_SLOT_POLL_INTERVAL_S)

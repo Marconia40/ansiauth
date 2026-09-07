@@ -350,6 +350,57 @@ class CiscoVendor(VendorDriver):
         brief = stdouts[1] if len(stdouts) > 1 else ""
         return CiscoSVIParser.parse_svis(running_config, brief)
 
+    def read_core_state(self, device: Device, password: str):
+        """Fuse VLANs + ports + SVIs into a single ``_leer()`` call -- 1
+        SSH session instead of 3. Total commands = 1 (VLAN brief) + 4
+        (port state) + 2 (SVI config + brief) = 7, all issued in the
+        same ``ios_command`` task so the ``network_cli`` connection is
+        opened once and reused for all seven.
+
+        The individual methods (``list_vlans``/``list_ports``/
+        ``get_svis``) remain untouched: single-scope refresh paths
+        (``POST /devices/{name}/vlans/refresh`` etc.) continue calling
+        them one at a time. This override only kicks in via
+        ``DeviceSyncService.sync_core()`` on ``scope="all"``.
+        """
+        from app.services.parsers.svi_parser import CiscoSVIParser
+        from app.services.parsers.vlan_parser import parse_vlan_brief
+
+        cmds = self._cargar_comandos()
+        vlan_cmds = list(cmds["list_vlans"]["primary"]["commands"])
+        port_cmds = list(cmds["list_ports"]["primary"]["commands"])
+        svi_cmds = list(cmds["get_svis"]["primary"]["commands"])
+
+        combined = vlan_cmds + port_cmds + svi_cmds
+        stdouts = self._leer(combined, device, password)
+
+        # Slice back into the per-scope outputs, in the same order the
+        # commands were appended above.
+        v_end = len(vlan_cmds)
+        p_end = v_end + len(port_cmds)
+        vlan_out = stdouts[:v_end]
+        port_out = stdouts[v_end:p_end]
+        svi_out = stdouts[p_end:]
+
+        vlans = parse_vlan_brief(vlan_out[0]) if vlan_out else []
+
+        status = port_out[_STATUS_INDEX] if len(port_out) > _STATUS_INDEX else ""
+        description = port_out[_DESCRIPTION_INDEX] if len(port_out) > _DESCRIPTION_INDEX else ""
+        switchport = port_out[_SWITCHPORT_INDEX] if len(port_out) > _SWITCHPORT_INDEX else ""
+        storm = port_out[_STORM_INDEX] if len(port_out) > _STORM_INDEX else ""
+        try:
+            ports = CiscoPortParser.parse_ports(status, description, switchport, storm)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot determine port state on device '{device.name}': {exc}",
+            ) from exc
+
+        running_config = svi_out[0] if len(svi_out) > 0 else ""
+        brief = svi_out[1] if len(svi_out) > 1 else ""
+        svis = CiscoSVIParser.parse_svis(running_config, brief)
+
+        return vlans, ports, svis
+
     def list_acl_names(self, device: Device, password: str) -> list[str]:
         """Confirmado contra el device real de lab con ACLs configuradas.
         Caso "0 ACLs" NO probado -- a diferencia de VRP (que sí imprime
