@@ -31,6 +31,7 @@ def _format_job(job) -> dict:
         "playbook": job.playbook,
         "device": job.device,
         "error": job.error,
+        "error_summary": job.error_summary,
         "result": job.result,
         "created_at": job.created_at.isoformat(),
         "started_at": job.started_at.isoformat() if job.started_at else None,

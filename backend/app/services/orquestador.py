@@ -13,60 +13,67 @@ logger = logging.getLogger(__name__)
 # retry_policy.py:15-61, verbatim -- absorbido acá como constantes de módulo.
 # Permanent patterns are checked FIRST -- a device that says "authentication
 # failure: connection timeout" should never be retried.
-_PATRONES_PERMANENTES: tuple[str, ...] = (
-    "invalid vlan id",
-    "incomplete command",
-    "syntax error",
-    "vlan already exists",
-    "permission denied",
-    "authentication failure",
-    "authentication failed",
-    "unsupported command",
-    "invalid input",
-    "invalid command",
-    "authorization failed",
-    "access denied",
-    "ambiguous command",
-    "bad command",
-    "error: invalid",
+#
+# Cada patrón va acompañado de una `categoria` corta -- no cambia la lógica
+# de reintento (sigue siendo exactamente la misma tabla, mismo orden, mismos
+# strings), solo etiqueta QUÉ TIPO de problema es cada uno. Usado por
+# Orquestador._resumir_error() para traducir un RetryDecision a una frase
+# legible en Job.error_summary -- ver plan de esta sesión ("Clasificar y
+# explicar mejor los errores de device").
+_PATRONES_PERMANENTES: tuple[tuple[str, str], ...] = (
+    ("invalid vlan id", "syntax"),
+    ("incomplete command", "syntax"),
+    ("syntax error", "syntax"),
+    ("vlan already exists", "conflict"),
+    ("permission denied", "auth"),
+    ("authentication failure", "auth"),
+    ("authentication failed", "auth"),
+    ("unsupported command", "syntax"),
+    ("invalid input", "syntax"),
+    ("invalid command", "syntax"),
+    ("authorization failed", "auth"),
+    ("access denied", "auth"),
+    ("ambiguous command", "syntax"),
+    ("bad command", "syntax"),
+    ("error: invalid", "syntax"),
     # Tipos de excepción de auth de Paramiko/Netmiko -- llegan como prefijo
     # del str(exc) (ver _ejecutar_con_retry). Los ponemos como permanentes
     # antes de _PATRONES_TRANSITORIOS por defensa en profundidad: aunque el
     # mensaje diga "connection timeout" (que matchearía transitorio), si el
     # tipo dice AuthenticationException el problema real es de credenciales
     # y reintentar sólo empeora la situación (ej. lockout tras N intentos).
-    "authenticationexception",
-    "badauthenticationtype",
-    "partialauthentication",
+    ("authenticationexception", "auth"),
+    ("badauthenticationtype", "auth"),
+    ("partialauthentication", "auth"),
 )
 
-_PATRONES_TRANSITORIOS: tuple[str, ...] = (
+_PATRONES_TRANSITORIOS: tuple[tuple[str, str], ...] = (
     # Spec-required exact phrases
-    "ssh timeout",
-    "connection timeout",
-    "socket timeout",
-    "temporary unreachable",
-    "ssh connection failed",
-    "network_cli timeout",
-    "session reset",
-    "connection reset",
-    "eof during transport",
-    "command timeout",
-    "ansible persistent connection timeout",
+    ("ssh timeout", "connectivity"),
+    ("connection timeout", "connectivity"),
+    ("socket timeout", "connectivity"),
+    ("temporary unreachable", "connectivity"),
+    ("ssh connection failed", "connectivity"),
+    ("network_cli timeout", "connectivity"),
+    ("session reset", "connectivity"),
+    ("connection reset", "connectivity"),
+    ("eof during transport", "connectivity"),
+    ("command timeout", "connectivity"),
+    ("ansible persistent connection timeout", "connectivity"),
     # Broader patterns that map to the same transient class
-    "timeout",
-    "timed out",
-    "connection refused",
-    "unable to connect",
-    "ssh failure",
-    "ssh error",
-    "ssh connect",
-    "network is unreachable",
-    "no route to host",
-    "broken pipe",
-    "host unreachable",
-    "transport endpoint",
-    "reset by peer",
+    ("timeout", "connectivity"),
+    ("timed out", "connectivity"),
+    ("connection refused", "connectivity"),
+    ("unable to connect", "connectivity"),
+    ("ssh failure", "connectivity"),
+    ("ssh error", "connectivity"),
+    ("ssh connect", "connectivity"),
+    ("network is unreachable", "connectivity"),
+    ("no route to host", "connectivity"),
+    ("broken pipe", "connectivity"),
+    ("host unreachable", "connectivity"),
+    ("transport endpoint", "connectivity"),
+    ("reset by peer", "connectivity"),
     # ssh_direct_service.py (devices en auth_method="key"): mensaje real de
     # OpenSSH cuando VRP/IOS cortan la conexión -- confirmado en vivo esta
     # sesión que pasa tanto por un cierre benigno de fin de sesión (ya
@@ -74,8 +81,8 @@ _PATRONES_TRANSITORIOS: tuple[str, ...] = (
     # corte genuino a mitad de comando, intermitente, sin patrón claro --
     # sin este pattern caía en "unknown" y solo tenía 1 reintento con delay
     # fijo de 1s en vez del backoff exponencial completo.
-    "closed by remote host",
-    "end of file",
+    ("closed by remote host", "connectivity"),
+    ("end of file", "connectivity"),
     # SSH session exhaustion -- el caso concreto que motivó esta ronda de
     # reliability: el device sólo permite N sesiones SSH concurrentes
     # (típicamente 5-16 en Cisco/Huawei) y cuando N sesiones ya están
@@ -85,52 +92,52 @@ _PATRONES_TRANSITORIOS: tuple[str, ...] = (
     # y el job moría de un tiro. Todos estos son transitorios de verdad:
     # esperar unos segundos hasta que otra sesión se cierre y reintentar
     # es exactamente lo correcto.
-    "unable to open channel",
-    "channel is not open",
-    "channel closed",
-    "session limit",
-    "max allowed sessions",
-    "too many sessions",
-    "ssh_msg_channel_open_failure",
-    "administratively prohibited",
-    "resource temporarily unavailable",
+    ("unable to open channel", "session_limit"),
+    ("channel is not open", "session_limit"),
+    ("channel closed", "session_limit"),
+    ("session limit", "session_limit"),
+    ("max allowed sessions", "session_limit"),
+    ("too many sessions", "session_limit"),
+    ("ssh_msg_channel_open_failure", "session_limit"),
+    ("administratively prohibited", "session_limit"),
+    ("resource temporarily unavailable", "session_limit"),
     # Códigos numéricos de errno crudos (sin nombre simbólico) que llegan
     # cuando str(exc) es un OSError sin decorar. Los 4 más comunes en
     # SSH transitorio: ETIMEDOUT=110, ECONNRESET=104, ECONNREFUSED=111,
     # EHOSTUNREACH=113, EAGAIN=11.
-    "[errno 11]",
-    "[errno 104]",
-    "[errno 110]",
-    "[errno 111]",
-    "[errno 113]",
+    ("[errno 11]", "connectivity"),
+    ("[errno 104]", "connectivity"),
+    ("[errno 110]", "connectivity"),
+    ("[errno 111]", "connectivity"),
+    ("[errno 113]", "connectivity"),
     # Otras variantes de red/handshake que ya vimos escapar en producción
     # sin matchear ningún pattern anterior.
-    "remote host closed",
-    "connection aborted",
-    "handshake",
-    "keepalive",
-    "no existing session",
-    "failed to connect",
-    "unable to establish",
+    ("remote host closed", "connectivity"),
+    ("connection aborted", "connectivity"),
+    ("handshake", "connectivity"),
+    ("keepalive", "connectivity"),
+    ("no existing session", "connectivity"),
+    ("failed to connect", "connectivity"),
+    ("unable to establish", "connectivity"),
     # Nombres de tipo de excepción de Python/Paramiko/Netmiko -- prefijados
     # al str(exc) por _ejecutar_con_retry (ver el except del retry loop).
     # Muchas de estas excepciones traen str(exc) vacío o críptico y el
     # tipo es la única señal léxica disponible. Los tipos de auth
     # exception NO van acá -- son permanentes (ver _PATRONES_PERMANENTES).
-    "sshexception",
-    "timeouterror",
-    "connectionreseterror",
-    "connectionrefusederror",
-    "connectionabortederror",
-    "eoferror",
-    "netmikotimeoutexception",
-    "socket.timeout",
-    "socket.gaierror",
-    "ssl.sslerror",
+    ("sshexception", "connectivity"),
+    ("timeouterror", "connectivity"),
+    ("connectionreseterror", "connectivity"),
+    ("connectionrefusederror", "connectivity"),
+    ("connectionabortederror", "connectivity"),
+    ("eoferror", "connectivity"),
+    ("netmikotimeoutexception", "connectivity"),
+    ("socket.timeout", "connectivity"),
+    ("socket.gaierror", "connectivity"),
+    ("ssl.sslerror", "connectivity"),
     # ansible_service.py's rc=0-but-stdout-is-literally-"None" guard --
     # ver esa nota, mismo criterio: no es un rechazo real del device, es
     # una lectura que no se pudo confiar, vale la pena reintentar.
-    "possible read desync",
+    ("possible read desync", "read_reliability"),
 )
 
 # vlan_execution_service.py:15 -- Ansible exits with rc=4 when hosts are
@@ -149,6 +156,33 @@ def _pre_state_json_safe(pre_state: dict) -> dict:
     a raw dataclass instance would blow up ``Job.pre_state``'s JSON column
     on write."""
     return {k: (asdict(v) if is_dataclass(v) else v) for k, v in pre_state.items()}
+
+
+# Traduce la `categoria` de un RetryDecision (o, si no hay categoria, su
+# `classification`) a una frase corta en inglés, legible por un humano --
+# usada para poblar Job.error_summary. No traduce el vocabulario completo
+# de mensajes de vendor (eso sigue viviendo en _PATRONES_*), solo agrupa
+# las ~6 categorias ya asignadas ahí arriba. Cuando `categoria` es None
+# (el branch de rc de Ansible, o el catch-all "unknown" sin match de
+# texto) cae al fallback genérico por `classification`.
+_RESUMENES_POR_CATEGORIA: dict[str, str] = {
+    "auth": "Authentication or permission problem — check the device credentials.",
+    "syntax": "The device rejected the command as invalid or unsupported.",
+    "conflict": "The requested change conflicts with the device's current configuration.",
+    "connectivity": "Network or SSH connectivity issue reaching the device.",
+    "session_limit": "The device has no free SSH sessions available right now.",
+    "read_reliability": "The device's response couldn't be read reliably.",
+}
+
+
+def _resumir_error(decision: "RetryDecision") -> str:
+    if decision.categoria in _RESUMENES_POR_CATEGORIA:
+        return _RESUMENES_POR_CATEGORIA[decision.categoria]
+    if decision.classification == "transient":
+        return "A transient connectivity issue occurred and retries were exhausted."
+    if decision.classification == "permanent":
+        return "The device rejected the operation."
+    return "The device gave an unfamiliar response — could not determine the exact cause."
 
 
 class Orquestador:
@@ -223,10 +257,12 @@ class Orquestador:
                     _reconciliar, job, device_name, max_retries=job.max_retries,
                 )
                 if resultado_prestate.get("rc", 0) != 0:
+                    decision = self._clasificar_error(resultado_prestate)
                     raise DeviceExecutionError(
                         resultado_prestate.get("stderr")
                         or resultado_prestate.get("stdout")
-                        or "Prestate read failed"
+                        or "Prestate read failed",
+                        resumen=_resumir_error(decision),
                     )
                 pre_state = pre_state_holder["value"]
                 # Bug real encontrado en una revisión de código: pre_state
@@ -263,7 +299,11 @@ class Orquestador:
                     _aplicar, job, device_name, max_retries=job.max_retries,
                 )
                 if resultado.get("rc", 0) != 0:
-                    raise DeviceExecutionError(resultado.get("stderr") or resultado.get("stdout") or "Execution failed")
+                    decision = self._clasificar_error(resultado)
+                    raise DeviceExecutionError(
+                        resultado.get("stderr") or resultado.get("stdout") or "Execution failed",
+                        resumen=_resumir_error(decision),
+                    )
         except Exception as error:
             rb_performed, rb_success = (False, None)
             if pre_state is not None:
@@ -297,7 +337,10 @@ class Orquestador:
                     )
                 rb_performed = rb_state["performed"]
                 rb_success = rb_state["success"]
-            job.marcar_fallido(str(error), rb_performed, rb_success)
+            job.marcar_fallido(
+                str(error), rb_performed, rb_success,
+                error_summary=getattr(error, "resumen", None),
+            )
             self._jobs.add(job)
             self._eventos.despachar([DomainEvent(
                 "recurso_fallido", recurso, device, actor,
@@ -457,10 +500,12 @@ class Orquestador:
                     _reconciliar_lote, job, device_name, max_retries=job.max_retries,
                 )
                 if resultado_prestate.get("rc", 0) != 0:
+                    decision = self._clasificar_error(resultado_prestate)
                     raise DeviceExecutionError(
                         resultado_prestate.get("stderr")
                         or resultado_prestate.get("stdout")
-                        or "Prestate read failed"
+                        or "Prestate read failed",
+                        resumen=_resumir_error(decision),
                     )
                 pre_states = pre_states_holder["value"]
                 job.pre_state = {"lote": [_pre_state_json_safe(ps) for ps in pre_states]}
@@ -502,7 +547,11 @@ class Orquestador:
                     _aplicar, job, device_name, max_retries=job.max_retries,
                 )
                 if resultado.get("rc", 0) != 0:
-                    raise DeviceExecutionError(resultado.get("stderr") or resultado.get("stdout") or "Execution failed")
+                    decision = self._clasificar_error(resultado)
+                    raise DeviceExecutionError(
+                        resultado.get("stderr") or resultado.get("stdout") or "Execution failed",
+                        resumen=_resumir_error(decision),
+                    )
         except Exception as error:
             rb_performed_total = False
             rb_resultados: list[tuple[bool, "bool | None"]] = []
@@ -521,7 +570,10 @@ class Orquestador:
             rb_success_total = (
                 all(s is not False for _p, s in rb_resultados if _p) if rb_resultados else None
             )
-            job.marcar_fallido(str(error), rb_performed_total, rb_success_total)
+            job.marcar_fallido(
+                str(error), rb_performed_total, rb_success_total,
+                error_summary=getattr(error, "resumen", None),
+            )
             self._jobs.add(job)
             self._eventos.despachar([DomainEvent(
                 "recurso_fallido", recursos[0], device, actor,
@@ -577,12 +629,12 @@ class Orquestador:
             )
         combinado = (resultado.get("stderr") or "") + " " + (resultado.get("stdout") or "")
         lowered = combinado.lower()
-        for patron in _PATRONES_PERMANENTES:
+        for patron, categoria in _PATRONES_PERMANENTES:
             if patron in lowered:
-                return RetryDecision(should_retry=False, classification="permanent", reason=patron)
-        for patron in _PATRONES_TRANSITORIOS:
+                return RetryDecision(should_retry=False, classification="permanent", reason=patron, categoria=categoria)
+        for patron, categoria in _PATRONES_TRANSITORIOS:
             if patron in lowered:
-                return RetryDecision(should_retry=True, classification="transient", reason=patron)
+                return RetryDecision(should_retry=True, classification="transient", reason=patron, categoria=categoria)
         # Sin match en ninguna tabla -- antes se trataba como permanente y
         # se mataba el job de un tiro. Cambio: se da UNA sola chance extra
         # (override=2 => 1 initial + 1 retry), independiente de max_retries.

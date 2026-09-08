@@ -511,9 +511,12 @@ export default function JobsPage() {
                               </span>
                             )}
                           </div>
-                          {job.status === 'failed' && (job.error ?? job.last_error) && (
-                            <p className="mt-0.5 text-xs text-danger truncate max-w-[220px]">
-                              {job.error ?? job.last_error}
+                          {job.status === 'failed' && (job.error_summary ?? job.error ?? job.last_error) && (
+                            <p
+                              className="mt-0.5 text-xs text-danger truncate max-w-[220px]"
+                              title={job.error ?? job.last_error ?? undefined}
+                            >
+                              {job.error_summary ?? job.error ?? job.last_error}
                             </p>
                           )}
                         </td>

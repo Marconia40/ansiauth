@@ -150,10 +150,10 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
           )}
         </div>
       </Field>
-      {hasError && job.status === 'failed' && (
+      {hasError && (
         <Field label="Error">
           <span className="text-red-600 text-xs truncate block max-w-full">
-            {job.error ?? job.last_error}
+            {job.error_summary ?? job.error ?? job.last_error}
           </span>
         </Field>
       )}
@@ -205,17 +205,9 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
         </>
       )}
 
-      {hasError && job.status !== 'failed' && (
+      {hasError && (
         <>
-          <SectionHeader>Error</SectionHeader>
-          <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all">
-            {job.error ?? job.last_error}
-          </div>
-        </>
-      )}
-      {hasError && job.status === 'failed' && (
-        <>
-          <SectionHeader>Full Error</SectionHeader>
+          <SectionHeader>Error details</SectionHeader>
           <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all">
             {job.error ?? job.last_error}
           </div>
@@ -245,30 +237,40 @@ function DeviceRow({
   const { icon, className } = deviceIcon(dr.status);
   const isDeviceActive = dr.status === 'running' || dr.status === 'retrying';
   return (
-    <div className="flex items-center gap-2 py-1.5 text-sm border-b border-gray-50 last:border-0">
-      <span className={`font-mono w-4 text-center flex-shrink-0 ${className}`}>{icon}</span>
-      <span className="flex-1 text-text min-w-0 truncate">{dr.device}</span>
-      <span className="flex-shrink-0">
-        <StatusBadge status={dr.status} />
-      </span>
-      {isDeviceActive ? (
-        <span className="text-xs text-muted/50 flex-shrink-0">running</span>
-      ) : dr.duration_ms != null ? (
-        <span className="text-xs text-muted/70 flex-shrink-0">{formatMs(dr.duration_ms)}</span>
-      ) : null}
-      {dr.retry_count > 0 && (
-        <span className="text-xs text-amber-600 flex-shrink-0">↺{dr.retry_count}</span>
-      )}
-      {dr.rollback_performed && (
-        <span className="text-xs text-orange-500 flex-shrink-0">↩</span>
-      )}
-      {dr.job_id && (
-        <button
-          onClick={() => onDrillDown(dr.job_id!)}
-          className="flex-shrink-0 text-xs text-info hover:underline"
-        >
-          Details
-        </button>
+    <div className="py-1.5 text-sm border-b border-gray-50 last:border-0">
+      <div className="flex items-center gap-2">
+        <span className={`font-mono w-4 text-center flex-shrink-0 ${className}`}>{icon}</span>
+        <span className="flex-1 text-text min-w-0 truncate">{dr.device}</span>
+        <span className="flex-shrink-0">
+          <StatusBadge status={dr.status} />
+        </span>
+        {isDeviceActive ? (
+          <span className="text-xs text-muted/50 flex-shrink-0">running</span>
+        ) : dr.duration_ms != null ? (
+          <span className="text-xs text-muted/70 flex-shrink-0">{formatMs(dr.duration_ms)}</span>
+        ) : null}
+        {dr.retry_count > 0 && (
+          <span className="text-xs text-amber-600 flex-shrink-0">↺{dr.retry_count}</span>
+        )}
+        {dr.rollback_performed && (
+          <span className="text-xs text-orange-500 flex-shrink-0">↩</span>
+        )}
+        {dr.job_id && (
+          <button
+            onClick={() => onDrillDown(dr.job_id!)}
+            className="flex-shrink-0 text-xs text-info hover:underline"
+          >
+            Details
+          </button>
+        )}
+      </div>
+      {/* Short reason inline, no drill-down needed for the common case --
+          before this, a device's error was invisible unless you clicked
+          into its own job. */}
+      {dr.status === 'failed' && (dr.error_summary || dr.error) && (
+        <p className="mt-0.5 pl-6 text-xs text-danger truncate">
+          {dr.error_summary ?? dr.error}
+        </p>
       )}
     </div>
   );

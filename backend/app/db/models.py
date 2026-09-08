@@ -269,8 +269,19 @@ class JobModel(Base):
     playbook = Column(String, nullable=True)
     device = Column(String, nullable=True)
     parameters = Column(JSON, nullable=True)
+    # Frase legible de la intención del request (ej. "Add route
+    # 192.168.100.0/24 -> 10.10.100.1") -- Job.parameters_summary. Faltaba
+    # esta columna desde que el campo se agregó (bug real encontrado y
+    # cerrado en la misma vuelta que agrega error_summary abajo): sin ella
+    # ni _to_orm() ni _to_domain() podían mapearlo, así que nunca
+    # sobrevivía un roundtrip por la base.
+    parameters_summary = Column(Text, nullable=True)
     result = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
+    # Frase legible de POR QUÉ falló -- Job.error_summary, ver docstring del
+    # campo en models/job.py. None cuando el fallo no vino de un rechazo del
+    # device (bug interno, no clasificable).
+    error_summary = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, index=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)

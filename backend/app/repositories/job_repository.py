@@ -22,8 +22,10 @@ def _to_domain(row: JobModel) -> Job:
         playbook=row.playbook,
         device=row.device,
         parameters=row.parameters,
+        parameters_summary=row.parameters_summary,
         result=row.result,
         error=row.error,
+        error_summary=row.error_summary,
         created_at=_ensure_utc(row.created_at),
         started_at=_ensure_utc(row.started_at),
         finished_at=_ensure_utc(row.finished_at),
@@ -41,7 +43,8 @@ def _to_domain(row: JobModel) -> Job:
 def _to_orm(j: Job) -> JobModel:
     return JobModel(
         job_id=j.job_id, status=j.status, operation=j.operation, playbook=j.playbook,
-        device=j.device, parameters=j.parameters, result=j.result, error=j.error,
+        device=j.device, parameters=j.parameters, parameters_summary=j.parameters_summary,
+        result=j.result, error=j.error, error_summary=j.error_summary,
         created_at=j.created_at, started_at=j.started_at, finished_at=j.finished_at,
         retry_count=j.retry_count, max_retries=j.max_retries,
         rollback_performed=j.rollback_performed, rollback_success=j.rollback_success,
@@ -164,6 +167,7 @@ class JobRepository(Repository):
                     "current_step": j.current_step, "retry_count": j.retry_count,
                     "rollback_performed": j.rollback_performed,
                     "rollback_success": j.rollback_success, "error": j.error,
+                    "error_summary": j.error_summary,
                     "duration_ms": _duration_ms(j),
                 }
                 for j in jobs

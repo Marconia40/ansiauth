@@ -198,6 +198,7 @@ export function JobNotificationProvider({ children }: { children: ReactNode }) {
         } else if (job.status === 'failed' || job.status === 'cancelled') {
           status = 'failed';
           message =
+            job.error_summary ??
             job.error ??
             job.last_error ??
             (job.result as { message?: string } | null)?.message ??

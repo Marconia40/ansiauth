@@ -25,6 +25,7 @@ export interface Job {
   device: string | null;
   result: unknown;
   error: string | null;
+  error_summary: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -53,6 +54,7 @@ export interface GroupJobDeviceResult {
   rollback_performed: boolean;
   rollback_success: boolean | null;
   error: string | null;
+  error_summary: string | null;
   duration_ms: number | null;
 }
 

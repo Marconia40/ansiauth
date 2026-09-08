@@ -3,7 +3,20 @@ class ValidationError(Exception):
 
 
 class DeviceExecutionError(Exception):
-    pass
+    """Raised when a device rejects a command or a read/write against it
+    fails. ``resumen`` (optional) carries a short, human-readable
+    explanation of WHY (e.g. "Authentication or permission problem —
+    check the device credentials."), computed by
+    ``Orquestador._resumir_error()`` from the same ``RetryDecision`` that
+    already decided whether to retry — kept separate from the raw
+    ``str(self)`` message so ``Job.error_summary`` can stay short while
+    ``Job.error`` keeps the full device text. Left as ``None`` when there
+    was no classification to draw from (callers that raise this directly
+    without going through the retry/classification path)."""
+
+    def __init__(self, mensaje: str, resumen: "str | None" = None):
+        super().__init__(mensaje)
+        self.resumen = resumen
 
 
 class NotFoundError(Exception):

@@ -13,6 +13,26 @@ _TRANSICIONES_VALIDAS: dict[str, set[str]] = {
     "cancelled": set(),  # terminal
 }
 
+# Límite de Job.error -- antes no tenía ninguno (a diferencia de last_error,
+# que ya cortaba a 500), así que un dump de device particularmente verboso
+# (ej. un "commit" rechazado con contexto de config embebido) viajaba
+# entero hasta la API/UI sin límite. 4000 es generoso -- deja ver un error
+# real completo en la inmensa mayoría de los casos -- sin ser ilimitado.
+_LIMITE_ERROR = 4000
+_LIMITE_LAST_ERROR = 500
+_SUFIJO_TRUNCADO = "... [truncated]"
+
+
+def _truncar(texto: str, limite: int) -> str:
+    """Corta *texto* a *limite* caracteres, con un sufijo visible cuando
+    efectivamente se cortó -- antes tanto Job.error como last_error se
+    cortaban con un slice ciego (last_error) o no se cortaban en absoluto
+    (error), sin ninguna señal de que el texto mostrado no es el
+    completo."""
+    if len(texto) <= limite:
+        return texto
+    return texto[: limite - len(_SUFIJO_TRUNCADO)] + _SUFIJO_TRUNCADO
+
 
 @dataclass
 class Job:
@@ -30,6 +50,15 @@ class Job:
     parameters_summary: Optional[str] = None
     result: Optional[dict] = None
     error: Optional[str] = None
+    # Frase corta y legible de POR QUÉ falló el job (ej. "Authentication or
+    # permission problem — check the device credentials."), calculada por
+    # Orquestador._resumir_error() a partir de la misma clasificación que ya
+    # decide si conviene reintentar (RetryDecision). Solo se setea cuando el
+    # error vino de un DeviceExecutionError real (rechazo del device) -- un
+    # bug interno de la app deja esto en None a propósito, no se le inventa
+    # una "explicación amigable" a algo que no vino del device. Ver `error`
+    # para el texto crudo completo.
+    error_summary: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -64,9 +93,13 @@ class Job:
         self.finished_at = datetime.now(timezone.utc)
         self.current_step = "completed"
 
-    def marcar_fallido(self, error: str, rollback_performed: bool = False, rollback_success: Optional[bool] = None) -> None:
+    def marcar_fallido(
+        self, error: str, rollback_performed: bool = False, rollback_success: Optional[bool] = None,
+        error_summary: Optional[str] = None,
+    ) -> None:
         self._transicionar("failed")
-        self.error = error
+        self.error = _truncar(error, _LIMITE_ERROR)
+        self.error_summary = error_summary
         self.rollback_performed = rollback_performed
         self.rollback_success = rollback_success
         self.finished_at = datetime.now(timezone.utc)
@@ -86,7 +119,7 @@ class Job:
         ``None``, corrección real encontrada en Fase 5 armando
         `Orquestador._ejecutar_con_retry()`)."""
         self.retry_count += 1
-        self.last_error = error.strip()[:500]
+        self.last_error = _truncar(error.strip(), _LIMITE_LAST_ERROR)
         self.current_step = "retrying"
 
     def asegurar_estado_final(self) -> None:
