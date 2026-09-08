@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import { getSite } from '@/services/api';
 import type { Site } from '@/types/site';
 import { ScopeShell } from '@/components/scope/ScopeShell';
+import { SiteHeaderActions } from '@/components/scope/SiteHeaderActions';
 
 export default function SiteScopeLayout({ children }: { children: ReactNode }) {
   const params = useParams<{ id: string }>();
@@ -26,6 +27,7 @@ export default function SiteScopeLayout({ children }: { children: ReactNode }) {
         { label: site?.name ?? `Site #${siteId}`, href: base },
       ]}
       tabsBase={base}
+      actions={<SiteHeaderActions site={site} />}
     >
       {children}
     </ScopeShell>
