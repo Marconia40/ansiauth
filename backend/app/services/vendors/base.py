@@ -74,11 +74,31 @@ class VendorDriver(ABC):
     _NETWORK_OS: str
     _CONNECTION: str = "network_cli"
 
-    def _build_inventory(self, device: Device, password: str) -> dict:
+    def _build_inventory(self, device: Device, password: str) -> str:
+        # Password-only -- only reached from _ejecutar()'s password branch,
+        # which is only taken when auth_method != "key" (see _ejecutar()).
         from app.services import ansible_service
         return ansible_service.build_inventory(
             device.name, device.host, device.username, password,
             network_os=self._NETWORK_OS, connection=self._CONNECTION,
+        )
+
+    def _ejecutar(self, extravars: dict, device: Device, password: str) -> dict:
+        """Único lugar donde se decide CÓMO se ejecuta *extravars* contra
+        el device -- ``_aplicar()``/``_leer()`` solo llaman a esto, no les
+        importa el transporte real. Devices en ``auth_method == "key"``
+        van por ``ssh_direct_service`` (bypass de Ansible/paramiko -- ver
+        su docstring para el motivo real); el resto (el 100% del fleet en
+        password) sigue exactamente igual por ``ansible_service.run_playbook()``,
+        sin ningún cambio de comportamiento."""
+        if device.auth_method == "key":
+            from app.services import ssh_direct_service
+            return ssh_direct_service.run_direct(extravars, device)
+        from app.services import ansible_service
+        return ansible_service.run_playbook(
+            playbook=self._PLAYBOOK,
+            extravars={**extravars, "device": device.name},
+            inventory=self._build_inventory(device, password),
         )
 
     def _aplicar(self, extravars: dict, device: Device, password: str, *, op_label: str) -> dict:
@@ -94,15 +114,9 @@ class VendorDriver(ABC):
         """
         import traceback
 
-        from app.services import ansible_service
-
         logger.info("%s: %s on device=%s", type(self).__name__, op_label, device.name)
         try:
-            result = ansible_service.run_playbook(
-                playbook=self._PLAYBOOK,
-                extravars={**extravars, "device": device.name},
-                inventory=self._build_inventory(device, password),
-            )
+            result = self._ejecutar(extravars, device, password)
             normalized = {**result, "success": result.get("rc", 1) == 0}
             if normalized["success"]:
                 logger.info("%s: %s OK on device=%s", type(self).__name__, op_label, device.name)
@@ -128,14 +142,8 @@ class VendorDriver(ABC):
         (``list_vlans``/``list_ports``) hand the returned strings to their
         vendor-specific parser, unchanged.
         """
-        from app.services import ansible_service
-
         logger.info("%s: run %d command(s) on device=%s", type(self).__name__, len(commands), device.name)
-        result = ansible_service.run_playbook(
-            playbook=self._PLAYBOOK,
-            extravars={"commands": commands, "device": device.name},
-            inventory=self._build_inventory(device, password),
-        )
+        result = self._ejecutar({"commands": commands}, device, password)
         if result["rc"] != 0:
             error = result.get("stderr") or result.get("stdout") or "playbook exited non-zero"
             logger.error("%s: read failed on device=%s — %s", type(self).__name__, device.name, error)

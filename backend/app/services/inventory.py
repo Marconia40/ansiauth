@@ -78,7 +78,9 @@ class Inventory:
         vendor: str,
         platform: str,
         username: str,
-        password: str,
+        password: "str | None" = None,
+        auth_method: str = "password",
+        private_key: "str | None" = None,
         site_id: int,
         device_group_id: Optional[int],
         actor: dict,
@@ -107,8 +109,18 @@ class Inventory:
             raise ValidationError(
                 f"Device group {group.id} belongs to site {group.site_id}, not site {site_id}"
             )
-        encrypted = self._vault.encrypt(password)
-        device = Device.nuevo(name, host, vendor, platform, username, encrypted, group.id)
+        # auth_method == "key": encrypted_password guarda un placeholder vacío
+        # cifrado -- Device.password sigue siendo un llamado válido y barato
+        # para los ~43 call-sites del dominio que ya lo hacen sin saber cómo
+        # se autentica cada device (ver Device.encrypted_private_key).
+        encrypted = self._vault.encrypt(password if auth_method == "password" else "")
+        encrypted_private_key = (
+            self._vault.encrypt(private_key) if auth_method == "key" else None
+        )
+        device = Device.nuevo(
+            name, host, vendor, platform, username, encrypted, group.id,
+            auth_method=auth_method, encrypted_private_key=encrypted_private_key,
+        )
         # Corrección real encontrada comparando contra DevicePublic (schema
         # real, site_id/site_name/device_group_name NO son Optional): el
         # snippet canónico de esta fase auditaba/devolvía el `device` recién

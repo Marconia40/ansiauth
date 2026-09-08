@@ -65,6 +65,14 @@ _PATRONES_TRANSITORIOS: tuple[str, ...] = (
     "host unreachable",
     "transport endpoint",
     "reset by peer",
+    # ssh_direct_service.py (devices en auth_method="key"): mensaje real de
+    # OpenSSH cuando VRP/IOS cortan la conexión -- confirmado en vivo esta
+    # sesión que pasa tanto por un cierre benigno de fin de sesión (ya
+    # filtrado antes de llegar acá por _sesion_completa()) como por un
+    # corte genuino a mitad de comando, intermitente, sin patrón claro --
+    # sin este pattern caía en "unknown" y solo tenía 1 reintento con delay
+    # fijo de 1s en vez del backoff exponencial completo.
+    "closed by remote host",
     "end of file",
     # SSH session exhaustion -- el caso concreto que motivó esta ronda de
     # reliability: el device sólo permite N sesiones SSH concurrentes

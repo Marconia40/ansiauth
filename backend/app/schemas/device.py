@@ -1,6 +1,6 @@
 import ipaddress
 import re
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -23,25 +23,22 @@ def _validate_host(v: str) -> str:
 
 
 class DeviceCreate(BaseModel):
-    model_config = ConfigDict(json_schema_extra={
-        "example": {
-            "name": "switch-01",
-            "host": "192.168.1.10",
-            "vendor": "cisco_ios",
-            "platform": "ios",
-            "username": "admin",
-            "password": "s3cr3tpass",
-            "site_id": 1,
-            "device_group_id": 3,
-        }
-    })
-
+    # Swagger's Example Value dropdown (password vs key) comes from
+    # openapi_examples on the /devices/ route's `data` param, not from a
+    # schema-level example here -- Swagger UI only renders a picker for
+    # examples wired at the request-body/media-type level, see
+    # api/devices.py::create_device.
     name: str
     host: str
     vendor: str
     platform: str = "ios"
     username: str
-    password: str  # plain text — encrypted before storing
+    # Exactamente 1 de los 2 según auth_method -- ver _validar_credencial.
+    # Plain text en ambos -- se cifran antes de guardar (Fernet), nunca en
+    # texto plano en DB/logs.
+    auth_method: Literal["password", "key"] = "password"
+    password: Optional[str] = None
+    private_key: Optional[str] = None
     # MSP: Phase 4 — Site is required. Group is optional; when omitted, the
     # device lands in the Site's Default group. When set, the service
     # rejects (400) if the group's site_id != site_id.
@@ -52,6 +49,20 @@ class DeviceCreate(BaseModel):
     @classmethod
     def validate_host(cls, v):
         return _validate_host(v)
+
+    @model_validator(mode="after")
+    def _validar_credencial(self) -> "DeviceCreate":
+        if self.auth_method == "password":
+            if not self.password:
+                raise ValueError("password is required when auth_method='password'")
+            if self.private_key:
+                raise ValueError("private_key cannot be set when auth_method='password'")
+        else:
+            if not self.private_key:
+                raise ValueError("private_key is required when auth_method='key'")
+            if self.password:
+                raise ValueError("password cannot be set when auth_method='key'")
+        return self
 
 
 class DeviceUpdate(BaseModel):
@@ -72,6 +83,11 @@ class DeviceUpdate(BaseModel):
     platform: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+    # Pasar private_key sin auth_method infiere "key" (y viceversa con
+    # password/"password") -- ver _inferir_auth_method. Mandar los 2
+    # secretos juntos siempre es un error, sea cual sea auth_method.
+    auth_method: Optional[Literal["password", "key"]] = None
+    private_key: Optional[str] = None
 
     @field_validator("host")
     @classmethod
@@ -79,6 +95,23 @@ class DeviceUpdate(BaseModel):
         if v is None:
             return v
         return _validate_host(v)
+
+    @model_validator(mode="after")
+    def _inferir_auth_method(self) -> "DeviceUpdate":
+        if self.password and self.private_key:
+            raise ValueError("cannot set both password and private_key in the same call")
+        if self.auth_method is None:
+            if self.private_key:
+                self.auth_method = "key"
+            elif self.password:
+                self.auth_method = "password"
+        elif self.auth_method == "password" and self.private_key:
+            raise ValueError("private_key cannot be set when auth_method='password'")
+        elif self.auth_method == "key" and self.password:
+            raise ValueError("password cannot be set when auth_method='key'")
+        elif self.auth_method == "key" and not self.private_key:
+            raise ValueError("private_key is required when setting auth_method='key'")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -102,6 +135,7 @@ class DevicePublic(BaseModel):
     vendor: str
     platform: str
     username: str
+    auth_method: str = "password"
     # MSP: Phase 4 — site + group are guaranteed to be populated (M3 flipped
     # ``devices.device_group_id`` NOT NULL; site is derived via
     # ``device.device_group.site``).
@@ -109,7 +143,7 @@ class DevicePublic(BaseModel):
     site_name: str
     device_group_id: int
     device_group_name: str
-    # encrypted_password intentionally excluded from responses
+    # encrypted_password / encrypted_private_key intentionally excluded from responses
 
 
 class DeviceMove(BaseModel):

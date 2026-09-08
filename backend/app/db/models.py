@@ -63,6 +63,11 @@ class DeviceModel(Base):
     platform = Column(String, nullable=True)  # nullable for backward compat with existing rows
     username = Column(String, nullable=False)
     encrypted_password = Column(String, nullable=False)
+    # "password" (default) o "key" -- ver Device._VALID_AUTH_METHODS. Server
+    # default cubre las filas existentes sin migración de datos.
+    auth_method = Column(String, nullable=False, server_default="password")
+    # Solo poblado cuando auth_method == "key" -- ver Device.private_key.
+    encrypted_private_key = Column(Text, nullable=True)
     # Every device belongs to exactly one group; the site is derived through
     # ``device_group.site``.
     device_group_id = Column(

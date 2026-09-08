@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.response import ok
@@ -25,6 +25,7 @@ def _to_public(device) -> dict:
         vendor=device.vendor,
         platform=device.platform,
         username=device.username,
+        auth_method=device.auth_method,
         site_id=device.site_id,
         site_name=device.site_name,
         device_group_id=device.device_group_id,
@@ -78,7 +79,41 @@ def get_device(
     ),
 )
 def create_device(
-    data: DeviceCreate,
+    data: DeviceCreate = Body(
+        ...,
+        # Named examples so Swagger's Example Value panel shows a picker --
+        # a schema-level example doesn't render a dropdown, this does.
+        openapi_examples={
+            "password": {
+                "summary": "Password auth",
+                "value": {
+                    "name": "switch-01",
+                    "host": "192.168.1.10",
+                    "vendor": "cisco_ios",
+                    "platform": "ios",
+                    "username": "admin",
+                    "auth_method": "password",
+                    "password": "s3cr3tpass",
+                    "site_id": 1,
+                    "device_group_id": 3,
+                },
+            },
+            "key": {
+                "summary": "SSH key auth",
+                "value": {
+                    "name": "switch-02",
+                    "host": "192.168.1.11",
+                    "vendor": "huawei_vrp",
+                    "platform": "ce",
+                    "username": "netconf",
+                    "auth_method": "key",
+                    "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----",
+                    "site_id": 1,
+                    "device_group_id": 3,
+                },
+            },
+        },
+    ),
     current_user: dict = Depends(require_scope("register_device")),
 ):
     from app.composition import inventory
@@ -91,6 +126,8 @@ def create_device(
             platform=data.platform,
             username=data.username,
             password=data.password,
+            auth_method=data.auth_method,
+            private_key=data.private_key,
             site_id=data.site_id,
             device_group_id=data.device_group_id,
             actor=current_user,
@@ -127,12 +164,14 @@ def update_device(
     try:
         device.actualizar(
             host=data.host, vendor=data.vendor, platform=data.platform,
-            username=data.username, password=data.password, vault=vault,
+            username=data.username, password=data.password,
+            auth_method=data.auth_method, private_key=data.private_key,
+            vault=vault,
         )
     except ValueError as e:
         raise ValidationError(str(e))
     device = device_repository.add(device)
-    audit_fields = {k: v for k, v in provided.items() if k != "password"}
+    audit_fields = {k: v for k, v in provided.items() if k not in ("password", "private_key")}
     # Antes llamaba audit_repository.append(AuditRecord(...)) directo --
     # único endpoint del ciclo de vida de Device que se saltaba
     # EventDispatcher (register()/move()/deregister() en Inventory ya

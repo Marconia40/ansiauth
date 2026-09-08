@@ -6,6 +6,13 @@ FROM python:3.12-slim AS base
 
 # System deps:
 #   - sshpass: required by ansible-runner for password auth to devices
+#   - openssh-client: real ssh binary, used by app.services.ssh_direct_service
+#     for devices with auth_method="key" -- confirmado en vivo esta sesión
+#     que ninguna librería SSH en Python (paramiko 2 versiones,
+#     ansible-pylibssh) logra autenticar por clave contra el firmware real
+#     de f3r9s2 (Huawei) ni f3r9s1 (Cisco), mientras que el ssh real del
+#     sistema conecta consistente en ambos -- ver docstring de
+#     ssh_direct_service.py.
 #   - libpq5: psycopg's runtime dependency (psycopg[binary] bundles it, but
 #     keeping it explicit means the slim image works even if someone later
 #     swaps to psycopg2-binary)
@@ -16,6 +23,7 @@ FROM python:3.12-slim AS base
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         sshpass \
+        openssh-client \
         libpq5 \
         build-essential \
         libssl-dev \
