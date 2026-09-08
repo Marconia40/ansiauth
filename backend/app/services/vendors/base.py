@@ -134,24 +134,122 @@ class VendorDriver(ABC):
             )
             raise
 
-    def _leer(self, commands: list[str], device: Device, password: str) -> list[str]:
+    # Marker que Cisco IOS y Huawei VRP emiten cuando la sintaxis del
+    # comando no existe en ese device (ej. un IOSv de lab que no implementa
+    # ``storm-control``, un modelo viejo sin ``poe``, etc.). Es texto libre
+    # del device, no un rc del transport -- por eso se detecta acá arriba
+    # del parser en lugar de esperar que cada parser vendor-específico
+    # reconozca su propio flavor de "no entiendo el comando".
+    _UNSUPPORTED_COMMAND_MARKERS = ("% Invalid input", "Error: Unrecognized command")
+
+    def _leer(
+        self,
+        commands: list[str],
+        device: Device,
+        password: str,
+        *,
+        partial_ok: bool = False,
+    ) -> list[str]:
         """Run this driver's single playbook in "read" mode (``commands``)
         and return every command's stdout, in execution order.
 
         Raises ``RuntimeError`` on a non-zero rc or empty output -- callers
         (``list_vlans``/``list_ports``) hand the returned strings to their
         vendor-specific parser, unchanged.
+
+        ``partial_ok=True`` softens the rc-check: when the playbook reports
+        failure BUT the transport still captured at least one command's
+        stdout, the responses are returned as-is instead of raising. This
+        is the "read is a mixed batch, some commands might not exist on
+        this device" mode -- used by ``list_ports`` so an IOSv image
+        without ``storm-control`` doesn't tumble the whole port read (the
+        offending entry comes through with ``% Invalid input`` text, which
+        callers filter via ``_filter_unsupported()``). Empty ``stdouts``
+        (device unreachable, auth failure, etc.) still raises regardless
+        of *partial_ok*.
         """
-        logger.info("%s: run %d command(s) on device=%s", type(self).__name__, len(commands), device.name)
-        result = self._ejecutar({"commands": commands}, device, password)
+        logger.info(
+            "%s: run %d command(s) on device=%s (partial_ok=%s)",
+            type(self).__name__, len(commands), device.name, partial_ok,
+        )
+        # tolerate_command_errors: extravar leído por el playbook de cada
+        # vendor (camino ansible_service, ver ``run.yml`` de cada vendor).
+        # Cuando True selecciona una task "tolerant" (failed_when: false)
+        # para que ios_command / cli_command no marquen la task como
+        # fallida cuando un comando individual devuelve "% Invalid input"
+        # (Cisco) o "Error: Unrecognized command" (Huawei) -- así el
+        # stdout resultante contiene la respuesta de CADA comando,
+        # incluidos los rechazados, y el driver los filtra con
+        # _filter_unsupported(). Sin este flag Ansible descarta las
+        # respuestas parciales, confirmado en vivo contra un IOSv sin
+        # storm-control. Para devices en ``auth_method == "key"`` este
+        # flag no hace nada (``ssh_direct_service._run_reads()`` ya es
+        # tolerante por diseño -- corre cada comando en su propia sesión y
+        # siempre devuelve todos los stdouts, le pasa de largo sin usarlo)
+        # -- pasa igual por ``_ejecutar()``, el único punto de decisión de
+        # transporte, en vez de llamar a ansible_service directo acá (that
+        # bypassearía el soporte de clave SSH).
+        extravars = {"commands": commands}
+        if partial_ok:
+            extravars["tolerate_command_errors"] = True
+        result = self._ejecutar(extravars, device, password)
+        stdouts = result.get("stdouts") or []
         if result["rc"] != 0:
             error = result.get("stderr") or result.get("stdout") or "playbook exited non-zero"
+            # partial_ok con stdouts poblados: modo tolerant + algún
+            # comando individual falló pero otros pasaron -- devolver lo
+            # que hay para que el driver decida qué filtrar. En la
+            # práctica con failed_when: false esto casi nunca dispara
+            # (rc suele ser 0), pero se mantiene como safety net por si
+            # el playbook falla por otras razones (auth, timeout) y aún
+            # así capturó algo.
+            if partial_ok and stdouts:
+                logger.warning(
+                    "%s: read on device=%s reported failure but captured %d/%d command output(s); "
+                    "returning them for per-command handling (error was: %s)",
+                    type(self).__name__, device.name, len(stdouts), len(commands), error,
+                )
+                return stdouts
             logger.error("%s: read failed on device=%s — %s", type(self).__name__, device.name, error)
             raise RuntimeError(f"Cannot read state on device '{device.name}': {error}")
-        stdouts = result.get("stdouts") or []
         if not stdouts:
             raise RuntimeError(f"Cannot read state on device '{device.name}': no command output returned")
         return stdouts
+
+    @classmethod
+    def _filter_unsupported(
+        cls,
+        stdouts: list[str],
+        commands: list[str],
+        device: Device,
+    ) -> list[str]:
+        """Replace any per-command stdout that matches an "unsupported
+        command" marker with an empty string, and log which commands were
+        skipped. Preserves order and length so callers that slice by index
+        (``list_ports``' ``_STORM_INDEX``, ``read_core_state``'s port slice)
+        stay in sync with their command list.
+
+        Parsers already accept ``""`` as "no data for this source" and
+        surface it as ``None`` on the affected fields (Puerto's
+        ``storm_control_enabled``/``storm_control_threshold`` become
+        ``None`` when the storm read is missing) -- so this filter alone
+        is enough, no downstream changes needed.
+        """
+        cleaned = []
+        for cmd, out in zip(commands, stdouts):
+            if any(marker in out for marker in cls._UNSUPPORTED_COMMAND_MARKERS):
+                logger.info(
+                    "%s: device=%s does not support %r -- treating as absent feature",
+                    cls.__name__, device.name, cmd,
+                )
+                cleaned.append("")
+            else:
+                cleaned.append(out)
+        # If commands and stdouts have different lengths (shouldn't happen,
+        # but defensive), preserve whatever extra stdouts we have unmodified.
+        if len(stdouts) > len(commands):
+            cleaned.extend(stdouts[len(commands):])
+        return cleaned
 
     _commands_cache: dict | None = None
 

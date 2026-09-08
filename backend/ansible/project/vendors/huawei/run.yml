@@ -42,8 +42,21 @@
         command: "{{ item }}"
       loop: "{{ command_blocks }}"
 
-    - name: Run read commands
-      when: commands is defined
+    # 2 tasks para el mismo cli_command loop, elegidas por
+    # tolerate_command_errors (extravar seteado por VendorDriver._leer()
+    # cuando el caller pasa partial_ok=True). Ver comentario largo en
+    # vendors/cisco/run.yml -- misma lógica, misma razón. En VRP el
+    # marker típico es "Error: Unrecognized command" (ver
+    # VendorDriver._UNSUPPORTED_COMMAND_MARKERS).
+    - name: Run read commands (strict — default)
+      when: commands is defined and not (tolerate_command_errors | default(false) | bool)
       ansible.netcommon.cli_command:
         command: "{{ item }}"
       loop: "{{ commands }}"
+
+    - name: Run read commands (tolerant — per-command errors surface as text)
+      when: commands is defined and (tolerate_command_errors | default(false) | bool)
+      ansible.netcommon.cli_command:
+        command: "{{ item }}"
+      loop: "{{ commands }}"
+      failed_when: false

@@ -125,8 +125,15 @@ class CiscoVendor(VendorDriver):
     # ── Port query operation ──────────────────────────────────────────────────
 
     def list_ports(self, device: Device, password: str) -> list[Puerto]:
+        # partial_ok=True + _filter_unsupported: a device that doesn't
+        # implement ``storm-control`` (e.g. the IOSv image used in GNS3
+        # labs) rejects the 4th command with ``% Invalid input``, which
+        # used to tumble the whole port read. Now the offending slot comes
+        # back as ``""`` and the parser degrades gracefully (ports keep
+        # every other field, ``storm_control_*`` become ``None``).
         commands = self._cargar_comandos()["list_ports"]["primary"]["commands"]
-        stdouts = self._leer(commands, device, password)
+        stdouts = self._leer(commands, device, password, partial_ok=True)
+        stdouts = self._filter_unsupported(stdouts, commands, device)
         status = stdouts[_STATUS_INDEX] if len(stdouts) > _STATUS_INDEX else ""
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         switchport = stdouts[_SWITCHPORT_INDEX] if len(stdouts) > _SWITCHPORT_INDEX else ""
@@ -372,7 +379,15 @@ class CiscoVendor(VendorDriver):
         svi_cmds = list(cmds["get_svis"]["primary"]["commands"])
 
         combined = vlan_cmds + port_cmds + svi_cmds
-        stdouts = self._leer(combined, device, password)
+        # Mismo criterio que list_ports: tolerar comandos no soportados a
+        # nivel per-command (ver comentario en list_ports arriba). Comandos
+        # base (show vlan brief / show interfaces status / show running-
+        # config | section) existen en cualquier IOS -- si esos igual
+        # devuelven "% Invalid input", el filtro los normaliza a "" y los
+        # parsers correspondientes devuelven listas vacías, comportamiento
+        # degraded pero sin crash de todo el refresh.
+        stdouts = self._leer(combined, device, password, partial_ok=True)
+        stdouts = self._filter_unsupported(stdouts, combined, device)
 
         # Slice back into the per-scope outputs, in the same order the
         # commands were appended above.
