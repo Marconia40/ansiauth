@@ -5,11 +5,13 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   addGlobalConfigDns,
   removeGlobalConfigDns,
+  parseFieldErrors,
 } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -44,6 +46,7 @@ export function DnsEditModal({
   const [domainDraft, setDomainDraft] = useState('');
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -54,6 +57,7 @@ export function DnsEditModal({
     setDomainDraft('');
     setPending(null);
     setError(null);
+    setFieldErrors(null);
   }, [open, currentServers]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -72,6 +76,7 @@ export function DnsEditModal({
     }
     setPending('add-server');
     setError(null);
+    setFieldErrors(null);
     try {
       const result = await addGlobalConfigDns(deviceName, { server: s });
       trackGroupJob(result.group_job_id, `Add DNS ${s} on ${deviceName}`);
@@ -79,7 +84,9 @@ export function DnsEditModal({
       setServerDraft('');
       invalidate();
     } catch (err) {
-      setError(extractMessage(err, 'Add DNS server failed.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Add DNS server failed.'));
     } finally {
       setPending(null);
     }
@@ -90,13 +97,16 @@ export function DnsEditModal({
     if (!d) return;
     setPending('set-domain');
     setError(null);
+    setFieldErrors(null);
     try {
       const result = await addGlobalConfigDns(deviceName, { domain_name: d });
       trackGroupJob(result.group_job_id, `Set domain ${d} on ${deviceName}`);
       setDomainDraft('');
       invalidate();
     } catch (err) {
-      setError(extractMessage(err, 'Set domain-name failed.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Set domain-name failed.'));
     } finally {
       setPending(null);
     }
@@ -196,6 +206,7 @@ export function DnsEditModal({
                 placeholder="e.g. 8.8.8.8"
                 className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
               />
+              <FieldError message={fieldErrors?.server} />
             </FieldRow>
           ) : (
             <FieldRow label="Domain">
@@ -206,6 +217,7 @@ export function DnsEditModal({
                 placeholder="e.g. example.com"
                 className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
               />
+              <FieldError message={fieldErrors?.domain_name} />
             </FieldRow>
           )}
 

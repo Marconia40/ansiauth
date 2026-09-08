@@ -331,6 +331,10 @@ class AuditLogModel(Base):
     resource_id = Column(String, nullable=True)
     status = Column(String, nullable=False, default="success")
     details = Column(JSON, nullable=False, default=dict)
+    # Frase legible de qué se hizo (o por qué falló) -- AuditRecord.summary,
+    # ver docstring del campo y de _resumir() en models/audit.py. None para
+    # eventos sin un RecursoGestionable detrás (auth/users/sites/...).
+    summary = Column(Text, nullable=True)
     job_id = Column(String, nullable=True)
     device = Column(String, nullable=True)
     request_id = Column(String, nullable=True)

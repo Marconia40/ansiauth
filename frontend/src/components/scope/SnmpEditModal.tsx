@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { setGlobalConfigSnmp } from '@/services/api';
+import { setGlobalConfigSnmp, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type {
   GlobalConfigSnmpInfo,
@@ -11,6 +11,7 @@ import type {
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -45,6 +46,7 @@ export function SnmpEditModal({
   const [trapHost, setTrapHost] = useState('');
   const [trapVersion, setTrapVersion] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -58,6 +60,7 @@ export function SnmpEditModal({
     setTrapHost('');
     setTrapVersion('');
     setError(null);
+    setFieldErrors(null);
   }, [open, currentSnmp]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -109,7 +112,9 @@ export function SnmpEditModal({
       onClose();
     },
     onError: (err: unknown) => {
-      setError(extractMessage(err, 'Failed to queue the SNMP change.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Failed to queue the SNMP change.'));
     },
   });
 
@@ -149,6 +154,7 @@ export function SnmpEditModal({
             placeholder="e.g. v2c (VRP only)"
             className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
           />
+          <FieldError message={fieldErrors?.version} />
         </FieldRow>
 
         <FieldRow label="Community">
@@ -159,6 +165,7 @@ export function SnmpEditModal({
             placeholder="e.g. public"
             className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
           />
+          <FieldError message={fieldErrors?.community} />
         </FieldRow>
 
         <FieldRow label="Trap source interface">
@@ -169,6 +176,7 @@ export function SnmpEditModal({
             placeholder="e.g. Loopback0"
             className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
           />
+          <FieldError message={fieldErrors?.trap_source} />
         </FieldRow>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -180,6 +188,7 @@ export function SnmpEditModal({
               placeholder="e.g. 10.0.0.5"
               className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
             />
+            <FieldError message={fieldErrors?.trap_host} />
           </FieldRow>
           <FieldRow label="Trap version">
             <input
@@ -189,6 +198,7 @@ export function SnmpEditModal({
               placeholder="e.g. 2c"
               className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
             />
+            <FieldError message={fieldErrors?.trap_version} />
           </FieldRow>
         </div>
 

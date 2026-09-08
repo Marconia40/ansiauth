@@ -308,6 +308,50 @@ export function extractMessage(error: unknown, fallback: string): string {
   return validationMsg ?? e?.response?.data?.message ?? e?.message ?? fallback;
 }
 
+/** Pydantic validation errors (`RequestValidationError`, see
+ * `request_validation_error_handler` in `backend/app/main.py`) come back
+ * as `details.errors: [{loc: ["body", "ipv4_address"], msg: "..."}]` --
+ * `extractMessage()` above only ever surfaces the FIRST one as a single
+ * generic string, with no link back to which field it's about, so a form
+ * with several inputs (e.g. SVIEditModal's IPv4/IPv6/ACL tabs) had no way
+ * to show the real reason next to the field the user is actually looking
+ * at -- it either showed nothing useful or a bottom-of-modal message the
+ * user had to go find in the Audit Logs' raw JSON to actually read.
+ *
+ * Returns a `{fieldName: message}` map keyed by the full `loc` path (minus
+ * the leading `"body"`), dot-joined -- for a flat body this is just the
+ * field name (`ipv4_address`, matching this app's convention of naming a
+ * form's local state after the wire field name), but for a field nested
+ * inside a list (e.g. GlobalConfigAcl's `rules: [...]`,
+ * `["body","rules",2,"protocol"]`) it's `"rules.2.protocol"` -- keeping the
+ * index means an error on rule 2 doesn't collide with the same field name
+ * on rule 0. Multiple errors on the same field are joined with '; '.
+ * Returns `null` for any error shape that isn't this validation response
+ * (network error, a different 4xx/5xx, etc.) so callers can tell "no
+ * field-level detail available" apart from "no errors at all". */
+export function parseFieldErrors(error: unknown): Record<string, string> | null {
+  const e = error as {
+    response?: { data?: { details?: { errors?: Array<{ loc?: unknown[]; msg?: string }> } } };
+  } | null;
+  const errors = e?.response?.data?.details?.errors;
+  if (!errors || errors.length === 0) return null;
+  const fields: Record<string, string> = {};
+  for (const err of errors) {
+    const loc = Array.isArray(err.loc) ? err.loc : [];
+    // Full loc path (minus the leading "body"), dot-joined, not just the
+    // last segment -- a flat body (`["body","ipv4_address"]`) still keys
+    // as `"ipv4_address"` (unchanged), but a nested/indexed one (a rule
+    // inside GlobalConfigAcl's `rules: [...]`, `["body","rules",2,"protocol"]`)
+    // keys as `"rules.2.protocol"` instead of colliding with every other
+    // rule's `"protocol"` under the same last-segment-only key.
+    const segments = loc.filter((s) => s !== 'body').map(String);
+    const field = segments.length > 0 ? segments.join('.') : null;
+    if (!field || !err.msg) continue;
+    fields[field] = fields[field] ? `${fields[field]}; ${err.msg}` : err.msg;
+  }
+  return Object.keys(fields).length > 0 ? fields : null;
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 export async function login(

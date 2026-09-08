@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { batchUpdateSvi } from '@/services/api';
+import { batchUpdateSvi, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { SVIBatchRequest } from '@/types/svi';
 import type { SviRow } from './scopeSvis';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -16,6 +17,22 @@ import {
 import { invalidateSviQueries } from './SVICreateModal';
 
 type Tab = 'general' | 'ipv4' | 'ipv6' | 'acl' | 'dhcp';
+
+// Maps the wire field name (Pydantic error `loc`'s last segment, see
+// `parseFieldErrors()`) to the tab that field's input lives on -- used to
+// jump straight to the right tab when Save comes back with a field error,
+// instead of leaving the user on whichever tab they happened to be on.
+const FIELD_TO_TAB: Record<string, Tab> = {
+  description: 'general',
+  admin_up: 'general',
+  ipv4_address: 'ipv4',
+  ipv4_address_secondary: 'ipv4',
+  ipv6_address: 'ipv6',
+  acl_in: 'acl',
+  acl_out: 'acl',
+  dhcp_relay_add: 'dhcp',
+  dhcp_relay_remove: 'dhcp',
+};
 
 interface Props {
   open: boolean;
@@ -69,6 +86,10 @@ export function SVIEditModal({ open, onClose, row }: Props) {
   const [dhcpAdding, setDhcpAdding] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+  // Per-field validation messages (see parseFieldErrors()) -- rendered
+  // inline under the actual input on the tab it belongs to, instead of
+  // only as one generic string at the bottom of the modal.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   // Re-hidrata el form cada vez que cambia la row objetivo (o se abre el modal).
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -86,6 +107,7 @@ export function SVIEditModal({ open, onClose, row }: Props) {
     setDhcpDraft('');
     setDhcpAdding(false);
     setError(null);
+    setFieldErrors(null);
   }, [row, open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -218,6 +240,16 @@ export function SVIEditModal({ open, onClose, row }: Props) {
     dhcpDelta,
   ]);
 
+  const errorTabs = useMemo(() => {
+    const tabs = new Set<Tab>();
+    if (!fieldErrors) return tabs;
+    for (const field of Object.keys(fieldErrors)) {
+      const t = FIELD_TO_TAB[field];
+      if (t) tabs.add(t);
+    }
+    return tabs;
+  }, [fieldErrors]);
+
   const mutation = useMutation({
     mutationFn: async () => {
       if (!initial || Object.keys(pending.body).length === 0) return;
@@ -233,7 +265,23 @@ export function SVIEditModal({ open, onClose, row }: Props) {
       onClose();
     },
     onSettled: () => invalidateSviQueries(queryClient),
-    onError: (err: unknown) => setError(extractMessage(err, 'Save failed.')),
+    onError: (err: unknown) => {
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      // The generic banner is redundant noise once a field-level message
+      // is already shown next to the input it's about -- only fall back
+      // to it when there's no field detail to show instead.
+      setError(fields ? null : extractMessage(err, 'Save failed.'));
+      // Jump to the tab holding the first field error so it's visible
+      // immediately -- before this, a rejected IPv4/ACL/etc value on a
+      // tab you weren't looking at was invisible without digging through
+      // the Audit Logs' raw JSON.
+      if (fields) {
+        const firstField = Object.keys(fields)[0];
+        const targetTab = FIELD_TO_TAB[firstField];
+        if (targetTab) setTab(targetTab);
+      }
+    },
   });
 
   function queueAddDhcpServer() {
@@ -290,6 +338,7 @@ export function SVIEditModal({ open, onClose, row }: Props) {
           tab={tab}
           onChange={setTab}
           dirty={dirtyByTab}
+          errorTabs={errorTabs}
           disabled={mutation.isPending}
         />
 
@@ -300,6 +349,7 @@ export function SVIEditModal({ open, onClose, row }: Props) {
             initialAdminUp={initial?.adminUp ?? null}
             description={description}
             onDescriptionChange={setDescription}
+            descriptionError={fieldErrors?.description}
           />
         )}
         {tab === 'ipv4' && (
@@ -309,10 +359,12 @@ export function SVIEditModal({ open, onClose, row }: Props) {
             secondary={ipv4Secondary}
             onSecondaryChange={setIpv4Secondary}
             initialPrimary={initial?.ipv4 ?? ''}
+            primaryError={fieldErrors?.ipv4_address}
+            secondaryError={fieldErrors?.ipv4_address_secondary}
           />
         )}
         {tab === 'ipv6' && (
-          <Ipv6Tab value={ipv6} onChange={setIpv6} />
+          <Ipv6Tab value={ipv6} onChange={setIpv6} error={fieldErrors?.ipv6_address} />
         )}
         {tab === 'acl' && (
           <AclTab
@@ -320,6 +372,8 @@ export function SVIEditModal({ open, onClose, row }: Props) {
             onAclInChange={setAclIn}
             aclOut={aclOut}
             onAclOutChange={setAclOut}
+            aclInError={fieldErrors?.acl_in}
+            aclOutError={fieldErrors?.acl_out}
           />
         )}
         {tab === 'dhcp' && (
@@ -352,11 +406,13 @@ function TabBar({
   tab,
   onChange,
   dirty,
+  errorTabs,
   disabled,
 }: {
   tab: Tab;
   onChange: (t: Tab) => void;
   dirty: Record<Tab, boolean>;
+  errorTabs: Set<Tab>;
   disabled?: boolean;
 }) {
   const items: Array<{ key: Tab; label: string }> = [
@@ -383,7 +439,12 @@ function TabBar({
             }`}
           >
             {it.label}
-            {dirty[it.key] && (
+            {errorTabs.has(it.key) ? (
+              <span
+                className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-danger align-middle"
+                title="This tab has a field with an error"
+              />
+            ) : dirty[it.key] && (
               <span
                 className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-warning align-middle"
                 title="Unsaved changes"
@@ -402,12 +463,14 @@ function GeneralTab({
   initialAdminUp,
   description,
   onDescriptionChange,
+  descriptionError,
 }: {
   adminUp: boolean | null;
   onAdminUpChange: (v: boolean) => void;
   initialAdminUp: boolean | null;
   description: string;
   onDescriptionChange: (v: string) => void;
+  descriptionError?: string;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -419,6 +482,7 @@ function GeneralTab({
           placeholder="Leave empty to clear"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
         />
+        <FieldError message={descriptionError} />
         <p className="text-xs text-muted mt-1">
           Clearing the field and saving will DELETE the description on the device.
         </p>
@@ -457,12 +521,16 @@ function Ipv4Tab({
   secondary,
   onSecondaryChange,
   initialPrimary,
+  primaryError,
+  secondaryError,
 }: {
   primary: string;
   onPrimaryChange: (v: string) => void;
   secondary: string;
   onSecondaryChange: (v: string) => void;
   initialPrimary: string;
+  primaryError?: string;
+  secondaryError?: string;
 }) {
   const secondaryBlocked = primary.trim() === '' && secondary.trim() !== '';
   return (
@@ -475,6 +543,7 @@ function Ipv4Tab({
           placeholder="e.g. 10.10.10.11/24 — empty to clear"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
         />
+        <FieldError message={primaryError} />
       </FieldRow>
 
       <FieldRow label="Secondary address (CIDR)">
@@ -485,6 +554,7 @@ function Ipv4Tab({
           placeholder="Optional — requires a primary already configured"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
         />
+        <FieldError message={secondaryError} />
         {secondaryBlocked && (
           <p className="text-xs text-danger mt-1">
             The device rejects a secondary without a primary. Save will fail
@@ -505,9 +575,11 @@ function Ipv4Tab({
 function Ipv6Tab({
   value,
   onChange,
+  error,
 }: {
   value: string;
   onChange: (v: string) => void;
+  error?: string;
 }) {
   return (
     <FieldRow label="IPv6 address (CIDR)">
@@ -518,6 +590,7 @@ function Ipv6Tab({
         placeholder="e.g. 2001:db8::1/64 — empty to clear"
         className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
       />
+      <FieldError message={error} />
     </FieldRow>
   );
 }
@@ -527,11 +600,15 @@ function AclTab({
   onAclInChange,
   aclOut,
   onAclOutChange,
+  aclInError,
+  aclOutError,
 }: {
   aclIn: string;
   onAclInChange: (v: string) => void;
   aclOut: string;
   onAclOutChange: (v: string) => void;
+  aclInError?: string;
+  aclOutError?: string;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -543,6 +620,7 @@ function AclTab({
           placeholder="ACL must already exist on the device — empty to unbind"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
         />
+        <FieldError message={aclInError} />
       </FieldRow>
       <FieldRow label="ACL name — outbound">
         <input
@@ -552,6 +630,7 @@ function AclTab({
           placeholder="ACL must already exist on the device — empty to unbind"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
         />
+        <FieldError message={aclOutError} />
       </FieldRow>
     </div>
   );

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { removeGlobalConfigAclRules } from '@/services/api';
+import { removeGlobalConfigAclRules, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Modal } from './Modal';
 import {
@@ -46,12 +46,14 @@ export function AclRemoveRulesModal({
 
   const [drafts, setDrafts] = useState<RuleDraft[]>([makeEmptyDraft()]);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!open) return;
     setDrafts([makeEmptyDraft()]);
     setError(null);
+    setFieldErrors(null);
   }, [open, aclName]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -77,7 +79,9 @@ export function AclRemoveRulesModal({
       onClose();
     },
     onError: (err: unknown) => {
-      setError(extractMessage(err, 'Failed to queue the rule removal.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Failed to queue the rule removal.'));
     },
   });
 
@@ -127,6 +131,7 @@ export function AclRemoveRulesModal({
           value={drafts}
           onChange={setDrafts}
           disabled={mutation.isPending}
+          fieldErrors={fieldErrors}
         />
 
         {rulesReady.length === 0 && (

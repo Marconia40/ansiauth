@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { addGlobalConfigRoute } from '@/services/api';
+import { addGlobalConfigRoute, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -32,6 +33,7 @@ export function RouteAddModal({ open, onClose, deviceName }: Props) {
   const [destination, setDestination] = useState('');
   const [nextHop, setNextHop] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -39,6 +41,7 @@ export function RouteAddModal({ open, onClose, deviceName }: Props) {
     setDestination('');
     setNextHop('');
     setError(null);
+    setFieldErrors(null);
   }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -66,7 +69,9 @@ export function RouteAddModal({ open, onClose, deviceName }: Props) {
       onClose();
     },
     onError: (err: unknown) => {
-      setError(extractMessage(err, 'Failed to queue the route addition.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Failed to queue the route addition.'));
     },
   });
 
@@ -103,6 +108,7 @@ export function RouteAddModal({ open, onClose, deviceName }: Props) {
               Destination must include a prefix length, e.g. /24.
             </p>
           )}
+          <FieldError message={fieldErrors?.destination} />
         </FieldRow>
 
         <FieldRow label="Next-hop IP">
@@ -113,6 +119,7 @@ export function RouteAddModal({ open, onClose, deviceName }: Props) {
             placeholder="e.g. 10.0.0.1"
             className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
           />
+          <FieldError message={fieldErrors?.next_hop} />
         </FieldRow>
 
         <p className="text-xs text-muted">

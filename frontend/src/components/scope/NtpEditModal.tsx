@@ -5,11 +5,13 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   addGlobalConfigNtp,
   removeGlobalConfigNtp,
+  parseFieldErrors,
 } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -40,6 +42,7 @@ export function NtpEditModal({
   const [prefer, setPrefer] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -49,6 +52,7 @@ export function NtpEditModal({
     setPrefer(false);
     setPending(null);
     setError(null);
+    setFieldErrors(null);
   }, [open, currentServers]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -67,6 +71,7 @@ export function NtpEditModal({
     }
     setPending('add');
     setError(null);
+    setFieldErrors(null);
     try {
       const result = await addGlobalConfigNtp(deviceName, {
         server: s,
@@ -78,7 +83,9 @@ export function NtpEditModal({
       setPrefer(false);
       invalidate();
     } catch (err) {
-      setError(extractMessage(err, 'Add NTP server failed.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Add NTP server failed.'));
     } finally {
       setPending(null);
     }
@@ -154,6 +161,7 @@ export function NtpEditModal({
               placeholder="e.g. 10.0.0.5"
               className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
             />
+            <FieldError message={fieldErrors?.server} />
           </FieldRow>
           <label className="flex items-center gap-2 text-sm text-text">
             <input

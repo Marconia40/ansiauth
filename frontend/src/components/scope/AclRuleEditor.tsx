@@ -6,7 +6,22 @@ import type {
   AclRuleEndpoint,
   AclRulePort,
 } from '@/types/global-config';
-import { FieldRow } from './VlanCreateModal';
+import { FieldRow, FieldError } from './VlanCreateModal';
+
+// A validation error on rule N comes back from the backend with a `loc`
+// like `["body","rules",2,"protocol"]` -- parseFieldErrors() (services/api.ts)
+// keys that as `"rules.2.protocol"`. This pulls out every key belonging to
+// rule `idx` and joins them into one message for that row -- source/
+// destination are compound (mode + value) inputs, so a per-sub-field
+// message wouldn't land cleanly on a single input anyway; row-level is the
+// right granularity here (still names which sub-field, just not the input).
+function rowError(fieldErrors: Record<string, string> | null | undefined, idx: number): string | null {
+  if (!fieldErrors) return null;
+  const prefix = `rules.${idx}.`;
+  const hits = Object.entries(fieldErrors).filter(([k]) => k.startsWith(prefix));
+  if (hits.length === 0) return null;
+  return hits.map(([k, v]) => `${k.slice(prefix.length)}: ${v}`).join('; ');
+}
 
 // Internal draft state for each rule row. Split source/destination into
 // (mode, value) pairs so the UI can render 3 radios + 1 value input per
@@ -83,13 +98,16 @@ interface Props {
   value: RuleDraft[];
   onChange: (next: RuleDraft[]) => void;
   disabled?: boolean;
+  /** Field-level validation errors from the last submit attempt, if any
+   *  (see parseFieldErrors()) -- routed to the row(s) they're about. */
+  fieldErrors?: Record<string, string> | null;
 }
 
 // Renders the list of rule drafts + Add/Remove controls. Fully controlled:
 // the parent owns `value` and receives every mutation via `onChange`.
 // Reused by both the Create/Add modal and the Remove-Rules modal since
 // the request shape is identical between them.
-export function AclRuleEditor({ value, onChange, disabled }: Props) {
+export function AclRuleEditor({ value, onChange, disabled, fieldErrors }: Props) {
   const addRule = () => onChange([...value, makeEmptyDraft()]);
   const removeRule = (idx: number) =>
     onChange(value.filter((_, i) => i !== idx));
@@ -107,6 +125,7 @@ export function AclRuleEditor({ value, onChange, disabled }: Props) {
           index={i}
           rule={r}
           disabled={disabled}
+          error={rowError(fieldErrors, i)}
           onChange={(patch) => patchRule(i, patch)}
           onRemove={() => removeRule(i)}
         />
@@ -129,12 +148,14 @@ function RuleCard({
   index,
   rule,
   disabled,
+  error,
   onChange,
   onRemove,
 }: {
   index: number;
   rule: RuleDraft;
   disabled?: boolean;
+  error?: string | null;
   onChange: (patch: Partial<RuleDraft>) => void;
   onRemove: () => void;
 }) {
@@ -159,6 +180,8 @@ function RuleCard({
           ×
         </button>
       </div>
+
+      <FieldError message={error ?? undefined} />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <FieldRow label="Action">

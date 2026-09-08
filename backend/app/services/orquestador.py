@@ -344,7 +344,10 @@ class Orquestador:
             self._jobs.add(job)
             self._eventos.despachar([DomainEvent(
                 "recurso_fallido", recurso, device, actor,
-                {"error": str(error), "rollback_performed": rb_performed, "rollback_success": rb_success},
+                {
+                    "error": str(error), "rollback_performed": rb_performed, "rollback_success": rb_success,
+                    "error_summary": getattr(error, "resumen", None),
+                },
                 exitoso=False,
             )])
             raise
@@ -578,7 +581,7 @@ class Orquestador:
             self._eventos.despachar([DomainEvent(
                 "recurso_fallido", recursos[0], device, actor,
                 {"error": str(error), "rollback_performed": rb_performed_total, "rollback_success": rb_success_total,
-                 "lote_size": len(recursos)},
+                 "lote_size": len(recursos), "error_summary": getattr(error, "resumen", None)},
                 exitoso=False,
             )])
             raise

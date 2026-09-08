@@ -835,9 +835,13 @@ function AuditPageContent() {
                     {log.status}
                   </td>
                   <td className="px-4 py-2">
-                    <pre className="text-xs text-text bg-panel-elev/60 border border-panel-border rounded p-2 max-w-xs overflow-auto max-h-32 whitespace-pre-wrap">
-                      {JSON.stringify(log.details, null, 2)}
-                    </pre>
+                    {log.summary ? (
+                      <p className="text-xs text-text">{log.summary}</p>
+                    ) : (
+                      <pre className="text-xs text-muted bg-panel-elev/60 border border-panel-border rounded p-2 max-w-xs overflow-auto max-h-32 whitespace-pre-wrap">
+                        {JSON.stringify(log.details, null, 2)}
+                      </pre>
+                    )}
                   </td>
                 </tr>
               ))}

@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { setGlobalConfigHostname } from '@/services/api';
+import { setGlobalConfigHostname, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -36,6 +37,7 @@ export function HostnameEditModal({
   const { trackGroupJob } = useJobNotifications();
   const [hostname, setHostname] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   // Re-hydrate the input whenever the modal (re)opens for a different device
   // or the cached hostname changes.
@@ -44,6 +46,7 @@ export function HostnameEditModal({
     if (!open) return;
     setHostname(currentHostname ?? '');
     setError(null);
+    setFieldErrors(null);
   }, [open, currentHostname]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -65,7 +68,9 @@ export function HostnameEditModal({
       onClose();
     },
     onError: (err: unknown) => {
-      setError(extractMessage(err, 'Failed to queue the hostname change.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Failed to queue the hostname change.'));
     },
   });
 
@@ -110,6 +115,7 @@ export function HostnameEditModal({
               Same as the current hostname — nothing to apply.
             </p>
           )}
+          <FieldError message={fieldErrors?.hostname} />
         </FieldRow>
 
         <p className="text-xs text-muted">
