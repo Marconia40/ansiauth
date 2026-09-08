@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { createVlan } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import { Modal } from './Modal';
 import { DeviceSelector } from './DeviceSelector';
@@ -13,12 +14,11 @@ interface Props {
   scope: Scope;
   /** Only relevant at device scope. */
   deviceName?: string;
-  /** Called with a friendly success/failure message so the tab can toast it. */
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
-export function VlanCreateModal({ open, onClose, scope, deviceName, onDone }: Props) {
+export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
   const queryClient = useQueryClient();
+  const { trackGroupJob } = useJobNotifications();
 
   const [vlanId, setVlanId] = useState('');
   const [name, setName] = useState('');
@@ -38,8 +38,11 @@ export function VlanCreateModal({ open, onClose, scope, deviceName, onDone }: Pr
       const devices = Array.from(effectiveSelected);
       return createVlan({ vlan_id: parsedId, name: name.trim(), devices });
     },
-    onSuccess: () => {
-      onDone?.(`VLAN ${vlanId} created on ${effectiveSelected.size} device(s).`, 'ok');
+    onSuccess: (result) => {
+      trackGroupJob(
+        result.group_job_id,
+        `Create VLAN ${vlanId} on ${effectiveSelected.size} device(s)`,
+      );
       invalidateVlanQueries(queryClient);
       resetAndClose();
     },

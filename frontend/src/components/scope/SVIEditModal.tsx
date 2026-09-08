@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { batchUpdateSvi } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { SVIBatchRequest } from '@/types/svi';
 import type { SviRow } from './scopeSvis';
 import { Modal } from './Modal';
@@ -21,7 +22,6 @@ interface Props {
   onClose: () => void;
   /** The SVI row to edit. When null the modal renders nothing (parent gates it). */
   row: SviRow | null;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 /** Editor de SVI. Una fila = un (device, vlan_id) unico, asi que el modal
@@ -39,8 +39,9 @@ interface Props {
  * contra el resultado del otro), y el 2do pisaría al 1ro en silencio.
  * Limitar a 1 evita ese bug de raíz sin tener que construir el mecanismo
  * de "plegar N deltas en 1 lista" que sí necesitaría permitir más de 1. */
-export function SVIEditModal({ open, onClose, row, onDone }: Props) {
+export function SVIEditModal({ open, onClose, row }: Props) {
   const queryClient = useQueryClient();
+  const { trackGroupJob } = useJobNotifications();
 
   const [tab, setTab] = useState<Tab>('general');
 
@@ -220,13 +221,15 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
   const mutation = useMutation({
     mutationFn: async () => {
       if (!initial || Object.keys(pending.body).length === 0) return;
-      await batchUpdateSvi(initial.device, initial.vlanId, pending.body);
+      return batchUpdateSvi(initial.device, initial.vlanId, pending.body);
     },
-    onSuccess: () => {
-      onDone?.(
-        `SVI ${initial?.vlanId} on ${initial?.device}: ${totalChanges} change(s) applied.`,
-        'ok',
-      );
+    onSuccess: (result) => {
+      if (result && initial) {
+        trackGroupJob(
+          result.group_job_id,
+          `Update SVI ${initial.vlanId} on ${initial.device}`,
+        );
+      }
       onClose();
     },
     onSettled: () => invalidateSviQueries(queryClient),

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Scope } from './ScopeDashboard';
 import { Panel } from './Panel';
@@ -18,8 +18,6 @@ interface Props {
   deviceName?: string;
 }
 
-type Toast = { msg: string; tone: 'ok' | 'error' } | null;
-
 export function VlanTab({ scope, deviceName }: Props) {
   const queryClient = useQueryClient();
   const { rows, devices, isLoading, isError } = useScopeVlans(scope);
@@ -27,14 +25,7 @@ export function VlanTab({ scope, deviceName }: Props) {
   const [openCreate, setOpenCreate] = useState(false);
   const [openUpdate, setOpenUpdate] = useState(false);
   const [openRemove, setOpenRemove] = useState(false);
-  const [toast, setToast] = useState<Toast>(null);
   const [refreshing, setRefreshing] = useState(false);
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4500);
-    return () => clearTimeout(t);
-  }, [toast]);
 
   async function handleRefresh() {
     const names = devices.map((d) => d.name);
@@ -92,7 +83,6 @@ export function VlanTab({ scope, deviceName }: Props) {
         onClose={() => setOpenCreate(false)}
         scope={scope}
         deviceName={deviceName}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       <VlanUpdateModal
         open={openUpdate}
@@ -100,7 +90,6 @@ export function VlanTab({ scope, deviceName }: Props) {
         scope={scope}
         deviceName={deviceName}
         rows={rows}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       <VlanRemoveModal
         open={openRemove}
@@ -108,20 +97,7 @@ export function VlanTab({ scope, deviceName }: Props) {
         scope={scope}
         deviceName={deviceName}
         rows={rows}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
-
-      {toast && (
-        <div
-          className={`fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm ${
-            toast.tone === 'ok'
-              ? 'bg-success text-white'
-              : 'bg-danger text-white'
-          }`}
-        >
-          {toast.msg}
-        </div>
-      )}
     </div>
   );
 }

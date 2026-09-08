@@ -25,7 +25,6 @@ interface Props {
   /** Raw rule lines shown as a read-only reference so the user knows what
    *  is currently configured before writing structured rules to remove. */
   currentRuleLines: string[];
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 // DELETE /devices/{name}/global-config/acls/rules -- same body shape as
@@ -41,10 +40,9 @@ export function AclRemoveRulesModal({
   deviceName,
   aclName,
   currentRuleLines,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const [drafts, setDrafts] = useState<RuleDraft[]>([makeEmptyDraft()]);
   const [error, setError] = useState<string | null>(null);
@@ -69,15 +67,13 @@ export function AclRemoveRulesModal({
         rules: rulesReady,
       }),
     onSuccess: (result) => {
-      const label = `Remove rules from ACL ${aclName} on ${deviceName}`;
-      trackGroupJob(result.group_job_id, label);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, label, j.device);
-      }
+      trackGroupJob(
+        result.group_job_id,
+        `Remove rules from ACL ${aclName} on ${deviceName}`,
+      );
       queryClient.invalidateQueries({
         queryKey: ['global-config', 'synced', deviceName],
       });
-      onDone?.(`Remove rules from ACL ${aclName} queued on ${deviceName}.`, 'ok');
       onClose();
     },
     onError: (err: unknown) => {

@@ -22,7 +22,6 @@ interface Props {
   deviceName: string;
   /** Snapshot of the cached SNMP block — used only as initial values. */
   currentSnmp: GlobalConfigSnmpInfo | null;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 // PATCH /devices/{name}/global-config/snmp (RF-GLOBAL-07). Community is
@@ -36,10 +35,9 @@ export function SnmpEditModal({
   onClose,
   deviceName,
   currentSnmp,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const [version, setVersion] = useState('');
   const [community, setCommunity] = useState('');
@@ -105,13 +103,9 @@ export function SnmpEditModal({
     mutationFn: () => setGlobalConfigSnmp(deviceName, body),
     onSuccess: (result) => {
       trackGroupJob(result.group_job_id, `Update SNMP on ${deviceName}`);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, `Update SNMP on ${deviceName}`, j.device);
-      }
       queryClient.invalidateQueries({
         queryKey: ['global-config', 'synced', deviceName],
       });
-      onDone?.(`SNMP change queued on ${deviceName}.`, 'ok');
       onClose();
     },
     onError: (err: unknown) => {

@@ -16,7 +16,6 @@ interface Props {
   open: boolean;
   onClose: () => void;
   deviceName: string;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 // POST /devices/{name}/global-config/routes (RF-GLOBAL-06). `destination`
@@ -26,9 +25,9 @@ interface Props {
 // -- it responds `accion="ruta_ya_existe"` and leaves the device untouched
 // (SRS alternative course). The user has to remove the old route first;
 // we hint that in the modal so the failure mode isn't a mystery.
-export function RouteAddModal({ open, onClose, deviceName, onDone }: Props) {
+export function RouteAddModal({ open, onClose, deviceName }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const [destination, setDestination] = useState('');
   const [nextHop, setNextHop] = useState('');
@@ -57,15 +56,13 @@ export function RouteAddModal({ open, onClose, deviceName, onDone }: Props) {
         next_hop: nhTrim,
       }),
     onSuccess: (result) => {
-      const label = `Add route ${dTrim} → ${nhTrim} on ${deviceName}`;
-      trackGroupJob(result.group_job_id, label);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, label, j.device);
-      }
+      trackGroupJob(
+        result.group_job_id,
+        `Add route ${dTrim} → ${nhTrim} on ${deviceName}`,
+      );
       queryClient.invalidateQueries({
         queryKey: ['global-config', 'synced', deviceName],
       });
-      onDone?.(`Add route ${dTrim} → ${nhTrim} queued on ${deviceName}.`, 'ok');
       onClose();
     },
     onError: (err: unknown) => {

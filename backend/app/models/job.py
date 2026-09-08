@@ -22,6 +22,12 @@ class Job:
     playbook: Optional[str] = None
     device: Optional[str] = None
     parameters: Optional[dict] = None
+    # Frase corta y legible de la INTENCIÓN de este job (ej. "Add route
+    # 192.168.100.0/24 -> 10.10.100.1"), calculada UNA vez por
+    # GroupOperationRunner vía RecursoGestionable.resumen_intento() --
+    # reemplaza mostrar `parameters` (el asdict() crudo del dataclass
+    # completo, con la mayoría de sus campos en None) en el frontend.
+    parameters_summary: Optional[str] = None
     result: Optional[dict] = None
     error: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

@@ -11,44 +11,19 @@ type Selected =
 
 // ── Status helpers ────────────────────────────────────────────────────────────
 
-function getJobDisplayState(job: JobNotification): { label: string; className: string } {
-  if (job.status === 'completed' && job.operationResult === 'noop') {
-    return { label: 'No changes', className: 'bg-gray-100 text-gray-700' };
-  }
-  if (job.status === 'completed') return { label: 'Completed', className: 'bg-green-100 text-green-700' };
-  if (job.status === 'failed') return { label: 'Failed', className: 'bg-red-100 text-red-700' };
-  if (job.status === 'running') return { label: 'Running', className: 'bg-amber-100 text-amber-700' };
-  return { label: 'Pending', className: 'bg-amber-100 text-amber-700' };
-}
-
-function getNoopMessage(reason?: string): string {
-  if (reason === 'vlan_already_exists_no_op') return 'VLAN already exists — no changes applied';
-  if (reason === 'vlan_name_unchanged_no_op') return 'VLAN name already matches current configuration';
-  return 'No changes were required';
-}
-
-function getGroupSummary(gj: GroupJobNotification): { text: string; badgeLabel: string; badgeClass: string } {
-  const { status, total, completed, failed } = gj;
-  if (status === 'pending') {
-    return { text: `(0/${total || '…'})`, badgeLabel: 'Pending', badgeClass: 'bg-amber-100 text-amber-700' };
-  }
-  if (status === 'running') {
-    return { text: `(${completed}/${total} completed)`, badgeLabel: 'Running', badgeClass: 'bg-amber-100 text-amber-700' };
-  }
-  if (status === 'completed') {
-    return { text: `— completed (${total}/${total})`, badgeLabel: 'Completed', badgeClass: 'bg-green-100 text-green-700' };
-  }
-  if (status === 'partial_success') {
-    return {
-      text: `— partial failure (${completed} success, ${failed} failed)`,
-      badgeLabel: 'Partial',
-      badgeClass: 'bg-orange-100 text-orange-700',
-    };
-  }
-  return { text: '— failed', badgeLabel: 'Failed', badgeClass: 'bg-red-100 text-red-700' };
-}
-
 // ── Notification cards ────────────────────────────────────────────────────────
+
+// Always a small solid-color toast (same look the old per-tab `toast` divs
+// had -- `bg-success text-white` / `bg-danger text-white`), for the whole
+// lifetime of the card, not just once it reaches a terminal state -- the
+// live status lives in the JobDetailModal this opens, the toast itself is
+// just "something is happening / happened, click for detail". Genuine
+// failure is still called out in red so it isn't missed.
+function solidGroupToastClass(status: GroupJobNotification['status']): string {
+  if (status === 'failed') return 'bg-danger text-white';
+  if (status === 'partial_success' || status === 'partial_failure') return 'bg-orange-600 text-white';
+  return 'bg-success text-white';
+}
 
 function GroupJobCard({
   gj,
@@ -59,31 +34,19 @@ function GroupJobCard({
   onOpen: () => void;
   onDismiss: () => void;
 }) {
-  const { text, badgeLabel, badgeClass } = getGroupSummary(gj);
-
   return (
     <div
       role="button"
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => e.key === 'Enter' && onOpen()}
-      className="bg-white border border-gray-200 rounded-md shadow-sm p-3 text-sm cursor-pointer hover:border-blue-300 hover:shadow-md transition-shadow"
+      className={`${solidGroupToastClass(gj.status)} rounded-md shadow-lg px-3 py-2 text-sm cursor-pointer hover:brightness-110 transition`}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex-1 min-w-0">
-          <div className="font-medium text-gray-900 truncate">
-            {gj.label} {text}
-          </div>
-          <div className="flex items-center gap-2 mt-1">
-            <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-medium ${badgeClass}`}>
-              {badgeLabel}
-            </span>
-            <span className="text-xs text-gray-400">Click for details</span>
-          </div>
-        </div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate">{gj.label}</span>
         <button
           onClick={(e) => { e.stopPropagation(); onDismiss(); }}
-          className="text-gray-400 hover:text-gray-600 text-lg leading-none mt-0.5 flex-shrink-0"
+          className="text-white/70 hover:text-white text-lg leading-none flex-shrink-0"
           aria-label="Dismiss"
         >
           &times;
@@ -91,6 +54,16 @@ function GroupJobCard({
       </div>
     </div>
   );
+}
+
+// Same always-solid treatment as GroupJobCard. A no-op completion stays
+// neutral (gray) rather than green -- "nothing changed" isn't quite the
+// same signal as "applied" -- but pending/running still reads as green
+// rather than flashing amber first, matching the group card.
+function solidJobToastClass(job: JobNotification): string {
+  if (job.status === 'failed') return 'bg-danger text-white';
+  if (job.status === 'completed' && job.operationResult === 'noop') return 'bg-gray-600 text-white';
+  return 'bg-success text-white';
 }
 
 function JobCard({
@@ -102,37 +75,21 @@ function JobCard({
   onOpen: () => void;
   onDismiss: () => void;
 }) {
-  const display = getJobDisplayState(job);
-  const isNoop = job.status === 'completed' && job.operationResult === 'noop';
-
   return (
     <div
       role="button"
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => e.key === 'Enter' && onOpen()}
-      className="bg-white border border-gray-200 rounded-md shadow-sm p-3 text-sm cursor-pointer hover:border-blue-300 hover:shadow-md transition-shadow"
+      className={`${solidJobToastClass(job)} rounded-md shadow-lg px-3 py-2 text-sm cursor-pointer hover:brightness-110 transition`}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex-1 min-w-0">
-          <div className="font-medium text-gray-900 truncate">
-            {job.operation}{job.device ? ` — ${job.device}` : ''}
-          </div>
-          <div className="flex items-center gap-2 mt-1">
-            <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-medium ${display.className}`}>
-              {display.label}
-            </span>
-            {job.status === 'failed' && (
-              <span className="text-gray-500 text-xs truncate">{job.message}</span>
-            )}
-          </div>
-          {isNoop && (
-            <div className="mt-1 text-xs text-gray-500">{getNoopMessage(job.reason)}</div>
-          )}
-        </div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate">
+          {job.operation}{job.device ? ` — ${job.device}` : ''}
+        </span>
         <button
           onClick={(e) => { e.stopPropagation(); onDismiss(); }}
-          className="text-gray-400 hover:text-gray-600 text-lg leading-none mt-0.5 flex-shrink-0"
+          className="text-white/70 hover:text-white text-lg leading-none flex-shrink-0"
           aria-label="Dismiss"
         >
           &times;

@@ -21,7 +21,6 @@ interface Props {
   deviceName: string;
   currentServers: string[] | null;
   currentLevel: string | null;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 // Log servers are incremental (POST / DELETE 1 at a time). `level` is a
@@ -34,10 +33,9 @@ export function LoggingEditModal({
   deviceName,
   currentServers,
   currentLevel,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const [servers, setServers] = useState<string[]>([]);
   const [draft, setDraft] = useState('');
@@ -81,14 +79,10 @@ export function LoggingEditModal({
         ? `Add log ${s} (level ${level}) on ${deviceName}`
         : `Add log ${s} on ${deviceName}`;
       trackGroupJob(result.group_job_id, label);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, label, j.device);
-      }
       if (!servers.includes(s)) setServers([...servers, s]);
       setDraft('');
       setLevelDraft('');
       invalidate();
-      onDone?.(`Add log server ${s} queued on ${deviceName}.`, 'ok');
     } catch (err) {
       setError(extractMessage(err, 'Add log server failed.'));
     } finally {
@@ -102,12 +96,8 @@ export function LoggingEditModal({
     try {
       const result = await removeGlobalConfigLogServer(deviceName, { server: s });
       trackGroupJob(result.group_job_id, `Remove log ${s} on ${deviceName}`);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, `Remove log ${s} on ${deviceName}`, j.device);
-      }
       setServers(servers.filter((x) => x !== s));
       invalidate();
-      onDone?.(`Remove log server ${s} queued on ${deviceName}.`, 'ok');
     } catch (err) {
       setError(extractMessage(err, 'Remove log server failed.'));
     } finally {

@@ -600,6 +600,20 @@ class Puerto:
     def repositorio(self) -> str:
         return "puerto"
 
+    def resumen_intento(self) -> str:
+        """Ver ``VLAN.resumen_intento()`` -- misma idea, ``self.reset`` acá
+        cumple el rol de ``eliminar``/``crear`` en las otras clases (corta
+        antes de mirar ``mutation_fields``, mismo criterio que
+        ``validar()``)."""
+        identidad = f"Port {self.interface} on {self.device}" if self.device else f"Port {self.interface}"
+        if self.reset:
+            return f"Reset {identidad} to defaults"
+        campos = self.mutation_fields
+        if not campos:
+            return f"{identidad}: no changes"
+        cambios = ", ".join(f"set {campo} to {getattr(self, campo)!r}" for campo in sorted(campos))
+        return f"{identidad}: {cambios}"
+
     def to_dict(self) -> dict:
         """Serialize to a JSON-safe dict — todos los campos, formato interno
         (``interface``, no ``name``; la traducción a la forma de API vieja

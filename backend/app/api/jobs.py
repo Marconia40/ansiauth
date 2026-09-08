@@ -26,6 +26,8 @@ def _format_job(job) -> dict:
     return {
         "job_id": job.job_id,
         "status": job.status,
+        "operation": job.operation,
+        "parameters_summary": job.parameters_summary,
         "playbook": job.playbook,
         "device": job.device,
         "error": job.error,

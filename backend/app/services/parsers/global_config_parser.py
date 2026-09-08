@@ -12,6 +12,7 @@ configurado para poder capturarla) -- ver nota en
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 from abc import ABC, abstractmethod
 
@@ -50,6 +51,19 @@ _IOS_ROUTE_CONNECTED_RE = re.compile(
 )
 _IOS_ROUTE_VIA_RE = re.compile(
     r"^[A-Z*]{1,3}\s+(\S+/\d+)\s+\[\d+/\d+\]\s+via\s+(\S+?),?(?:\s|$)", re.IGNORECASE,
+)
+# "ip route 192.168.100.0 255.255.255.0 10.10.100.10" -- leído de
+# running-config, NO de la RIB. Complementa (no reemplaza) el parse de
+# arriba: una ruta estática con next-hop no alcanzable desde este device
+# queda en el config pero JAMÁS se instala en la RIB (confirmado en vivo
+# contra f3r9s1, ver el docstring de ``_aplicar_route_remove`` en
+# ``global_config.py`` -- ese límite quedaba documentado como "fuera de
+# alcance"; esto lo cierra). Sin este regex esas rutas eran invisibles
+# para la app enTERA (no aparecían para poder borrarlas ni para detectar
+# que ya existían) -- ese era justo el pedido del usuario, que se vean
+# aunque no estén activas para poder borrarlas desde la interfaz.
+_IOS_STATIC_ROUTE_RE = re.compile(
+    r"^ip route\s+(\S+)\s+(\S+)\s+(\S+)", re.IGNORECASE | re.MULTILINE,
 )
 # NTP/DNS/log server+level -- confirmado en vivo contra f3r9s1, todos
 # leídos del mismo running-config completo que ya se trae para
@@ -106,19 +120,35 @@ class CiscoGlobalConfigParser(GlobalConfigParser):
                 snmp_community, snmp_permission = m.group(1), m.group(2).upper()
                 break
 
+        rc = strip_ansi(running_config_output)
+
         routes: list[dict] = []
+        routes_por_clave: dict[tuple[str, str | None], dict] = {}
         for raw in route_output.splitlines():
             line = strip_ansi(raw).rstrip()
             m = _IOS_ROUTE_CONNECTED_RE.match(line)
             if m:
-                routes.append({"destination": m.group(1), "next_hop": None, "interface": m.group(2)})
+                ruta = {"destination": m.group(1), "next_hop": None, "interface": m.group(2)}
+                routes.append(ruta)
+                routes_por_clave[(ruta["destination"], ruta["next_hop"])] = ruta
                 continue
             m = _IOS_ROUTE_VIA_RE.match(line)
             if m:
-                routes.append({"destination": m.group(1), "next_hop": m.group(2), "interface": None})
+                ruta = {"destination": m.group(1), "next_hop": m.group(2), "interface": None}
+                routes.append(ruta)
+                routes_por_clave[(ruta["destination"], ruta["next_hop"])] = ruta
+        for dest, mask, next_hop in _IOS_STATIC_ROUTE_RE.findall(rc):
+            try:
+                destino = str(ipaddress.ip_network(f"{dest}/{mask}", strict=False))
+            except ValueError:
+                continue
+            clave = (destino, next_hop)
+            if clave not in routes_por_clave:
+                ruta = {"destination": destino, "next_hop": next_hop, "interface": None}
+                routes.append(ruta)
+                routes_por_clave[clave] = ruta
 
         version_text = strip_ansi(version_output).strip() or None
-        rc = strip_ansi(running_config_output)
         ntp_servers = _IOS_NTP_SERVER_RE.findall(rc)
         dns_servers = [ip for linea in _IOS_DNS_SERVER_RE.findall(rc) for ip in linea.split()]
         log_servers = _IOS_LOG_HOST_RE.findall(rc)
@@ -152,6 +182,13 @@ _VRP_HOSTNAME_LINE = re.compile(r"^sysname\s+(\S+)\s*$", re.IGNORECASE)
 # parser, es el device el que corta la columna.
 _VRP_ROUTE_LINE = re.compile(
     r"^\s*(\S+/\d+)\s+(\S+)\s+(\d+)\s+(\d+)\s+\S*\s+(\S+)\s+(\S+)\s*$",
+)
+# "ip route-static 192.168.100.0 255.255.255.0 10.10.100.10" -- misma
+# lógica que ``_IOS_STATIC_ROUTE_RE`` (ver comentario ahí): complementa el
+# parse de la tabla de ruteo activa con las rutas estáticas del config,
+# para que una con next-hop no alcanzable siga siendo visible/borrable.
+_VRP_STATIC_ROUTE_RE = re.compile(
+    r"^ip route-static\s+(\S+)\s+(\S+)\s+(\S+)", re.IGNORECASE | re.MULTILINE,
 )
 # NTP/DNS/log server+level/snmp version -- confirmado en vivo contra
 # f3r9s2, todos leídos del mismo running-config completo que ya se trae
@@ -223,17 +260,31 @@ class HuaweiGlobalConfigParser(GlobalConfigParser):
                 hostname = m.group(1)
                 break
 
+        rc = strip_ansi(running_config_output)
+
         routes: list[dict] = []
+        routes_por_clave: dict[tuple[str, str | None], dict] = {}
         for raw in route_output.splitlines():
             line = strip_ansi(raw).rstrip()
             m = _VRP_ROUTE_LINE.match(line)
             if m and "/" in m.group(1):
-                routes.append({
+                ruta = {
                     "destination": m.group(1), "next_hop": m.group(5), "interface": m.group(6),
-                })
+                }
+                routes.append(ruta)
+                routes_por_clave[(ruta["destination"], ruta["next_hop"])] = ruta
+        for dest, mask, next_hop in _VRP_STATIC_ROUTE_RE.findall(rc):
+            try:
+                destino = str(ipaddress.ip_network(f"{dest}/{mask}", strict=False))
+            except ValueError:
+                continue
+            clave = (destino, next_hop)
+            if clave not in routes_por_clave:
+                ruta = {"destination": destino, "next_hop": next_hop, "interface": None}
+                routes.append(ruta)
+                routes_por_clave[clave] = ruta
 
         version_text = strip_ansi(version_output).strip() or None
-        rc = strip_ansi(running_config_output)
         ntp_servers = _VRP_NTP_SERVER_RE.findall(rc)
         dns_servers = _VRP_DNS_SERVER_RE.findall(rc)
         log_servers = _VRP_LOG_HOST_RE.findall(rc)

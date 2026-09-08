@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { createSVI } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import { Modal } from './Modal';
 import { DeviceSelector } from './DeviceSelector';
@@ -19,7 +20,6 @@ interface Props {
   scope: Scope;
   /** Only relevant at device scope. */
   deviceName?: string;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 /** Crear SVI. A diferencia de VLAN, la API es one-device-per-call:
@@ -27,8 +27,9 @@ interface Props {
  * se resuelve con Promise.all en paralelo. Backend valida que la VLAN
  * exista en el device (RF-INTERV-09) -- si no existe, el error del
  * backend es lo que se ve. */
-export function SVICreateModal({ open, onClose, scope, deviceName, onDone }: Props) {
+export function SVICreateModal({ open, onClose, scope, deviceName }: Props) {
   const queryClient = useQueryClient();
+  const { trackGroupJob } = useJobNotifications();
 
   const [vlanId, setVlanId] = useState('');
   const [description, setDescription] = useState('');
@@ -62,6 +63,16 @@ export function SVICreateModal({ open, onClose, scope, deviceName, onDone }: Pro
           }
         }),
       );
+      // Track every job that DID get queued, even if some devices in the
+      // batch failed below -- a partial failure shouldn't hide live status
+      // for the creates that actually went through.
+      const label = `Create SVI ${vlanId} on ${devices.length} device(s)`;
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          trackGroupJob(r.value.group_job_id, label);
+        }
+      }
+
       const failed = results.filter((r) => r.status === 'rejected');
       if (failed.length > 0) {
         // Mensaje del primer error para dar señal accionable en vez del
@@ -74,10 +85,6 @@ export function SVICreateModal({ open, onClose, scope, deviceName, onDone }: Pro
       }
     },
     onSuccess: () => {
-      onDone?.(
-        `SVI ${vlanId} created on ${effectiveSelected.size} device(s).`,
-        'ok',
-      );
       invalidateSviQueries(queryClient);
       resetAndClose();
     },

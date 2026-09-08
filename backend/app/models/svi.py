@@ -474,6 +474,21 @@ class SVI:
     def repositorio(self) -> str:
         return "svi"
 
+    def resumen_intento(self) -> str:
+        """Ver ``VLAN.resumen_intento()`` -- misma idea, adaptada a que acá
+        ``eliminar``/``crear`` son flags aparte de ``mutation_fields`` (no
+        entran en ese set, ver ``validar()``)."""
+        identidad = f"SVI {self.vlan_id} on {self.device}" if self.device else f"SVI {self.vlan_id}"
+        if self.eliminar:
+            return f"Delete {identidad}"
+        if self.crear:
+            return f"Create {identidad}"
+        campos = self.mutation_fields
+        if not campos:
+            return f"{identidad}: no changes"
+        cambios = ", ".join(f"set {campo} to {getattr(self, campo)!r}" for campo in sorted(campos))
+        return f"{identidad}: {cambios}"
+
     def to_dict(self) -> dict:
         return {
             "vlan_id": self.vlan_id,

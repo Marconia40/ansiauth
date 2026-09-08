@@ -351,7 +351,10 @@ class GlobalConfigRead(BaseModel):
             "conectada no tiene next_hop (por definición, sale directo por la interfaz), "
             "y una ruta estática vía next-hop puede no traer interfaz si el device no la "
             "resuelve en el 'show ip route'/'display ip routing-table' (confirmado en vivo, "
-            "no es un gap del parser)."
+            "no es un gap del parser). Incluye también rutas estáticas configuradas cuyo "
+            "next_hop no es alcanzable (no aparecen en la tabla activa, pero SÍ en el "
+            "running-config -- se leen de ahí también) para que se puedan ver y borrar "
+            "desde la interfaz aunque no estén activas."
         ),
     )
     acls: Optional[list[GlobalConfigAclInfo]] = Field(

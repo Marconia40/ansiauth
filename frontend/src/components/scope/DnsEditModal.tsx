@@ -22,7 +22,6 @@ interface Props {
   onClose: () => void;
   deviceName: string;
   currentServers: string[] | null;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 // DNS add takes EITHER a `server` OR a `domain_name` (backend validator:
@@ -35,10 +34,9 @@ export function DnsEditModal({
   onClose,
   deviceName,
   currentServers,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const [servers, setServers] = useState<string[]>([]);
   const [mode, setMode] = useState<AddMode>('server');
@@ -77,13 +75,9 @@ export function DnsEditModal({
     try {
       const result = await addGlobalConfigDns(deviceName, { server: s });
       trackGroupJob(result.group_job_id, `Add DNS ${s} on ${deviceName}`);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, `Add DNS ${s} on ${deviceName}`, j.device);
-      }
       setServers([...servers, s]);
       setServerDraft('');
       invalidate();
-      onDone?.(`Add DNS ${s} queued on ${deviceName}.`, 'ok');
     } catch (err) {
       setError(extractMessage(err, 'Add DNS server failed.'));
     } finally {
@@ -99,12 +93,8 @@ export function DnsEditModal({
     try {
       const result = await addGlobalConfigDns(deviceName, { domain_name: d });
       trackGroupJob(result.group_job_id, `Set domain ${d} on ${deviceName}`);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, `Set domain ${d} on ${deviceName}`, j.device);
-      }
       setDomainDraft('');
       invalidate();
-      onDone?.(`Set domain-name to ${d} queued on ${deviceName}.`, 'ok');
     } catch (err) {
       setError(extractMessage(err, 'Set domain-name failed.'));
     } finally {
@@ -118,12 +108,8 @@ export function DnsEditModal({
     try {
       const result = await removeGlobalConfigDns(deviceName, { server: s });
       trackGroupJob(result.group_job_id, `Remove DNS ${s} on ${deviceName}`);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, `Remove DNS ${s} on ${deviceName}`, j.device);
-      }
       setServers(servers.filter((x) => x !== s));
       invalidate();
-      onDone?.(`Remove DNS ${s} queued on ${deviceName}.`, 'ok');
     } catch (err) {
       setError(extractMessage(err, 'Remove DNS server failed.'));
     } finally {

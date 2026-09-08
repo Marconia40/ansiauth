@@ -431,15 +431,19 @@ class GlobalConfig:
         debería ser un error (mismo criterio de idempotencia que el resto
         de esta clase).
 
-        Límite real encontrado en vivo contra f3r9s1: ``routes`` sale de
-        ``show ip route``/``display ip routing-table`` (la RIB), no de
-        ``show running-config``/``display current-configuration`` -- una
-        ruta con next-hop no alcanzable en la red real del device queda
-        en el config pero NUNCA se instala en la RIB, así que este método
-        no la ve y reporta no-op aunque el device SÍ tenga la línea. No
-        hay forma de detectar ese caso desde acá sin leer running-config
-        completo y parsear rutas de ahí también -- fuera de alcance por
-        ahora, documentado para no repetir la confusión."""
+        Límite real encontrado en vivo contra f3r9s1, ya CERRADO: ``routes``
+        salía solo de ``show ip route``/``display ip routing-table`` (la
+        RIB), no de ``show running-config``/``display current-configuration``
+        -- una ruta con next-hop no alcanzable en la red real del device
+        queda en el config pero NUNCA se instala en la RIB, así que este
+        método no la veía y reportaba no-op aunque el device SÍ tuviera la
+        línea (y encima era invisible en el front, no se podía borrar desde
+        ahí). Los parsers (``CiscoGlobalConfigParser``/
+        ``HuaweiGlobalConfigParser`` en ``global_config_parser.py``) ahora
+        también leen rutas estáticas directo de running-config
+        (``_IOS_STATIC_ROUTE_RE``/``_VRP_STATIC_ROUTE_RE``) y las suman a
+        ``routes`` cuando no aparecen ya en la RIB, así que ``actual.routes``
+        las incluye y este método las ve igual que a cualquier otra."""
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         destino_normalizado = str(ipaddress.ip_network(self.route_remove["destination"], strict=False))
@@ -574,6 +578,58 @@ class GlobalConfig:
 
     def repositorio(self) -> str:
         return "global_config"
+
+    def resumen_intento(self) -> str:
+        """Ver ``VLAN.resumen_intento()`` -- misma idea. A diferencia de
+        VLAN/SVI/Puerto (identidad simple + 1-pocos campos escalares), acá
+        cada uno de los 15 ``mutation_fields`` tiene su propia forma (dict
+        con sub-claves, o str) -- se desempaqueta campo por campo en
+        ``_describir_campo_mutacion()``. En la práctica solo 1 viene
+        seteado por request (todos los endpoints de escritura de esta
+        clase arman un ``GlobalConfig`` con un único campo), pero se listan
+        todos los que estén seteados por robustez en vez de asumirlo."""
+        campos = self.mutation_fields
+        if not campos:
+            return "Global config: no changes"
+        return "; ".join(self._describir_campo_mutacion(c) for c in sorted(campos))
+
+    def _describir_campo_mutacion(self, campo: str) -> str:
+        valor = getattr(self, campo)
+        if campo == "hostname":
+            return f"Set hostname to '{valor}'"
+        if campo == "snmp_config":
+            detalles = ", ".join(f"{k}={v}" for k, v in valor.items() if v is not None)
+            return f"Update SNMP ({detalles})" if detalles else "Update SNMP"
+        if campo == "snmp_trap_host_remove":
+            return f"Remove SNMP trap host {valor.get('host')}"
+        if campo == "route_add":
+            return f"Add route {valor.get('destination')} -> {valor.get('next_hop')}"
+        if campo == "route_remove":
+            return f"Remove route {valor.get('destination')} -> {valor.get('next_hop')}"
+        if campo == "ntp_server_add":
+            return f"Add NTP server {valor.get('server')}"
+        if campo == "ntp_server_remove":
+            return f"Remove NTP server {valor.get('server')}"
+        if campo == "dns_server_add":
+            return f"Add DNS server {valor.get('server')}"
+        if campo == "dns_server_remove":
+            return f"Remove DNS server {valor.get('server')}"
+        if campo == "dns_domain_set":
+            return f"Set DNS domain-name to '{valor}'"
+        if campo == "log_server_add":
+            nivel = f" (level {valor.get('level')})" if valor.get("level") else ""
+            return f"Add log server {valor.get('server')}{nivel}"
+        if campo == "log_server_remove":
+            return f"Remove log server {valor.get('server')}"
+        if campo == "acl_create":
+            n = len(valor.get("rules") or [])
+            return f"Create/update ACL '{valor.get('name')}' ({n} rule{'s' if n != 1 else ''})"
+        if campo == "acl_rule_remove":
+            n = len(valor.get("rules") or [])
+            return f"Remove {n} rule{'s' if n != 1 else ''} from ACL '{valor.get('name')}'"
+        if campo == "acl_delete":
+            return f"Delete ACL '{valor}'"
+        return f"{campo}: {valor!r}"
 
     def to_dict(self) -> dict:
         return {

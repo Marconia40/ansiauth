@@ -7,6 +7,12 @@ import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Job, GroupJob, GroupJobDeviceResult } from '@/types/job';
 
+// Mirrors JobNotificationContext's JOB_POLL_INTERVAL_MS -- kept as its own
+// constant since this modal polls independently of the toast context (it
+// must keep working even after the underlying toast has already been
+// dismissed).
+const JOB_DETAIL_POLL_INTERVAL_MS = 2500;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatMs(ms: number | null | undefined): string {
@@ -26,6 +32,35 @@ function formatDateTime(iso: string | null | undefined): string {
 function deriveDurationMs(startedAt: string | null, finishedAt: string | null): number | null {
   if (!startedAt || !finishedAt) return null;
   return Math.round(new Date(finishedAt).getTime() - new Date(startedAt).getTime());
+}
+
+// The backend dumps the FULL request dataclass as `parameters` (every
+// field the resource type can carry, e.g. every GlobalConfig field --
+// hostname, snmp_config, routes, acls...), not just what this particular
+// request actually set. Rendering that verbatim buries the 1-2 fields that
+// matter under a wall of "field: null". Recurses because the batch shape
+// (`encolar_lote()` -> `{lote: [asdict(r), ...]}`, used by SVI's batch
+// editor) nests the same problem a level down -- a shallow filter would
+// clean the top level and leave the wall of nulls inside `lote[0]`.
+function stripEmpty(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripEmpty).filter((v) => v !== undefined);
+  }
+  if (value !== null && typeof value === 'object') {
+    const cleaned = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([k, v]) => [k, stripEmpty(v)] as const)
+        .filter(([, v]) => v !== null && v !== undefined && v !== ''),
+    );
+    return Object.keys(cleaned).length > 0 ? cleaned : undefined;
+  }
+  return value;
+}
+
+function meaningfulParameters(parameters: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!parameters) return null;
+  const cleaned = stripEmpty(parameters) as Record<string, unknown> | undefined;
+  return cleaned && Object.keys(cleaned).length > 0 ? cleaned : null;
 }
 
 // ── Building blocks ───────────────────────────────────────────────────────────
@@ -123,7 +158,9 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
         </Field>
       )}
       <Field label="Device">{job.device}</Field>
-      <Field label="Playbook">{job.playbook}</Field>
+      {job.parameters_summary && (
+        <Field label="Change">{job.parameters_summary}</Field>
+      )}
       <Field label="Job ID" mono>{job.job_id}</Field>
       {job.group_job_id && (
         <Field label="Group Job" mono>{job.group_job_id}</Field>
@@ -246,8 +283,11 @@ function GroupJobView({
   groupJob: GroupJob;
   onDrillDown: (jobId: string, device: string) => void;
 }) {
-  const { execution_summary: s, device_results, parameters } = groupJob;
+  const { execution_summary: s, device_results, parameters, parameters_summary } = groupJob;
   const isGroupActive = groupJob.status === 'pending' || groupJob.status === 'running';
+  // Fallback only -- covers a resource type that doesn't have a backend
+  // `resumen_intento()` yet (or older data from before this field existed).
+  const fallbackParams = parameters_summary ? null : meaningfulParameters(parameters);
 
   return (
     <div>
@@ -268,14 +308,6 @@ function GroupJobView({
         </div>
       </Field>
       <Field label="Operation">{groupJob.operation}</Field>
-      <Field label="Playbook">{groupJob.playbook}</Field>
-      {parameters && (
-        <Field label="Parameters" mono>
-          {Object.entries(parameters)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join(', ')}
-        </Field>
-      )}
       <Field label="Group ID" mono>{groupJob.group_job_id}</Field>
 
       <SectionHeader>Timing</SectionHeader>
@@ -284,6 +316,19 @@ function GroupJobView({
       <Field label="Finished">{formatDateTime(groupJob.finished_at)}</Field>
       {s.duration_ms != null && (
         <Field label="Duration">{formatMs(s.duration_ms)}</Field>
+      )}
+
+      {parameters_summary && (
+        <>
+          <SectionHeader>Change</SectionHeader>
+          <p className="text-sm text-text">{parameters_summary}</p>
+        </>
+      )}
+      {!parameters_summary && fallbackParams && (
+        <>
+          <SectionHeader>Change</SectionHeader>
+          <JsonBlock data={fallbackParams} />
+        </>
       )}
 
       <SectionHeader>Devices ({device_results.length})</SectionHeader>
@@ -339,7 +384,12 @@ export function JobDetailModal({ jobId, groupJobId, onClose }: JobDetailModalPro
   const [drillJob, setDrillJob] = useState<Job | null>(null);
   const [drillLoading, setDrillLoading] = useState(false);
 
-  // initial fetch
+  // Fetch + keep polling while the job/group is still active, so a modal
+  // left open while its job finishes reflects that -- rather than freezing
+  // on whatever snapshot was fetched at open time (the bug: the job could
+  // finish seconds after open and the modal would sit on "Running..."
+  // forever, even though the toast behind it correctly went green).
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setLoading(true);
     setFetchError(null);
@@ -348,28 +398,84 @@ export function JobDetailModal({ jobId, groupJobId, onClose }: JobDetailModalPro
     setDrillJobId(null);
     setDrillJob(null);
 
-    if (jobId) {
-      getJob(jobId)
-        .then(setJob)
-        .catch(() => setFetchError('Failed to load job details.'))
-        .finally(() => setLoading(false));
-    } else if (groupJobId) {
-      getGroupJob(groupJobId)
-        .then(setGroupJob)
-        .catch(() => setFetchError('Failed to load group job details.'))
-        .finally(() => setLoading(false));
-    }
-  }, [jobId, groupJobId]);
+    if (!jobId && !groupJobId) return;
 
-  // drill-down fetch
+    let cancelled = false;
+    let timerId: ReturnType<typeof setInterval> | undefined;
+
+    const fetchOnce = async () => {
+      try {
+        if (jobId) {
+          const j = await getJob(jobId);
+          if (cancelled) return;
+          setJob(j);
+          if (!(ACTIVE_JOB_STATUSES as string[]).includes(j.status) && timerId !== undefined) {
+            clearInterval(timerId);
+            timerId = undefined;
+          }
+        } else if (groupJobId) {
+          const gj = await getGroupJob(groupJobId);
+          if (cancelled) return;
+          setGroupJob(gj);
+          const isActive = gj.status === 'pending' || gj.status === 'running';
+          if (!isActive && timerId !== undefined) {
+            clearInterval(timerId);
+            timerId = undefined;
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setFetchError(jobId ? 'Failed to load job details.' : 'Failed to load group job details.');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    void fetchOnce();
+    timerId = setInterval(fetchOnce, JOB_DETAIL_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      if (timerId !== undefined) clearInterval(timerId);
+    };
+  }, [jobId, groupJobId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Same live-polling treatment for a drilled-down device job.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!drillJobId) { setDrillJob(null); return; }
     setDrillLoading(true);
-    getJob(drillJobId)
-      .then(setDrillJob)
-      .catch(() => setDrillJob(null))
-      .finally(() => setDrillLoading(false));
+
+    let cancelled = false;
+    let timerId: ReturnType<typeof setInterval> | undefined;
+
+    const fetchOnce = async () => {
+      try {
+        const j = await getJob(drillJobId);
+        if (cancelled) return;
+        setDrillJob(j);
+        if (!(ACTIVE_JOB_STATUSES as string[]).includes(j.status) && timerId !== undefined) {
+          clearInterval(timerId);
+          timerId = undefined;
+        }
+      } catch {
+        if (!cancelled) setDrillJob(null);
+      } finally {
+        if (!cancelled) setDrillLoading(false);
+      }
+    };
+
+    void fetchOnce();
+    timerId = setInterval(fetchOnce, JOB_DETAIL_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      if (timerId !== undefined) clearInterval(timerId);
+    };
   }, [drillJobId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ESC to close (or back from drill-down)
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -396,7 +502,8 @@ export function JobDetailModal({ jobId, groupJobId, onClose }: JobDetailModalPro
     const op = groupJob.operation?.replace('_', ' ') ?? 'Operation';
     title = vlanId != null ? `${op} ${vlanId}` : op;
   } else if (job) {
-    title = [job.playbook, job.device].filter(Boolean).join(' — ');
+    const op = job.operation?.replace('_', ' ');
+    title = [op, job.device].filter(Boolean).join(' — ') || 'Job Details';
   }
 
   const handleDrillDown = (jobId: string, device: string) => {

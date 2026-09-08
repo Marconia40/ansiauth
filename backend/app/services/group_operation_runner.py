@@ -20,11 +20,13 @@ class GroupOperationRunner:
     def encolar(self, recurso: "RecursoGestionable", devices: list[str], actor: str) -> tuple[str, list[dict]]:
         group_job_id = str(uuid.uuid4())  # sin fila, sin Repository[GroupJob] -- §2.9
         parametros = asdict(recurso)  # Job.parameters -- JobDetailModal.tsx real lo necesita
+        resumen = recurso.resumen_intento()  # Job.parameters_summary -- ver docstring del campo
         job_entries = []
         for device_name in devices:
             job = Job(
                 operation=recurso.repositorio(), device=device_name,
                 group_job_id=group_job_id, parameters=parametros,
+                parameters_summary=resumen,
             )
             self._jobs.add(job)
             self._job_queue.dispatch(recurso, device_name, actor, job.job_id)
@@ -41,9 +43,15 @@ class GroupOperationRunner:
         1 solo job."""
         group_job_id = str(uuid.uuid4())
         parametros = {"lote": [asdict(r) for r in recursos]}
+        # Cada resumen ya incluye su propia identidad (vlan_id/interface +
+        # device) -- concatenar es suficiente, no hace falta extraer un
+        # prefijo común (ver nota en el plan de esta sesión sobre por qué
+        # no vale la pena la complejidad extra acá).
+        resumen = "; ".join(r.resumen_intento() for r in recursos)
         job = Job(
             operation=recursos[0].repositorio(), device=device_name,
             group_job_id=group_job_id, parameters=parametros,
+            parameters_summary=resumen,
         )
         self._jobs.add(job)
         self._job_queue.dispatch_lote(recursos, device_name, actor, job.job_id)

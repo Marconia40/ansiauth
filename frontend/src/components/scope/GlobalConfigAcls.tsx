@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   deleteGlobalConfigAcl,
@@ -37,7 +37,7 @@ type ModalState =
 // no locked name.
 export function GlobalConfigAcls({ deviceName }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const configQuery = useQuery({
     queryKey: ['global-config', 'synced', deviceName],
@@ -57,15 +57,9 @@ export function GlobalConfigAcls({ deviceName }: Props) {
   const [modal, setModal] = useState<ModalState>({ kind: 'closed' });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [deletingName, setDeletingName] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ msg: string; tone: 'ok' | 'error' } | null>(
-    null,
-  );
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4500);
-    return () => clearTimeout(t);
-  }, [toast]);
+  // Only used for delete errors -- a success hands off to
+  // JobNotificationContext's tracked toast (trackGroupJob below).
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -96,17 +90,13 @@ export function GlobalConfigAcls({ deviceName }: Props) {
     setDeletingName(name);
     try {
       const result = await deleteGlobalConfigAcl(deviceName, { name });
-      const label = `Delete ACL ${name} on ${deviceName}`;
-      trackGroupJob(result.group_job_id, label);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, label, j.device);
-      }
+      trackGroupJob(result.group_job_id, `Delete ACL ${name} on ${deviceName}`);
       queryClient.invalidateQueries({
         queryKey: ['global-config', 'synced', deviceName],
       });
-      setToast({ msg: `Delete ACL ${name} queued on ${deviceName}.`, tone: 'ok' });
     } catch (err) {
-      setToast({ msg: extractMessage(err, 'Delete ACL failed.'), tone: 'error' });
+      setDeleteError(extractMessage(err, 'Delete ACL failed.'));
+      setTimeout(() => setDeleteError(null), 4500);
     } finally {
       setDeletingName(null);
     }
@@ -166,7 +156,6 @@ export function GlobalConfigAcls({ deviceName }: Props) {
         onClose={() => setModal({ kind: 'closed' })}
         deviceName={deviceName}
         lockedName={modal.kind === 'addRules' ? modal.name : null}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       {modal.kind === 'removeRules' && (
         <AclRemoveRulesModal
@@ -175,17 +164,12 @@ export function GlobalConfigAcls({ deviceName }: Props) {
           deviceName={deviceName}
           aclName={modal.name}
           currentRuleLines={modal.rules}
-          onDone={(msg, tone) => setToast({ msg, tone })}
         />
       )}
 
-      {toast && (
-        <div
-          className={`fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm ${
-            toast.tone === 'ok' ? 'bg-success text-white' : 'bg-danger text-white'
-          }`}
-        >
-          {toast.msg}
+      {deleteError && (
+        <div className="fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm bg-danger text-white">
+          {deleteError}
         </div>
       )}
     </div>

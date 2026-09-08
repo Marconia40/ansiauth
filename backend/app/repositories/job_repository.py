@@ -146,6 +146,7 @@ class JobRepository(Repository):
             "operation": primero.operation,
             "playbook": primero.playbook,
             "parameters": primero.parameters,
+            "parameters_summary": primero.parameters_summary,
             "created_at": min((j.created_at for j in jobs), default=None),
             "started_at": min(started, default=None),
             "finished_at": max(finished, default=None) if todos_terminales else None,
