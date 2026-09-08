@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { getDevices, getPortsSynced, type SyncedResource } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Device } from '@/types/device';
 import type { Port, PortListResponse } from '@/types/port';
 import type { Scope } from './ScopeDashboard';
@@ -15,25 +16,17 @@ import { PortSelectionSummary } from './PortSelectionSummary';
 import { PortActionRail, type PortActionId } from './PortActionRail';
 import { usePortSelection } from './usePortSelection';
 import type { BatchResult } from './runPortBatch';
-import {
-  PortAccessVlanModal,
-  PortConfirmModal,
-  PortDescriptionModal,
-  PortModeModal,
-  PortPoeModal,
-  PortStormControlModal,
-  PortTrunkVlansModal,
-} from './PortActionModals';
+import { PortResetModal } from './PortActionModals';
+import { PortEditModal } from './PortEditModal';
 import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 
 interface Props {
   scope: Scope;
 }
 
-type Toast = { msg: string; tone: 'ok' | 'error' } | null;
-
 export function PortsTab({ scope }: Props) {
   const queryClient = useQueryClient();
+  const { trackGroupJob } = useJobNotifications();
   const selection = usePortSelection();
 
   const devicesQuery = useQuery<Device[]>({
@@ -102,21 +95,15 @@ export function PortsTab({ scope }: Props) {
   }
 
   const [openAction, setOpenAction] = useState<PortActionId | null>(null);
-  const [toast, setToast] = useState<Toast>(null);
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4500);
-    return () => clearTimeout(t);
-  }, [toast]);
 
+  // Every `reset` succeeds as its own group_job on the backend — register
+  // each so the global JobNotifications toast is clickable → JobDetailModal
+  // (same UX as Routes / SVI). `PortEditModal` handles its own tracking
+  // internally, so `handleDone` here only sees `perPortJobs` from the reset
+  // path; `groupJobsByDevice` (batch) is a no-op no-such-key iteration.
   function handleDone(result: BatchResult) {
-    if (result.failed === 0) {
-      setToast({ msg: `${result.success} port(s) updated.`, tone: 'ok' });
-    } else {
-      setToast({
-        msg: `${result.success}/${result.success + result.failed} succeeded — ${result.failed} failed.`,
-        tone: 'error',
-      });
+    for (const { ref, groupJobId } of result.perPortJobs ?? []) {
+      trackGroupJob(groupJobId, `Reset ${ref.interface} on ${ref.device}`);
     }
   }
 
@@ -211,75 +198,17 @@ export function PortsTab({ scope }: Props) {
       </div>
 
       {/* ── Modals ───────────────────────────────────────────────────── */}
-      <PortConfirmModal
-        open={openAction === 'shutdown'}
+      <PortEditModal
+        open={openAction === 'edit'}
         onClose={() => setOpenAction(null)}
         selection={selection}
-        action="shutdown"
-        onDone={handleDone}
       />
-      <PortConfirmModal
-        open={openAction === 'undo-shutdown'}
-        onClose={() => setOpenAction(null)}
-        selection={selection}
-        action="undo-shutdown"
-        onDone={handleDone}
-      />
-      <PortConfirmModal
+      <PortResetModal
         open={openAction === 'reset'}
         onClose={() => setOpenAction(null)}
         selection={selection}
-        action="reset"
         onDone={handleDone}
       />
-      <PortDescriptionModal
-        open={openAction === 'description'}
-        onClose={() => setOpenAction(null)}
-        selection={selection}
-        onDone={handleDone}
-      />
-      <PortModeModal
-        open={openAction === 'mode'}
-        onClose={() => setOpenAction(null)}
-        selection={selection}
-        onDone={handleDone}
-      />
-      <PortAccessVlanModal
-        open={openAction === 'access-vlan'}
-        onClose={() => setOpenAction(null)}
-        selection={selection}
-        onDone={handleDone}
-      />
-      <PortTrunkVlansModal
-        open={openAction === 'trunk-vlans'}
-        onClose={() => setOpenAction(null)}
-        selection={selection}
-        onDone={handleDone}
-      />
-      <PortPoeModal
-        open={openAction === 'poe'}
-        onClose={() => setOpenAction(null)}
-        selection={selection}
-        onDone={handleDone}
-      />
-      <PortStormControlModal
-        open={openAction === 'storm-control'}
-        onClose={() => setOpenAction(null)}
-        selection={selection}
-        onDone={handleDone}
-      />
-
-      {toast && (
-        <div
-          className={`fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm ${
-            toast.tone === 'ok'
-              ? 'bg-success text-white'
-              : 'bg-danger text-white'
-          }`}
-        >
-          {toast.msg}
-        </div>
-      )}
     </div>
   );
 }

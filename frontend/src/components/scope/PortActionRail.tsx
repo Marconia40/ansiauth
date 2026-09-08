@@ -1,15 +1,6 @@
 'use client';
 
-export type PortActionId =
-  | 'mode'
-  | 'access-vlan'
-  | 'trunk-vlans'
-  | 'shutdown'
-  | 'undo-shutdown'
-  | 'description'
-  | 'storm-control'
-  | 'poe'
-  | 'reset';
+export type PortActionId = 'edit' | 'reset';
 
 interface RailItem {
   id: PortActionId;
@@ -18,14 +9,7 @@ interface RailItem {
 }
 
 const RAIL: RailItem[] = [
-  { id: 'mode', label: 'Select Type-Port · Access / Trunk' },
-  { id: 'access-vlan', label: 'Assign Native VLAN (UT)' },
-  { id: 'trunk-vlans', label: 'Assign Tagged VLANs (T)' },
-  { id: 'shutdown', label: 'Shutdown Ports', tone: 'danger' },
-  { id: 'undo-shutdown', label: 'Undo Shutdown' },
-  { id: 'description', label: 'Change Description' },
-  { id: 'storm-control', label: 'Set Storm-Control' },
-  { id: 'poe', label: 'Activate / Deactivate PoE' },
+  { id: 'edit', label: 'Edit' },
   { id: 'reset', label: 'Delete Ports Config', tone: 'danger' },
 ];
 
@@ -34,7 +18,11 @@ interface Props {
   onOpen: (id: PortActionId) => void;
 }
 
-/** Right-hand rail with the 9 fixed bulk-port operations. */
+/** Right-hand rail with the 2 bulk-port operations: `Edit` opens the unified
+ * tabbed modal that batches every field change into 1 SSH connection per
+ * device via `POST .../ports/batch`; `Delete Ports Config` (reset) stays
+ * separate because it's non-composable server-side (resets EVERYTHING to
+ * vendor defaults, doesn't fit in a `changes` list of specific fields). */
 export function PortActionRail({ disabled, onOpen }: Props) {
   return (
     <div className="flex flex-col gap-2 sticky top-2">
