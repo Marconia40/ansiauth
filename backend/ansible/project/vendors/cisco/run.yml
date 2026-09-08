@@ -38,7 +38,52 @@
         lines: "{{ lines }}"
         match: "{{ match | default(omit) }}"
 
-    - name: Run commands
-      when: commands is defined
+    # ── Reads ─────────────────────────────────────────────────────────────
+    # 2 tasks distintas para el mismo ios_command, elegidas por el flag
+    # tolerate_command_errors (extravar seteado por VendorDriver._leer()
+    # cuando el caller pasa partial_ok=True):
+    #
+    #   - strict (default): comportamiento histórico -- si algún comando
+    #     falla ("% Invalid input", "SNMP agent not enabled", etc.) la
+    #     task falla y _leer() lanza RuntimeError. Requerido por
+    #     get_snmp_status / list_acl_names / cualquier read que use el
+    #     error como señal semántica.
+    #
+    #   - tolerant: failed_when: false hace que la task nunca falle. El
+    #     stdout devuelto por ios_command incluye la respuesta de CADA
+    #     comando, incluidos los rechazados (con su texto "% Invalid
+    #     input..."). El driver Python inspecciona cada slot con
+    #     _filter_unsupported() y decide qué tratar como feature ausente.
+    #     Usado por list_ports/read_core_state para tolerar devices sin
+    #     storm-control (IOSv de GNS3, modelos viejos, etc.).
+    #
+    # Bug real encontrado en vivo contra un GNS3 IOSv sin storm-control:
+    # cuando ios_command detecta "%" en la respuesta, marca la task como
+    # failed y devuelve SOLO {"changed": false, "msg": "..."} -- las
+    # respuestas de los otros comandos que sí funcionaron NO viajan en el
+    # evento, por eso "capturar stdouts del runner_on_failed" no alcanzaba.
+    # La única forma de recuperar los outputs es evitar el failure en la
+    # task, y eso requiere failed_when: false, que solo tiene sentido cuando
+    # el caller pidió explícitamente tolerar.
+    - name: Run commands (strict — default)
+      when: commands is defined and not (tolerate_command_errors | default(false) | bool)
       cisco.ios.ios_command:
         commands: "{{ commands }}"
+
+    # Loop 1-comando-por-iteración (mismo patrón que huawei/run.yml).
+    # Bug real reproducido en vivo contra un IOSv sin storm-control:
+    # ios_command con commands: [4 items] + failed_when: false NO devuelve
+    # stdout cuando alguno de esos 4 comandos matchea el patrón de error
+    # interno del módulo -- la task no falla, pero el res.stdout viene
+    # vacío, así que el driver recibía stdouts=[] y volvía a tirar
+    # "no command output returned". Con loop, cada comando queda en su
+    # propia iteración, Ansible produce res.results[i] con el stdout
+    # individual (incluido el texto "% Invalid input" para los rechazados)
+    # y _extract_all_command_outputs los saca por posición.
+    - name: Run commands (tolerant — per-command errors surface as text)
+      when: commands is defined and (tolerate_command_errors | default(false) | bool)
+      cisco.ios.ios_command:
+        commands:
+          - "{{ item }}"
+      loop: "{{ commands }}"
+      failed_when: false

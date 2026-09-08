@@ -46,6 +46,11 @@ list_ports:
       # "Forwarding" o "Blocking" = enabled, "inactive" = disabled,
       # Upper = porcentaje configurado. Un solo comando cubre todos los
       # puertos, mismo criterio que los 3 anteriores.
+      # Nota: hay imágenes IOSv/GNS3 que NO implementan storm-control y
+      # rechazan este comando con "% Invalid input detected". list_ports
+      # y read_core_state llaman a _leer(partial_ok=True) + _filter_unsupported,
+      # así que ese caso se degrada a storm_control=None por puerto en vez
+      # de tirar el read entero.
       - "show storm-control broadcast"
 
 update_port_description:

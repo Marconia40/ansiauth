@@ -173,8 +173,13 @@ def run_playbook(
         stdout = raw_stdout
     # Per-task stdouts for callers that need every command's output (e.g. the
     # port driver runs three read commands in one playbook).  Always populated
-    # so consumers don't need to check for None.
-    stdouts = _extract_all_command_outputs(r) if rc == 0 else []
+    # so consumers don't need to check for None. Extracted regardless of rc:
+    # when ``ios_command`` gets a mixed batch and one command is rejected by
+    # the device (``% Invalid input``), the task fails but the per-command
+    # responses ARE captured in the event -- callers can pass ``partial_ok=True``
+    # to ``_leer()`` to inspect them (used by the port driver to tolerate
+    # devices that don't implement ``storm-control``).
+    stdouts = _extract_all_command_outputs(r)
     combined_output = (stdout + stderr).lower()
     if "no hosts matched" in combined_output and rc == 0:
         logger.error("Playbook %s: no hosts matched on device=%s — treating as failure", playbook, device_label)
@@ -284,23 +289,50 @@ def _extract_all_command_outputs(r) -> list[str]:
     outputs: list[str] = []
     try:
         for event in r.events:
-            if event.get("event") != "runner_on_ok":
+            # ``runner_on_failed`` is included on purpose: when ``ios_command``
+            # runs a list and one command is rejected by the device (e.g.
+            # ``% Invalid input`` on an IOSv image without ``storm-control``),
+            # the task fails but Ansible still captures the per-command
+            # responses -- ``res.stdout`` holds the same list shape as on
+            # success, with the offending entries containing the device's
+            # error text. Callers opting into ``_leer(..., partial_ok=True)``
+            # inspect those entries to decide which commands to treat as
+            # "unsupported" vs. "actually broken".
+            if event.get("event") not in ("runner_on_ok", "runner_on_failed"):
                 continue
             res = event.get("event_data", {}).get("res", {})
             # Looped task (e.g. huawei/run.yml's "Run read commands", one
-            # cli_command per item): the aggregate runner_on_ok event has no
-            # top-level "stdout" at all -- each item's own stdout lives in
-            # its own dict under res["results"] instead. Same event shape
-            # that _extract_failure_reason() already accounts for on the
-            # failure side.
+            # cli_command per item; cisco/run.yml's tolerant path, one
+            # ios_command per item): the aggregate runner_on_ok event has
+            # no top-level "stdout" at all -- each item's own stdout lives
+            # in its own dict under res["results"] instead. Same event
+            # shape that _extract_failure_reason() already accounts for on
+            # the failure side.
+            #
+            # Shape del stdout por item depende del módulo usado en el loop:
+            #   - cli_command (Huawei): stdout es str          → append directo
+            #   - ios_command (Cisco):  stdout es list[str]    → aplanar SIEMPRE 1 entry (loop 1:1)
+            #   - iteración fallida / skipped: stdout ausente  → append "" para no correr el índice
+            #
+            # Preservar 1-entry-por-iteración es crítico para callers que
+            # slicean por posición (list_ports con _STORM_INDEX=3,
+            # read_core_state con v_end/p_end); una iteración fallida sin
+            # stdout se conserva como "" y el parser degrada la sección
+            # afectada a valores None (comportamiento tolerante).
             results = res.get("results")
             if isinstance(results, list):
                 for item in results:
                     if not isinstance(item, dict):
+                        outputs.append("")
                         continue
                     item_stdout = item.get("stdout")
                     if isinstance(item_stdout, str):
                         outputs.append(item_stdout)
+                    elif isinstance(item_stdout, list) and item_stdout:
+                        first = item_stdout[0]
+                        outputs.append(first if isinstance(first, str) else "")
+                    else:
+                        outputs.append("")
                 continue
             stdout_val = res.get("stdout")
             if isinstance(stdout_val, list):
