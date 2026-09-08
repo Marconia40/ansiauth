@@ -28,6 +28,7 @@ from app.schemas.global_config import (
     GlobalConfigRunningConfigRead,
     GlobalConfigRouteAddRequest,
     GlobalConfigSnmpInfo,
+    GlobalConfigSnmpTrapHostRemoveRequest,
     GlobalConfigSnmpUpdateRequest,
     GlobalConfigVersionRead,
 )
@@ -482,10 +483,10 @@ def remove_global_config_dns(
         "`trap_host` needs a resolvable community (either in this same "
         "request or already configured on the device). No-op on sub-fields "
         "that already match the device's current state. `trap_source` has "
-        "no confirmed effect on Huawei yet; `trap_host` is not yet "
-        "supported on Huawei (surfaces as a failed job, see job error). "
-        "Executed asynchronously, same job-polling shape as the other "
-        "global-config writes. Requires admin role or higher."
+        "no confirmed effect on Huawei yet. To remove a trap host, use "
+        "`DELETE /snmp/trap-hosts` instead. Executed asynchronously, same "
+        "job-polling shape as the other global-config writes. Requires "
+        "admin role or higher."
     ),
 )
 def set_global_config_snmp(
@@ -505,6 +506,43 @@ def set_global_config_snmp(
     dev = require_device(name)
     _authz_device(scope, name, min_role="admin", device=dev)
     _require_driver_with(dev, "set_snmp")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.delete(
+    "/snmp/trap-hosts",
+    status_code=202,
+    summary="Remove an SNMP trap host",
+    description=(
+        "Remove an SNMP trap host (RF-GLOBAL-07, counterpart of `trap_host` "
+        "in `PATCH /snmp`). No-op if the host isn't currently configured. "
+        "`community` is required on both vendors: IOS rejects `no "
+        "snmp-server host {ip}` alone as an incomplete command, and VRP "
+        "requires the exact community used when the trap host was added "
+        "(it's stored encrypted, can't be read back). Executed "
+        "asynchronously, same job-polling shape as the other "
+        "global-config writes. Requires admin role or higher."
+    ),
+)
+def remove_global_config_snmp_trap_host(
+    name: str,
+    data: GlobalConfigSnmpTrapHostRemoveRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = GlobalConfig(snmp_trap_host_remove=data.model_dump(exclude_none=True))
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="admin", device=dev)
+    _require_driver_with(dev, "remove_snmp_trap_host")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})

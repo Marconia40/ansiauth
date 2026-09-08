@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -126,6 +126,104 @@ class SVI:
         existente = next((i for i in interfaces if i.vlan_id == self.vlan_id), None)
         return {"existed": existente is not None, "actual": existente}
 
+    @staticmethod
+    def reconciliar_lote(recursos: "list[SVI]", device: "Device") -> "list[dict]":
+        """Ver ``Puerto.reconciliar_lote()`` -- mismo criterio, 1 sola
+        llamada a ``get_svis()`` en vez de 1 por cada ``SVI`` del lote."""
+        interfaces = device.driver.get_svis(device, device.password)
+        por_vlan = {i.vlan_id: i for i in interfaces}
+        return [
+            {"existed": r.vlan_id in por_vlan, "actual": por_vlan.get(r.vlan_id)}
+            for r in recursos
+        ]
+
+    @staticmethod
+    def ajustar_estados_lote(recursos: "list[SVI]", estados: "list[dict]") -> "list[dict]":
+        """Bug real encontrado probando un batch {ipv4_address, dhcp_relay_add}
+        junto: ``_resolver_dhcp_relay_add``/``_resolver_ipv4_secondary``
+        validan su precondition ("¿la interfaz tiene IPv4/IPv6?") contra
+        ``actual`` -- el estado leído ANTES de aplicar nada del lote. Si el
+        mismo lote está fijando esa IPv4/IPv6 por primera vez, la
+        validación fallaba con un falso "interface has no IPv4 address
+        configured" pese a que el comando de IPv4 se manda ANTES en la
+        MISMA conexión (mismo orden que ``expandir_a_svis()`` ya arma:
+        ipv4_address antes que ipv4_address_secondary/dhcp_relay_*) -- en
+        el device de verdad funcionaría. Este método corre antes de
+        ``resolver_paso()`` (llamado por ``Orquestador.ejecutar_lote()``
+        vía ``getattr(tipo, "ajustar_estados_lote", None)``, opcional --
+        ``Puerto`` no lo necesita, ningún campo suyo depende de otro campo
+        del MISMO lote) y le pega al ``actual`` de cada entrada el
+        ipv4_address/ipv6_address "efectivo" -- el que otro recurso del
+        MISMO vlan_id esté por fijar en este lote, si lo hay, si no el
+        leído. No toca ningún otro campo (ni siquiera
+        ipv4_address_secondary/dhcp_relay_servers) -- el no-op check de
+        esos sigue comparando contra el valor real leído.
+
+        Bug real encontrado probando ESTE fix: si se incluye al propio
+        recurso al armar "qué está fijando el lote", el resolver de
+        ``ipv4_address``/``ipv6_address`` termina comparando su ``actual``
+        parchado contra SU PROPIO valor nuevo -- siempre "igual", siempre
+        no-op, ni un solo `ipv4_address` se llegaba a aplicar más. El
+        parche para la entrada ``i`` tiene que salir de los OTROS
+        recursos del lote (``j != i``), nunca del propio."""
+        ajustados: "list[dict]" = []
+        for i, (r, estado) in enumerate(zip(recursos, estados)):
+            ipv4_nuevo = None
+            ipv6_nuevo = None
+            for j, otro in enumerate(recursos):
+                if j == i or otro.vlan_id != r.vlan_id:
+                    continue
+                if otro.ipv4_address:
+                    ipv4_nuevo = otro.ipv4_address
+                if otro.ipv6_address:
+                    ipv6_nuevo = otro.ipv6_address
+            if ipv4_nuevo is None and ipv6_nuevo is None:
+                ajustados.append(estado)
+                continue
+            actual = estado.get("actual")
+            base = actual if actual is not None else SVI(vlan_id=r.vlan_id)
+            actual_efectivo = replace(
+                base,
+                ipv4_address=ipv4_nuevo if ipv4_nuevo is not None else base.ipv4_address,
+                ipv6_address=ipv6_nuevo if ipv6_nuevo is not None else base.ipv6_address,
+            )
+            ajustados.append({**estado, "actual": actual_efectivo})
+        return ajustados
+
+    def resolver_paso(self, device: "Device", actual: "SVI | None") -> "tuple[str, str | None, dict] | None":
+        """Ver ``RecursoGestionable.resolver_paso``. ``dhcp_relay_add``/
+        ``dhcp_relay_remove`` SÍ batchean -- el front (``SVIEditModal``)
+        limita a 1 solo cambio de DHCP relay encolado por Save, así que
+        acá nunca hay más de 1 delta por lote a plegar contra la misma
+        lectura de ``actual`` (ver docstring de ``_resolver_dhcp_relay_add``/
+        ``_resolver_dhcp_relay_remove``). ``crear``/``eliminar`` quedan
+        afuera -- son operaciones de ciclo de vida, no "cambios de campo"
+        batcheables junto con el resto."""
+        campos = self.mutation_fields
+        if len(campos) != 1:
+            raise ValueError(
+                f"SVI.resolver_paso(): se espera exactamente 1 campo de "
+                f"mutación por llamada (se recibieron {sorted(campos)})"
+            )
+        campo = next(iter(campos))
+        if campo == "description":
+            return self._resolver_description(device, actual)
+        if campo == "admin_up":
+            return self._resolver_admin_up(device, actual)
+        if campo == "ipv4_address":
+            return self._resolver_ipv4(device, actual)
+        if campo == "ipv4_address_secondary":
+            return self._resolver_ipv4_secondary(device, actual)
+        if campo == "ipv6_address":
+            return self._resolver_ipv6(device, actual)
+        if campo in ("acl_in", "acl_out"):
+            return self._resolver_acl(device, actual, campo)
+        if campo == "dhcp_relay_add":
+            return self._resolver_dhcp_relay_add(device, actual)
+        if campo == "dhcp_relay_remove":
+            return self._resolver_dhcp_relay_remove(device, actual)
+        raise ValueError(f"SVI.resolver_paso(): campo no batcheable {campo!r}")
+
     def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """Mismo criterio que ``VLAN.aplicar()``/``Puerto.aplicar()``: el
         dict devuelto siempre incluye "accion", agregado acá, no por el
@@ -188,30 +286,64 @@ class SVI:
         )
         return {**desc_resultado, "accion": "crear_svi"}
 
+    def _resolver_description(self, device: "Device", actual: "SVI | None") -> "tuple[str, str | None, dict] | None":
+        if actual is not None and actual.description == self.description:
+            return None
+        return device.driver.resolver_set_svi_description(self.vlan_id, self.description)
+
     def _aplicar_description(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if actual is not None and actual.description == self.description:
+        paso = self._resolver_description(device, actual)
+        if paso is None:
             return self._noop_resultado("actualizar_descripcion_svi")
-        resultado = device.driver.set_svi_description(self.vlan_id, self.description, device, device.password)
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "actualizar_descripcion_svi"}
+
+    def _resolver_admin_up(self, device: "Device", actual: "SVI | None") -> "tuple[str, str | None, dict] | None":
+        if actual is not None and actual.admin_up == self.admin_up:
+            return None
+        return device.driver.resolver_set_svi_admin_state(self.vlan_id, self.admin_up)
 
     def _aplicar_admin_up(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         accion = "activar_svi" if self.admin_up else "desactivar_svi"
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if actual is not None and actual.admin_up == self.admin_up:
+        paso = self._resolver_admin_up(device, actual)
+        if paso is None:
             return self._noop_resultado(accion)
-        resultado = device.driver.set_svi_admin_state(self.vlan_id, self.admin_up, device, device.password)
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": accion}
+
+    def _resolver_ipv4(self, device: "Device", actual: "SVI | None") -> "tuple[str, str | None, dict] | None":
+        if actual is not None and actual.ipv4_address == self.ipv4_address:
+            return None
+        return device.driver.resolver_set_svi_ipv4(self.vlan_id, self.ipv4_address)
 
     def _aplicar_ipv4(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if actual is not None and actual.ipv4_address == self.ipv4_address:
+        paso = self._resolver_ipv4(device, actual)
+        if paso is None:
             return self._noop_resultado("configurar_ipv4_svi")
-        resultado = device.driver.set_svi_ipv4(self.vlan_id, self.ipv4_address, device, device.password)
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "configurar_ipv4_svi"}
+
+    def _resolver_ipv4_secondary(self, device: "Device", actual: "SVI | None") -> "tuple[str, str | None, dict] | None":
+        """RF-INTERV-03: "IP secundaria sin IP primaria" -- chequeo de
+        estado real, mismo criterio que ``_aplicar_ipv4_secondary()`` de
+        siempre (ver esa docstring)."""
+        if self.ipv4_address_secondary and not (actual and actual.ipv4_address):
+            raise ValueError(
+                "cannot set a secondary IPv4 address: interface has no primary IPv4 address configured"
+            )
+        if actual is not None and actual.ipv4_address_secondary == self.ipv4_address_secondary:
+            return None
+        previa = actual.ipv4_address_secondary if actual is not None else None
+        return device.driver.resolver_set_svi_ipv4_secondary(self.vlan_id, self.ipv4_address_secondary, previa)
 
     def _aplicar_ipv4_secondary(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """RF-INTERV-03: "IP secundaria sin IP primaria: se intenta asignar
@@ -223,31 +355,33 @@ class SVI:
         device ya tiene configurado."""
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if self.ipv4_address_secondary and not (actual and actual.ipv4_address):
-            raise ValueError(
-                "cannot set a secondary IPv4 address: interface has no primary IPv4 address configured"
-            )
-        if actual is not None and actual.ipv4_address_secondary == self.ipv4_address_secondary:
+        paso = self._resolver_ipv4_secondary(device, actual)
+        if paso is None:
             return self._noop_resultado("configurar_ipv4_secundaria_svi")
-        previa = actual.ipv4_address_secondary if actual is not None else None
-        resultado = device.driver.set_svi_ipv4_secondary(
-            self.vlan_id, self.ipv4_address_secondary, previa, device, device.password,
-        )
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "configurar_ipv4_secundaria_svi"}
+
+    def _resolver_ipv6(self, device: "Device", actual: "SVI | None") -> "tuple[str, str | None, dict] | None":
+        if actual is not None and actual.ipv6_address == self.ipv6_address:
+            return None
+        return device.driver.resolver_set_svi_ipv6(self.vlan_id, self.ipv6_address)
 
     def _aplicar_ipv6(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if actual is not None and actual.ipv6_address == self.ipv6_address:
+        paso = self._resolver_ipv6(device, actual)
+        if paso is None:
             return self._noop_resultado("configurar_ipv6_svi")
-        resultado = device.driver.set_svi_ipv6(self.vlan_id, self.ipv6_address, device, device.password)
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "configurar_ipv6_svi"}
 
-    def _aplicar_acl(self, device: "Device", pre_state: "dict | None" = None, campo: str = "acl_in") -> dict:
+    def _resolver_acl(
+        self, device: "Device", actual: "SVI | None", campo: str = "acl_in",
+    ) -> "tuple[str, str | None, dict] | None":
         direccion = "in" if campo == "acl_in" else "out"
         valor = self.acl_in if campo == "acl_in" else self.acl_out
-        estado = pre_state if pre_state is not None else self.reconciliar(device)
-        actual = estado.get("actual")
         actual_valor = getattr(actual, campo) if actual is not None else None
         # "" (clear) contra None (nada atado en el device) es el mismo
         # estado -- sin esta normalización, un clear pedido sobre una
@@ -255,27 +389,38 @@ class SVI:
         # (None != "") y llegaba al driver sin ACL de referencia para el
         # "undo".
         if actual is not None and (actual_valor or None) == (valor or None):
+            return None
+        return device.driver.resolver_set_svi_acl(self.vlan_id, direccion, valor, current_acl_name=actual_valor)
+
+    def _aplicar_acl(self, device: "Device", pre_state: "dict | None" = None, campo: str = "acl_in") -> dict:
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
+        actual = estado.get("actual")
+        paso = self._resolver_acl(device, actual, campo)
+        if paso is None:
             return self._noop_resultado("configurar_acl_svi")
-        resultado = device.driver.set_svi_acl(
-            self.vlan_id, direccion, valor, device, device.password,
-            current_acl_name=actual_valor,
-        )
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "configurar_acl_svi"}
 
     @staticmethod
     def _es_ipv6(ip: str) -> bool:
         return ":" in ip
 
-    def _aplicar_dhcp_relay_add(self, device: "Device", pre_state: "dict | None" = None) -> dict:
+    def _resolver_dhcp_relay_add(
+        self, device: "Device", actual: "SVI | None",
+    ) -> "tuple[str, str | None, dict] | None":
         """RF-INTERV-05: incremental (1 server por llamada), no full-replace
-        -- reconciliar() para conocer la lista actual, agregar 1 IP, y
-        volver a mandar la lista completa al driver (que sí sigue siendo
-        full-replace puertas adentro, mismo mecanismo ya construido). El
-        SRS pide 2 preconditions de estado real: la IP ya está (duplicado,
-        noop) y la interfaz debe tener IPv4/IPv6 configurada según la
-        familia del server que se agrega."""
-        estado = pre_state if pre_state is not None else self.reconciliar(device)
-        actual = estado.get("actual")
+        -- se conoce la lista actual vía ``actual`` (leída 1 vez, sea por
+        ``reconciliar()`` individual o por ``reconciliar_lote()`` cuando
+        viene de un batch), se agrega 1 IP, y se manda la lista completa
+        al driver (que sí sigue siendo full-replace puertas adentro,
+        mismo mecanismo ya construido). El SRS pide 2 preconditions de
+        estado real: la IP ya está (duplicado, noop) y la interfaz debe
+        tener IPv4/IPv6 configurada según la familia del server que se
+        agrega. Batchea sin plegado especial porque el front
+        (``SVIEditModal``) limita a 1 solo cambio de DHCP relay encolado
+        por Save -- nunca hay un 2do delta contra el mismo ``actual`` que
+        pueda pisar a este."""
         servers_actuales = list(actual.dhcp_relay_servers) if actual and actual.dhcp_relay_servers else []
         ip = self.dhcp_relay_add
         if self._es_ipv6(ip):
@@ -288,30 +433,61 @@ class SVI:
                 "cannot add an IPv4 DHCP relay server: interface has no IPv4 address configured"
             )
         if ip in servers_actuales:
-            return self._noop_resultado("agregar_dhcp_relay_svi")
+            return None
         if len(servers_actuales) >= _MAX_DHCP_RELAY_SERVERS:
             raise ValueError(f"cannot add DHCP relay server: limit of {_MAX_DHCP_RELAY_SERVERS} reached")
-        resultado = device.driver.set_svi_dhcp_relay(
-            self.vlan_id, servers_actuales + [ip], device, device.password,
-        )
-        return {**resultado, "accion": "agregar_dhcp_relay_svi"}
+        return device.driver.resolver_set_svi_dhcp_relay(self.vlan_id, servers_actuales + [ip])
 
-    def _aplicar_dhcp_relay_remove(self, device: "Device", pre_state: "dict | None" = None) -> dict:
-        """El SRS pide "sin error crítico" si la IP a eliminar no estaba --
-        mismo criterio de noop que el resto del contrato (VLAN/Puerto)."""
+    def _aplicar_dhcp_relay_add(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
+        paso = self._resolver_dhcp_relay_add(device, actual)
+        if paso is None:
+            return self._noop_resultado("agregar_dhcp_relay_svi")
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
+        return {**resultado, "accion": "agregar_dhcp_relay_svi"}
+
+    def _resolver_dhcp_relay_remove(
+        self, device: "Device", actual: "SVI | None",
+    ) -> "tuple[str, str | None, dict] | None":
+        """El SRS pide "sin error crítico" si la IP a eliminar no estaba --
+        mismo criterio de noop que el resto del contrato (VLAN/Puerto)."""
         servers_actuales = list(actual.dhcp_relay_servers) if actual and actual.dhcp_relay_servers else []
         ip = self.dhcp_relay_remove
         if ip not in servers_actuales:
-            return self._noop_resultado("eliminar_dhcp_relay_svi")
-        resultado = device.driver.set_svi_dhcp_relay(
-            self.vlan_id, [s for s in servers_actuales if s != ip], device, device.password,
+            return None
+        return device.driver.resolver_set_svi_dhcp_relay(
+            self.vlan_id, [s for s in servers_actuales if s != ip],
         )
+
+    def _aplicar_dhcp_relay_remove(self, device: "Device", pre_state: "dict | None" = None) -> dict:
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
+        actual = estado.get("actual")
+        paso = self._resolver_dhcp_relay_remove(device, actual)
+        if paso is None:
+            return self._noop_resultado("eliminar_dhcp_relay_svi")
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "eliminar_dhcp_relay_svi"}
 
     def repositorio(self) -> str:
         return "svi"
+
+    def resumen_intento(self) -> str:
+        """Ver ``VLAN.resumen_intento()`` -- misma idea, adaptada a que acá
+        ``eliminar``/``crear`` son flags aparte de ``mutation_fields`` (no
+        entran en ese set, ver ``validar()``)."""
+        identidad = f"SVI {self.vlan_id} on {self.device}" if self.device else f"SVI {self.vlan_id}"
+        if self.eliminar:
+            return f"Delete {identidad}"
+        if self.crear:
+            return f"Create {identidad}"
+        campos = self.mutation_fields
+        if not campos:
+            return f"{identidad}: no changes"
+        cambios = ", ".join(f"set {campo} to {getattr(self, campo)!r}" for campo in sorted(campos))
+        return f"{identidad}: {cambios}"
 
     def to_dict(self) -> dict:
         return {

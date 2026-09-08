@@ -42,6 +42,8 @@ def _to_domain(row: DeviceModel) -> Device:
         platform=row.platform or "ios",
         username=row.username,
         encrypted_password=row.encrypted_password,
+        auth_method=row.auth_method or "password",
+        encrypted_private_key=row.encrypted_private_key,
         id=str(row.id),
         created_at=row.created_at or datetime.now(timezone.utc),
         site_id=site_id,
@@ -59,6 +61,8 @@ def _to_orm(d: Device) -> DeviceModel:
         platform=d.platform,
         username=d.username,
         encrypted_password=d.encrypted_password,
+        auth_method=d.auth_method,
+        encrypted_private_key=d.encrypted_private_key,
         device_group_id=d.device_group_id,
     )
 

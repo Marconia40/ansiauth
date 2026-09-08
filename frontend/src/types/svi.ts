@@ -126,3 +126,29 @@ export interface SVIOperationResult {
   group_job_id: string;
   jobs: SVIJobResult[];
 }
+
+// Body for PATCH /api/v1/devices/{name}/svis/{vlan_id}/batch. All fields
+// optional together on one object (unlike each individual endpoint, which
+// takes exactly one) — the server applies every set field in 1 SSH
+// connection instead of 1 per field. `""` clears a field (same meaning it
+// already has on every individual endpoint's clear variant), `null`/
+// omitted leaves it untouched. DHCP relay has no batch equivalent — it
+// stays immediate via POST/DELETE .../dhcp-relay. vlan_id is the URL
+// path segment, not part of this body.
+export interface SVIBatchRequest {
+  description?: string | null;
+  admin_up?: boolean | null;
+  ipv4_address?: string | null;
+  ipv4_address_secondary?: string | null;
+  ipv6_address?: string | null;
+  acl_in?: string | null;
+  acl_out?: string | null;
+  /** Mutually exclusive with dhcp_relay_remove — at most 1 DHCP relay
+   * change per batch (server-side full-replace, see SVIEditModal). */
+  dhcp_relay_add?: string | null;
+  dhcp_relay_remove?: string | null;
+}
+
+// Response shape for PATCH .../svis/{vlan_id}/batch is the SAME
+// SVIOperationResult as every other SVI endpoint — `jobs` always has
+// exactly 1 entry here (1 batch = 1 connection = 1 job).

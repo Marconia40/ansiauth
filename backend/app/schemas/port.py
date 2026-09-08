@@ -261,6 +261,37 @@ class PortStormControlUpdateRequest(_PortTargetRequest):
     )
 
 
+class PortBatchChangeItem(_PortTargetRequest):
+    """1 entrada de ``POST /ports/batch`` -- la config de 1 puerto, con
+    TODOS los campos opcionales a la vez (a diferencia de cada endpoint
+    individual, que exige exactamente 1). Puede traer la config completa
+    de un puerto de una (varios campos juntos) o un solo campo -- el
+    servidor la expande a 1+ ``Puerto`` internamente (ver
+    ``expandir_a_puertos()`` en ``api/ports.py``), reusando la misma
+    validación que cada endpoint individual ya tiene."""
+
+    description: Optional[str] = Field(None, max_length=200)
+    admin_up: Optional[bool] = None
+    mode: Optional[Literal["access", "trunk"]] = None
+    access_vlan: Optional[int] = Field(None, ge=1, le=4094)
+    allowed_vlans: Optional[list[int]] = None
+    allowed_vlan_operation: Literal["replace", "add", "remove"] = "replace"
+    poe_enabled: Optional[bool] = None
+    storm_control_enabled: Optional[bool] = None
+    storm_control_threshold: Optional[float] = Field(None, ge=0, le=100)
+
+
+class PortBatchRequest(BaseModel):
+    """Request body de ``POST /devices/{name}/ports/batch`` -- N cambios,
+    cada uno con la config de 1 puerto (parcial o completa). Cubre 2
+    dimensiones con la misma forma: N puertos con el mismo campo (una
+    entrada por puerto, mismo campo seteado en cada una), o 1 puerto con
+    muchos campos (1 sola entrada con varios campos), o cualquier mezcla
+    -- todo termina en 1 sola conexión SSH real."""
+
+    changes: list[PortBatchChangeItem] = Field(..., min_length=1)
+
+
 class PortResetRequest(_PortTargetRequest):
     """Request body for ``POST /api/v1/ports/reset`` (RF-PUERTO-10).
 

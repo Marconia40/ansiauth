@@ -14,6 +14,7 @@ from app.schemas.svi import (
     SVIAclClearRequest,
     SVIAclUpdateRequest,
     SVIAdminStateUpdateRequest,
+    SVIBatchRequest,
     SVICreateRequest,
     SVIDeleteRequest,
     SVIDescriptionClearRequest,
@@ -586,3 +587,73 @@ def remove_svi_dhcp_relay(
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+def expandir_a_svis(vlan_id: int, cambios: SVIBatchRequest) -> list[SVI]:
+    """1 ``SVIBatchRequest`` -> 1+ ``SVI``, 1 por campo seteado (``SVI``
+    exige exactamente 1 campo de mutación por instancia, mismo criterio
+    que ``Puerto`` -- ver ``expandir_a_puertos()`` en ``api/ports.py``,
+    misma idea, sin combos especiales acá). Cada ``SVI`` resultante pasa
+    por ``SVI.validar()`` sin cambios."""
+    svis: list[SVI] = []
+    if cambios.description is not None:
+        svis.append(SVI(vlan_id=vlan_id, description=cambios.description))
+    if cambios.admin_up is not None:
+        svis.append(SVI(vlan_id=vlan_id, admin_up=cambios.admin_up))
+    if cambios.ipv4_address is not None:
+        svis.append(SVI(vlan_id=vlan_id, ipv4_address=cambios.ipv4_address))
+    if cambios.ipv4_address_secondary is not None:
+        svis.append(SVI(vlan_id=vlan_id, ipv4_address_secondary=cambios.ipv4_address_secondary))
+    if cambios.ipv6_address is not None:
+        svis.append(SVI(vlan_id=vlan_id, ipv6_address=cambios.ipv6_address))
+    if cambios.acl_in is not None:
+        svis.append(SVI(vlan_id=vlan_id, acl_in=cambios.acl_in))
+    if cambios.acl_out is not None:
+        svis.append(SVI(vlan_id=vlan_id, acl_out=cambios.acl_out))
+    if cambios.dhcp_relay_add is not None:
+        svis.append(SVI(vlan_id=vlan_id, dhcp_relay_add=cambios.dhcp_relay_add))
+    if cambios.dhcp_relay_remove is not None:
+        svis.append(SVI(vlan_id=vlan_id, dhcp_relay_remove=cambios.dhcp_relay_remove))
+    if not svis:
+        raise ValueError("no changes provided")
+    return svis
+
+
+@router.patch(
+    "/{vlan_id}/batch",
+    status_code=202,
+    summary="Batch-update multiple fields on one virtual interface in 1 connection",
+    description=(
+        "Apply N field changes to a single virtual interface (description, "
+        "admin state, IPv4/IPv6, ACL in/out, and at most 1 DHCP relay "
+        "server add or remove) in a **single** SSH connection instead of "
+        "one connection per field. Field-level no-op detection still "
+        "applies (unchanged values aren't re-sent). If the batch fails "
+        "partway, the whole job fails and rollback attempts to restore "
+        "every field that did change. Executed asynchronously: the "
+        "response carries a `group_job_id` and a single job entry. "
+        "Requires operator role or higher; site-scoped users may only "
+        "target devices in their allowed sites."
+    ),
+)
+def batch_update_svi(
+    name: str,
+    vlan_id: int,
+    data: SVIBatchRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    try:
+        recursos = expandir_a_svis(vlan_id, data)
+        for svi in recursos:
+            svi.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
+
+    group_job_id, job_entry = group_operation_runner.encolar_lote(recursos, name, current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": [job_entry]})

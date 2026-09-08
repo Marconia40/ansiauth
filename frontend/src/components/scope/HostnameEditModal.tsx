@@ -18,7 +18,6 @@ interface Props {
   deviceName: string;
   /** Current hostname read from the cache — used only as an initial value. */
   currentHostname: string | null;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 // PATCH /devices/{name}/global-config/hostname (RF-GLOBAL-08). Async: the
@@ -32,10 +31,9 @@ export function HostnameEditModal({
   onClose,
   deviceName,
   currentHostname,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
   const [hostname, setHostname] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -58,16 +56,12 @@ export function HostnameEditModal({
     mutationFn: () => setGlobalConfigHostname(deviceName, { hostname: trimmed }),
     onSuccess: (result) => {
       trackGroupJob(result.group_job_id, `Set hostname on ${deviceName}`);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, `Set hostname on ${deviceName}`, j.device);
-      }
       queryClient.invalidateQueries({
         queryKey: ['global-config', 'synced', deviceName],
       });
       queryClient.invalidateQueries({
         queryKey: ['global-config', 'version', 'synced', deviceName],
       });
-      onDone?.(`Hostname change queued on ${deviceName}.`, 'ok');
       onClose();
     },
     onError: (err: unknown) => {

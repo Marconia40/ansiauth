@@ -252,6 +252,24 @@ class Puerto:
         existente = next((p for p in puertos if p.interface == self.interface), None)
         return {"existed": existente is not None, "actual": existente}
 
+    @staticmethod
+    def reconciliar_lote(recursos: "list[Puerto]", device: "Device") -> "list[dict]":
+        """Lectura compartida para ``Orquestador.ejecutar_lote()`` -- 1 sola
+        llamada a ``list_ports()`` (ya trae TODOS los puertos) en vez de 1
+        por cada ``Puerto`` del lote. Devuelve 1 dict ``{"existed",
+        "actual"}`` por entrada de *recursos*, EN EL MISMO ORDEN -- mismo
+        shape por entrada que ``reconciliar()`` individual. Lista (no dict
+        por interfaz) a propósito: alinea por posición con *recursos* sin
+        necesitar una clave de identidad genérica del lado del
+        orquestador (que no sabe si un recurso se identifica por
+        interfaz, vlan_id, etc.)."""
+        puertos = device.driver.list_ports(device, device.password)
+        por_interfaz = {p.interface: p for p in puertos}
+        return [
+            {"existed": r.interface in por_interfaz, "actual": por_interfaz.get(r.interface)}
+            for r in recursos
+        ]
+
     def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """Mismo criterio que VLAN.aplicar(): el dict devuelto siempre
         incluye "accion", agregado acá, no por el driver — Fase 3
@@ -313,6 +331,42 @@ class Puerto:
             return self._aplicar_poe(device, pre_state)
         raise ValueError(f"Puerto.aplicar(): no hay driver call para el campo {campo!r}")
 
+    def resolver_paso(self, device: "Device", actual: "Puerto | None") -> "tuple[str, str | None, dict] | None":
+        """Ver ``RecursoGestionable.resolver_paso`` -- mismo dispatch que
+        ``aplicar()`` (reset -> mode -> storm-control -> campo único),
+        pero devuelve el paso sin tocar el device. Cada rama delega al
+        ``_resolver_XXX`` correspondiente -- los mismos que usa
+        ``aplicar()`` por debajo, no hay 2 caminos de no-op/dispatch."""
+        if self.reset:
+            return device.driver.resolver_reset_port(self.interface)
+        if self.mode == "access":
+            return device.driver.resolver_set_access_mode(self.interface, self.access_vlan)
+        if self.mode == "trunk":
+            return device.driver.resolver_set_trunk_mode(self.interface, self.access_vlan, list(self.allowed_vlans))
+        campos = self.mutation_fields
+        if "storm_control_enabled" in campos:
+            return self._resolver_storm_control(device)
+        if len(campos) != 1:
+            raise ValueError(
+                f"Puerto.resolver_paso(): sin mode seteado se espera exactamente "
+                f"1 campo de mutación (se recibieron {sorted(campos)}) -- "
+                f"las únicas combinaciones válidas de 2+ campos son "
+                f"mode='access'+access_vlan, mode='trunk'+allowed_vlans, o "
+                f"storm_control_enabled(+storm_control_threshold)"
+            )
+        campo = next(iter(campos))
+        if campo == "description":
+            return self._resolver_description(device, actual)
+        if campo == "admin_up":
+            return self._resolver_admin_up(device, actual)
+        if campo == "access_vlan":
+            return self._resolver_access_vlan(device, actual)
+        if campo == "allowed_vlans":
+            return self._resolver_allowed_vlans(device, actual)
+        if campo == "poe_enabled":
+            return self._resolver_poe(device, actual)
+        raise ValueError(f"Puerto.resolver_paso(): no hay driver call para el campo {campo!r}")
+
     def _aplicar_modo_access(self, device: "Device") -> dict:
         """Cambia el puerto a modo access con ``self.access_vlan``,
         atómico -- reemplaza la rama ``_es_composite`` vieja para este caso
@@ -320,7 +374,8 @@ class Puerto:
         el camino que reemplaza: comparar "ya está en access con esta
         VLAN" es una pregunta legítima pero separada, documentada como
         alcance no resuelto, no un caso olvidado."""
-        resultado = device.driver.set_access_mode(self.interface, self.access_vlan, device, device.password)
+        op_key, variant, vars = device.driver.resolver_set_access_mode(self.interface, self.access_vlan)
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "configurar_modo_access"}
 
     def _aplicar_modo_trunk(self, device: "Device") -> dict:
@@ -328,9 +383,10 @@ class Puerto:
         native VLAN -- mismo campo dual-purpose que usa el modo access,
         ver docstring de la clase) y ``self.allowed_vlans``, atómico --
         mismo criterio que ``_aplicar_modo_access()``."""
-        resultado = device.driver.set_trunk_mode(
-            self.interface, self.access_vlan, list(self.allowed_vlans), device, device.password,
+        op_key, variant, vars = device.driver.resolver_set_trunk_mode(
+            self.interface, self.access_vlan, list(self.allowed_vlans),
         )
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "configurar_modo_trunk"}
 
     def _noop_resultado(self, accion: str) -> dict:
@@ -342,22 +398,41 @@ class Puerto:
         al device cada vez."""
         return {"rc": 0, "success": True, "changed": False, "noop": True, "accion": accion}
 
+    def _resolver_description(self, device: "Device", actual: "Puerto | None") -> "tuple[str, str | None, dict] | None":
+        if actual is not None and actual.description == self.description:
+            return None
+        return device.driver.resolver_update_port_description(self.interface, self.description)
+
     def _aplicar_description(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if actual is not None and actual.description == self.description:
+        paso = self._resolver_description(device, actual)
+        if paso is None:
             return self._noop_resultado("actualizar_descripcion_puerto")
-        resultado = device.driver.update_port_description(self.interface, self.description, device, device.password)
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "actualizar_descripcion_puerto"}
+
+    def _resolver_admin_up(self, device: "Device", actual: "Puerto | None") -> "tuple[str, str | None, dict] | None":
+        if actual is not None and actual.admin_up == self.admin_up:
+            return None
+        return device.driver.resolver_set_port_admin_state(self.interface, self.admin_up)
 
     def _aplicar_admin_up(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         accion = "activar_puerto" if self.admin_up else "desactivar_puerto"
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if actual is not None and actual.admin_up == self.admin_up:
+        paso = self._resolver_admin_up(device, actual)
+        if paso is None:
             return self._noop_resultado(accion)
-        resultado = device.driver.set_port_admin_state(self.interface, self.admin_up, device, device.password)
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": accion}
+
+    def _resolver_poe(self, device: "Device", actual: "Puerto | None") -> "tuple[str, str | None, dict] | None":
+        if actual is not None and actual.poe_enabled == self.poe_enabled:
+            return None
+        return device.driver.resolver_set_port_poe(self.interface, self.poe_enabled)
 
     def _aplicar_poe(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """RF-PUERTO-09. Mismo shape que ``_aplicar_admin_up()`` -- no-op si
@@ -369,9 +444,11 @@ class Puerto:
         accion = "activar_poe" if self.poe_enabled else "desactivar_poe"
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
-        if actual is not None and actual.poe_enabled == self.poe_enabled:
+        paso = self._resolver_poe(device, actual)
+        if paso is None:
             return self._noop_resultado(accion)
-        resultado = device.driver.set_port_poe(self.interface, self.poe_enabled, device, device.password)
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": accion}
 
     def _aplicar_access_vlan(self, device: "Device", pre_state: "dict | None" = None) -> dict:
@@ -391,19 +468,28 @@ class Puerto:
         no reconocido caía silenciosamente en la rama access."""
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
+        paso = self._resolver_access_vlan(device, actual)
+        if paso is None:
+            # Corrección real de Fase 7 (RNF-API-05) -- ver _noop_resultado().
+            return self._noop_resultado("asignar_vlan_acceso")
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
+        return {**resultado, "accion": "asignar_vlan_acceso"}
+
+    def _resolver_access_vlan(self, device: "Device", actual: "Puerto | None") -> "tuple[str, str | None, dict] | None":
+        """Mismo gate/no-op/dispatch que ``_aplicar_access_vlan()`` de
+        siempre (ver esa docstring), separado para que ``resolver_paso()``
+        lo pueda usar sin tocar el device."""
         if actual is not None and actual.mode not in ("access", "trunk"):
             raise ValueError(
                 f"el puerto {self.interface} no está en modo access ni trunk "
                 f"(modo actual: {actual.mode!r}) — no se puede asignar VLAN de acceso"
             )
         if actual is not None and actual.access_vlan == self.access_vlan:
-            # Corrección real de Fase 7 (RNF-API-05) -- ver _noop_resultado().
-            return self._noop_resultado("asignar_vlan_acceso")
+            return None
         if actual is not None and actual.mode == "trunk":
-            resultado = device.driver.set_trunk_pvid_vlan(self.interface, self.access_vlan, device, device.password)
-        else:
-            resultado = device.driver.set_port_access_vlan(self.interface, self.access_vlan, device, device.password)
-        return {**resultado, "accion": "asignar_vlan_acceso"}
+            return device.driver.resolver_set_trunk_pvid_vlan(self.interface, self.access_vlan)
+        return device.driver.resolver_set_port_access_vlan(self.interface, self.access_vlan)
 
     def _aplicar_allowed_vlans(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """`allowed_vlan_operation` ("replace"/"add"/"remove") necesita la
@@ -424,6 +510,18 @@ class Puerto:
         nunca va a exponer esa config."""
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
+        paso = self._resolver_allowed_vlans(device, actual)
+        if paso is None:
+            # Corrección real de Fase 7 (RNF-API-05) -- ver _noop_resultado().
+            return self._noop_resultado("configurar_trunk_vlans")
+        op_key, variant, vars = paso
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
+        return {**resultado, "accion": "configurar_trunk_vlans"}
+
+    def _resolver_allowed_vlans(self, device: "Device", actual: "Puerto | None") -> "tuple[str, str | None, dict] | None":
+        """Mismo gate/cómputo de delta/no-op que ``_aplicar_allowed_vlans()``
+        de siempre (ver esa docstring), separado para que ``resolver_paso()``
+        lo pueda usar sin tocar el device."""
         if actual is not None and actual.mode != "trunk":
             raise ValueError(
                 f"el puerto {self.interface} no está en modo trunk "
@@ -464,16 +562,19 @@ class Puerto:
             )
 
         if actuales is not None and sorted(set(actuales)) == deseados:
-            # Corrección real de Fase 7 (RNF-API-05) -- ver _noop_resultado().
             # Comparación sobre la lista YA calculada (deseados), no sobre
             # self.allowed_vlans crudo -- "add"/"remove" son relativos al
             # estado actual, el no-op real es "¿el resultado final ya es
             # igual al estado actual?", no "¿la lista pedida es idéntica a
             # la actual?".
-            return self._noop_resultado("configurar_trunk_vlans")
+            return None
 
-        resultado = device.driver.set_trunk_allowed_vlans(self.interface, deseados, device, device.password)
-        return {**resultado, "accion": "configurar_trunk_vlans"}
+        return device.driver.resolver_set_trunk_allowed_vlans(self.interface, deseados)
+
+    def _resolver_storm_control(self, device: "Device") -> "tuple[str, str | None, dict]":
+        return device.driver.resolver_set_storm_control(
+            self.interface, self.storm_control_enabled, self.storm_control_threshold,
+        )
 
     def _aplicar_storm_control(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """RF-PUERTO-07, alcance simple (decisión con el usuario): un
@@ -482,9 +583,8 @@ class Puerto:
         el modo, la lectura no expone storm-control hoy, así que no hay
         estado previo confiable contra el que comparar."""
         accion = "activar_storm_control" if self.storm_control_enabled else "desactivar_storm_control"
-        resultado = device.driver.set_storm_control(
-            self.interface, self.storm_control_enabled, self.storm_control_threshold, device, device.password,
-        )
+        op_key, variant, vars = self._resolver_storm_control(device)
+        resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": accion}
 
     def _aplicar_reset(self, device: "Device") -> dict:
@@ -499,6 +599,20 @@ class Puerto:
 
     def repositorio(self) -> str:
         return "puerto"
+
+    def resumen_intento(self) -> str:
+        """Ver ``VLAN.resumen_intento()`` -- misma idea, ``self.reset`` acá
+        cumple el rol de ``eliminar``/``crear`` en las otras clases (corta
+        antes de mirar ``mutation_fields``, mismo criterio que
+        ``validar()``)."""
+        identidad = f"Port {self.interface} on {self.device}" if self.device else f"Port {self.interface}"
+        if self.reset:
+            return f"Reset {identidad} to defaults"
+        campos = self.mutation_fields
+        if not campos:
+            return f"{identidad}: no changes"
+        cambios = ", ".join(f"set {campo} to {getattr(self, campo)!r}" for campo in sorted(campos))
+        return f"{identidad}: {cambios}"
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-safe dict — todos los campos, formato interno

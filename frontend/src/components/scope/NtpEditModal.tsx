@@ -20,7 +20,6 @@ interface Props {
   onClose: () => void;
   deviceName: string;
   currentServers: string[] | null;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 // NTP servers are incremental (POST / DELETE 1 server at a time) so this
@@ -32,10 +31,9 @@ export function NtpEditModal({
   onClose,
   deviceName,
   currentServers,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const [servers, setServers] = useState<string[]>([]);
   const [draft, setDraft] = useState('');
@@ -75,14 +73,10 @@ export function NtpEditModal({
         ...(prefer ? { prefer: true } : {}),
       });
       trackGroupJob(result.group_job_id, `Add NTP ${s} on ${deviceName}`);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, `Add NTP ${s} on ${deviceName}`, j.device);
-      }
       setServers([...servers, s]);
       setDraft('');
       setPrefer(false);
       invalidate();
-      onDone?.(`Add NTP ${s} queued on ${deviceName}.`, 'ok');
     } catch (err) {
       setError(extractMessage(err, 'Add NTP server failed.'));
     } finally {
@@ -96,12 +90,8 @@ export function NtpEditModal({
     try {
       const result = await removeGlobalConfigNtp(deviceName, { server: s });
       trackGroupJob(result.group_job_id, `Remove NTP ${s} on ${deviceName}`);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, `Remove NTP ${s} on ${deviceName}`, j.device);
-      }
       setServers(servers.filter((x) => x !== s));
       invalidate();
-      onDone?.(`Remove NTP ${s} queued on ${deviceName}.`, 'ok');
     } catch (err) {
       setError(extractMessage(err, 'Remove NTP server failed.'));
     } finally {

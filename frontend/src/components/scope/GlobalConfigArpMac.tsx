@@ -15,6 +15,7 @@ import type {
 } from '@/types/global-config';
 import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 
 interface Props {
   deviceName: string;
@@ -60,7 +61,7 @@ export function GlobalConfigArpMac({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (query: {
       state: { data?: SyncedResource<ArpTableRead> };
-    }) => (query.state.data?.sync_in_progress ? 2000 : false),
+    }) => (query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const macQuery = useQuery({
@@ -69,7 +70,7 @@ export function GlobalConfigArpMac({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (query: {
       state: { data?: SyncedResource<MacTableRead> };
-    }) => (query.state.data?.sync_in_progress ? 2000 : false),
+    }) => (query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const inProgress = Boolean(

@@ -15,6 +15,7 @@ import type { Site, SiteCreate, SiteUpdate } from '@/types/site';
 import type {
   PortAccessVlanUpdateRequest,
   PortAdminStateUpdateRequest,
+  PortBatchRequest,
   PortDescriptionClearRequest,
   PortDescriptionUpdateRequest,
   PortListResponse,
@@ -30,6 +31,7 @@ import type {
   SVIAclClearRequest,
   SVIAclUpdateRequest,
   SVIAdminStateUpdateRequest,
+  SVIBatchRequest,
   SVICreateRequest,
   SVIDeleteRequest,
   SVIDescriptionClearRequest,
@@ -562,6 +564,19 @@ export async function resetPort(
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
+/** POST /devices/{name}/ports/batch — N changes (across ports, fields, or
+ * both) applied in 1 SSH connection instead of 1 per change. See
+ * PortBatchRequest. */
+export async function batchUpdatePorts(
+  device: string,
+  body: PortBatchRequest,
+): Promise<PortOperationResult> {
+  const result = await unwrap<PortOperationResult>(
+    client.post<ApiResponse<PortOperationResult>>(`/devices/${device}/ports/batch`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
 // ── Virtual interfaces (SVI) ─────────────────────────────────────────────────
 
 export async function getInterfacesVirtuales(device: string): Promise<SVIListResponse> {
@@ -725,6 +740,20 @@ export async function removeSVIDhcpRelay(
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
+/** PATCH /devices/{name}/svis/{vlan_id}/batch — N field changes on 1 SVI
+ * applied in 1 SSH connection instead of 1 per field. See SVIBatchRequest.
+ * DHCP relay isn't included, it stays immediate via the 2 functions above. */
+export async function batchUpdateSvi(
+  device: string,
+  vlanId: number,
+  body: SVIBatchRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.patch<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/${vlanId}/batch`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
 // ── Devices ───────────────────────────────────────────────────────────────────
 
 export async function getDevices(): Promise<Device[]> {
@@ -806,14 +835,23 @@ export async function getDashboardSummary(
 }
 
 export interface DashboardRefreshResult {
+  /** Devices whose sync_device_task was actually enqueued. */
   devices_queued: number;
+  /** Devices considered fresh (skipped by staleness filter). */
+  devices_skipped_fresh?: number;
+  /** Devices that already had a pending sync (skipped by coalescing). */
+  devices_skipped_coalesced?: number;
+  /** Same as devices_queued -- kept for backwards compatibility. */
   tasks_dispatched: number;
-  tasks: { device: string; scope: 'vlans' | 'ports' | 'svis'; task_id: string }[];
 }
 
-/** Encola sync de vlans+ports+svis para cada device del scope. Fire and
- * forget: la respuesta trae los task_ids pero el frontend simplemente
- * hace polling del summary hasta que sync_in_progress_count vuelve a 0. */
+/** Reactive-refresh endpoint: pide al backend que sincronice sólo los
+ * devices "stale" del scope (default umbral 7 min), con coalescing para
+ * no re-encolar los que ya tienen una sync pending. Fire and forget: la
+ * UI simplemente hace polling del summary hasta que
+ * ``sync_in_progress_count`` vuelve a 0. Reemplaza al viejo botón manual
+ * de refresh global -- el barrido periódico completo lo hace ahora Celery
+ * Beat (``sync_stale_devices_task``). */
 export async function refreshDashboardScope(
   params: Pick<DashboardSummaryParams, 'scope' | 'id' | 'name'>,
 ): Promise<DashboardRefreshResult> {

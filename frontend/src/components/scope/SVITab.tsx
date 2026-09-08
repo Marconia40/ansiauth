@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { refreshDeviceSvis } from '@/services/api';
 import type { Scope } from './ScopeDashboard';
@@ -18,8 +18,6 @@ interface Props {
   deviceName?: string;
 }
 
-type Toast = { msg: string; tone: 'ok' | 'error' } | null;
-
 export function SVITab({ scope, deviceName }: Props) {
   const queryClient = useQueryClient();
   const { rows, devices, isLoading, isError } = useScopeSvis(scope);
@@ -27,14 +25,7 @@ export function SVITab({ scope, deviceName }: Props) {
   const [openCreate, setOpenCreate] = useState(false);
   const [openRemove, setOpenRemove] = useState(false);
   const [editRow, setEditRow] = useState<SviRow | null>(null);
-  const [toast, setToast] = useState<Toast>(null);
   const [refreshing, setRefreshing] = useState(false);
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4500);
-    return () => clearTimeout(t);
-  }, [toast]);
 
   async function handleRefresh() {
     const names = devices.map((d) => d.name);
@@ -89,33 +80,18 @@ export function SVITab({ scope, deviceName }: Props) {
         onClose={() => setOpenCreate(false)}
         scope={scope}
         deviceName={deviceName}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       <SVIRemoveModal
         open={openRemove}
         onClose={() => setOpenRemove(false)}
         scope={scope}
         rows={rows}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       <SVIEditModal
         open={editRow !== null}
         onClose={() => setEditRow(null)}
         row={editRow}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
-
-      {toast && (
-        <div
-          className={`fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm ${
-            toast.tone === 'ok'
-              ? 'bg-success text-white'
-              : 'bg-danger text-white'
-          }`}
-        >
-          {toast.msg}
-        </div>
-      )}
     </div>
   );
 }

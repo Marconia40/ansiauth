@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getGlobalConfigSynced,
@@ -14,6 +14,7 @@ import type {
 } from '@/types/global-config';
 import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 import { HostnameEditModal } from './HostnameEditModal';
 import { SnmpEditModal } from './SnmpEditModal';
 import { NtpEditModal } from './NtpEditModal';
@@ -39,7 +40,7 @@ export function GlobalConfigOverview({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (query: {
       state: { data?: SyncedResource<GlobalConfigRead> };
-    }) => (query.state.data?.sync_in_progress ? 2000 : false),
+    }) => (query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const versionQuery = useQuery({
@@ -48,7 +49,7 @@ export function GlobalConfigOverview({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (query: {
       state: { data?: SyncedResource<GlobalConfigVersionRead> };
-    }) => (query.state.data?.sync_in_progress ? 2000 : false),
+    }) => (query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const config = configQuery.data?.data;
@@ -68,13 +69,6 @@ export function GlobalConfigOverview({ deviceName }: Props) {
   const [openNtp, setOpenNtp] = useState(false);
   const [openDns, setOpenDns] = useState(false);
   const [openLogging, setOpenLogging] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; tone: 'ok' | 'error' } | null>(null);
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4500);
-    return () => clearTimeout(t);
-  }, [toast]);
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -196,28 +190,24 @@ export function GlobalConfigOverview({ deviceName }: Props) {
         onClose={() => setOpenHostname(false)}
         deviceName={deviceName}
         currentHostname={config?.hostname ?? null}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       <SnmpEditModal
         open={openSnmp}
         onClose={() => setOpenSnmp(false)}
         deviceName={deviceName}
         currentSnmp={config?.snmp ?? null}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       <NtpEditModal
         open={openNtp}
         onClose={() => setOpenNtp(false)}
         deviceName={deviceName}
         currentServers={config?.ntp.servers ?? null}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       <DnsEditModal
         open={openDns}
         onClose={() => setOpenDns(false)}
         deviceName={deviceName}
         currentServers={config?.dns.servers ?? null}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
       <LoggingEditModal
         open={openLogging}
@@ -225,18 +215,7 @@ export function GlobalConfigOverview({ deviceName }: Props) {
         deviceName={deviceName}
         currentServers={config?.logging.servers ?? null}
         currentLevel={config?.logging.level ?? null}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
-
-      {toast && (
-        <div
-          className={`fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm ${
-            toast.tone === 'ok' ? 'bg-success text-white' : 'bg-danger text-white'
-          }`}
-        >
-          {toast.msg}
-        </div>
-      )}
     </div>
   );
 }

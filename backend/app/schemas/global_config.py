@@ -36,6 +36,23 @@ class GlobalConfigSnmpUpdateRequest(BaseModel):
         return self
 
 
+class GlobalConfigSnmpTrapHostRemoveRequest(BaseModel):
+    """Request body para ``DELETE /global-config/snmp/trap-hosts``
+    (RF-GLOBAL-07, contraparte de ``trap_host`` en ``PATCH /snmp``).
+    ``community`` es requerida en los 2 vendors -- confirmado en vivo que
+    ni IOS (``no snmp-server host {ip}`` solo sale "% Incomplete command",
+    la community es el único completor que no depende de otro campo) ni
+    VRP (exige la community EXACTA usada al agregar, queda cifrada al
+    leerla de vuelta, no se puede recuperar del device) aceptan sacar un
+    trap host sin ella."""
+
+    host: str = Field(..., min_length=1, description="IP del trap host a sacar.")
+    community: str = Field(
+        ..., min_length=1,
+        description="Community usada al agregar este trap host. Requerida en ambos vendors.",
+    )
+
+
 class GlobalConfigLogServerAddRequest(BaseModel):
     """Request body para ``POST /global-config/log-servers`` (RF-GLOBAL-09,
     Log como endpoint propio). ``level`` es opcional y es un ajuste global
@@ -334,7 +351,10 @@ class GlobalConfigRead(BaseModel):
             "conectada no tiene next_hop (por definición, sale directo por la interfaz), "
             "y una ruta estática vía next-hop puede no traer interfaz si el device no la "
             "resuelve en el 'show ip route'/'display ip routing-table' (confirmado en vivo, "
-            "no es un gap del parser)."
+            "no es un gap del parser). Incluye también rutas estáticas configuradas cuyo "
+            "next_hop no es alcanzable (no aparecen en la tabla activa, pero SÍ en el "
+            "running-config -- se leen de ahí también) para que se puedan ver y borrar "
+            "desde la interfaz aunque no estén activas."
         ),
     )
     acls: Optional[list[GlobalConfigAclInfo]] = Field(

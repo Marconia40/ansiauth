@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { deleteSVI } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import type { SviRow } from './scopeSvis';
 import { Modal } from './Modal';
@@ -19,15 +20,15 @@ interface Props {
   onClose: () => void;
   scope: Scope;
   rows: SviRow[];
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 /** Eliminar SVI. Cada SVI es un par (device, vlan_id) unico -- a
  * diferencia de VLAN, no se puede "borrar VLAN 10 de N devices" en un
  * body; cada delete es una call. Multi-select en el modal se resuelve
  * con Promise.all. */
-export function SVIRemoveModal({ open, onClose, scope: _scope, rows, onDone }: Props) {
+export function SVIRemoveModal({ open, onClose, scope: _scope, rows }: Props) {
   const queryClient = useQueryClient();
+  const { trackGroupJob } = useJobNotifications();
 
   // Set de keys "device:vlanId" -- combinacion unica para poder deseleccionar
   // una fila concreta cuando el mismo VLAN ID esta en varios devices.
@@ -52,6 +53,15 @@ export function SVIRemoveModal({ open, onClose, scope: _scope, rows, onDone }: P
           }
         }),
       );
+      // Track every job that DID get queued, even if some SVIs in the
+      // batch failed below.
+      const label = `Remove SVI (${targets.length} target(s))`;
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          trackGroupJob(r.value.group_job_id, label);
+        }
+      }
+
       const failed = results.filter((r) => r.status === 'rejected');
       if (failed.length > 0) {
         const firstErr = (failed[0] as PromiseRejectedResult).reason;
@@ -61,7 +71,6 @@ export function SVIRemoveModal({ open, onClose, scope: _scope, rows, onDone }: P
       }
     },
     onSuccess: () => {
-      onDone?.(`Removed ${picked.size} SVI(s).`, 'ok');
       invalidateSviQueries(queryClient);
       resetAndClose();
     },

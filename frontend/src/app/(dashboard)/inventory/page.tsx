@@ -16,7 +16,7 @@ import {
   moveDevice,
 } from '@/services/api';
 import type { DeviceGroup } from '@/services/api';
-import type { Device, DeviceUpdate, Vendor } from '@/types/device';
+import type { AuthMethod, Device, DeviceUpdate, Vendor } from '@/types/device';
 import type { Site } from '@/types/site';
 
 function extractMessage(error: unknown, fallback: string): string {
@@ -57,7 +57,9 @@ export default function InventoryPage() {
   const [newVendor, setNewVendor] = useState<Vendor>('cisco_ios');
   const [newPlatform, setNewPlatform] = useState<string>(defaultPlatformFor('cisco_ios'));
   const [newUsername, setNewUsername] = useState('');
+  const [newAuthMethod, setNewAuthMethod] = useState<AuthMethod>('password');
   const [newPassword, setNewPassword] = useState('');
+  const [newPrivateKey, setNewPrivateKey] = useState('');
   // MSP: Phase 4 — Site is required. Empty string means "not selected"; the
   // submit button is disabled until a site is picked.
   const [newSiteId, setNewSiteId] = useState<string>('');
@@ -69,7 +71,12 @@ export default function InventoryPage() {
   const [editingVendor, setEditingVendor] = useState<Vendor>('cisco_ios');
   const [editingPlatform, setEditingPlatform] = useState<string>(defaultPlatformFor('cisco_ios'));
   const [editingUsername, setEditingUsername] = useState('');
+  // Auth method the edit row is set to try to switch to. Defaults to the
+  // device's current method — the field for whichever secret ISN'T shown
+  // stays empty and unsent, matching "leave password blank to keep it".
+  const [editingAuthMethod, setEditingAuthMethod] = useState<AuthMethod>('password');
   const [editingPassword, setEditingPassword] = useState('');
+  const [editingPrivateKey, setEditingPrivateKey] = useState('');
 
   // ── Move dialog state ────────────────────────────────────────────────────
   const [movingDevice, setMovingDevice] = useState<Device | null>(null);
@@ -140,7 +147,8 @@ export default function InventoryPage() {
     if (!newHost.trim()) { setErrorMessage('Host is required'); return; }
     if (!newPlatform.trim()) { setErrorMessage('Platform is required'); return; }
     if (!newUsername.trim()) { setErrorMessage('Username is required'); return; }
-    if (!newPassword.trim()) { setErrorMessage('Password is required'); return; }
+    if (newAuthMethod === 'password' && !newPassword.trim()) { setErrorMessage('Password is required'); return; }
+    if (newAuthMethod === 'key' && !newPrivateKey.trim()) { setErrorMessage('Private key is required'); return; }
     if (!newSiteId) { setErrorMessage('Site is required'); return; }
     setIsSubmitting(true);
     setSuccessMessage(null);
@@ -153,7 +161,10 @@ export default function InventoryPage() {
         vendor: newVendor,
         platform: newPlatform.trim(),
         username: newUsername.trim(),
-        password: newPassword.trim(),
+        auth_method: newAuthMethod,
+        ...(newAuthMethod === 'password'
+          ? { password: newPassword.trim() }
+          : { private_key: newPrivateKey.trim() }),
         site_id: Number(newSiteId),
         device_group_id: newGroupId ? Number(newGroupId) : undefined,
       });
@@ -162,7 +173,9 @@ export default function InventoryPage() {
       setNewVendor('cisco_ios');
       setNewPlatform(defaultPlatformFor('cisco_ios'));
       setNewUsername('');
+      setNewAuthMethod('password');
       setNewPassword('');
+      setNewPrivateKey('');
       setNewSiteId('');
       setNewGroupId('');
       await refetch();
@@ -180,7 +193,9 @@ export default function InventoryPage() {
     setEditingVendor(device.vendor);
     setEditingPlatform(device.platform);
     setEditingUsername(device.username);
+    setEditingAuthMethod(device.auth_method);
     setEditingPassword('');
+    setEditingPrivateKey('');
     setSuccessMessage(null);
     setErrorMessage(null);
   }
@@ -191,13 +206,25 @@ export default function InventoryPage() {
     setEditingVendor('cisco_ios');
     setEditingPlatform(defaultPlatformFor('cisco_ios'));
     setEditingUsername('');
+    setEditingAuthMethod('password');
     setEditingPassword('');
+    setEditingPrivateKey('');
   }
 
   async function handleUpdate() {
     if (!editingHost.trim()) { setErrorMessage('Host is required'); return; }
     if (!editingPlatform.trim()) { setErrorMessage('Platform is required'); return; }
     if (!editingUsername.trim()) { setErrorMessage('Username is required'); return; }
+    const currentDevice = devices?.find((d) => d.name === editingDeviceName);
+    const switchingAuthMethod = !!currentDevice && editingAuthMethod !== currentDevice.auth_method;
+    if (switchingAuthMethod && editingAuthMethod === 'password' && !editingPassword.trim()) {
+      setErrorMessage('Password is required to switch to password auth');
+      return;
+    }
+    if (switchingAuthMethod && editingAuthMethod === 'key' && !editingPrivateKey.trim()) {
+      setErrorMessage('Private key is required to switch to key auth');
+      return;
+    }
     setIsSubmitting(true);
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -211,8 +238,15 @@ export default function InventoryPage() {
         platform: editingPlatform.trim(),
         username: editingUsername.trim(),
       };
-      if (editingPassword.trim()) {
+      // Only include auth_method + the matching secret when a new secret was
+      // actually typed — leaving both blank keeps the stored credential as
+      // it is, same pattern the plain password field already had.
+      if (editingAuthMethod === 'password' && editingPassword.trim()) {
+        body.auth_method = 'password';
         body.password = editingPassword.trim();
+      } else if (editingAuthMethod === 'key' && editingPrivateKey.trim()) {
+        body.auth_method = 'key';
+        body.private_key = editingPrivateKey.trim();
       }
       await updateDevice(deviceName, body);
       handleEditCancel();
@@ -348,15 +382,37 @@ export default function InventoryPage() {
           required
           className="border border-panel-border rounded-md px-3 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
         />
-        <input
-          type="password"
-          placeholder="Password"
-          value={newPassword}
-          onChange={(e) => setNewPassword(e.target.value)}
+        <select
+          value={newAuthMethod}
+          onChange={(e) => setNewAuthMethod(e.target.value as AuthMethod)}
           disabled={isSubmitting}
-          required
-          className="border border-panel-border rounded-md px-3 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-        />
+          aria-label="Auth method"
+          className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
+        >
+          <option value="password">Password</option>
+          <option value="key">SSH Key</option>
+        </select>
+        {newAuthMethod === 'password' ? (
+          <input
+            type="password"
+            placeholder="Password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            disabled={isSubmitting}
+            required
+            className="border border-panel-border rounded-md px-3 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
+          />
+        ) : (
+          <textarea
+            placeholder="Private key (PEM / OpenSSH)"
+            value={newPrivateKey}
+            onChange={(e) => setNewPrivateKey(e.target.value)}
+            disabled={isSubmitting}
+            required
+            rows={2}
+            className="border border-panel-border rounded-md px-3 py-1.5 text-xs font-mono w-56 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
+          />
+        )}
         <select
           value={newSiteId}
           onChange={(e) => {
@@ -393,7 +449,8 @@ export default function InventoryPage() {
           disabled={
             isSubmitting ||
             !newName.trim() || !newHost.trim() || !newPlatform.trim() ||
-            !newUsername.trim() || !newPassword.trim() || !newSiteId
+            !newUsername.trim() || !newSiteId ||
+            (newAuthMethod === 'password' ? !newPassword.trim() : !newPrivateKey.trim())
           }
           className="px-3 py-1.5 text-sm bg-info text-white rounded-md hover:bg-info disabled:opacity-50 disabled:cursor-not-allowed"
         >
@@ -434,6 +491,7 @@ export default function InventoryPage() {
               <th className="text-left px-4 py-2 font-medium text-text">Vendor</th>
               <th className="text-left px-4 py-2 font-medium text-text">Platform</th>
               <th className="text-left px-4 py-2 font-medium text-text">Username</th>
+              <th className="text-left px-4 py-2 font-medium text-text">Auth</th>
               <th className="text-left px-4 py-2 font-medium text-text">Site</th>
               <th className="text-left px-4 py-2 font-medium text-text">Group</th>
               <th className="text-left px-4 py-2 font-medium text-text">Actions</th>
@@ -510,19 +568,48 @@ export default function InventoryPage() {
                         device.username
                       )}
                     </td>
+                    <td className="px-4 py-2 text-text">
+                      {isEditing ? (
+                        <select
+                          value={editingAuthMethod}
+                          onChange={(e) => setEditingAuthMethod(e.target.value as AuthMethod)}
+                          disabled={isSubmitting}
+                          aria-label="Auth method"
+                          className="border border-panel-border rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
+                        >
+                          <option value="password">Password</option>
+                          <option value="key">SSH Key</option>
+                        </select>
+                      ) : (
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${device.auth_method === 'key' ? 'bg-info/10 text-info' : 'bg-panel-elev/60 text-muted'}`}>
+                          {device.auth_method === 'key' ? 'Key' : 'Password'}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-2 text-text">{device.site_name}</td>
                     <td className="px-4 py-2 text-text">{device.device_group_name}</td>
                     <td className="px-4 py-2">
                       {canMutate && (isEditing ? (
                         <div className="flex flex-wrap gap-2 items-center">
-                          <input
-                            type="password"
-                            placeholder="New password"
-                            value={editingPassword}
-                            onChange={(e) => setEditingPassword(e.target.value)}
-                            disabled={isSubmitting}
-                            className="border border-panel-border rounded-md px-2 py-1 text-sm w-32 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-                          />
+                          {editingAuthMethod === 'password' ? (
+                            <input
+                              type="password"
+                              placeholder="New password"
+                              value={editingPassword}
+                              onChange={(e) => setEditingPassword(e.target.value)}
+                              disabled={isSubmitting}
+                              className="border border-panel-border rounded-md px-2 py-1 text-sm w-32 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
+                            />
+                          ) : (
+                            <textarea
+                              placeholder="New private key"
+                              value={editingPrivateKey}
+                              onChange={(e) => setEditingPrivateKey(e.target.value)}
+                              disabled={isSubmitting}
+                              rows={2}
+                              className="border border-panel-border rounded-md px-2 py-1 text-xs font-mono w-48 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
+                            />
+                          )}
                           <button
                             onClick={handleUpdate}
                             disabled={
@@ -572,7 +659,7 @@ export default function InventoryPage() {
               })
             ) : (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-muted/70">
+                <td colSpan={9} className="px-4 py-8 text-center text-muted/70">
                   No devices registered yet.
                 </td>
               </tr>

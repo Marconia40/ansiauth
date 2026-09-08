@@ -883,6 +883,38 @@ set_svi_dhcp_relay:
           - "interface Vlanif{vlan_id}"
           - "undo dhcp select relay"
       trailer: ["commit", "quit", "quit"]
+    - triggered_by_error: 'dhcp relay (?:binding server group|server group ansiauth-vlan\d+)\r?\n\s*\^\r?\nError: Unrecognized command'
+      # Confirmado en vivo contra f3r9s2 (S5731, VRP V200R022C00SPC500):
+      # el device soporta perfectamente la forma directa ("dhcp select
+      # relay" + "dhcp relay server-ip {ip}", verificado aplicando y
+      # leyendo el running-config resultante) pero NO TIENE en absoluto
+      # el comando "dhcp relay server group" (ni "?" lo reconoce) -- a
+      # diferencia del CE12800 de lab, donde ambas formas coexisten y el
+      # cleanup incondicional de arriba (comentario en `primary`) es
+      # inofensivo. Acá esas 2 líneas de limpieza rechazan con
+      # "Unrecognized command" y tumban el bloque ENTERO antes de llegar
+      # a la línea real -- ni siquiera un simple "agregar 1 servidor"
+      # llega a ejecutarse. Esta alternativa es la forma directa sin
+      # ningún cleanup de "server group" (nada que limpiar en un device
+      # que nunca soportó esa forma). Sin "commit" en el trailer -- 2do
+      # bug encontrado probando en vivo: con "servers" vacío (remove del
+      # único server) el trailer corre TODAVÍA dentro del contexto de
+      # interfaz (``[f3r9s2-Vlanif20]commit``, no llegó a hacer "quit"
+      # antes), y ESTE device específicamente rechaza "commit" ahí adentro
+      # (mismo síntoma que ``alt[0]`` ya cubre para otros devices, pero acá
+      # hacen falta AMBOS fixes a la vez -- el mecanismo de alternatives no
+      # encadena una 2da alternativa sobre el error de la 1ra). Confirmado
+      # con pruebas crudas que "dhcp select relay"/"dhcp relay server-ip"
+      # se aplican y persisten en el running-config sin ningún "commit".
+      block:
+        - "system-view"
+        - "interface Vlanif{vlan_id}"
+        - "undo dhcp select relay"
+      repeat:
+        over: "servers"
+        prefix_if_nonempty: ["dhcp select relay"]
+        line: "dhcp relay server-ip {item}"
+      trailer: ["quit", "quit"]
 
 # RF-INTERV-04's "ACL previamente creada... e identificador válido" --
 # "Total nonempty ACL number is 0" confirmado contra el device real de lab
@@ -1086,9 +1118,7 @@ set_snmp_community:
 
 # RF-GLOBAL-07 -- confirmado en vivo contra f3r9s2 (aplicado y revertido,
 # no había trap-source configurado antes así que fue una prueba real sin
-# efecto en producción). "trap-host" NO tiene entrada acá a propósito --
-# ver docstring de ``HuaweiVendor.set_snmp()`` (comando real >100
-# caracteres, se corrompe en tránsito sobre esta sesión SSH).
+# efecto en producción).
 set_snmp_trap_source:
   primary:
     block:
@@ -1101,6 +1131,61 @@ set_snmp_trap_source:
       block:
         - "system-view"
         - "snmp-agent trap source {interface}"
+        - "quit"
+
+# RF-GLOBAL-07 (trap host) -- confirmado en vivo contra f3r9s2, de punta a
+# punta (alta + baja + display snmp-agent target-host para verificar). El
+# comando es largo y se ve corrompido en el ECO (una secuencia ANSI de
+# cursor metida en medio de "securityname") -- mismo bug que ya resolvía
+# "screen-width 512" para create_or_update_acl/remove_acl_rules, ver esa
+# nota más arriba. La corrupción visual no impide que VRP interprete el
+# comando bien -- confirmado con display snmp-agent target-host después.
+# "v2c" es la única versión probada -- no se agrega soporte para otras sin
+# volver a confirmar contra un device real. El "undo" NO lleva "v2c" al
+# final ("Too many parameters" si se agrega, confirmado en vivo) y exige la
+# community EXACTA usada al alta (ver docstring de
+# ``HuaweiVendor.remove_snmp_trap_host()``).
+#
+# A propósito SIN "commit" en el primary (a diferencia de otras operaciones
+# de esta plataforma) -- bug real encontrado probando el remove: f3r9s2
+# rechaza "commit" ("Unrecognized command", cosmético, confirmado que el
+# comando real ya se había aplicado bien ANTES de esa línea) y el
+# mecanismo de "alternatives" reintenta el bloque completo sin commit --
+# para un ALTA reintentar es inofensivo (mismo resultado o un duplicado
+# inofensivo), pero para esta BAJA (undo) el reintento le pega al MISMO
+# comando ya aplicado por el primary, y VRP lo rechaza con un error real
+# ("does not exist") porque ya no existe -- el resultado final terminaba
+# reportando falla aunque el undo original hubiera funcionado. Mandar
+# directo la forma sin commit (ya confirmada que alcanza en f3r9s2) evita
+# el reintento inseguro por completo.
+set_snmp_trap_host:
+  primary:
+    block:
+      - "screen-width 512"
+      - "y"
+      - "system-view"
+      - "snmp-agent target-host trap address udp-domain {host} params securityname {community} v2c"
+      - "quit"
+  alternatives:
+    - triggered_by_error: 'screen-width 512\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "snmp-agent target-host trap address udp-domain {host} params securityname {community} v2c"
+        - "quit"
+
+remove_snmp_trap_host:
+  primary:
+    block:
+      - "screen-width 512"
+      - "y"
+      - "system-view"
+      - "undo snmp-agent target-host trap address udp-domain {host} params securityname {community}"
+      - "quit"
+  alternatives:
+    - triggered_by_error: 'screen-width 512\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo snmp-agent target-host trap address udp-domain {host} params securityname {community}"
         - "quit"
 
 # RF-GLOBAL-09 -- confirmado en vivo contra huawei01. "ntp unicast-server"

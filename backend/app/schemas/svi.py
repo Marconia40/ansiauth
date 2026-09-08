@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _validar_cidr(value: str, version: int) -> str:
@@ -148,6 +148,60 @@ class SVIAclClearRequest(_SVITargetRequest):
     """Request body para ``DELETE /svis/acl`` (RF-INTERV-05)."""
 
     direction: Literal["in", "out"] = Field(..., description="Sentido de la ACL a desasignar -- 'in' o 'out'.")
+
+
+class SVIBatchRequest(BaseModel):
+    """Body de ``PATCH /devices/{name}/svis/{vlan_id}/batch`` -- TODOS los
+    campos opcionales juntos en 1 solo objeto (a diferencia de cada
+    endpoint individual, que exige exactamente 1). ``None`` = no tocar,
+    ``""`` = limpiar (mismo criterio que el resto de esta clase),
+    cualquier otro valor = asignar -- mismo significado que ya tiene cada
+    campo en ``app.models.svi.SVI``, no se inventa nada nuevo.
+    ``dhcp_relay_add``/``dhcp_relay_remove`` SI entran al batch -- mismo
+    mecanismo que el resto (``VendorDriver.aplicar_lote()``), 1 sola
+    conexion real junto con cualquier otro campo que venga en el mismo
+    body. Mutuamente excluyentes (mismo criterio que ``SVI``). El front
+    limita a 1 solo cambio de DHCP relay encolado por Save, asi que nunca
+    hace falta plegar 2 deltas contra la misma lectura previa (ver
+    ``SVI._resolver_dhcp_relay_add``/``_resolver_dhcp_relay_remove``).
+    ``vlan_id`` es un segmento de la URL, no va en el body."""
+
+    description: Optional[str] = Field(None, max_length=240)
+    admin_up: Optional[bool] = None
+    ipv4_address: Optional[str] = None
+    ipv4_address_secondary: Optional[str] = None
+    ipv6_address: Optional[str] = None
+    acl_in: Optional[str] = Field(None, description="Nombre/número de ACL, o '' para desasignar.")
+    acl_out: Optional[str] = Field(None, description="Nombre/número de ACL, o '' para desasignar.")
+    dhcp_relay_add: Optional[str] = Field(None, description="IP de 1 servidor DHCP relay a agregar.")
+    dhcp_relay_remove: Optional[str] = Field(None, description="IP de 1 servidor DHCP relay a eliminar.")
+
+    @field_validator("ipv4_address", "ipv4_address_secondary")
+    @classmethod
+    def _validar_ipv4_o_vacio(cls, v: "str | None") -> "str | None":
+        if v:
+            _validar_cidr(v, 4)
+        return v
+
+    @field_validator("ipv6_address")
+    @classmethod
+    def _validar_ipv6_o_vacio(cls, v: "str | None") -> "str | None":
+        if v:
+            _validar_cidr(v, 6)
+        return v
+
+    @field_validator("dhcp_relay_add", "dhcp_relay_remove")
+    @classmethod
+    def _validar_dhcp_relay_ip(cls, v: "str | None") -> "str | None":
+        if v:
+            _validar_ip_plana(v)
+        return v
+
+    @model_validator(mode="after")
+    def _validar_dhcp_relay_exclusivo(self) -> "SVIBatchRequest":
+        if self.dhcp_relay_add is not None and self.dhcp_relay_remove is not None:
+            raise ValueError("cannot set dhcp_relay_add and dhcp_relay_remove in the same call")
+        return self
 
 
 class SVIDhcpRelayAddRequest(_SVITargetRequest):

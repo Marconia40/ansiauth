@@ -14,6 +14,12 @@ export function Providers({ children }: { children: ReactNode }) {
             staleTime: 60 * 1000,
             retry: 1,
             refetchOnWindowFocus: false,
+            // Explicit even though it's the default -- Decision 4 of
+            // docs/SSH_REFRESH_PLAN.md relies on this to pause all
+            // ``refetchInterval`` pollings while the tab is in the
+            // background. Every ``sync_in_progress`` poller (~13 across
+            // the app) inherits it via QueryClient defaults.
+            refetchIntervalInBackground: false,
           },
         },
       }),

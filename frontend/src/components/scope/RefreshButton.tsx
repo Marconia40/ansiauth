@@ -1,6 +1,7 @@
 'use client';
 
 import { RefreshIcon } from '../Icon';
+import { formatSyncRelative } from './formatSyncRelative';
 
 export interface RefreshButtonProps {
   onClick?: () => void;
@@ -13,19 +14,6 @@ export interface RefreshButtonProps {
   /** While a multi-device refresh runs, e.g. "12 / 20 synced". Replaces the
    * synced-at label until the refresh finishes. */
   progressLabel?: string | null;
-}
-
-function formatRelative(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '';
-  const diffMs = Date.now() - then;
-  if (diffMs < 45_000) return 'just now';
-  const mins = Math.round(diffMs / 60_000);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  return `${days}d ago`;
 }
 
 export function RefreshButton({
@@ -44,7 +32,7 @@ export function RefreshButton({
         <span className="text-xs text-danger">Sync error</span>
       ) : syncedAt ? (
         <span className="text-xs text-muted">
-          Last synced {formatRelative(syncedAt)}
+          Last synced {formatSyncRelative(syncedAt)}
         </span>
       ) : null}
       <button

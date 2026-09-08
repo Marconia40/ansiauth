@@ -19,6 +19,8 @@ export interface JobExecutionSummary {
 export interface Job {
   job_id: string;
   status: JobStatus;
+  operation: string | null;
+  parameters_summary: string | null;
   playbook: string | null;
   device: string | null;
   result: unknown;
@@ -69,6 +71,7 @@ export interface GroupJob {
   operation: string | null;
   playbook: string | null;
   parameters: Record<string, unknown> | null;
+  parameters_summary: string | null;
   created_at: string | null;
   started_at: string | null;
   finished_at: string | null;

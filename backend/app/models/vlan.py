@@ -168,6 +168,17 @@ class VLAN:
     def repositorio(self) -> str:
         return "vlan"
 
+    def resumen_intento(self) -> str:
+        """Frase corta legible de la INTENCIÓN de este request -- no el
+        resultado real (``accion``, que sale de ``aplicar()`` y puede
+        variar por device según el estado previo). Usado por
+        ``GroupOperationRunner`` para poblar ``Job.parameters_summary``,
+        mostrado en el modal de detalle de job en vez del dump crudo de
+        ``asdict(self)``."""
+        if self.eliminar:
+            return f"Delete VLAN {self.vlan_id}"
+        return f"VLAN {self.vlan_id}: set name to '{self.name}'"
+
     def to_dict(self) -> dict:
         """Serialize to the ``{"vlan_id": int, "name": str}`` wire format.
 

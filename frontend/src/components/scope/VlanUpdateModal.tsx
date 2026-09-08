@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { updateVlan } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import type { VlanRow } from './scopeVlans';
 import { Modal } from './Modal';
@@ -21,7 +22,6 @@ interface Props {
   scope: Scope;
   deviceName?: string;
   rows: VlanRow[];
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 export function VlanUpdateModal({
@@ -30,9 +30,9 @@ export function VlanUpdateModal({
   scope,
   deviceName,
   rows,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
+  const { trackGroupJob } = useJobNotifications();
 
   const [pickedId, setPickedId] = useState<number | ''>('');
   const [description, setDescription] = useState('');
@@ -70,10 +70,10 @@ export function VlanUpdateModal({
         devices: Array.from(effectiveSelected),
       });
     },
-    onSuccess: () => {
-      onDone?.(
-        `VLAN ${pickedId} updated on ${effectiveSelected.size} device(s).`,
-        'ok',
+    onSuccess: (result) => {
+      trackGroupJob(
+        result.group_job_id,
+        `Update VLAN ${pickedId} on ${effectiveSelected.size} device(s)`,
       );
       invalidateVlanQueries(queryClient);
       resetAndClose();

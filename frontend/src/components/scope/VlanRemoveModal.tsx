@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { deleteVlan } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import type { VlanRow } from './scopeVlans';
 import { Modal } from './Modal';
@@ -21,7 +22,6 @@ interface Props {
   scope: Scope;
   deviceName?: string;
   rows: VlanRow[];
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 export function VlanRemoveModal({
@@ -30,9 +30,9 @@ export function VlanRemoveModal({
   scope,
   deviceName,
   rows,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
+  const { trackGroupJob } = useJobNotifications();
 
   const [pickedIds, setPickedIds] = useState<Set<number>>(new Set());
   const [selectedDevices, setSelectedDevices] = useState<Set<string>>(new Set());
@@ -54,8 +54,19 @@ export function VlanRemoveModal({
       const results = await Promise.allSettled(
         ids.map((id) => deleteVlan(id, { devices })),
       );
-      const failed = results.filter((r) => r.status === 'rejected');
       setProgress({ done: ids.length, total: ids.length });
+
+      // Track every job that DID get queued, even if some ids in the batch
+      // failed below -- a partial failure shouldn't hide live status for the
+      // deletes that actually went through.
+      const label = `Remove VLAN from ${effectiveDevices.size} device(s)`;
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          trackGroupJob(r.value.group_job_id, label);
+        }
+      }
+
+      const failed = results.filter((r) => r.status === 'rejected');
       if (failed.length > 0) {
         throw new Error(
           `${failed.length} of ${ids.length} VLAN(s) failed to delete.`,
@@ -63,10 +74,6 @@ export function VlanRemoveModal({
       }
     },
     onSuccess: () => {
-      onDone?.(
-        `Removed ${pickedIds.size} VLAN(s) from ${effectiveDevices.size} device(s).`,
-        'ok',
-      );
       invalidateVlanQueries(queryClient);
       resetAndClose();
     },

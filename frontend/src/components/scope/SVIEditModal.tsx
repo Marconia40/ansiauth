@@ -2,19 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import {
-  addSVIDhcpRelay,
-  clearSVIAcl,
-  clearSVIDescription,
-  clearSVIIpv4,
-  clearSVIIpv6,
-  removeSVIDhcpRelay,
-  setSVIAcl,
-  setSVIAdminState,
-  setSVIDescription,
-  setSVIIpv4,
-  setSVIIpv6,
-} from '@/services/api';
+import { batchUpdateSvi } from '@/services/api';
+import { useJobNotifications } from '@/context/JobNotificationContext';
+import type { SVIBatchRequest } from '@/types/svi';
 import type { SviRow } from './scopeSvis';
 import { Modal } from './Modal';
 import {
@@ -32,23 +22,26 @@ interface Props {
   onClose: () => void;
   /** The SVI row to edit. When null the modal renders nothing (parent gates it). */
   row: SviRow | null;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
-}
-
-/** Etiqueta legible por operacion, para poder decir en el toast que operaciones
- * fallaron cuando hay error parcial. */
-interface Op {
-  label: string;
-  run: () => Promise<unknown>;
 }
 
 /** Editor de SVI. Una fila = un (device, vlan_id) unico, asi que el modal
  * opera sobre un solo device. Tabs internas para agrupar campos por dominio
  * (General / IPv4 / IPv6 / ACL / DHCP Relay); el save es global, calcula el
- * delta sobre TODAS las tabs y despacha solo los endpoints cuyo campo cambio.
- * Los endpoints se ejecutan en serie para no colisionar sobre el mismo device. */
-export function SVIEditModal({ open, onClose, row, onDone }: Props) {
+ * delta sobre TODAS las tabs (DHCP Relay incluida) y manda 1 sola llamada a
+ * `PATCH .../batch` con todos los campos que cambiaron -- antes eran N
+ * llamadas en serie (1 por campo, N conexiones SSH); ahora el server las
+ * junta en 1 sola conexión, DHCP relay también (`SVI.resolver_paso()` la
+ * batchea igual que cualquier otro campo).
+ * La tab DHCP Relay solo permite 1 cambio (1 add O 1 remove) encolado a la
+ * vez -- `set_svi_dhcp_relay` es un full-replace de la lista completa, no
+ * una mutación aditiva por campo: si se encolaran 2 cambios, cada uno
+ * calcularía su propia "lista final" contra la MISMA lectura previa (no
+ * contra el resultado del otro), y el 2do pisaría al 1ro en silencio.
+ * Limitar a 1 evita ese bug de raíz sin tener que construir el mecanismo
+ * de "plegar N deltas en 1 lista" que sí necesitaría permitir más de 1. */
+export function SVIEditModal({ open, onClose, row }: Props) {
   const queryClient = useQueryClient();
+  const { trackGroupJob } = useJobNotifications();
 
   const [tab, setTab] = useState<Tab>('general');
 
@@ -67,19 +60,15 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
   const [aclIn, setAclIn] = useState('');
   const [aclOut, setAclOut] = useState('');
 
-  // DHCP relay — modelado aparte del resto: los endpoints son incrementales
-  // (POST/DELETE 1 servidor a la vez), asi que cada fila dispara su propia
-  // llamada en el momento y no participa del delta/Save global.
+  // DHCP relay — los endpoints siguen siendo incrementales (POST/DELETE 1
+  // servidor a la vez, ver docstring del componente), pero +/- ahora solo
+  // editan esta lista local; el delta contra `initial.dhcpRelayServers`
+  // (`dhcpDelta` mas abajo) es lo que se manda, recien al hacer Save.
   const [dhcpServers, setDhcpServers] = useState<string[]>([]);
   const [dhcpDraft, setDhcpDraft] = useState('');
   const [dhcpAdding, setDhcpAdding] = useState(false);
-  const [dhcpPending, setDhcpPending] = useState<string | null>(null);
-  const [dhcpError, setDhcpError] = useState<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(
-    null,
-  );
 
   // Re-hidrata el form cada vez que cambia la row objetivo (o se abre el modal).
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -96,148 +85,96 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
     setDhcpServers(row.dhcpRelayServers.slice());
     setDhcpDraft('');
     setDhcpAdding(false);
-    setDhcpPending(null);
-    setDhcpError(null);
     setError(null);
-    setProgress(null);
   }, [row, open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Snapshot inicial estable para dirty-check. Reseteado por el useEffect de arriba.
   const initial = row;
 
-  const ops = useMemo<Op[]>(() => {
-    if (!initial) return [];
-    const out: Op[] = [];
-    const device = initial.device;
-    const vlan_id = initial.vlanId;
+  // Delta de DHCP relay — diff local `dhcpServers` (editado por +/-, sin
+  // red) contra `initial.dhcpRelayServers`. Mismo criterio que `pending`
+  // abajo: se calcula, no se dispara, hasta el Save. Como mucho 1 entrada
+  // en total entre `adds`/`removes` (la UI limita a 1 cambio encolado).
+  const dhcpDelta = useMemo(() => {
+    if (!initial) return { adds: [] as string[], removes: [] as string[] };
+    const originalSet = new Set(initial.dhcpRelayServers);
+    const currentSet = new Set(dhcpServers);
+    return {
+      adds: dhcpServers.filter((s) => !originalSet.has(s)),
+      removes: initial.dhcpRelayServers.filter((s) => !currentSet.has(s)),
+    };
+  }, [initial, dhcpServers]);
 
-    // Description — trim para evitar ruido de espacios.
+  // Máx 1 cambio de DHCP relay encolado por Save -- ver docstring del
+  // componente. Evita el bug de colisión de raíz (nunca hay 2 deltas para
+  // plegar) sin construir el mecanismo de plegado.
+  const dhcpTotalDelta = dhcpDelta.adds.length + dhcpDelta.removes.length;
+
+  // Delta de campos cambiados -> 1 solo body para PATCH .../batch (antes
+  // eran N llamadas individuales en serie, ver docstring del componente).
+  // `''` limpia el campo, mismo significado que ya tenía en cada endpoint
+  // individual -- no se inventa nada nuevo, solo se junta en 1 objeto.
+  // DHCP relay (`dhcpDelta`) se pliega acá también -- mismo body, misma
+  // conexión.
+  const pending = useMemo<{ body: SVIBatchRequest; labels: string[] }>(() => {
+    if (!initial) return { body: {}, labels: [] };
+    const body: SVIBatchRequest = {};
+    const labels: string[] = [];
+
     const descNext = description.trim();
-    const descInit = initial.description ?? '';
-    if (descNext !== descInit) {
-      if (descNext === '') {
-        out.push({
-          label: 'clear description',
-          run: () => clearSVIDescription(device, { vlan_id }),
-        });
-      } else {
-        out.push({
-          label: 'set description',
-          run: () => setSVIDescription(device, { vlan_id, description: descNext }),
-        });
-      }
+    if (descNext !== (initial.description ?? '')) {
+      body.description = descNext;
+      labels.push(descNext === '' ? 'clear description' : 'set description');
     }
 
     // Admin state — solo si cambio y no es null (null = desconocido, no editable).
     if (adminUp !== null && adminUp !== initial.adminUp) {
-      out.push({
-        label: `admin ${adminUp ? 'up' : 'down'}`,
-        run: () => setSVIAdminState(device, { vlan_id, enabled: adminUp }),
-      });
+      body.admin_up = adminUp;
+      labels.push(`admin ${adminUp ? 'up' : 'down'}`);
     }
 
-    // IPv4 primary
     const p4Next = ipv4Primary.trim();
-    const p4Init = initial.ipv4 ?? '';
-    if (p4Next !== p4Init) {
-      if (p4Next === '') {
-        out.push({
-          label: 'clear IPv4 primary',
-          run: () => clearSVIIpv4(device, { vlan_id, secondary: false }),
-        });
-      } else {
-        out.push({
-          label: 'set IPv4 primary',
-          run: () =>
-            setSVIIpv4(device, {
-              vlan_id,
-              ipv4_address: p4Next,
-              secondary: false,
-            }),
-        });
-      }
+    if (p4Next !== (initial.ipv4 ?? '')) {
+      body.ipv4_address = p4Next;
+      labels.push(p4Next === '' ? 'clear IPv4 primary' : 'set IPv4 primary');
     }
 
-    // IPv4 secondary
     const s4Next = ipv4Secondary.trim();
-    const s4Init = initial.ipv4Secondary ?? '';
-    if (s4Next !== s4Init) {
-      if (s4Next === '') {
-        out.push({
-          label: 'clear IPv4 secondary',
-          run: () => clearSVIIpv4(device, { vlan_id, secondary: true }),
-        });
-      } else {
-        out.push({
-          label: 'set IPv4 secondary',
-          run: () =>
-            setSVIIpv4(device, {
-              vlan_id,
-              ipv4_address: s4Next,
-              secondary: true,
-            }),
-        });
-      }
+    if (s4Next !== (initial.ipv4Secondary ?? '')) {
+      body.ipv4_address_secondary = s4Next;
+      labels.push(s4Next === '' ? 'clear IPv4 secondary' : 'set IPv4 secondary');
     }
 
-    // IPv6
     const v6Next = ipv6.trim();
-    const v6Init = initial.ipv6 ?? '';
-    if (v6Next !== v6Init) {
-      if (v6Next === '') {
-        out.push({
-          label: 'clear IPv6',
-          run: () => clearSVIIpv6(device, { vlan_id }),
-        });
-      } else {
-        out.push({
-          label: 'set IPv6',
-          run: () => setSVIIpv6(device, { vlan_id, ipv6_address: v6Next }),
-        });
-      }
+    if (v6Next !== (initial.ipv6 ?? '')) {
+      body.ipv6_address = v6Next;
+      labels.push(v6Next === '' ? 'clear IPv6' : 'set IPv6');
     }
 
-    // ACL in
     const aInNext = aclIn.trim();
-    const aInInit = initial.aclIn ?? '';
-    if (aInNext !== aInInit) {
-      if (aInNext === '') {
-        out.push({
-          label: 'clear ACL in',
-          run: () => clearSVIAcl(device, { vlan_id, direction: 'in' }),
-        });
-      } else {
-        out.push({
-          label: 'set ACL in',
-          run: () =>
-            setSVIAcl(device, { vlan_id, direction: 'in', acl_name: aInNext }),
-        });
-      }
+    if (aInNext !== (initial.aclIn ?? '')) {
+      body.acl_in = aInNext;
+      labels.push(aInNext === '' ? 'clear ACL in' : 'set ACL in');
     }
 
-    // ACL out
     const aOutNext = aclOut.trim();
-    const aOutInit = initial.aclOut ?? '';
-    if (aOutNext !== aOutInit) {
-      if (aOutNext === '') {
-        out.push({
-          label: 'clear ACL out',
-          run: () => clearSVIAcl(device, { vlan_id, direction: 'out' }),
-        });
-      } else {
-        out.push({
-          label: 'set ACL out',
-          run: () =>
-            setSVIAcl(device, { vlan_id, direction: 'out', acl_name: aOutNext }),
-        });
-      }
+    if (aOutNext !== (initial.aclOut ?? '')) {
+      body.acl_out = aOutNext;
+      labels.push(aOutNext === '' ? 'clear ACL out' : 'set ACL out');
     }
 
-    // DHCP relay NO participa aca — su tab dispara POST/DELETE incremental
-    // por fila en el momento del click.
+    // Máx 1 entrada entre adds/removes (ver dhcpTotalDelta) -- si hay una,
+    // se pliega en el mismo body.
+    if (dhcpDelta.removes.length > 0) {
+      body.dhcp_relay_remove = dhcpDelta.removes[0];
+      labels.push(`remove DHCP relay ${dhcpDelta.removes[0]}`);
+    } else if (dhcpDelta.adds.length > 0) {
+      body.dhcp_relay_add = dhcpDelta.adds[0];
+      labels.push(`add DHCP relay ${dhcpDelta.adds[0]}`);
+    }
 
-    return out;
+    return { body, labels };
   }, [
     initial,
     description,
@@ -247,7 +184,10 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
     ipv6,
     aclIn,
     aclOut,
+    dhcpDelta,
   ]);
+
+  const totalChanges = pending.labels.length;
 
   const dirtyByTab = useMemo(() => {
     if (!initial) {
@@ -264,8 +204,7 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
       acl:
         aclIn.trim() !== (initial.aclIn ?? '') ||
         aclOut.trim() !== (initial.aclOut ?? ''),
-      // DHCP tab es modo inmediato — no acumula "dirty" para el Save global.
-      dhcp: false,
+      dhcp: dhcpDelta.adds.length > 0 || dhcpDelta.removes.length > 0,
     };
   }, [
     initial,
@@ -276,47 +215,29 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
     ipv6,
     aclIn,
     aclOut,
+    dhcpDelta,
   ]);
 
   const mutation = useMutation({
     mutationFn: async () => {
-      setProgress({ done: 0, total: ops.length });
-      const failures: Array<{ label: string; msg: string }> = [];
-      let done = 0;
-      // Serie: sobre el mismo device no queremos concurrentes que se pisen
-      // en la sesion netconf/CLI subyacente.
-      for (const op of ops) {
-        try {
-          await op.run();
-        } catch (err) {
-          failures.push({ label: op.label, msg: extractMessage(err, 'failed') });
-        } finally {
-          done += 1;
-          setProgress({ done, total: ops.length });
-        }
-      }
-      if (failures.length > 0) {
-        const summary = failures
-          .map((f) => `${f.label}: ${f.msg}`)
-          .join('; ');
-        throw new Error(
-          `${failures.length} of ${ops.length} change(s) failed — ${summary}`,
+      if (!initial || Object.keys(pending.body).length === 0) return;
+      return batchUpdateSvi(initial.device, initial.vlanId, pending.body);
+    },
+    onSuccess: (result) => {
+      if (result && initial) {
+        trackGroupJob(
+          result.group_job_id,
+          `Update SVI ${initial.vlanId} on ${initial.device}`,
         );
       }
-    },
-    onSuccess: () => {
-      onDone?.(
-        `SVI ${initial?.vlanId} on ${initial?.device}: ${ops.length} change(s) applied.`,
-        'ok',
-      );
-      invalidateSviQueries(queryClient);
       onClose();
     },
+    onSettled: () => invalidateSviQueries(queryClient),
     onError: (err: unknown) => setError(extractMessage(err, 'Save failed.')),
   });
 
-  async function addDhcpServer() {
-    if (!initial) return;
+  function queueAddDhcpServer() {
+    if (dhcpTotalDelta >= 1) return;
     const v = dhcpDraft.trim();
     if (!v) return;
     if (dhcpServers.includes(v)) {
@@ -324,45 +245,21 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
       setDhcpAdding(false);
       return;
     }
-    setDhcpPending('add');
-    setDhcpError(null);
-    try {
-      await addSVIDhcpRelay(initial.device, {
-        vlan_id: initial.vlanId,
-        server: v,
-      });
-      setDhcpServers([...dhcpServers, v]);
-      setDhcpDraft('');
-      setDhcpAdding(false);
-      onDone?.(`Added relay ${v} on VLAN ${initial.vlanId}.`, 'ok');
-      invalidateSviQueries(queryClient);
-    } catch (err) {
-      setDhcpError(extractMessage(err, 'Add relay failed.'));
-    } finally {
-      setDhcpPending(null);
-    }
+    setDhcpServers([...dhcpServers, v]);
+    setDhcpDraft('');
+    setDhcpAdding(false);
   }
 
-  async function removeDhcpServer(s: string) {
-    if (!initial) return;
-    setDhcpPending(`remove:${s}`);
-    setDhcpError(null);
-    try {
-      await removeSVIDhcpRelay(initial.device, {
-        vlan_id: initial.vlanId,
-        server: s,
-      });
-      setDhcpServers(dhcpServers.filter((x) => x !== s));
-      onDone?.(`Removed relay ${s} on VLAN ${initial.vlanId}.`, 'ok');
-      invalidateSviQueries(queryClient);
-    } catch (err) {
-      setDhcpError(extractMessage(err, 'Remove relay failed.'));
-    } finally {
-      setDhcpPending(null);
-    }
+  function queueRemoveDhcpServer(s: string) {
+    // Quitar una fila recién agregada (todavía no está en `initial`) es
+    // deshacer el único delta pendiente -- siempre permitido. Quitar una
+    // fila original crea un delta nuevo -- bloqueado si ya hay 1 encolado.
+    const isNewlyAdded = !(initial?.dhcpRelayServers ?? []).includes(s);
+    if (!isNewlyAdded && dhcpTotalDelta >= 1) return;
+    setDhcpServers(dhcpServers.filter((x) => x !== s));
   }
 
-  const canSubmit = ops.length > 0 && !mutation.isPending;
+  const canSubmit = totalChanges > 0 && !mutation.isPending;
 
   if (!row) return null;
 
@@ -375,19 +272,15 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
       footer={
         <>
           <span className="text-xs text-muted mr-auto">
-            {ops.length === 0
+            {totalChanges === 0
               ? 'No changes'
-              : `${ops.length} pending change${ops.length === 1 ? '' : 's'}`}
+              : `${totalChanges} pending change${totalChanges === 1 ? '' : 's'}`}
           </span>
           <ModalSecondary onClick={onClose} disabled={mutation.isPending}>
             Cancel
           </ModalSecondary>
           <ModalPrimary onClick={() => mutation.mutate()} disabled={!canSubmit}>
-            {mutation.isPending
-              ? progress
-                ? `Saving ${progress.done}/${progress.total}…`
-                : 'Saving…'
-              : 'Save'}
+            {mutation.isPending ? 'Saving…' : 'Save'}
           </ModalPrimary>
         </>
       }
@@ -432,14 +325,14 @@ export function SVIEditModal({ open, onClose, row, onDone }: Props) {
         {tab === 'dhcp' && (
           <DhcpTab
             servers={dhcpServers}
+            originalServers={initial?.dhcpRelayServers ?? []}
+            addDisabled={dhcpTotalDelta >= 1}
             draft={dhcpDraft}
             onDraftChange={setDhcpDraft}
             adding={dhcpAdding}
             onAddingChange={setDhcpAdding}
-            pending={dhcpPending}
-            error={dhcpError}
-            onAdd={addDhcpServer}
-            onRemove={removeDhcpServer}
+            onAdd={queueAddDhcpServer}
+            onRemove={queueRemoveDhcpServer}
           />
         )}
 
@@ -666,26 +559,25 @@ function AclTab({
 
 function DhcpTab({
   servers,
+  originalServers,
+  addDisabled,
   draft,
   onDraftChange,
   adding,
   onAddingChange,
-  pending,
-  error,
   onAdd,
   onRemove,
 }: {
   servers: string[];
+  originalServers: string[];
+  addDisabled: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
   adding: boolean;
   onAddingChange: (v: boolean) => void;
-  pending: string | null;
-  error: string | null;
   onAdd: () => void;
   onRemove: (s: string) => void;
 }) {
-  const busy = pending !== null;
   return (
     <div className="flex flex-col gap-3">
       <div className="rounded-md border border-panel-border p-3 flex flex-col gap-2">
@@ -694,7 +586,8 @@ function DhcpTab({
         </p>
 
         {servers.map((s) => {
-          const removing = pending === `remove:${s}`;
+          const isNewlyAdded = !originalServers.includes(s);
+          const removeDisabled = addDisabled && !isNewlyAdded;
           return (
             <div key={s} className="flex items-center gap-2">
               <div className="flex-1 rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text font-mono">
@@ -703,11 +596,11 @@ function DhcpTab({
               <button
                 type="button"
                 onClick={() => onRemove(s)}
-                disabled={busy}
+                disabled={removeDisabled}
                 aria-label={`Remove relay ${s}`}
                 className="rounded-md border border-danger/50 text-danger px-3 py-2 text-sm leading-none hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed transition"
               >
-                {removing ? '…' : '−'}
+                −
               </button>
             </div>
           );
@@ -731,16 +624,15 @@ function DhcpTab({
                 }
               }}
               placeholder="e.g. 10.0.0.53"
-              disabled={busy}
               className="flex-1 rounded-md bg-panel-elev border border-info px-3 py-2 text-sm text-text font-mono focus:outline-none focus:ring-2 focus:ring-info"
             />
             <button
               type="button"
               onClick={onAdd}
-              disabled={busy || draft.trim() === ''}
+              disabled={draft.trim() === ''}
               className="rounded-md border border-info text-info px-3 py-2 text-xs font-semibold uppercase tracking-wider hover:bg-info/10 disabled:opacity-40 disabled:cursor-not-allowed transition"
             >
-              {pending === 'add' ? 'Adding…' : 'Add'}
+              Add
             </button>
             <button
               type="button"
@@ -748,8 +640,7 @@ function DhcpTab({
                 onDraftChange('');
                 onAddingChange(false);
               }}
-              disabled={busy}
-              className="rounded-md border border-panel-border text-muted px-3 py-2 text-xs font-semibold uppercase tracking-wider hover:text-text disabled:opacity-40 transition"
+              className="rounded-md border border-panel-border text-muted px-3 py-2 text-xs font-semibold uppercase tracking-wider hover:text-text transition"
             >
               Cancel
             </button>
@@ -758,7 +649,7 @@ function DhcpTab({
           <button
             type="button"
             onClick={() => onAddingChange(true)}
-            disabled={busy}
+            disabled={addDisabled}
             className="w-full rounded-md border-2 border-dashed border-panel-border px-3 py-2 text-sm text-muted hover:text-text hover:border-muted disabled:opacity-40 disabled:cursor-not-allowed transition"
           >
             + Add server
@@ -766,16 +657,18 @@ function DhcpTab({
         )}
       </div>
 
-      <p className="text-xs text-muted italic">
-        Each row fires its own POST or DELETE — changes here don&apos;t wait
-        for Save.
-      </p>
-
-      {error && (
-        <p className="text-sm text-danger border border-danger/40 bg-danger/10 rounded px-3 py-2">
-          {error}
+      {addDisabled && (
+        <p className="text-xs text-warning">
+          Only 1 DHCP relay change can be queued per Save — undo it or Save
+          first before queuing another.
         </p>
       )}
+
+      <p className="text-xs text-muted italic">
+        Queued locally — applied together when you click Save, same as the
+        other tabs. Only 1 server add/remove per Save (still its own request,
+        not combined into a single connection with the rest).
+      </p>
     </div>
   );
 }

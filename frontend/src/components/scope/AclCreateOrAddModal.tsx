@@ -27,7 +27,6 @@ interface Props {
    *  the user types the name and this becomes a "create ACL" flow (which
    *  the backend collapses onto the same endpoint). */
   lockedName?: string | null;
-  onDone?: (msg: string, tone: 'ok' | 'error') => void;
 }
 
 // POST /devices/{name}/global-config/acls (RF-GLOBAL-05). Backend collapses
@@ -42,10 +41,9 @@ export function AclCreateOrAddModal({
   onClose,
   deviceName,
   lockedName,
-  onDone,
 }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const [name, setName] = useState('');
   const [drafts, setDrafts] = useState<RuleDraft[]>([makeEmptyDraft()]);
@@ -82,16 +80,9 @@ export function AclCreateOrAddModal({
         ? `Add rules to ACL ${name.trim()} on ${deviceName}`
         : `Create/update ACL ${name.trim()} on ${deviceName}`;
       trackGroupJob(result.group_job_id, label);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, label, j.device);
-      }
       queryClient.invalidateQueries({
         queryKey: ['global-config', 'synced', deviceName],
       });
-      onDone?.(
-        `${lockedName ? 'Add rules' : 'Create/update'} ACL ${name.trim()} queued on ${deviceName}.`,
-        'ok',
-      );
       onClose();
     },
     onError: (err: unknown) => {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getGlobalConfigSynced,
@@ -15,6 +15,7 @@ import type {
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Panel } from './Panel';
 import { RefreshButton } from './RefreshButton';
+import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 import { RouteAddModal } from './RouteAddModal';
 import { extractMessage } from './VlanCreateModal';
 
@@ -30,7 +31,7 @@ interface Props {
 // values as the identity of the route to remove.
 export function GlobalConfigRoutes({ deviceName }: Props) {
   const queryClient = useQueryClient();
-  const { trackJob, trackGroupJob } = useJobNotifications();
+  const { trackGroupJob } = useJobNotifications();
 
   const configQuery = useQuery({
     queryKey: ['global-config', 'synced', deviceName],
@@ -38,7 +39,7 @@ export function GlobalConfigRoutes({ deviceName }: Props) {
     enabled: Boolean(deviceName),
     refetchInterval: (query: {
       state: { data?: SyncedResource<GlobalConfigRead> };
-    }) => (query.state.data?.sync_in_progress ? 2000 : false),
+    }) => (query.state.data?.sync_in_progress ? SYNC_POLL_INTERVAL_MS : false),
   });
 
   const inProgress = Boolean(configQuery.data?.sync_in_progress);
@@ -48,16 +49,13 @@ export function GlobalConfigRoutes({ deviceName }: Props) {
 
   const [refreshing, setRefreshing] = useState(false);
   const [openAdd, setOpenAdd] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; tone: 'ok' | 'error' } | null>(
-    null,
-  );
+  // Only used for delete errors -- a success just hands off to
+  // JobNotificationContext's tracked toast (trackGroupJob below), no need
+  // to duplicate it here. There's no modal for this row-level action to
+  // show an inline error in, so a lightweight toast is still the right
+  // place for the error case.
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4500);
-    return () => clearTimeout(t);
-  }, [toast]);
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -82,23 +80,16 @@ export function GlobalConfigRoutes({ deviceName }: Props) {
         destination,
         next_hop,
       });
-      const label = `Remove route ${destination} → ${next_hop} on ${deviceName}`;
-      trackGroupJob(result.group_job_id, label);
-      for (const j of result.jobs) {
-        trackJob(j.job_id, label, j.device);
-      }
+      trackGroupJob(
+        result.group_job_id,
+        `Remove route ${destination} → ${next_hop} on ${deviceName}`,
+      );
       queryClient.invalidateQueries({
         queryKey: ['global-config', 'synced', deviceName],
       });
-      setToast({
-        msg: `Remove route ${destination} queued on ${deviceName}.`,
-        tone: 'ok',
-      });
     } catch (err) {
-      setToast({
-        msg: extractMessage(err, 'Remove route failed.'),
-        tone: 'error',
-      });
+      setDeleteError(extractMessage(err, 'Remove route failed.'));
+      setTimeout(() => setDeleteError(null), 4500);
     } finally {
       setDeletingKey(null);
     }
@@ -152,16 +143,11 @@ export function GlobalConfigRoutes({ deviceName }: Props) {
         open={openAdd}
         onClose={() => setOpenAdd(false)}
         deviceName={deviceName}
-        onDone={(msg, tone) => setToast({ msg, tone })}
       />
 
-      {toast && (
-        <div
-          className={`fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm ${
-            toast.tone === 'ok' ? 'bg-success text-white' : 'bg-danger text-white'
-          }`}
-        >
-          {toast.msg}
+      {deleteError && (
+        <div className="fixed bottom-4 right-4 z-40 rounded-md px-4 py-2 shadow-lg text-sm bg-danger text-white">
+          {deleteError}
         </div>
       )}
     </div>

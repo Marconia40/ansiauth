@@ -74,11 +74,31 @@ class VendorDriver(ABC):
     _NETWORK_OS: str
     _CONNECTION: str = "network_cli"
 
-    def _build_inventory(self, device: Device, password: str) -> dict:
+    def _build_inventory(self, device: Device, password: str) -> str:
+        # Password-only -- only reached from _ejecutar()'s password branch,
+        # which is only taken when auth_method != "key" (see _ejecutar()).
         from app.services import ansible_service
         return ansible_service.build_inventory(
             device.name, device.host, device.username, password,
             network_os=self._NETWORK_OS, connection=self._CONNECTION,
+        )
+
+    def _ejecutar(self, extravars: dict, device: Device, password: str) -> dict:
+        """Único lugar donde se decide CÓMO se ejecuta *extravars* contra
+        el device -- ``_aplicar()``/``_leer()`` solo llaman a esto, no les
+        importa el transporte real. Devices en ``auth_method == "key"``
+        van por ``ssh_direct_service`` (bypass de Ansible/paramiko -- ver
+        su docstring para el motivo real); el resto (el 100% del fleet en
+        password) sigue exactamente igual por ``ansible_service.run_playbook()``,
+        sin ningún cambio de comportamiento."""
+        if device.auth_method == "key":
+            from app.services import ssh_direct_service
+            return ssh_direct_service.run_direct(extravars, device)
+        from app.services import ansible_service
+        return ansible_service.run_playbook(
+            playbook=self._PLAYBOOK,
+            extravars={**extravars, "device": device.name},
+            inventory=self._build_inventory(device, password),
         )
 
     def _aplicar(self, extravars: dict, device: Device, password: str, *, op_label: str) -> dict:
@@ -94,15 +114,9 @@ class VendorDriver(ABC):
         """
         import traceback
 
-        from app.services import ansible_service
-
         logger.info("%s: %s on device=%s", type(self).__name__, op_label, device.name)
         try:
-            result = ansible_service.run_playbook(
-                playbook=self._PLAYBOOK,
-                extravars={**extravars, "device": device.name},
-                inventory=self._build_inventory(device, password),
-            )
+            result = self._ejecutar(extravars, device, password)
             normalized = {**result, "success": result.get("rc", 1) == 0}
             if normalized["success"]:
                 logger.info("%s: %s OK on device=%s", type(self).__name__, op_label, device.name)
@@ -120,30 +134,122 @@ class VendorDriver(ABC):
             )
             raise
 
-    def _leer(self, commands: list[str], device: Device, password: str) -> list[str]:
+    # Marker que Cisco IOS y Huawei VRP emiten cuando la sintaxis del
+    # comando no existe en ese device (ej. un IOSv de lab que no implementa
+    # ``storm-control``, un modelo viejo sin ``poe``, etc.). Es texto libre
+    # del device, no un rc del transport -- por eso se detecta acá arriba
+    # del parser en lugar de esperar que cada parser vendor-específico
+    # reconozca su propio flavor de "no entiendo el comando".
+    _UNSUPPORTED_COMMAND_MARKERS = ("% Invalid input", "Error: Unrecognized command")
+
+    def _leer(
+        self,
+        commands: list[str],
+        device: Device,
+        password: str,
+        *,
+        partial_ok: bool = False,
+    ) -> list[str]:
         """Run this driver's single playbook in "read" mode (``commands``)
         and return every command's stdout, in execution order.
 
         Raises ``RuntimeError`` on a non-zero rc or empty output -- callers
         (``list_vlans``/``list_ports``) hand the returned strings to their
         vendor-specific parser, unchanged.
-        """
-        from app.services import ansible_service
 
-        logger.info("%s: run %d command(s) on device=%s", type(self).__name__, len(commands), device.name)
-        result = ansible_service.run_playbook(
-            playbook=self._PLAYBOOK,
-            extravars={"commands": commands, "device": device.name},
-            inventory=self._build_inventory(device, password),
+        ``partial_ok=True`` softens the rc-check: when the playbook reports
+        failure BUT the transport still captured at least one command's
+        stdout, the responses are returned as-is instead of raising. This
+        is the "read is a mixed batch, some commands might not exist on
+        this device" mode -- used by ``list_ports`` so an IOSv image
+        without ``storm-control`` doesn't tumble the whole port read (the
+        offending entry comes through with ``% Invalid input`` text, which
+        callers filter via ``_filter_unsupported()``). Empty ``stdouts``
+        (device unreachable, auth failure, etc.) still raises regardless
+        of *partial_ok*.
+        """
+        logger.info(
+            "%s: run %d command(s) on device=%s (partial_ok=%s)",
+            type(self).__name__, len(commands), device.name, partial_ok,
         )
+        # tolerate_command_errors: extravar leído por el playbook de cada
+        # vendor (camino ansible_service, ver ``run.yml`` de cada vendor).
+        # Cuando True selecciona una task "tolerant" (failed_when: false)
+        # para que ios_command / cli_command no marquen la task como
+        # fallida cuando un comando individual devuelve "% Invalid input"
+        # (Cisco) o "Error: Unrecognized command" (Huawei) -- así el
+        # stdout resultante contiene la respuesta de CADA comando,
+        # incluidos los rechazados, y el driver los filtra con
+        # _filter_unsupported(). Sin este flag Ansible descarta las
+        # respuestas parciales, confirmado en vivo contra un IOSv sin
+        # storm-control. Para devices en ``auth_method == "key"`` este
+        # flag no hace nada (``ssh_direct_service._run_reads()`` ya es
+        # tolerante por diseño -- corre cada comando en su propia sesión y
+        # siempre devuelve todos los stdouts, le pasa de largo sin usarlo)
+        # -- pasa igual por ``_ejecutar()``, el único punto de decisión de
+        # transporte, en vez de llamar a ansible_service directo acá (that
+        # bypassearía el soporte de clave SSH).
+        extravars = {"commands": commands}
+        if partial_ok:
+            extravars["tolerate_command_errors"] = True
+        result = self._ejecutar(extravars, device, password)
+        stdouts = result.get("stdouts") or []
         if result["rc"] != 0:
             error = result.get("stderr") or result.get("stdout") or "playbook exited non-zero"
+            # partial_ok con stdouts poblados: modo tolerant + algún
+            # comando individual falló pero otros pasaron -- devolver lo
+            # que hay para que el driver decida qué filtrar. En la
+            # práctica con failed_when: false esto casi nunca dispara
+            # (rc suele ser 0), pero se mantiene como safety net por si
+            # el playbook falla por otras razones (auth, timeout) y aún
+            # así capturó algo.
+            if partial_ok and stdouts:
+                logger.warning(
+                    "%s: read on device=%s reported failure but captured %d/%d command output(s); "
+                    "returning them for per-command handling (error was: %s)",
+                    type(self).__name__, device.name, len(stdouts), len(commands), error,
+                )
+                return stdouts
             logger.error("%s: read failed on device=%s — %s", type(self).__name__, device.name, error)
             raise RuntimeError(f"Cannot read state on device '{device.name}': {error}")
-        stdouts = result.get("stdouts") or []
         if not stdouts:
             raise RuntimeError(f"Cannot read state on device '{device.name}': no command output returned")
         return stdouts
+
+    @classmethod
+    def _filter_unsupported(
+        cls,
+        stdouts: list[str],
+        commands: list[str],
+        device: Device,
+    ) -> list[str]:
+        """Replace any per-command stdout that matches an "unsupported
+        command" marker with an empty string, and log which commands were
+        skipped. Preserves order and length so callers that slice by index
+        (``list_ports``' ``_STORM_INDEX``, ``read_core_state``'s port slice)
+        stay in sync with their command list.
+
+        Parsers already accept ``""`` as "no data for this source" and
+        surface it as ``None`` on the affected fields (Puerto's
+        ``storm_control_enabled``/``storm_control_threshold`` become
+        ``None`` when the storm read is missing) -- so this filter alone
+        is enough, no downstream changes needed.
+        """
+        cleaned = []
+        for cmd, out in zip(commands, stdouts):
+            if any(marker in out for marker in cls._UNSUPPORTED_COMMAND_MARKERS):
+                logger.info(
+                    "%s: device=%s does not support %r -- treating as absent feature",
+                    cls.__name__, device.name, cmd,
+                )
+                cleaned.append("")
+            else:
+                cleaned.append(out)
+        # If commands and stdouts have different lengths (shouldn't happen,
+        # but defensive), preserve whatever extra stdouts we have unmodified.
+        if len(stdouts) > len(commands):
+            cleaned.extend(stdouts[len(commands):])
+        return cleaned
 
     _commands_cache: dict | None = None
 
@@ -195,19 +301,20 @@ class VendorDriver(ABC):
             lineas += [l.format(**vars) for l in repeat.get("if_empty", [])]
         return lineas
 
-    def _ejecutar_paso(self, step: dict, vars: dict, device: Device, password: str, *, op_label: str) -> dict:
-        """Renderiza un paso del YAML (``lines``[+``parents``], ``block``, o
-        ``commands`` -- se infiere de qué clave está presente, no hace
-        falta declarar el modo aparte) sustituyendo *vars* con
-        ``str.format()``, arma el extravars shape que ``run.yml`` de este
-        vendor entiende, y corre ``_aplicar()`` (sin tocar).
+    def _renderizar_paso(self, step: dict, vars: dict) -> dict:
+        """Parte "render" de ``_ejecutar_paso()`` -- todo lo que arma el
+        extravars-shape a partir de un paso de YAML, SIN ejecutar nada
+        (no abre conexión). Extraído para que ``aplicar_lote()`` pueda
+        renderizar N pasos y juntarlos en 1 sola llamada a ``_aplicar()``
+        en vez de 1 por paso -- ver esa nota para el porqué.
 
-        ``repeat`` (ver ``_lineas_repetidas()``) y ``trailer`` (líneas
-        fijas después de las repetidas, ej. ``commit``/``quit``/``quit``
-        de Huawei) se agregan al final de ``lines``/``block`` cuando
-        están presentes. ``match`` (Cisco/``ios_config`` -- ver nota en
-        ``set_svi_dhcp_relay`` de ambos vendors) pasa directo al
-        extravars si está presente."""
+        ``lines``[+``parents``], ``block``, o ``commands`` se infiere de
+        qué clave está presente. ``repeat`` (ver ``_lineas_repetidas()``)
+        y ``trailer`` (líneas fijas después de las repetidas, ej.
+        ``commit``/``quit``/``quit`` de Huawei) se agregan al final de
+        ``lines``/``block`` cuando están presentes. ``match`` (Cisco/
+        ``ios_config`` -- ver nota en ``set_svi_dhcp_relay`` de ambos
+        vendors) pasa directo al extravars si está presente."""
         extra = self._lineas_repetidas(step, vars)
         trailer = [l.format(**vars) for l in step.get("trailer", [])]
         if "commands" in step:
@@ -222,6 +329,12 @@ class VendorDriver(ABC):
                 extravars["parents"] = step["parents"].format(**vars)
         if "match" in step:
             extravars["match"] = step["match"]
+        return extravars
+
+    def _ejecutar_paso(self, step: dict, vars: dict, device: Device, password: str, *, op_label: str) -> dict:
+        """Renderiza (``_renderizar_paso()``) y corre ``_aplicar()`` --
+        sin cambios de comportamiento, solo delega el render."""
+        extravars = self._renderizar_paso(step, vars)
         return self._aplicar(extravars, device, password, op_label=op_label)
 
     def _aplicar_desde_template(
@@ -260,6 +373,95 @@ class VendorDriver(ABC):
                 )
                 return self._ejecutar_paso(alt, vars, device, password, op_label=f"{op_key} (alt)")
         return resultado
+
+    def aplicar_paso(self, op_key: str, variant: "str | None", vars: dict, device: Device, password: str) -> dict:
+        """Punto de entrada genérico para ``RecursoGestionable.resolver_paso()``
+        -- mismo comportamiento que ``_aplicar_desde_template()`` (que sigue
+        existiendo, la sigue usando cada método individual del driver), solo
+        expuesto sin guión bajo para que el modelo de dominio (``Puerto``/
+        ``SVI``) lo llame directo sin pasar por un método con nombre propio
+        por campo."""
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    @staticmethod
+    def _combinar_pasos_renderizados(renders: list[dict]) -> dict:
+        """Junta N extravars ya renderizados (``_renderizar_paso()``, 1 por
+        paso) en la forma que entiende la tarea "batch" de ``run.yml`` de
+        este vendor -- se infiere del shape del primer render, mismo
+        criterio que ``_ejecutar_paso()`` ya usa para inferir
+        ``commands``/``block``/``lines``. Huawei: cada render ya es un
+        ``command_block`` completo y autocontenido (su propio
+        ``system-view``/``commit``/``quit``(s)) -- se manda la lista de
+        strings tal cual. Cisco: cada render ya es
+        ``{"parents","lines","match"}`` -- se manda la lista de dicts tal
+        cual, ``run.yml`` la loopea con ``cisco.ios.ios_config`` por
+        item."""
+        if "command_block" in renders[0]:
+            return {"command_blocks": [r["command_block"] for r in renders]}
+        return {"config_steps": renders}
+
+    def aplicar_lote(
+        self, pasos: list[tuple[str, "str | None", dict]], device: Device, password: str,
+        *, op_label: str = "lote",
+    ) -> dict:
+        """Renderiza N pasos independientes (``(op_key, variant, vars)``,
+        la misma forma que devuelve ``RecursoGestionable.resolver_paso()``)
+        y los manda en **1 sola conexión** en vez de N -- confirmado en
+        vivo contra devices reales (Huawei ``f3r9s2`` y Cisco ``cisco01``)
+        que la tarea con ``loop`` de ``run.yml`` reusa la conexión entre
+        iteraciones, incluso con bloques interactivos completos (6.17s
+        para 3 bloques Huawei vs 14.97s como 3 conexiones separadas; 4.86s
+        vs 9.24s el mismo test contra Cisco).
+
+        Si el lote entero falla, se busca -- para CADA paso -- si alguna
+        de sus ``alternatives`` (las que YA están en ``commands.yaml`` de
+        cada operación, no se inventa nada nuevo acá) matchea el error
+        real, y se reintenta el lote completo UNA vez con esas
+        alternativas aplicadas (los pasos sin alternativa que matchee
+        quedan con su render primario). Esto cubre el caso dominante
+        (device que rechaza "commit", ~54 de 42 operaciones Huawei lo
+        tienen declarado) sin mecanismo nuevo -- se reusan las
+        alternativas existentes tal cual. Si ningún paso tiene una
+        alternativa que matchee, se devuelve el error real sin
+        reintentar -- "si falla alguno, falla todo", sin reintento
+        selectivo línea por línea."""
+        comandos = self._cargar_comandos()
+        entradas: list[tuple[str, "str | None", dict, dict]] = []
+        renders: list[dict] = []
+        for op_key, variant, vars in pasos:
+            entry = comandos[op_key]
+            if variant is not None:
+                entry = entry[variant]
+            entradas.append((op_key, variant, entry, vars))
+            renders.append(self._renderizar_paso(entry["primary"], vars))
+
+        resultado = self._aplicar(
+            self._combinar_pasos_renderizados(renders), device, password, op_label=op_label,
+        )
+        if resultado["success"]:
+            return resultado
+
+        error_text = (resultado.get("stderr") or "") + (resultado.get("stdout") or "")
+        error_text = error_text.replace("\\r\\n", "\r\n").replace("\\r", "\r").replace("\\n", "\n")
+
+        renders_alt = list(renders)
+        hubo_alternativa = False
+        for i, (op_key, variant, entry, vars) in enumerate(entradas):
+            for alt in entry.get("alternatives", []):
+                if re.search(alt["triggered_by_error"], error_text):
+                    renders_alt[i] = self._renderizar_paso(alt, vars)
+                    hubo_alternativa = True
+                    break
+        if not hubo_alternativa:
+            return resultado
+
+        logger.info(
+            "%s: %s primary failed, retrying lote with known alternative(s) on device=%s",
+            type(self).__name__, op_label, device.name,
+        )
+        return self._aplicar(
+            self._combinar_pasos_renderizados(renders_alt), device, password, op_label=f"{op_label} (alt)",
+        )
 
     @staticmethod
     def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:
@@ -459,6 +661,37 @@ class VendorDriver(ABC):
             (v for v in self.list_vlans(device, password) if v.vlan_id == vlan_id),
             None,
         )
+
+    # ── Combined core-state read (VLAN + ports + SVI in fewer SSH sessions) ─
+
+    def read_core_state(
+        self, device: Device, password: str,
+    ) -> tuple[list[VLAN], list[Puerto], list[SVI]]:
+        """Return ``(vlans, ports, svis)`` reading all three from the
+        device with as few SSH sessions as the vendor allows.
+
+        Default implementation calls ``get_vlans``/``list_ports``/
+        ``get_svis`` sequentially -- 3 separate SSH sessions. Concrete
+        vendors override this to consolidate reads: ``CiscoVendor`` fuses
+        the three into a single ``_leer()`` call (1 session);
+        ``HuaweiVendor`` folds them into 2 sessions (VRP requires
+        discovering Vlanif IDs before it can pull their config).
+
+        Used by ``DeviceSyncService.sync_core()`` on the ``scope="all"``
+        path -- reduces the SSH-session cost of a refresh from 3+ to 1-2
+        without changing external contracts. The single-scope entry
+        points (``sync_vlans``/``sync_ports``/``sync_svis``) keep calling
+        the individual methods, so refreshing one scope at a time is
+        unaffected.
+
+        Raises ``RuntimeError`` on any read failure, same as the
+        individual methods -- the caller decides whether to persist the
+        successful parts.
+        """
+        vlans = self.get_vlans(device, password)
+        ports = self.list_ports(device, password)
+        svis = self.get_svis(device, password)
+        return vlans, ports, svis
 
     # ── Port query operation (must be implemented by every driver) ───────────
 

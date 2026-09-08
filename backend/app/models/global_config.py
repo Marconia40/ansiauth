@@ -66,6 +66,13 @@ class GlobalConfig:
     hostname: str | None = None
     # -- escritura, acción tipo struct (dict con sub-campos opcionales) --
     snmp_config: dict | None = None
+    # {"host": ip, "community": str} -- "community" es requerida en los 2
+    # vendors, confirmado en vivo: IOS rechaza ``no snmp-server host {ip}``
+    # solo ("% Incomplete command", la community es el único completor que
+    # no depende de otro campo) y VRP exige la community EXACTA usada al
+    # agregar para poder armar el ``undo`` real (queda cifrada al leerla de
+    # vuelta, no hay forma de recuperarla del device).
+    snmp_trap_host_remove: dict | None = None
     # -- escritura, acción puntual sobre una lista --
     route_add: dict | None = None
     route_remove: dict | None = None
@@ -119,7 +126,7 @@ class GlobalConfig:
     @property
     def mutation_fields(self) -> set[str]:
         campos = (
-            "hostname", "snmp_config", "route_add", "route_remove",
+            "hostname", "snmp_config", "snmp_trap_host_remove", "route_add", "route_remove",
             "ntp_server_add", "ntp_server_remove", "dns_server_add", "dns_server_remove",
             "dns_domain_set", "log_server_add", "log_server_remove",
             "acl_create", "acl_rule_remove", "acl_delete",
@@ -133,7 +140,7 @@ class GlobalConfig:
         if not self.mutation_fields:
             raise ValueError(
                 "at least one mutation field must be provided "
-                "(hostname, snmp_config, route_add, route_remove, ntp_server_add, "
+                "(hostname, snmp_config, snmp_trap_host_remove, route_add, route_remove, ntp_server_add, "
                 "ntp_server_remove, dns_server_add, dns_server_remove, dns_domain_set, "
                 "log_server_add, log_server_remove, acl_create, acl_rule_remove, acl_delete)"
             )
@@ -149,6 +156,16 @@ class GlobalConfig:
             trap_host, trap_version = self.snmp_config.get("trap_host"), self.snmp_config.get("trap_version")
             if (trap_host is None) != (trap_version is None):
                 raise ValueError("snmp_config: 'trap_host' and 'trap_version' must be provided together")
+        if self.snmp_trap_host_remove is not None:
+            desconocidas = set(self.snmp_trap_host_remove) - {"host", "community"}
+            if desconocidas:
+                raise ValueError(
+                    f"snmp_trap_host_remove: unknown keys {sorted(desconocidas)} (valid: ['host', 'community'])"
+                )
+            if not self.snmp_trap_host_remove.get("host"):
+                raise ValueError("snmp_trap_host_remove: 'host' is required")
+            if not self.snmp_trap_host_remove.get("community"):
+                raise ValueError("snmp_trap_host_remove: 'community' is required")
         if self.log_server_add is not None:
             desconocidas = set(self.log_server_add) - {"server", "level"}
             if desconocidas:
@@ -265,6 +282,8 @@ class GlobalConfig:
             return self._aplicar_hostname(device, pre_state)
         if campo == "snmp_config":
             return self._aplicar_snmp_config(device, pre_state)
+        if campo == "snmp_trap_host_remove":
+            return self._aplicar_snmp_trap_host_remove(device, pre_state)
         if campo == "route_add":
             return self._aplicar_route_add(device, pre_state)
         if campo == "route_remove":
@@ -309,18 +328,16 @@ class GlobalConfig:
         ``community`` (siempre RO, el permiso ya no es parámetro),
         ``trap_source`` y ``trap_host``+``trap_version`` -- solo se
         reenvían al driver los sub-campos que difieren del estado actual.
-        ``trap_host`` se resuelve de 2 formas posibles según lo que
-        ``reconciliar()`` haya encontrado en ``actual.snmp_acl_name``:
-        - Si HAY una ACL atada al agente SNMP (Huawei con ``snmp-agent acl
-          {nombre}`` configurado) -- se manda ``trap_host_acl_name`` al
-          driver, que agrega una regla ``permit source`` a esa ACL (no
-          necesita community, es una operación de ACL, no de SNMP en sí).
-        - Si NO hay ACL (Cisco, o Huawei sin ninguna atada) -- arma un
-          comando que necesita la community (IOS ``snmp-server host {ip}
-          version {v} {community}`` y el equivalente VRP la llevan en la
-          misma línea): si no vino en esta misma request, usa la ya
-          conocida vía ``reconciliar()``; si no hay ninguna, error
-          explícito."""
+        ``trap_host`` necesita una community resolvible (IOS
+        ``snmp-server host {ip} version {v} {community}``, VRP
+        ``snmp-agent target-host trap address udp-domain {ip} params
+        securityname {community} v2c`` -- confirmado en vivo contra f3r9s2
+        que el comando real de VRP anda con ``screen-width 512``, ya no
+        hace falta el workaround de ACL que se había explorado antes de
+        confirmarlo): si no vino en esta misma request, usa la ya conocida
+        vía ``reconciliar()``; si no hay ninguna, error explícito. Mismo
+        criterio en los 2 vendors -- ``trap_host_community`` es la clave
+        que ambos drivers leen de ``cambios``."""
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         cambios = {}
@@ -335,26 +352,42 @@ class GlobalConfig:
             cambios["trap_source"] = trap_source
         trap_host, trap_version = self.snmp_config.get("trap_host"), self.snmp_config.get("trap_version")
         if trap_host is not None:
-            acl_name = actual.snmp_acl_name if actual is not None else None
-            if acl_name is not None:
-                cambios["trap_host"] = trap_host
-                cambios["trap_version"] = trap_version
-                cambios["trap_host_acl_name"] = acl_name
-            else:
-                community_para_trap = community or (actual.snmp_community if actual is not None else None)
-                if not community_para_trap:
-                    raise ValueError(
-                        "snmp_config: 'trap_host' requires a resolvable community "
-                        "(either in this same request or already configured on the device), "
-                        "unless the device already has an ACL bound to its SNMP agent"
-                    )
-                cambios["trap_host"] = trap_host
-                cambios["trap_version"] = trap_version
-                cambios["trap_host_community"] = community_para_trap
+            community_para_trap = community or (actual.snmp_community if actual is not None else None)
+            if not community_para_trap:
+                raise ValueError(
+                    "snmp_config: 'trap_host' requires a resolvable community "
+                    "(either in this same request or already configured on the device)"
+                )
+            cambios["trap_host"] = trap_host
+            cambios["trap_version"] = trap_version
+            cambios["trap_host_community"] = community_para_trap
         if not cambios:
             return self._noop_resultado("configurar_snmp")
         resultado = device.driver.set_snmp(cambios, device, device.password)
         return {**resultado, "accion": "configurar_snmp"}
+
+    def _aplicar_snmp_trap_host_remove(self, device: "Device", pre_state: "dict | None" = None) -> dict:
+        """Contraparte de ``trap_host`` (agregar vive en ``snmp_config``,
+        ver docstring de ``_aplicar_snmp_config()``). Sin no-op detection a
+        propósito -- ``actual.snmp_trap_hosts`` en Huawei sigue viniendo de
+        cruzar la ACL del agente (ver docstring de
+        ``HuaweiVendor.set_snmp()``), NO del comando real de target-host
+        que usa este mismo mecanismo para agregar/sacar -- un host agregado
+        vía ``trap_host`` nunca aparece ahí, así que un no-op check contra
+        esa lista lo trataría SIEMPRE como "no está" y nunca intentaría el
+        remove real (bug real encontrado probando esto en vivo). Se manda
+        directo al driver -- si el host no existe de verdad, el device lo
+        rechaza con su propio error real (confirmado en vivo: VRP con
+        "does not exist", IOS de forma análoga), no hace falta adivinar
+        desde acá. ``community`` es requerida en los 2 vendors
+        (``validar()`` ya la exige antes de llegar acá) -- ver docstrings
+        de ``CiscoVendor.remove_snmp_trap_host()``/
+        ``HuaweiVendor.remove_snmp_trap_host()`` para el motivo real de
+        cada uno."""
+        host = self.snmp_trap_host_remove["host"]
+        community = self.snmp_trap_host_remove["community"]
+        resultado = device.driver.remove_snmp_trap_host(host, device, device.password, community=community)
+        return {**resultado, "accion": "sacar_snmp_trap_host"}
 
     def _aplicar_log_server_add(self, device: "Device") -> dict:
         """RF-GLOBAL-09 (Log, split). Sin no-op detection, mismo criterio
@@ -398,15 +431,19 @@ class GlobalConfig:
         debería ser un error (mismo criterio de idempotencia que el resto
         de esta clase).
 
-        Límite real encontrado en vivo contra f3r9s1: ``routes`` sale de
-        ``show ip route``/``display ip routing-table`` (la RIB), no de
-        ``show running-config``/``display current-configuration`` -- una
-        ruta con next-hop no alcanzable en la red real del device queda
-        en el config pero NUNCA se instala en la RIB, así que este método
-        no la ve y reporta no-op aunque el device SÍ tenga la línea. No
-        hay forma de detectar ese caso desde acá sin leer running-config
-        completo y parsear rutas de ahí también -- fuera de alcance por
-        ahora, documentado para no repetir la confusión."""
+        Límite real encontrado en vivo contra f3r9s1, ya CERRADO: ``routes``
+        salía solo de ``show ip route``/``display ip routing-table`` (la
+        RIB), no de ``show running-config``/``display current-configuration``
+        -- una ruta con next-hop no alcanzable en la red real del device
+        queda en el config pero NUNCA se instala en la RIB, así que este
+        método no la veía y reportaba no-op aunque el device SÍ tuviera la
+        línea (y encima era invisible en el front, no se podía borrar desde
+        ahí). Los parsers (``CiscoGlobalConfigParser``/
+        ``HuaweiGlobalConfigParser`` en ``global_config_parser.py``) ahora
+        también leen rutas estáticas directo de running-config
+        (``_IOS_STATIC_ROUTE_RE``/``_VRP_STATIC_ROUTE_RE``) y las suman a
+        ``routes`` cuando no aparecen ya en la RIB, así que ``actual.routes``
+        las incluye y este método las ve igual que a cualquier otra."""
         estado = pre_state if pre_state is not None else self.reconciliar(device)
         actual = estado.get("actual")
         destino_normalizado = str(ipaddress.ip_network(self.route_remove["destination"], strict=False))
@@ -541,6 +578,58 @@ class GlobalConfig:
 
     def repositorio(self) -> str:
         return "global_config"
+
+    def resumen_intento(self) -> str:
+        """Ver ``VLAN.resumen_intento()`` -- misma idea. A diferencia de
+        VLAN/SVI/Puerto (identidad simple + 1-pocos campos escalares), acá
+        cada uno de los 15 ``mutation_fields`` tiene su propia forma (dict
+        con sub-claves, o str) -- se desempaqueta campo por campo en
+        ``_describir_campo_mutacion()``. En la práctica solo 1 viene
+        seteado por request (todos los endpoints de escritura de esta
+        clase arman un ``GlobalConfig`` con un único campo), pero se listan
+        todos los que estén seteados por robustez en vez de asumirlo."""
+        campos = self.mutation_fields
+        if not campos:
+            return "Global config: no changes"
+        return "; ".join(self._describir_campo_mutacion(c) for c in sorted(campos))
+
+    def _describir_campo_mutacion(self, campo: str) -> str:
+        valor = getattr(self, campo)
+        if campo == "hostname":
+            return f"Set hostname to '{valor}'"
+        if campo == "snmp_config":
+            detalles = ", ".join(f"{k}={v}" for k, v in valor.items() if v is not None)
+            return f"Update SNMP ({detalles})" if detalles else "Update SNMP"
+        if campo == "snmp_trap_host_remove":
+            return f"Remove SNMP trap host {valor.get('host')}"
+        if campo == "route_add":
+            return f"Add route {valor.get('destination')} -> {valor.get('next_hop')}"
+        if campo == "route_remove":
+            return f"Remove route {valor.get('destination')} -> {valor.get('next_hop')}"
+        if campo == "ntp_server_add":
+            return f"Add NTP server {valor.get('server')}"
+        if campo == "ntp_server_remove":
+            return f"Remove NTP server {valor.get('server')}"
+        if campo == "dns_server_add":
+            return f"Add DNS server {valor.get('server')}"
+        if campo == "dns_server_remove":
+            return f"Remove DNS server {valor.get('server')}"
+        if campo == "dns_domain_set":
+            return f"Set DNS domain-name to '{valor}'"
+        if campo == "log_server_add":
+            nivel = f" (level {valor.get('level')})" if valor.get("level") else ""
+            return f"Add log server {valor.get('server')}{nivel}"
+        if campo == "log_server_remove":
+            return f"Remove log server {valor.get('server')}"
+        if campo == "acl_create":
+            n = len(valor.get("rules") or [])
+            return f"Create/update ACL '{valor.get('name')}' ({n} rule{'s' if n != 1 else ''})"
+        if campo == "acl_rule_remove":
+            n = len(valor.get("rules") or [])
+            return f"Remove {n} rule{'s' if n != 1 else ''} from ACL '{valor.get('name')}'"
+        if campo == "acl_delete":
+            return f"Delete ACL '{valor}'"
+        return f"{campo}: {valor!r}"
 
     def to_dict(self) -> dict:
         return {
