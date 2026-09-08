@@ -566,6 +566,28 @@ class CiscoVendor(VendorDriver):
             )
         return self._combinar_resultados(resultados)
 
+    def remove_snmp_trap_host(
+        self, host: str, device: Device, password: str, *, community: "str | None" = None,
+    ) -> dict:
+        """RF-GLOBAL-07 (trap host, delete). Confirmado en vivo contra
+        f3r9s1 que ``no snmp-server host {host}`` solo (y también con
+        ``traps``) sale "% Incomplete command" -- IOS exige un completor,
+        y la community es el que identifica la entrada sin depender de
+        otro estado del device. Mismo requisito que VRP entonces (ver
+        ``HuaweiVendor.remove_snmp_trap_host()``), aunque por un motivo de
+        sintaxis distinto -- acá no es que IOS necesite matchear la
+        community exacta contra algo cifrado, cualquier completor válido
+        alcanzaría, community es simplemente el único que no requiere
+        conocer otro campo."""
+        if not community:
+            raise ValueError(
+                "CiscoVendor.remove_snmp_trap_host: 'community' is required -- "
+                "'no snmp-server host {ip}' alone is rejected by IOS as an incomplete command"
+            )
+        return self._aplicar_desde_template(
+            "remove_snmp_trap_host", {"host": host, "community": community}, device, password,
+        )
+
     def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
         """RF-GLOBAL-09 (Log, endpoint propio). Confirmado en vivo contra
         cisco01: ``logging host {ip}`` + (si viene ``level``) ``logging

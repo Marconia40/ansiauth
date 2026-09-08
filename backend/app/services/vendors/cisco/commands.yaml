@@ -375,6 +375,16 @@ set_snmp_trap_host:
   primary:
     lines: ["snmp-server host {host} version {version} {community}"]
 
+# RF-GLOBAL-07 (trap host, delete) -- confirmado en vivo contra f3r9s1 que
+# "no snmp-server host {ip}" solo ("no snmp-server host {ip} traps" tampoco)
+# sale "% Incomplete command" -- IOS exige un completor, y la community es
+# el único que no depende de otro estado (traps/informs/version/vrf no
+# identifican la entrada por sí solos). "no snmp-server host {ip} {community}"
+# sí saca la entrada completa, confirmado con show running-config después.
+remove_snmp_trap_host:
+  primary:
+    lines: ["no snmp-server host {host} {community}"]
+
 # DNS como endpoint propio (RF-GLOBAL-09 split) -- "ip name-server"
 # ya confirmado esta sesión; "no ip name-server" también (con la salvedad
 # ya documentada de que IOS a veces responde con un mensaje que Ansible

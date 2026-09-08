@@ -670,35 +670,34 @@ class HuaweiVendor(VendorDriver):
         comentario en ``commands.yaml``). ``community`` siempre se fija con
         el verbo "read" (ya no es parámetro, ver ``GlobalConfig.validar()``).
         ``trap_source`` confirmado en vivo contra f3r9s2 (``snmp-agent trap
-        source {interface}``). ``trap_host`` NO está soportado todavía --
-        el comando real (``snmp-agent target-host host-name ... trap
-        address udp-domain ... params securityname ... v2c``) es largo
-        (>100 caracteres) y se corrompe en tránsito sobre esta sesión SSH
-        (confirmado en vivo contra f3r9s2: la línea se corta y re-envuelve
-        con una secuencia de control ANSI en medio de una palabra, el
-        device recibe el comando roto y lo rechaza) -- necesita que la
-        conexión Ansible fuerce un ancho de terminal mayor antes de poder
-        confirmarse, fuera de alcance de esta vuelta. Esto se dispara
-        dentro de ``aplicar()`` (o sea DENTRO del job async, después de que
-        el POST ya devolvió 202) -- no hay forma de rechazarlo en la
-        request inicial porque ``GlobalConfig.validar()`` no conoce el
-        vendor. Levanta ``NotImplementedError`` a propósito en vez de
-        mandar el comando roto silenciosamente -- el error queda visible
-        pollendo el job (``GET /jobs/{id}``), mismo lugar donde ya
-        aparecería un error real del device. Sin ``target-host`` leíble,
-        ``snmp.trap_hosts`` en la lectura (``get_global_config()``) NO
-        viene de un comando de trap real acá -- se resuelve cruzando
-        ``snmp-agent acl {nombre}`` (la ACL atada al agente SNMP) contra
-        ``acls`` (ver ``HuaweiGlobalConfigParser.parse()``), tomando TODOS
-        los ``permit source`` de esa ACL. Confirmado en vivo que la ACL
-        ``acceso-snmp`` lista exactamente las mismas IPs que el
-        ``trap_host`` de Cisco en el mismo par de devices -- pedido
-        explícito del usuario tras notar la coincidencia."""
-        if "trap_host" in cambios:
-            raise NotImplementedError(
-                "HuaweiVendor.set_snmp: 'trap_host' not supported yet -- the real VRP command "
-                "gets corrupted in transit over this SSH session for lines this long, see docstring"
-            )
+        source {interface}``).
+
+        ``trap_host`` -- el comando real (``snmp-agent target-host trap
+        address udp-domain {ip} params securityname {community} v2c``) se
+        había descartado en una vuelta anterior por corromperse en tránsito
+        sobre esta sesión SSH (línea larga, se corta y re-envuelve con una
+        secuencia de control ANSI en medio de una palabra). Confirmado en
+        vivo esta vuelta contra f3r9s2, de punta a punta (alta + baja +
+        ``display snmp-agent target-host`` para verificar), que con
+        ``screen-width 512`` antepuesto (mismo fix ya usado en
+        ``create_or_update_acl()``/``remove_acl_rules()`` para el mismo tipo
+        de corrupción) el comando aplica bien -- la corrupción sigue
+        apareciendo en el ECO visual (glitch de display del terminal), pero
+        el parser de VRP interpreta el comando completo correctamente en
+        los 2 sentidos (nunca tira "Unrecognized command"/"Invalid input"
+        por la corrupción, y el estado final se verifica limpio). El
+        workaround de ACL que se había explorado como alternativa (agregar
+        la IP a la ACL atada al agente SNMP) ya NO hace falta -- VRP soporta
+        trap hosts reales con community por-host, igual que Cisco.
+
+        ``snmp.trap_hosts`` en la lectura (``get_global_config()``) sigue
+        viniendo de cruzar la ACL del agente (``HuaweiGlobalConfigParser``)
+        -- no de ``display snmp-agent target-host`` -- a propósito, sin
+        tocar en esta vuelta: confirmado en vivo que la ACL reporta un host
+        (200.16.16.13) que NO aparece como target-host real, o sea sirve un
+        propósito más amplio que "solo trap hosts" en este device -- migrar
+        la lectura cambiaría qué hosts se reportan hoy, un cambio de
+        comportamiento que no se está pidiendo acá."""
         resultados = []
         if "version" in cambios:
             resultados.append(
@@ -716,7 +715,38 @@ class HuaweiVendor(VendorDriver):
                     "set_snmp_trap_source", {"interface": cambios["trap_source"]}, device, password,
                 )
             )
+        if "trap_host" in cambios:
+            resultados.append(
+                self._aplicar_desde_template(
+                    "set_snmp_trap_host",
+                    {"host": cambios["trap_host"], "community": cambios["trap_host_community"]},
+                    device, password,
+                )
+            )
         return self._combinar_resultados(resultados)
+
+    def remove_snmp_trap_host(
+        self, host: str, device: Device, password: str, *, community: "str | None" = None,
+    ) -> dict:
+        """RF-GLOBAL-07 (trap host, delete). A diferencia de Cisco, VRP
+        exige la community EXACTA usada al agregar para poder armar el
+        ``undo`` real -- confirmado en vivo contra f3r9s2 que un ``undo``
+        con la community equivocada sale limpio pero rechazado ("Error: The
+        specified target host does not exist."), no hay match por IP sola.
+        Como la community queda cifrada al leerla de vuelta
+        (``display snmp-agent target-host``), no hay forma de recuperarla
+        del device -- si no viene acá, se levanta un error claro ANTES de
+        tocar el device en vez de mandar un ``undo`` que sabemos que va a
+        fallar."""
+        if not community:
+            raise ValueError(
+                "HuaweiVendor.remove_snmp_trap_host: 'community' is required -- VRP needs the exact "
+                "community used when the trap host was added to match and remove it, and it can't be "
+                "read back from the device (stored encrypted)"
+            )
+        return self._aplicar_desde_template(
+            "remove_snmp_trap_host", {"host": host, "community": community}, device, password,
+        )
 
     def add_log_server(self, server: str, level: "str | None", device: Device, password: str) -> dict:
         """RF-GLOBAL-09 (Log, endpoint propio). ``info-center loghost {ip}``

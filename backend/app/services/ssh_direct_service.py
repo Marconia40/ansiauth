@@ -42,10 +42,26 @@ _SSH_COMMAND_TIMEOUT = int(os.environ.get("SSH_DIRECT_COMMAND_TIMEOUT", "60"))
 # f3r9s2 y f3r9s1, los 2 devices reales probados. "+" agrega a la lista
 # default de OpenSSH en vez de reemplazarla, así que son inofensivos si
 # algún día se corre contra un device que no los necesita.
+#
+# KexAlgorithms usa "^" (prepende, no solo agrega) a propósito -- confirmado
+# en vivo que sin esto, f3r9s2 negocia "diffie-hellman-group-exchange-sha256"
+# (el device SÍ lo soporta, y el cliente lo prioriza por sobre lo que
+# agregábamos con "+") en vez de un grupo fijo -- "group-exchange" implica 1
+# round-trip extra (el server tiene que generar parámetros DH a medida) y es
+# más caro de computar, ~3.3s de conexión contra f3r9s2 vs ~1.2s forzando un
+# grupo fijo. "group14-sha1" (lo que había antes) ni siquiera es un algoritmo
+# que f3r9s2 ofrezca -- confirmado que su oferta real es
+# "diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256", el
+# "+group14-sha1" de antes era muerto para este device y por eso nunca se
+# usaba. f3r9s1 (Cisco) no ofrece ningún grupo fijo en sha256, solo
+# "diffie-hellman-group-exchange-sha1,diffie-hellman-group14-sha1" -- por
+# eso van los 2 prepend-eados, sha256 primero (gana en f3r9s2) y sha1 de
+# fallback (gana en f3r9s1), cada device se queda con el que sí soporta y
+# ambos evitan el group-exchange lento.
 _SSH_LEGACY_OPTS = [
     "-o", "HostKeyAlgorithms=+ssh-rsa",
     "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
-    "-o", "KexAlgorithms=+diffie-hellman-group14-sha1",
+    "-o", "KexAlgorithms=^diffie-hellman-group14-sha256,diffie-hellman-group14-sha1",
 ]
 
 # Huawei VRP: "Error: ...". Cisco IOS: "% ..." al principio de línea (ej.
@@ -211,10 +227,20 @@ def _extraer_salida_comando(raw: str, command: str) -> str:
     recorte una línea de banner puede colarse como si fuera un registro de
     interfaz y romper la validación. Recorta buscando la línea que hace
     eco de *command* (todo lo de ANTES es banner/pager-disable) y cortando
-    en la próxima línea que termina en "quit" -- el terminador que
+    en la ÚLTIMA línea que termina en "quit" -- el terminador que
     ``_run_ssh_interactive()`` siempre agrega al final de la sesión, así
     que su eco marca confiablemente el final de la salida real, sin
-    necesidad de un regex de prompt por-vendor."""
+    necesidad de un regex de prompt por-vendor.
+
+    Bug real encontrado probando rollback de GlobalConfig: tiene que ser
+    la ÚLTIMA ocurrencia, no la primera -- ``show running-config`` en
+    Cisco cortaba a la mitad de un bloque ``crypto pki certificate
+    chain`` porque esos bloques terminan con un "quit" LEGÍTIMO como parte
+    del config real (nada que ver con nuestro terminador), y la primera
+    ocurrencia encontrada era esa, no la nuestra. Nuestro "quit" siempre
+    es la ÚLTIMA línea que hacemos eco (se manda al final de todo), así
+    que buscar desde el final es la señal confiable sin importar cuántos
+    "quit" legítimos traiga el output real en el medio."""
     lines = raw.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -224,7 +250,7 @@ def _extraer_salida_comando(raw: str, command: str) -> str:
     if start is None:
         return raw.strip("\n")
     end = len(lines)
-    for i in range(start, len(lines)):
+    for i in range(len(lines) - 1, start - 1, -1):
         if lines[i].rstrip().endswith("quit"):
             end = i
             break

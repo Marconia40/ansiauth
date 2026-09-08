@@ -1118,9 +1118,7 @@ set_snmp_community:
 
 # RF-GLOBAL-07 -- confirmado en vivo contra f3r9s2 (aplicado y revertido,
 # no había trap-source configurado antes así que fue una prueba real sin
-# efecto en producción). "trap-host" NO tiene entrada acá a propósito --
-# ver docstring de ``HuaweiVendor.set_snmp()`` (comando real >100
-# caracteres, se corrompe en tránsito sobre esta sesión SSH).
+# efecto en producción).
 set_snmp_trap_source:
   primary:
     block:
@@ -1133,6 +1131,61 @@ set_snmp_trap_source:
       block:
         - "system-view"
         - "snmp-agent trap source {interface}"
+        - "quit"
+
+# RF-GLOBAL-07 (trap host) -- confirmado en vivo contra f3r9s2, de punta a
+# punta (alta + baja + display snmp-agent target-host para verificar). El
+# comando es largo y se ve corrompido en el ECO (una secuencia ANSI de
+# cursor metida en medio de "securityname") -- mismo bug que ya resolvía
+# "screen-width 512" para create_or_update_acl/remove_acl_rules, ver esa
+# nota más arriba. La corrupción visual no impide que VRP interprete el
+# comando bien -- confirmado con display snmp-agent target-host después.
+# "v2c" es la única versión probada -- no se agrega soporte para otras sin
+# volver a confirmar contra un device real. El "undo" NO lleva "v2c" al
+# final ("Too many parameters" si se agrega, confirmado en vivo) y exige la
+# community EXACTA usada al alta (ver docstring de
+# ``HuaweiVendor.remove_snmp_trap_host()``).
+#
+# A propósito SIN "commit" en el primary (a diferencia de otras operaciones
+# de esta plataforma) -- bug real encontrado probando el remove: f3r9s2
+# rechaza "commit" ("Unrecognized command", cosmético, confirmado que el
+# comando real ya se había aplicado bien ANTES de esa línea) y el
+# mecanismo de "alternatives" reintenta el bloque completo sin commit --
+# para un ALTA reintentar es inofensivo (mismo resultado o un duplicado
+# inofensivo), pero para esta BAJA (undo) el reintento le pega al MISMO
+# comando ya aplicado por el primary, y VRP lo rechaza con un error real
+# ("does not exist") porque ya no existe -- el resultado final terminaba
+# reportando falla aunque el undo original hubiera funcionado. Mandar
+# directo la forma sin commit (ya confirmada que alcanza en f3r9s2) evita
+# el reintento inseguro por completo.
+set_snmp_trap_host:
+  primary:
+    block:
+      - "screen-width 512"
+      - "y"
+      - "system-view"
+      - "snmp-agent target-host trap address udp-domain {host} params securityname {community} v2c"
+      - "quit"
+  alternatives:
+    - triggered_by_error: 'screen-width 512\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "snmp-agent target-host trap address udp-domain {host} params securityname {community} v2c"
+        - "quit"
+
+remove_snmp_trap_host:
+  primary:
+    block:
+      - "screen-width 512"
+      - "y"
+      - "system-view"
+      - "undo snmp-agent target-host trap address udp-domain {host} params securityname {community}"
+      - "quit"
+  alternatives:
+    - triggered_by_error: 'screen-width 512\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "undo snmp-agent target-host trap address udp-domain {host} params securityname {community}"
         - "quit"
 
 # RF-GLOBAL-09 -- confirmado en vivo contra huawei01. "ntp unicast-server"
