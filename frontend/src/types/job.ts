@@ -34,6 +34,21 @@ export interface Job {
   rollback_success: boolean | null;
   pre_state: unknown;
   last_error: string | null;
+  // Friendly error classification populated by Orquestador._error_amigable()
+  // when the job ends as `failed`. Null for successful jobs and for jobs
+  // created before backend migration t14msp19_job_error_classification.
+  //   - error_type:    "permanent" | "transient" | "unknown"
+  //   - error_reason:  raw pattern that matched (e.g. "invalid input")
+  //   - error_summary: short English message ready to render in UI
+  // Prefer `error_summary` over the raw `error` field when displaying to
+  // users -- `error` still carries the raw device/stack output for debug.
+  error_type: string | null;
+  error_reason: string | null;
+  error_summary: string | null;
+  // Populated only when rollback ran and failed (`rollback_success=false`).
+  // Raw device/verify message explaining WHY the rollback failed --
+  // complements `error` (which is the apply-side failure).
+  rollback_error: string | null;
   current_step: string | null;
   group_job_id: string | null;
   execution_summary: JobExecutionSummary | null;
@@ -53,6 +68,11 @@ export interface GroupJobDeviceResult {
   rollback_performed: boolean;
   rollback_success: boolean | null;
   error: string | null;
+  // Friendly error classification -- see Job.error_summary docstring.
+  error_type: string | null;
+  error_reason: string | null;
+  error_summary: string | null;
+  rollback_error: string | null;
   duration_ms: number | null;
 }
 

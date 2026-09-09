@@ -33,6 +33,10 @@ def _to_domain(row: JobModel) -> Job:
         rollback_success=row.rollback_success,
         pre_state=row.pre_state,
         last_error=row.last_error,
+        error_type=row.error_type,
+        error_reason=row.error_reason,
+        error_summary=row.error_summary,
+        rollback_error=row.rollback_error,
         current_step=row.current_step,
         group_job_id=row.group_job_id,
     )
@@ -45,7 +49,10 @@ def _to_orm(j: Job) -> JobModel:
         created_at=j.created_at, started_at=j.started_at, finished_at=j.finished_at,
         retry_count=j.retry_count, max_retries=j.max_retries,
         rollback_performed=j.rollback_performed, rollback_success=j.rollback_success,
-        pre_state=j.pre_state, last_error=j.last_error, current_step=j.current_step,
+        pre_state=j.pre_state, last_error=j.last_error,
+        error_type=j.error_type, error_reason=j.error_reason, error_summary=j.error_summary,
+        rollback_error=j.rollback_error,
+        current_step=j.current_step,
         group_job_id=j.group_job_id,
     )
 
@@ -164,6 +171,13 @@ class JobRepository(Repository):
                     "current_step": j.current_step, "retry_count": j.retry_count,
                     "rollback_performed": j.rollback_performed,
                     "rollback_success": j.rollback_success, "error": j.error,
+                    # Clasificación amigable poblada por
+                    # ``Orquestador._error_amigable()`` -- ver docstring en
+                    # app/models/job.py.
+                    "error_type": j.error_type,
+                    "error_reason": j.error_reason,
+                    "error_summary": j.error_summary,
+                    "rollback_error": j.rollback_error,
                     "duration_ms": _duration_ms(j),
                 }
                 for j in jobs

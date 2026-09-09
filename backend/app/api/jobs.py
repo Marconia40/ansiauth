@@ -41,6 +41,18 @@ def _format_job(job) -> dict:
         "rollback_success": job.rollback_success,
         "pre_state": job.pre_state,
         "last_error": job.last_error,
+        # Clasificación amigable del error final -- se pobla en
+        # ``Orquestador._error_amigable()`` al marcar el job como failed
+        # (queda en NULL para jobs completados con éxito). ``error_summary``
+        # es el string EN corto pensado para render directo en UI;
+        # ``error_type``/``error_reason`` sirven para agrupar/filtrar.
+        "error_type": job.error_type,
+        "error_reason": job.error_reason,
+        "error_summary": job.error_summary,
+        # Motivo del fallo del rollback (raw) -- se pobla solo cuando
+        # ``rollback_success=false``. Complementa a ``error`` que es
+        # el motivo del apply. NULL en jobs sin rollback fallido.
+        "rollback_error": job.rollback_error,
         "current_step": job.current_step,
         "group_job_id": job.group_job_id,
         "execution_summary": {
