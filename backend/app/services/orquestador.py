@@ -175,6 +175,26 @@ _RESUMENES_POR_CATEGORIA: dict[str, str] = {
 }
 
 
+def _mensaje_error(resultado: dict, fallback: str) -> str:
+    """Arma el mensaje de ``DeviceExecutionError`` (-> ``Job.error``) a
+    partir de un resultado de ejecución. Bug real encontrado esta sesión:
+    los 4 call-sites usaban ``stderr or stdout``, mostrando SOLO stderr
+    cuando venía no-vacío -- pero ``_clasificar_error()`` (ver abajo)
+    clasifica sobre stderr+stdout concatenados, así que un rechazo real
+    del device (ej. "% Invalid input detected...") que llegó por stdout
+    quedaba invisible en pantalla cada vez que stderr también traía algo
+    (típicamente un mensaje de conexión tipo "closed by remote host" de
+    un corte de sesión posterior al rechazo) -- el usuario veía "se cortó
+    la conexión" mientras `error_summary` (que sí ve el texto completo)
+    correctamente decía "el device rechazó el comando", sin forma de
+    reconciliar ambos mensajes. Ahora se muestran los dos cuando difieren."""
+    stderr = (resultado.get("stderr") or "").strip()
+    stdout = (resultado.get("stdout") or "").strip()
+    if stderr and stdout and stderr != stdout:
+        return f"{stderr}\n{stdout}"
+    return stderr or stdout or fallback
+
+
 def _resumir_error(decision: "RetryDecision") -> str:
     if decision.categoria in _RESUMENES_POR_CATEGORIA:
         return _RESUMENES_POR_CATEGORIA[decision.categoria]
@@ -259,9 +279,7 @@ class Orquestador:
                 if resultado_prestate.get("rc", 0) != 0:
                     decision = self._clasificar_error(resultado_prestate)
                     raise DeviceExecutionError(
-                        resultado_prestate.get("stderr")
-                        or resultado_prestate.get("stdout")
-                        or "Prestate read failed",
+                        _mensaje_error(resultado_prestate, "Prestate read failed"),
                         resumen=_resumir_error(decision),
                     )
                 pre_state = pre_state_holder["value"]
@@ -301,7 +319,7 @@ class Orquestador:
                 if resultado.get("rc", 0) != 0:
                     decision = self._clasificar_error(resultado)
                     raise DeviceExecutionError(
-                        resultado.get("stderr") or resultado.get("stdout") or "Execution failed",
+                        _mensaje_error(resultado, "Execution failed"),
                         resumen=_resumir_error(decision),
                     )
         except Exception as error:
@@ -505,9 +523,7 @@ class Orquestador:
                 if resultado_prestate.get("rc", 0) != 0:
                     decision = self._clasificar_error(resultado_prestate)
                     raise DeviceExecutionError(
-                        resultado_prestate.get("stderr")
-                        or resultado_prestate.get("stdout")
-                        or "Prestate read failed",
+                        _mensaje_error(resultado_prestate, "Prestate read failed"),
                         resumen=_resumir_error(decision),
                     )
                 pre_states = pre_states_holder["value"]
@@ -552,7 +568,7 @@ class Orquestador:
                 if resultado.get("rc", 0) != 0:
                     decision = self._clasificar_error(resultado)
                     raise DeviceExecutionError(
-                        resultado.get("stderr") or resultado.get("stdout") or "Execution failed",
+                        _mensaje_error(resultado, "Execution failed"),
                         resumen=_resumir_error(decision),
                     )
         except Exception as error:
@@ -581,7 +597,8 @@ class Orquestador:
             self._eventos.despachar([DomainEvent(
                 "recurso_fallido", recursos[0], device, actor,
                 {"error": str(error), "rollback_performed": rb_performed_total, "rollback_success": rb_success_total,
-                 "lote_size": len(recursos), "error_summary": getattr(error, "resumen", None)},
+                 "lote_size": len(recursos), "error_summary": getattr(error, "resumen", None),
+                 "resumen_lote": "; ".join(r.resumen_intento() for r in recursos)},
                 exitoso=False,
             )])
             raise
@@ -591,7 +608,10 @@ class Orquestador:
             try:
                 self._eventos.despachar([DomainEvent(
                     "recurso_aplicado", recursos[0], device, actor,
-                    {**resultado, "lote_size": len(recursos)},
+                    {
+                        **resultado, "lote_size": len(recursos),
+                        "resumen_lote": "; ".join(r.resumen_intento() for r in recursos),
+                    },
                 )])
             except Exception:
                 logger.exception(

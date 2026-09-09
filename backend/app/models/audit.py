@@ -30,12 +30,18 @@ class AuditRecord(BaseModel):
     @staticmethod
     def _resumir(evento: "DomainEvent") -> "str | None":
         recurso = evento.recurso
-        if not hasattr(recurso, "resumen_intento"):
+        # Un lote (Orquestador.ejecutar_lote()) manda TODOS los resumen_intento()
+        # ya unidos en el payload -- evento.recurso ahí es solo recursos[0]
+        # (representativo, no la lista completa), así que sin esto un batch de
+        # 3 cambios mostraba nada más que el primero + "(part of a 3-item
+        # batch)", perdiendo los otros 2 por completo.
+        resumen_lote = evento.payload.get("resumen_lote")
+        if resumen_lote:
+            intento = resumen_lote
+        elif hasattr(recurso, "resumen_intento"):
+            intento = recurso.resumen_intento()
+        else:
             return None
-        intento = recurso.resumen_intento()
-        lote_size = evento.payload.get("lote_size")
-        if lote_size and lote_size > 1:
-            intento += f" (part of a {lote_size}-item batch)"
         if not evento.exitoso:
             razon = evento.payload.get("error_summary")
             return f"{intento} — failed: {razon}" if razon else f"{intento} — failed"

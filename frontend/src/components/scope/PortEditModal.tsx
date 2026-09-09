@@ -2,12 +2,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { batchUpdatePorts } from '@/services/api';
+import { batchUpdatePorts, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { PortBatchChangeItem, TrunkVlanMode } from '@/types/port';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
 } from './VlanCreateModal';
@@ -69,6 +70,7 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [result, setResult] = useState<BatchResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   // Reset form each time the modal opens.
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -96,6 +98,7 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
     setProgress(null);
     setResult(null);
     setError(null);
+    setFieldErrors(null);
   }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -132,6 +135,17 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
   };
 
   const totalChanges = Object.values(dirtyByTab).filter(Boolean).length;
+
+  const errorTabs = useMemo(() => {
+    const tabs = new Set<Tab>();
+    if (!fieldErrors) return tabs;
+    for (const key of Object.keys(fieldErrors)) {
+      const field = key.replace(/^changes\.\d+\./, '');
+      const t = fieldErrorTab(field, modeEnabled, modeKind, trunkEnabled);
+      if (t) tabs.add(t);
+    }
+    return tabs;
+  }, [fieldErrors, modeEnabled, modeKind, trunkEnabled]);
 
   // If mode is set to trunk AND the trunk-vlans tab is also enabled, the
   // former's allowed_vlans+replace overrides the latter — flag it so the
@@ -198,6 +212,7 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
   async function handleSave() {
     setRunning(true);
     setError(null);
+    setFieldErrors(null);
     setResult(null);
     setProgress({ done: 0, total: selection.count });
     try {
@@ -208,6 +223,25 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
         { onProgress: (done, total) => setProgress({ done, total }) },
       );
       setResult(res);
+
+      // The change template is shared by every selected port/device, so a
+      // validation rejection is almost always the same regardless of which
+      // one failed first -- take the first failure's field detail (still
+      // keyed per-index, e.g. "changes.0.access_vlan", since batchUpdatePorts
+      // posts a list; sharedFieldError() below collapses the index away
+      // since there's only 1 real value shared across the whole batch) and
+      // show it inline under the input, same as every other modal. The
+      // per-port/per-device breakdown in ResultView already covers "which
+      // targets failed" -- this covers "why", without needing to open the
+      // JobDetailModal or dig through the raw error string.
+      const firstFieldErrors = res.errors.find((e) => e.fieldErrors)?.fieldErrors ?? null;
+      setFieldErrors(firstFieldErrors);
+      if (firstFieldErrors) {
+        const firstKey = Object.keys(firstFieldErrors)[0];
+        const field = firstKey?.replace(/^changes\.\d+\./, '');
+        const targetTab = field ? fieldErrorTab(field, modeEnabled, modeKind, trunkEnabled) : null;
+        if (targetTab) setTab(targetTab);
+      }
 
       // Register every successful device batch as a group job so the global
       // JobNotifications toast is clickable → JobDetailModal (like Routes/SVI).
@@ -227,7 +261,9 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
 
       onDone?.(res);
     } catch (err) {
-      setError(extractMessage(err, 'Save failed.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Save failed.'));
     } finally {
       setRunning(false);
     }
@@ -266,7 +302,7 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
       <div className="flex flex-col gap-4">
         <SelectionBanner selection={selection} />
 
-        <TabBar tab={tab} onChange={setTab} dirty={dirtyByTab} disabled={running} />
+        <TabBar tab={tab} onChange={setTab} dirty={dirtyByTab} errorTabs={errorTabs} disabled={running} />
 
         {tab === 'general' && (
           <GeneralTab
@@ -278,6 +314,7 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
             onAdminEnabledChange={setAdminEnabled}
             adminUp={adminUp}
             onAdminUpChange={setAdminUp}
+            descriptionError={sharedFieldError(fieldErrors, 'description')}
           />
         )}
         {tab === 'mode' && (
@@ -293,6 +330,8 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
             allowedText={modeAllowedText}
             onAllowedTextChange={setModeAllowedText}
             allowedParsed={modeAllowedParsed}
+            accessVlanError={sharedFieldError(fieldErrors, 'access_vlan')}
+            allowedVlansError={sharedFieldError(fieldErrors, 'allowed_vlans')}
           />
         )}
         {tab === 'trunk' && (
@@ -305,6 +344,10 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
             onTextChange={setTrunkText}
             parsed={trunkParsed}
             overridden={trunkOverriddenByMode}
+            listError={
+              sharedFieldError(fieldErrors, 'allowed_vlans') ??
+              sharedFieldError(fieldErrors, 'allowed_vlan_operation')
+            }
           />
         )}
         {tab === 'storm' && (
@@ -315,6 +358,7 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
             onOnChange={setStormOn}
             threshold={stormThreshold}
             onThresholdChange={setStormThreshold}
+            thresholdError={sharedFieldError(fieldErrors, 'storm_control_threshold')}
           />
         )}
         {tab === 'poe' && (
@@ -351,11 +395,13 @@ function TabBar({
   tab,
   onChange,
   dirty,
+  errorTabs,
   disabled,
 }: {
   tab: Tab;
   onChange: (t: Tab) => void;
   dirty: Record<Tab, boolean>;
+  errorTabs: Set<Tab>;
   disabled?: boolean;
 }) {
   const items: Array<{ key: Tab; label: string }> = [
@@ -382,7 +428,12 @@ function TabBar({
             }`}
           >
             {it.label}
-            {dirty[it.key] && (
+            {errorTabs.has(it.key) ? (
+              <span
+                className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-danger align-middle"
+                title="This tab has a field with an error"
+              />
+            ) : dirty[it.key] && (
               <span
                 className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-warning align-middle"
                 title="Modification queued"
@@ -406,6 +457,7 @@ function GeneralTab({
   onAdminEnabledChange,
   adminUp,
   onAdminUpChange,
+  descriptionError,
 }: {
   descriptionEnabled: boolean;
   onDescriptionEnabledChange: (v: boolean) => void;
@@ -415,6 +467,7 @@ function GeneralTab({
   onAdminEnabledChange: (v: boolean) => void;
   adminUp: boolean;
   onAdminUpChange: (v: boolean) => void;
+  descriptionError?: string;
 }) {
   return (
     <div className="flex flex-col gap-5">
@@ -432,6 +485,7 @@ function GeneralTab({
             placeholder="Leave empty to clear the description"
             className={inputCls(descriptionEnabled)}
           />
+          <FieldError message={descriptionError} />
         </FieldRow>
       </Section>
 
@@ -475,6 +529,8 @@ function ModeTab({
   allowedText,
   onAllowedTextChange,
   allowedParsed,
+  accessVlanError,
+  allowedVlansError,
 }: {
   enabled: boolean;
   onEnabledChange: (v: boolean) => void;
@@ -487,6 +543,8 @@ function ModeTab({
   allowedText: string;
   onAllowedTextChange: (v: string) => void;
   allowedParsed: number[] | null;
+  accessVlanError?: string;
+  allowedVlansError?: string;
 }) {
   return (
     <Section title="Port mode" enabled={enabled} onEnabledChange={onEnabledChange}>
@@ -521,6 +579,7 @@ function ModeTab({
               disabled={!enabled}
               className={inputCls(enabled)}
             />
+            <FieldError message={accessVlanError} />
           </FieldRow>
         ) : (
           <>
@@ -534,6 +593,7 @@ function ModeTab({
                 disabled={!enabled}
                 className={inputCls(enabled)}
               />
+              <FieldError message={accessVlanError} />
             </FieldRow>
             <FieldRow label="Allowed / Tagged VLANs">
               <input
@@ -549,6 +609,7 @@ function ModeTab({
                   Use comma-separated VLAN ids and optional ranges (e.g. `10, 20, 100-105`).
                 </p>
               )}
+              <FieldError message={allowedVlansError} />
             </FieldRow>
           </>
         )}
@@ -566,6 +627,7 @@ function TrunkVlansTab({
   onTextChange,
   parsed,
   overridden,
+  listError,
 }: {
   enabled: boolean;
   onEnabledChange: (v: boolean) => void;
@@ -575,6 +637,7 @@ function TrunkVlansTab({
   onTextChange: (v: string) => void;
   parsed: number[] | null;
   overridden: boolean;
+  listError?: string;
 }) {
   return (
     <Section
@@ -623,6 +686,7 @@ function TrunkVlansTab({
               Use comma-separated VLAN ids and optional ranges (e.g. `10, 20, 100-105`).
             </p>
           )}
+          <FieldError message={listError} />
         </FieldRow>
         {overridden && (
           <p className="text-xs text-warning">
@@ -642,6 +706,7 @@ function StormControlTab({
   onOnChange,
   threshold,
   onThresholdChange,
+  thresholdError,
 }: {
   enabled: boolean;
   onEnabledChange: (v: boolean) => void;
@@ -649,6 +714,7 @@ function StormControlTab({
   onOnChange: (v: boolean) => void;
   threshold: string;
   onThresholdChange: (v: string) => void;
+  thresholdError?: string;
 }) {
   return (
     <Section title="Storm control" enabled={enabled} onEnabledChange={onEnabledChange}>
@@ -682,6 +748,7 @@ function StormControlTab({
               disabled={!enabled}
               className={inputCls(enabled)}
             />
+            <FieldError message={thresholdError} />
           </FieldRow>
         )}
       </div>
@@ -900,6 +967,44 @@ function parseVlanList(text: string): number[] | null {
   }
   if (out.size === 0) return null;
   return Array.from(out).sort((a, b) => a - b);
+}
+
+// batchUpdatePorts posts `{changes: PortBatchChangeItem[]}` -- one item per
+// selected interface on that device -- so a validation error's loc comes
+// back indexed, e.g. "changes.0.access_vlan", "changes.1.access_vlan".
+// Every item shares the SAME value for a given field (1 form, N ports), so
+// collapsing the index and de-duping messages is correct here, unlike
+// AclRuleEditor's per-row errors where each index is a genuinely different
+// rule.
+function sharedFieldError(fieldErrors: Record<string, string> | null, field: string): string | undefined {
+  if (!fieldErrors) return undefined;
+  const re = new RegExp(`^changes\\.\\d+\\.${field}$`);
+  const messages = new Set<string>();
+  for (const [k, v] of Object.entries(fieldErrors)) {
+    if (re.test(k)) messages.add(v);
+  }
+  return messages.size > 0 ? Array.from(messages).join('; ') : undefined;
+}
+
+// `access_vlan`/`allowed_vlans`/`allowed_vlan_operation` are shared wire
+// fields written by more than one tab (access_vlan is either "Access VLAN"
+// or trunk's "Native VLAN" depending on modeKind; allowed_vlans comes from
+// either the Mode tab's trunk view or the separate Trunk VLANs tab,
+// whichever one is actually enabled) -- so the target tab for a field error
+// depends on which tab is live for this submission, not a static map.
+function fieldErrorTab(
+  field: string, modeEnabled: boolean, modeKind: 'access' | 'trunk', trunkEnabled: boolean,
+): Tab | null {
+  if (field === 'description' || field === 'admin_up') return 'general';
+  if (field === 'access_vlan') return 'mode';
+  if (field === 'allowed_vlans' || field === 'allowed_vlan_operation') {
+    if (modeEnabled && modeKind === 'trunk') return 'mode';
+    if (trunkEnabled) return 'trunk';
+    return null;
+  }
+  if (field === 'storm_control_enabled' || field === 'storm_control_threshold') return 'storm';
+  if (field === 'poe_enabled') return 'poe';
+  return null;
 }
 
 function extractMessage(err: unknown, fallback: string): string {

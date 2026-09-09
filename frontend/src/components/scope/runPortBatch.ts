@@ -1,10 +1,11 @@
 import type { PortBatchChangeItem, PortOperationResult } from '@/types/port';
 import type { PortRef } from './usePortSelection';
+import { parseFieldErrors } from '@/services/api';
 
 export interface BatchResult {
   success: number;
   failed: number;
-  errors: { ref: PortRef; error: string }[];
+  errors: { ref: PortRef; error: string; fieldErrors?: Record<string, string> | null }[];
   /** group_job_id per device batch that succeeded — one entry per device.
    * Populated by `runPortBatchByDevice()`. */
   groupJobsByDevice?: { device: string; groupJobId: string }[];
@@ -70,7 +71,7 @@ export async function runPortBatch(
         if (res?.group_job_id) perPortJobs.push({ ref, groupJobId: res.group_job_id });
       } catch (err) {
         result.failed += 1;
-        result.errors.push({ ref, error: extractError(err) });
+        result.errors.push({ ref, error: extractError(err), fieldErrors: parseFieldErrors(err) });
       } finally {
         done += 1;
         onProgress?.(done, total);
@@ -121,8 +122,9 @@ export async function runPortBatchByDevice(
     } catch (err) {
       result.failed += interfaces.length;
       const error = extractError(err);
+      const fieldErrors = parseFieldErrors(err);
       for (const interfaceName of interfaces) {
-        result.errors.push({ ref: { device, interface: interfaceName }, error });
+        result.errors.push({ ref: { device, interface: interfaceName }, error, fieldErrors });
       }
     } finally {
       done += interfaces.length;
