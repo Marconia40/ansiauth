@@ -840,6 +840,36 @@ class Orquestador:
                     # segura de reconstruirlo.
                     return False, None
                 exitoso = resultado.get("rc", 1) == 0
+            elif "storm_control_enabled" in campos:
+                # Mismo criterio que la rama de "mode" arriba -- 2+ campos
+                # (storm_control_enabled/threshold, y action/trap aunque
+                # esos 2 no sean mutation_fields) se aplican juntos en 1
+                # solo comando, así que se revierten juntos también. Bug
+                # preexistente encontrado: esta rama no existía, caía al
+                # "else: return False, None" genérico de abajo -- un
+                # storm-control aplicado y después revertido por un fallo
+                # más adelante en el mismo batch nunca se revertía.
+                if anterior.storm_control_enabled is None:
+                    return False, None
+                # Bug real encontrado en vivo: enabled=True con threshold=None
+                # es un estado real y documentado (config preexistente en
+                # pps/bps, no percent -- ver Puerto.storm_control_threshold),
+                # no "desconocido". Sin este guard, bool(True) elegía la
+                # variante "enabled" y mandaba threshold=None derecho al
+                # device -- VRP lo interpola literal como "percent None",
+                # comando basura que el device rechaza como "Unrecognized
+                # command". No hay forma segura de restaurar un valor que
+                # nunca se pudo leer en la unidad que nuestro write path
+                # entiende (percent) -- mismo criterio que el guard de arriba.
+                if anterior.storm_control_enabled and anterior.storm_control_threshold is None:
+                    return False, None
+                resultado = device.driver.set_storm_control(
+                    puerto.interface, bool(anterior.storm_control_enabled), anterior.storm_control_threshold,
+                    anterior.storm_control_action or "shutdown",
+                    anterior.storm_control_trap if anterior.storm_control_trap is not None else True,
+                    device, device.password,
+                )
+                exitoso = resultado.get("rc", 1) == 0
             else:
                 campo = next(iter(campos))
                 if campo == "description":

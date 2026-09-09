@@ -163,6 +163,10 @@ class DevicePortModel(Base):
     # sistema, nuestro write siempre produce percent-form.
     storm_control_enabled = Column(Boolean, nullable=True)
     storm_control_threshold = Column(Float, nullable=True)
+    # "filter"/"shutdown" -- ver Puerto.storm_control_action. Leído del
+    # running-config/current-configuration (no es estado operacional).
+    storm_control_action = Column(String, nullable=True)
+    storm_control_trap = Column(Boolean, nullable=True)
     # Read-only, provienen del getter del driver, no de escrituras del usuario.
     operational_up = Column(Boolean, nullable=True)
     speed = Column(String, nullable=True)

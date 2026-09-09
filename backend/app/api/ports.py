@@ -586,6 +586,8 @@ def set_port_storm_control(
             interface=data.interface,
             storm_control_enabled=data.enabled,
             storm_control_threshold=data.threshold_percent,
+            storm_control_action=data.action,
+            storm_control_trap=data.trap,
         )
         entidad.validar()
     except ValueError as exc:
@@ -658,6 +660,8 @@ def expandir_a_puertos(cambio: PortBatchChangeItem) -> list[Puerto]:
         puertos.append(Puerto(
             interface=cambio.interface, storm_control_enabled=cambio.storm_control_enabled,
             storm_control_threshold=cambio.storm_control_threshold,
+            storm_control_action=cambio.storm_control_action,
+            storm_control_trap=cambio.storm_control_trap,
         ))
     if cambio.description is not None:
         puertos.append(Puerto(interface=cambio.interface, description=cambio.description))

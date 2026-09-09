@@ -374,17 +374,24 @@ set_port_poe:
 # ciegas, esperar un caso real.
 set_storm_control:
   enabled:
+    # "action_lines"/"action_lines_dash" (Puerto.storm_control_action/
+    # storm_control_trap, huawei/driver.py's resolver_set_storm_control())
+    # ya vienen resueltas a 1-2 líneas -- a diferencia de Cisco, VRP siempre
+    # manda la línea de "action" explícita (nunca la omite, ni para
+    # "filter"==block) porque no confiamos en un default implícito no
+    # confirmado en todas las plataformas. 2 variables porque cada
+    # alternative usa su propia sintaxis (espacio/guión), mismo criterio
+    # que el resto de este bloque.
     primary:
       block:
         - "system-view"
         - "interface {interface}"
         - "storm control broadcast min-rate percent {threshold} max-rate percent {threshold}"
         - "storm control multicast min-rate percent {threshold} max-rate percent {threshold}"
-        - "storm control action block"
-        - "storm control enable trap"
-        - "commit"
-        - "quit"
-        - "quit"
+      repeat:
+        over: "action_lines"
+        line: "{item}"
+      trailer: ["commit", "quit", "quit"]
     alternatives:
       - triggered_by_error: *interface_wrong_param
         block:
@@ -392,20 +399,28 @@ set_storm_control:
           - "interface {interface_full}"
           - "storm control broadcast min-rate percent {threshold} max-rate percent {threshold}"
           - "storm control multicast min-rate percent {threshold} max-rate percent {threshold}"
-          - "storm control action block"
-          - "storm control enable trap"
-          - "quit"
-          - "quit"
+        repeat:
+          over: "action_lines"
+          line: "{item}"
+        trailer: ["quit", "quit"]
       - triggered_by_error: 'storm control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
+        # {interface_full}, no {interface} -- bug real encontrado en vivo
+        # contra f3r9s2/GE0/0/22: este device necesita LOS 2 fixes a la vez
+        # (nombre completo Y guión). Con {interface} acá, el encadenado de
+        # alternatives (ver _aplicar_desde_template en base.py) volvía a
+        # pisar el mismo "Wrong parameter" de la interfaz abreviada que la
+        # alternativa anterior ya había corregido. La forma completa es
+        # universal (todo VRP la acepta), así que no rompe nada en los
+        # devices que solo necesitaban el guión.
         block:
           - "system-view"
-          - "interface {interface}"
+          - "interface {interface_full}"
           - "storm-control broadcast min-rate percent {threshold} max-rate percent {threshold}"
           - "storm-control multicast min-rate percent {threshold} max-rate percent {threshold}"
-          - "storm-control action block"
-          - "storm-control enable trap"
-          - "quit"
-          - "quit"
+        repeat:
+          over: "action_lines_dash"
+          line: "{item}"
+        trailer: ["quit", "quit"]
       - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
         # A diferencia de la alternativa de arriba, acá lo único que falló
         # fue "commit" -- las líneas de storm control (con espacio, lo que
@@ -416,10 +431,10 @@ set_storm_control:
           - "interface {interface}"
           - "storm control broadcast min-rate percent {threshold} max-rate percent {threshold}"
           - "storm control multicast min-rate percent {threshold} max-rate percent {threshold}"
-          - "storm control action block"
-          - "storm control enable trap"
-          - "quit"
-          - "quit"
+        repeat:
+          over: "action_lines"
+          line: "{item}"
+        trailer: ["quit", "quit"]
   disabled:
     primary:
       block:
@@ -444,9 +459,10 @@ set_storm_control:
           - "quit"
           - "quit"
       - triggered_by_error: 'storm control[^\n]*\r?\n\s*\^\r?\nError: Unrecognized command'
+        # {interface_full} -- mismo motivo que la variante "enabled" arriba.
         block:
           - "system-view"
-          - "interface {interface}"
+          - "interface {interface_full}"
           - "undo storm-control broadcast"
           - "undo storm-control multicast"
           - "undo storm-control action"

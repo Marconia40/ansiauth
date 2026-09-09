@@ -202,13 +202,14 @@ class MockVendor(VendorDriver):
         return {"rc": 0, "stdout": "Simulated PoE state applied", "stderr": "", "success": True}
 
     def set_storm_control(
-        self, interface: str, enabled: bool, threshold: "float | None", device: "Device", password: str
+        self, interface: str, enabled: bool, threshold: "float | None", action: str, trap: bool,
+        device: "Device", password: str,
     ) -> dict:
         if device.name == "fail_device":
             return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
         logger.info(
-            "Mock: set storm-control on interface=%s device=%s enabled=%s threshold=%s",
-            interface, device.name, enabled, threshold,
+            "Mock: set storm-control on interface=%s device=%s enabled=%s threshold=%s action=%s trap=%s",
+            interface, device.name, enabled, threshold, action, trap,
         )
         return {"rc": 0, "stdout": "Simulated storm-control applied", "stderr": "", "success": True}
 

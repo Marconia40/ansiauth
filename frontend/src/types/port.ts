@@ -17,6 +17,13 @@ export interface Port {
   // Percent 0-100. Null aún con enabled=true cuando el equipo tiene storm
   // control en pps/bps u otra unidad no-percent (config preexistente).
   storm_control_threshold: number | null;
+  // 'filter' (descarta el exceso, el puerto sigue arriba) o 'shutdown'
+  // (el puerto se cae). Null cuando desconocido o storm control está
+  // deshabilitado.
+  storm_control_action: string | null;
+  // Si manda trap SNMP, independiente de la acción. Null en las mismas
+  // condiciones que storm_control_action.
+  storm_control_trap: boolean | null;
 }
 
 // Envelope returned by GET /api/v1/ports/?device=...
@@ -94,6 +101,10 @@ export interface PortStormControlUpdateRequest {
   interface: string;
   enabled: boolean;
   threshold_percent?: number | null;
+  // Solo tienen efecto con enabled=true; si se omiten, el server aplica
+  // 'shutdown'/true (mismo comportamiento hardcodeado de siempre).
+  action?: 'filter' | 'shutdown' | null;
+  trap?: boolean | null;
 }
 
 // Body for POST /api/v1/ports/reset (RF-PUERTO-10). Resets the interface to
@@ -133,6 +144,8 @@ export interface PortBatchChangeItem {
   poe_enabled?: boolean | null;
   storm_control_enabled?: boolean | null;
   storm_control_threshold?: number | null;
+  storm_control_action?: 'filter' | 'shutdown' | null;
+  storm_control_trap?: boolean | null;
 }
 
 export interface PortBatchRequest {

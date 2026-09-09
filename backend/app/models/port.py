@@ -171,6 +171,19 @@ class Puerto:
     poe_enabled: bool | None = None
     storm_control_enabled: bool | None = None
     storm_control_threshold: float | None = None
+    # Qué le pasa al puerto ante una tormenta ("filter" = descarta el
+    # exceso, sigue arriba; "shutdown" = el puerto se cae) y si además
+    # manda trap SNMP -- ambos vendors soportan este mismo eje aunque su
+    # sintaxis difiera (Cisco: 2 flags "action shutdown"/"action trap"
+    # independientes y combinables, filter=default implícito sin ninguna;
+    # Huawei: "action {block|shutdown}" excluyente + "enable trap" aparte,
+    # block=="filter"). No entran a mutation_fields -- son modificadores
+    # de storm_control_enabled, no triggers independientes (no tiene
+    # sentido "cambiar solo la acción" sin resend del enable completo, que
+    # es como funciona el comando real en ambos vendors). Lectura real via
+    # running-config/current-configuration -- ver port_parser.py.
+    storm_control_action: str | None = None
+    storm_control_trap: bool | None = None
     # RF-PUERTO-10 -- marcador de intención "reset a defaults", mismo
     # criterio que VLAN.eliminar: no es un campo de mutación más, es un
     # discriminador que aplicar()/validar() chequean primero y cortan ahí.
@@ -228,6 +241,14 @@ class Puerto:
             raise ValueError("storm_control_enabled=True requires 'storm_control_threshold' to be set")
         if self.storm_control_threshold is not None and not (0 <= self.storm_control_threshold <= 100):
             raise ValueError("storm_control_threshold must be between 0 and 100")
+        if (self.storm_control_action is not None or self.storm_control_trap is not None) \
+                and self.storm_control_enabled is not True:
+            raise ValueError(
+                "storm_control_action/storm_control_trap require 'storm_control_enabled=True' "
+                "in the same call"
+            )
+        if self.storm_control_action is not None and self.storm_control_action not in ("filter", "shutdown"):
+            raise ValueError("storm_control_action must be 'filter' or 'shutdown'")
         if self.mode == "access" and self.access_vlan is None:
             raise ValueError("mode='access' requires 'access_vlan' to be set")
         if self.mode == "trunk":
@@ -345,7 +366,7 @@ class Puerto:
             return device.driver.resolver_set_trunk_mode(self.interface, self.access_vlan, list(self.allowed_vlans))
         campos = self.mutation_fields
         if "storm_control_enabled" in campos:
-            return self._resolver_storm_control(device)
+            return self._resolver_storm_control(device, actual)
         if len(campos) != 1:
             raise ValueError(
                 f"Puerto.resolver_paso(): sin mode seteado se espera exactamente "
@@ -571,19 +592,39 @@ class Puerto:
 
         return device.driver.resolver_set_trunk_allowed_vlans(self.interface, deseados)
 
-    def _resolver_storm_control(self, device: "Device") -> "tuple[str, str | None, dict]":
+    def _resolver_storm_control(
+        self, device: "Device", actual: "Puerto | None",
+    ) -> "tuple[str, str | None, dict] | None":
+        """RF-PUERTO-07, alcance simple (decisión con el usuario): un
+        booleano + 1 threshold global (%), no los 3 tipos de tráfico
+        (broadcast/multicast/unicast) por separado. ``action``/``trap`` se
+        resuelven acá (no se mutan en ``self``, para que
+        ``resumen_intento()`` siga mostrando solo lo que el caller pidió
+        explícito) a los mismos defaults que ya eran fijos antes de este
+        campo existir -- un caller viejo que no los conoce sigue viendo
+        exactamente el mismo comportamiento."""
+        action = self.storm_control_action or "shutdown"
+        trap = self.storm_control_trap if self.storm_control_trap is not None else True
+        if (
+            actual is not None
+            and actual.storm_control_enabled == self.storm_control_enabled
+            and actual.storm_control_threshold == self.storm_control_threshold
+            and (actual.storm_control_action or "shutdown") == action
+            and (actual.storm_control_trap if actual.storm_control_trap is not None else True) == trap
+        ):
+            return None
         return device.driver.resolver_set_storm_control(
-            self.interface, self.storm_control_enabled, self.storm_control_threshold,
+            self.interface, self.storm_control_enabled, self.storm_control_threshold, action, trap,
         )
 
     def _aplicar_storm_control(self, device: "Device", pre_state: "dict | None" = None) -> dict:
-        """RF-PUERTO-07, alcance simple (decisión con el usuario): un
-        booleano + 1 threshold global (%), no los 3 tipos de tráfico
-        (broadcast/multicast/unicast) por separado. Sin no-op -- igual que
-        el modo, la lectura no expone storm-control hoy, así que no hay
-        estado previo confiable contra el que comparar."""
         accion = "activar_storm_control" if self.storm_control_enabled else "desactivar_storm_control"
-        op_key, variant, vars = self._resolver_storm_control(device)
+        estado = pre_state if pre_state is not None else self.reconciliar(device)
+        actual = estado.get("actual")
+        paso = self._resolver_storm_control(device, actual)
+        if paso is None:
+            return self._noop_resultado(accion)
+        op_key, variant, vars = paso
         resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": accion}
 
@@ -630,6 +671,8 @@ class Puerto:
             "poe_enabled": self.poe_enabled,
             "storm_control_enabled": self.storm_control_enabled,
             "storm_control_threshold": self.storm_control_threshold,
+            "storm_control_action": self.storm_control_action,
+            "storm_control_trap": self.storm_control_trap,
             "reset": self.reset,
             "operational_up": self.operational_up,
             "speed": self.speed,
@@ -654,6 +697,8 @@ class Puerto:
             poe_enabled=data.get("poe_enabled"),
             storm_control_enabled=data.get("storm_control_enabled"),
             storm_control_threshold=data.get("storm_control_threshold"),
+            storm_control_action=data.get("storm_control_action"),
+            storm_control_trap=data.get("storm_control_trap"),
             reset=data.get("reset", False),
             operational_up=data.get("operational_up"),
             speed=data.get("speed"),

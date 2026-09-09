@@ -346,32 +346,56 @@ class VendorDriver(ABC):
         ``self._cargar_comandos()``, corre ``primary``. Si falla, recorre
         ``alternatives`` en orden y compara ``triggered_by_error`` (regex)
         contra ``stderr+stdout`` del resultado -- la primera que matchea se
-        reintenta una vez. Si ninguna matchea (o no hay alternativas), se
-        devuelve el resultado original con el error real, sin ocultarlo --
-        mismo criterio que ya sigue el resto del pipeline de errores."""
+        reintenta. Si ESA también falla, vuelve a buscar entre las
+        alternativas que quedan (nunca repite una ya probada) cuál matchea
+        el error NUEVO, y sigue así hasta que una funcione o no quede
+        ninguna que matchee. Si ninguna matchea nunca (o no hay
+        alternativas), se devuelve el resultado real, sin ocultarlo --
+        mismo criterio que ya sigue el resto del pipeline de errores.
+
+        Bug real encontrado en vivo contra un Huawei real (storm-control en
+        f3r9s2/GE0/0/22): la versión anterior probaba como máximo 1
+        alternativa TOTAL, siempre comparada contra el error del primary.
+        Este device necesitaba 2 fixes a la vez (nombre de interfaz
+        completo Y sintaxis con guión) -- cada uno cubierto por una
+        alternativa DISTINTA, pensadas para corregirse una por una, no en
+        combinación. La 1ra alternativa (nombre completo) arreglaba el
+        primer error y exponía el segundo (sintaxis), pero el código ya
+        había dejado de mirar más alternativas para entonces. Mismo
+        mecanismo compartido por ~10 operaciones de Huawei (ver
+        ``interface_wrong_param`` en ``commands.yaml``) -- el fix va acá,
+        no parchando cada YAML por separado."""
         entry = self._cargar_comandos()[op_key]
         if variant is not None:
             entry = entry[variant]
         resultado = self._ejecutar_paso(entry["primary"], vars, device, password, op_label=op_key)
-        if resultado["success"]:
-            return resultado
-        error_text = (resultado.get("stderr") or "") + (resultado.get("stdout") or "")
-        # Bug real encontrado contra un device real: ansible.netcommon.cli_command
-        # arma su mensaje de fallo con str() sobre los bytes crudos del device
-        # (confirmado -- "Task failed: b'...'"), lo que deja "\r\n" como texto
-        # literal (4 caracteres: \, r, \, n) en vez de los bytes de control
-        # reales -- ningún trigger con \r?\n matcheaba nunca, la alternativa no
-        # se disparaba jamás. Normalizar de vuelta a bytes de control reales acá,
-        # una sola vez, arregla todos los triggers existentes y futuros sin
-        # tocar cada regex.
-        error_text = error_text.replace("\\r\\n", "\r\n").replace("\\r", "\r").replace("\\n", "\n")
-        for alt in entry.get("alternatives", []):
-            if re.search(alt["triggered_by_error"], error_text):
-                logger.info(
-                    "%s: %s primary failed, retrying with known alternative on device=%s",
-                    type(self).__name__, op_key, device.name,
-                )
-                return self._ejecutar_paso(alt, vars, device, password, op_label=f"{op_key} (alt)")
+        alternativas_restantes = list(entry.get("alternatives", []))
+        intento = 0
+        while not resultado["success"] and alternativas_restantes:
+            error_text = (resultado.get("stderr") or "") + (resultado.get("stdout") or "")
+            # Bug real encontrado contra un device real: ansible.netcommon.cli_command
+            # arma su mensaje de fallo con str() sobre los bytes crudos del device
+            # (confirmado -- "Task failed: b'...'"), lo que deja "\r\n" como texto
+            # literal (4 caracteres: \, r, \, n) en vez de los bytes de control
+            # reales -- ningún trigger con \r?\n matcheaba nunca, la alternativa no
+            # se disparaba jamás. Normalizar de vuelta a bytes de control reales acá,
+            # una sola vez, arregla todos los triggers existentes y futuros sin
+            # tocar cada regex.
+            error_text = error_text.replace("\\r\\n", "\r\n").replace("\\r", "\r").replace("\\n", "\n")
+            indice_match = next(
+                (i for i, alt in enumerate(alternativas_restantes)
+                 if re.search(alt["triggered_by_error"], error_text)),
+                None,
+            )
+            if indice_match is None:
+                break
+            alt = alternativas_restantes.pop(indice_match)
+            intento += 1
+            logger.info(
+                "%s: %s failed (attempt %d), retrying with known alternative on device=%s",
+                type(self).__name__, op_key, intento, device.name,
+            )
+            resultado = self._ejecutar_paso(alt, vars, device, password, op_label=f"{op_key} (alt {intento})")
         return resultado
 
     def aplicar_paso(self, op_key: str, variant: "str | None", vars: dict, device: Device, password: str) -> dict:
@@ -416,52 +440,67 @@ class VendorDriver(ABC):
         Si el lote entero falla, se busca -- para CADA paso -- si alguna
         de sus ``alternatives`` (las que YA están en ``commands.yaml`` de
         cada operación, no se inventa nada nuevo acá) matchea el error
-        real, y se reintenta el lote completo UNA vez con esas
-        alternativas aplicadas (los pasos sin alternativa que matchee
-        quedan con su render primario). Esto cubre el caso dominante
+        real, y se reintenta el lote completo con esas alternativas
+        aplicadas (los pasos sin alternativa que matchee quedan con su
+        render vigente). Si ESE reintento también falla, se vuelve a
+        buscar -- por paso, nunca repitiendo una alternativa ya consumida
+        por ese mismo paso -- cuál matchea el error NUEVO, y así sigue
+        hasta que el lote entero aplique bien o ningún paso tenga más
+        alternativas que matcheen. Esto cubre tanto el caso dominante
         (device que rechaza "commit", ~54 de 42 operaciones Huawei lo
-        tienen declarado) sin mecanismo nuevo -- se reusan las
-        alternativas existentes tal cual. Si ningún paso tiene una
+        tienen declarado) como el caso de 2 problemas simultáneos en el
+        mismo paso (bug real encontrado en vivo: storm-control en
+        f3r9s2 necesitaba nombre de interfaz completo Y sintaxis con
+        guión a la vez -- con un solo reintento total, el lote se quedaba
+        a mitad de camino igual que le pasaba a ``_aplicar_desde_template()``,
+        mismo mecanismo, mismo fix). Si ningún paso tiene alguna
         alternativa que matchee, se devuelve el error real sin
-        reintentar -- "si falla alguno, falla todo", sin reintento
+        reintentar más -- "si falla alguno, falla todo", sin reintento
         selectivo línea por línea."""
         comandos = self._cargar_comandos()
         entradas: list[tuple[str, "str | None", dict, dict]] = []
         renders: list[dict] = []
+        alternativas_restantes: list[list[dict]] = []
         for op_key, variant, vars in pasos:
             entry = comandos[op_key]
             if variant is not None:
                 entry = entry[variant]
             entradas.append((op_key, variant, entry, vars))
             renders.append(self._renderizar_paso(entry["primary"], vars))
+            alternativas_restantes.append(list(entry.get("alternatives", [])))
 
         resultado = self._aplicar(
             self._combinar_pasos_renderizados(renders), device, password, op_label=op_label,
         )
-        if resultado["success"]:
-            return resultado
+        intento = 0
+        while not resultado["success"]:
+            error_text = (resultado.get("stderr") or "") + (resultado.get("stdout") or "")
+            error_text = error_text.replace("\\r\\n", "\r\n").replace("\\r", "\r").replace("\\n", "\n")
 
-        error_text = (resultado.get("stderr") or "") + (resultado.get("stdout") or "")
-        error_text = error_text.replace("\\r\\n", "\r\n").replace("\\r", "\r").replace("\\n", "\n")
+            hubo_alternativa = False
+            for i, (op_key, variant, entry, vars) in enumerate(entradas):
+                restantes = alternativas_restantes[i]
+                indice_match = next(
+                    (j for j, alt in enumerate(restantes) if re.search(alt["triggered_by_error"], error_text)),
+                    None,
+                )
+                if indice_match is None:
+                    continue
+                alt = restantes.pop(indice_match)
+                renders[i] = self._renderizar_paso(alt, vars)
+                hubo_alternativa = True
+            if not hubo_alternativa:
+                return resultado
 
-        renders_alt = list(renders)
-        hubo_alternativa = False
-        for i, (op_key, variant, entry, vars) in enumerate(entradas):
-            for alt in entry.get("alternatives", []):
-                if re.search(alt["triggered_by_error"], error_text):
-                    renders_alt[i] = self._renderizar_paso(alt, vars)
-                    hubo_alternativa = True
-                    break
-        if not hubo_alternativa:
-            return resultado
-
-        logger.info(
-            "%s: %s primary failed, retrying lote with known alternative(s) on device=%s",
-            type(self).__name__, op_label, device.name,
-        )
-        return self._aplicar(
-            self._combinar_pasos_renderizados(renders_alt), device, password, op_label=f"{op_label} (alt)",
-        )
+            intento += 1
+            logger.info(
+                "%s: %s failed (attempt %d), retrying lote with known alternative(s) on device=%s",
+                type(self).__name__, op_label, intento, device.name,
+            )
+            resultado = self._aplicar(
+                self._combinar_pasos_renderizados(renders), device, password, op_label=f"{op_label} (alt {intento})",
+            )
+        return resultado
 
     @staticmethod
     def _compress_to_ranges(vlans: list[int]) -> list[tuple[int, int]]:
@@ -949,6 +988,8 @@ class VendorDriver(ABC):
         interface: str,
         enabled: bool,
         threshold: "float | None",
+        action: str,
+        trap: bool,
         device: Device,
         password: str,
     ) -> dict:
@@ -960,14 +1001,24 @@ class VendorDriver(ABC):
 
         *threshold* is required (non-``None``) when *enabled* is ``True`` —
         enforced by ``Puerto.validar()`` before this is ever called.
+        *action*/*trap* — what happens to the port on a storm (``"filter"``
+        = drop excess, port stays up; ``"shutdown"`` = port goes down) and
+        whether an SNMP trap fires — already resolved to their effective
+        value by ``Puerto._resolver_storm_control()`` (never ``None`` here).
+        Both vendors expose this same axis under different vocabulary —
+        see ``CiscoVendor``/``HuaweiVendor`` implementations.
 
         Vendor mapping:
             * Cisco IOS  — ``storm-control broadcast level <threshold>`` to
               enable+set in one line, ``no storm-control broadcast level``
-              to disable.
-            * Huawei VRP — syntax varies by platform family, verify against
-              the real device (``storm-control ?`` / ``storm suppression
-              ?`` in interface view) before finalizing.
+              to disable. ``action``/``trap`` map to independent, combinable
+              ``storm-control action shutdown``/``storm-control action
+              trap`` lines (``"filter"``+``trap=False`` -> neither line,
+              the device's own implicit default).
+            * Huawei VRP — ``storm control action {block|shutdown}``
+              (exclusive choice, ``"filter"``==``block``) + ``storm control
+              enable trap`` (independent, always emitted explicitly when
+              *trap* is true — no implicit default relied upon here).
 
         Returns
         -------

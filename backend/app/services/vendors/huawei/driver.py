@@ -196,7 +196,7 @@ class HuaweiVendor(VendorDriver):
         return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def resolver_set_storm_control(
-        self, interface: str, enabled: bool, threshold: "float | None",
+        self, interface: str, enabled: bool, threshold: "float | None", action: str = "shutdown", trap: bool = True,
     ) -> tuple[str, "str | None", dict]:
         # "percent {threshold}" en VRP espera un entero -- confirmado
         # contra un device real: mandarlo como float de Python (ej. "1.0")
@@ -205,16 +205,32 @@ class HuaweiVendor(VendorDriver):
         # (storm-control broadcast level 80.00), por eso esta conversión
         # queda acá y no en el modelo/schema compartido.
         variant = "enabled" if enabled else "disabled"
+        # A diferencia de Cisco, VRP trata "action" como excluyente
+        # (block|shutdown) y siempre la manda explícita -- nunca se omite,
+        # ni siquiera para "filter"==block (a diferencia de Cisco, que sí
+        # confía en su default implícito). 2 variables porque el YAML tiene
+        # alternatives con y sin guión ("storm control"/"storm-control")
+        # que coexisten según qué firmware acepta cuál -- mismo criterio ya
+        # usado en las demás alternatives de este vendor.
+        accion_vrp = "shutdown" if action == "shutdown" else "block"
+        action_lines = [f"storm control action {accion_vrp}"] + (
+            ["storm control enable trap"] if trap else []
+        )
+        action_lines_dash = [f"storm-control action {accion_vrp}"] + (
+            ["storm-control enable trap"] if trap else []
+        )
         vars = {
             "interface": interface, "interface_full": expandir_nombre_interfaz(interface),
             "threshold": int(threshold) if threshold is not None else None,
+            "action_lines": action_lines, "action_lines_dash": action_lines_dash,
         }
         return "set_storm_control", variant, vars
 
     def set_storm_control(
-        self, interface: str, enabled: bool, threshold: "float | None", device: Device, password: str,
+        self, interface: str, enabled: bool, threshold: "float | None", action: str, trap: bool,
+        device: Device, password: str,
     ) -> dict:
-        op_key, variant, vars = self.resolver_set_storm_control(interface, enabled, threshold)
+        op_key, variant, vars = self.resolver_set_storm_control(interface, enabled, threshold, action, trap)
         return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def resolver_reset_port(self, interface: str) -> tuple[str, "str | None", dict]:

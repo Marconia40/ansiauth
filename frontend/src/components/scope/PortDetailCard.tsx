@@ -51,14 +51,20 @@ function speedLabel(_port: Port): string {
 function stormControlLabel(port: Port): string {
   if (port.storm_control_enabled === false) return 'OFF';
   if (port.storm_control_enabled === true) {
+    let base: string;
     if (port.storm_control_threshold === null || port.storm_control_threshold === undefined) {
-      return 'ON';
+      base = 'ON';
+    } else {
+      // Redondear los decimales cuando son .00 para mostrar "10%" en vez de
+      // "10.00%" -- match visual con lo que muestra Cisco al operador.
+      const t = port.storm_control_threshold;
+      const shown = Number.isInteger(t) ? String(t) : t.toFixed(2);
+      base = `${shown}%`;
     }
-    // Redondear los decimales cuando son .00 para mostrar "10%" en vez de
-    // "10.00%" -- match visual con lo que muestra Cisco al operador.
-    const t = port.storm_control_threshold;
-    const shown = Number.isInteger(t) ? String(t) : t.toFixed(2);
-    return `${shown}%`;
+    const extras: string[] = [];
+    if (port.storm_control_action) extras.push(port.storm_control_action);
+    if (port.storm_control_trap) extras.push('trap');
+    return extras.length > 0 ? `${base} · ${extras.join(' · ')}` : base;
   }
   return '—';
 }

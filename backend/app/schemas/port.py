@@ -68,6 +68,18 @@ class PortRead(BaseModel):
             "only happens with configs preexisting to this system."
         ),
     )
+    storm_control_action: Optional[str] = Field(
+        None,
+        description=(
+            "What happens to the port on a storm -- 'filter' (drop excess "
+            "traffic, port stays up) or 'shutdown' (port goes down). Null "
+            "when unknown or storm-control is disabled."
+        ),
+    )
+    storm_control_trap: Optional[bool] = Field(
+        None,
+        description="Whether an SNMP trap fires on a storm. Null when unknown or storm-control is disabled.",
+    )
 
 
 class _PortTargetRequest(BaseModel):
@@ -259,6 +271,23 @@ class PortStormControlUpdateRequest(_PortTargetRequest):
         le=100,
         description="Broadcast threshold as a percentage of bandwidth (0-100). Required when enabled=True.",
     )
+    action: Optional[Literal["filter", "shutdown"]] = Field(
+        default=None,
+        description=(
+            "What happens to the port on a storm -- 'filter' (drop excess, "
+            "port stays up) or 'shutdown' (port goes down). Only meaningful "
+            "with enabled=True; defaults to 'shutdown' (today's hardcoded "
+            "behavior) when omitted."
+        ),
+    )
+    trap: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether an SNMP trap fires on a storm. Only meaningful with "
+            "enabled=True; defaults to True (today's hardcoded behavior) "
+            "when omitted."
+        ),
+    )
 
 
 class PortBatchChangeItem(_PortTargetRequest):
@@ -279,6 +308,8 @@ class PortBatchChangeItem(_PortTargetRequest):
     poe_enabled: Optional[bool] = None
     storm_control_enabled: Optional[bool] = None
     storm_control_threshold: Optional[float] = Field(None, ge=0, le=100)
+    storm_control_action: Optional[Literal["filter", "shutdown"]] = None
+    storm_control_trap: Optional[bool] = None
 
 
 class PortBatchRequest(BaseModel):

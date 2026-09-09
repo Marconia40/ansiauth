@@ -60,6 +60,8 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
   const [stormEnabledToggle, setStormEnabledToggle] = useState(false);
   const [stormOn, setStormOn] = useState(true);
   const [stormThreshold, setStormThreshold] = useState('10');
+  const [stormAction, setStormAction] = useState<'filter' | 'shutdown'>('shutdown');
+  const [stormTrap, setStormTrap] = useState(true);
 
   // ── PoE ────────────────────────────────────────────────────────────────────
   const [poeEnabledToggle, setPoeEnabledToggle] = useState(false);
@@ -92,6 +94,8 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
     setStormEnabledToggle(false);
     setStormOn(true);
     setStormThreshold('10');
+    setStormAction('shutdown');
+    setStormTrap(true);
     setPoeEnabledToggle(false);
     setPoeOn(true);
     setRunning(false);
@@ -181,6 +185,8 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
     if (stormEnabledToggle) {
       change.storm_control_enabled = stormOn;
       change.storm_control_threshold = stormOn ? stormThresholdParsed : null;
+      change.storm_control_action = stormOn ? stormAction : null;
+      change.storm_control_trap = stormOn ? stormTrap : null;
     }
 
     if (poeEnabledToggle) change.poe_enabled = poeOn;
@@ -202,6 +208,8 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
     stormEnabledToggle,
     stormOn,
     stormThresholdParsed,
+    stormAction,
+    stormTrap,
     poeEnabledToggle,
     poeOn,
   ]);
@@ -359,6 +367,10 @@ export function PortEditModal({ open, onClose, selection, onDone }: Props) {
             threshold={stormThreshold}
             onThresholdChange={setStormThreshold}
             thresholdError={sharedFieldError(fieldErrors, 'storm_control_threshold')}
+            action={stormAction}
+            onActionChange={setStormAction}
+            trap={stormTrap}
+            onTrapChange={setStormTrap}
           />
         )}
         {tab === 'poe' && (
@@ -707,6 +719,10 @@ function StormControlTab({
   threshold,
   onThresholdChange,
   thresholdError,
+  action,
+  onActionChange,
+  trap,
+  onTrapChange,
 }: {
   enabled: boolean;
   onEnabledChange: (v: boolean) => void;
@@ -715,6 +731,10 @@ function StormControlTab({
   threshold: string;
   onThresholdChange: (v: string) => void;
   thresholdError?: string;
+  action: 'filter' | 'shutdown';
+  onActionChange: (v: 'filter' | 'shutdown') => void;
+  trap: boolean;
+  onTrapChange: (v: boolean) => void;
 }) {
   return (
     <Section title="Storm control" enabled={enabled} onEnabledChange={onEnabledChange}>
@@ -738,18 +758,48 @@ function StormControlTab({
           </div>
         </FieldRow>
         {on && (
-          <FieldRow label="Threshold %">
-            <input
-              type="number"
-              min={1}
-              max={100}
-              value={threshold}
-              onChange={(e) => onThresholdChange(e.target.value)}
-              disabled={!enabled}
-              className={inputCls(enabled)}
-            />
-            <FieldError message={thresholdError} />
-          </FieldRow>
+          <>
+            <FieldRow label="Threshold %">
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={threshold}
+                onChange={(e) => onThresholdChange(e.target.value)}
+                disabled={!enabled}
+                className={inputCls(enabled)}
+              />
+              <FieldError message={thresholdError} />
+            </FieldRow>
+            <FieldRow label="Action on storm">
+              <div className="flex items-center gap-4">
+                <RadioLabel
+                  checked={action === 'filter'}
+                  onChange={() => onActionChange('filter')}
+                  disabled={!enabled}
+                >
+                  Filter (drop excess, port stays up)
+                </RadioLabel>
+                <RadioLabel
+                  checked={action === 'shutdown'}
+                  onChange={() => onActionChange('shutdown')}
+                  disabled={!enabled}
+                >
+                  Shut down port
+                </RadioLabel>
+              </div>
+            </FieldRow>
+            <label className="flex items-center gap-2 cursor-pointer select-none text-sm text-text">
+              <input
+                type="checkbox"
+                checked={trap}
+                onChange={(e) => onTrapChange(e.target.checked)}
+                disabled={!enabled}
+                className="h-4 w-4 accent-info"
+              />
+              Send SNMP trap
+            </label>
+          </>
         )}
       </div>
     </Section>
@@ -1002,7 +1052,10 @@ function fieldErrorTab(
     if (trunkEnabled) return 'trunk';
     return null;
   }
-  if (field === 'storm_control_enabled' || field === 'storm_control_threshold') return 'storm';
+  if (
+    field === 'storm_control_enabled' || field === 'storm_control_threshold'
+    || field === 'storm_control_action' || field === 'storm_control_trap'
+  ) return 'storm';
   if (field === 'poe_enabled') return 'poe';
   return null;
 }
