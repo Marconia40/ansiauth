@@ -122,10 +122,12 @@ class CiscoSVIParser(SVIParser):
         interfaces: list[SVI] = []
         actual: SVI | None = None
         helpers: list[str] = []
+        secundarias: list[str] = []
 
         def _cerrar_actual() -> None:
             if actual is not None:
                 actual.dhcp_relay_servers = helpers[:] if helpers else None
+                actual.ipv4_address_secondary = secundarias[:] if secundarias else None
                 interfaces.append(actual)
 
         for raw in running_config_output.splitlines():
@@ -137,6 +139,7 @@ class CiscoSVIParser(SVIParser):
                 admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
                 actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
                 helpers = []
+                secundarias = []
                 continue
             if actual is None:
                 continue
@@ -149,7 +152,7 @@ class CiscoSVIParser(SVIParser):
                 continue
             m = _IOS_IPV4_SECONDARY.match(line)
             if m:
-                actual.ipv4_address_secondary = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
+                secundarias.append(_direccion_y_mascara_a_cidr(m.group(1), m.group(2)))
                 continue
             m = _IOS_IPV4.match(line)
             if m:
@@ -294,6 +297,7 @@ class HuaweiSVIParser(SVIParser):
         interfaces: list[SVI] = []
         actual: SVI | None = None
         helpers: list[str] = []
+        secundarias: list[str] = []
         binding_group: str | None = None
 
         def _cerrar_actual() -> None:
@@ -302,6 +306,7 @@ class HuaweiSVIParser(SVIParser):
                     actual.dhcp_relay_servers = dhcp_groups.get(binding_group) or None
                 else:
                     actual.dhcp_relay_servers = helpers[:] if helpers else None
+                actual.ipv4_address_secondary = secundarias[:] if secundarias else None
                 interfaces.append(actual)
 
         for raw in config_output.splitlines():
@@ -313,6 +318,7 @@ class HuaweiSVIParser(SVIParser):
                 admin_up, operational_up = estado_por_vlan.get(vlan_id, (None, None))
                 actual = SVI(vlan_id=vlan_id, admin_up=admin_up, operational_up=operational_up)
                 helpers = []
+                secundarias = []
                 binding_group = None
                 continue
             if actual is None:
@@ -326,7 +332,7 @@ class HuaweiSVIParser(SVIParser):
                 continue
             m = _VRP_IPV4_SECONDARY.match(line)
             if m:
-                actual.ipv4_address_secondary = _direccion_y_mascara_a_cidr(m.group(1), m.group(2))
+                secundarias.append(_direccion_y_mascara_a_cidr(m.group(1), m.group(2)))
                 continue
             m = _VRP_IPV4.match(line)
             if m:

@@ -39,6 +39,8 @@ import type {
   SVIDhcpRelayAddRequest,
   SVIDhcpRelayRemoveRequest,
   SVIIpv4ClearRequest,
+  SVIIpv4SecondaryAddRequest,
+  SVIIpv4SecondaryRemoveRequest,
   SVIIpv4UpdateRequest,
   SVIIpv6ClearRequest,
   SVIIpv6UpdateRequest,
@@ -784,9 +786,31 @@ export async function removeSVIDhcpRelay(
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
+export async function addSVIIpv4Secondary(
+  device: string,
+  body: SVIIpv4SecondaryAddRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.post<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/ipv4-secondary`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function removeSVIIpv4Secondary(
+  device: string,
+  body: SVIIpv4SecondaryRemoveRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/ipv4-secondary`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
 /** PATCH /devices/{name}/svis/{vlan_id}/batch — N field changes on 1 SVI
- * applied in 1 SSH connection instead of 1 per field. See SVIBatchRequest.
- * DHCP relay isn't included, it stays immediate via the 2 functions above. */
+ * applied in 1 SSH connection instead of 1 per field. See SVIBatchRequest --
+ * DHCP relay and secondary-IPv4 add/remove both fold into this same batch,
+ * despite the dedicated functions above existing for API parity (neither
+ * is actually called by SVIEditModal, which always goes through this one). */
 export async function batchUpdateSvi(
   device: string,
   vlanId: number,

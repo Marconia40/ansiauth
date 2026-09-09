@@ -183,7 +183,7 @@ class DeviceSVIModel(Base):
     description = Column(String, nullable=True)
     admin_up = Column(Boolean, nullable=True)
     ipv4_address = Column(String, nullable=True)
-    ipv4_address_secondary = Column(String, nullable=True)
+    ipv4_address_secondary = Column(JSON, nullable=True)  # lista de str
     ipv6_address = Column(String, nullable=True)
     acl_in = Column(String, nullable=True)
     acl_out = Column(String, nullable=True)

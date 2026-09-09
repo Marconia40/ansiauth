@@ -898,12 +898,14 @@ class Orquestador:
         de la API (``PATCH .../svis/{vlan_id}/batch``) promete "rollback
         attempts to restore every field that did change".
 
-        ``ipv4_address_secondary``/``acl_in``/``acl_out`` necesitan el
-        valor ACTUAL del device (no el de *pre_state*) para armar su "undo"
-        -- mismo motivo que ``SVI._resolver_ipv4_secondary()``/
-        ``_resolver_acl()`` lo piden vía ``actual`` en el camino normal,
+        ``acl_in``/``acl_out`` necesitan el valor ACTUAL del device (no el
+        de *pre_state*) para armar su "undo" -- mismo motivo que
+        ``SVI._resolver_acl()`` lo pide vía ``actual`` en el camino normal,
         acá se relee 1 vez con ``_svi_actual()`` en vez de asumir que
-        *pre_state* sigue vigente."""
+        *pre_state* sigue vigente. ``ipv4_secondary_add``/``_remove`` NO
+        necesitan esto -- a diferencia del viejo campo de valor único, cada
+        op ya sabe exactamente qué IP puntual agregar/sacar, sin depender
+        de una lectura fresca del resto de la lista."""
         if not pre_state.get("existed"):
             return False, None
         anterior = pre_state.get("actual")
@@ -929,11 +931,17 @@ class Orquestador:
                 resultado = device.driver.set_svi_ipv4(
                     svi.vlan_id, anterior.ipv4_address, device, device.password,
                 )
-            elif campo == "ipv4_address_secondary":
-                actual_ahora = self._svi_actual(device, svi.vlan_id)
-                previa = actual_ahora.ipv4_address_secondary if actual_ahora is not None else None
+            elif campo == "ipv4_secondary_add":
+                # Revertir un add es sacar esa IP puntual -- a diferencia de
+                # dhcp_relay (full-replace), el comando es aditivo/quitable
+                # por dirección, así que no hace falta releer el device con
+                # _svi_actual() para saber qué tocar (ver SVI.ipv4_address_secondary).
                 resultado = device.driver.set_svi_ipv4_secondary(
-                    svi.vlan_id, anterior.ipv4_address_secondary, previa, device, device.password,
+                    svi.vlan_id, None, svi.ipv4_secondary_add, device, device.password,
+                )
+            elif campo == "ipv4_secondary_remove":
+                resultado = device.driver.set_svi_ipv4_secondary(
+                    svi.vlan_id, svi.ipv4_secondary_remove, None, device, device.password,
                 )
             elif campo == "ipv6_address":
                 resultado = device.driver.set_svi_ipv6(
@@ -966,6 +974,11 @@ class Orquestador:
                 verificado = False
             elif campo in ("dhcp_relay_add", "dhcp_relay_remove"):
                 verificado = set(actual_final.dhcp_relay_servers or []) == set(anterior.dhcp_relay_servers or [])
+            elif campo in ("ipv4_secondary_add", "ipv4_secondary_remove"):
+                verificado = (
+                    set(actual_final.ipv4_address_secondary or [])
+                    == set(anterior.ipv4_address_secondary or [])
+                )
             else:
                 verificado = getattr(actual_final, campo) == getattr(anterior, campo)
         except Exception:

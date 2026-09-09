@@ -33,7 +33,7 @@ class SVIRead(BaseModel):
     admin_up: Optional[bool] = Field(None, description="Estado administrativo (True = no shutdown).")
     operational_up: Optional[bool] = Field(None, description="Estado operacional real reportado por el device.")
     ipv4_address: Optional[str] = Field(None, description="Dirección IPv4 primaria en formato CIDR, o null si no configurada.")
-    ipv4_address_secondary: Optional[str] = Field(None, description="Dirección IPv4 secundaria en formato CIDR, o null si no hay.")
+    ipv4_address_secondary: Optional[list[str]] = Field(None, description="Direcciones IPv4 secundarias en formato CIDR, o null si no hay ninguna.")
     ipv6_address: Optional[str] = Field(None, description="Dirección IPv6 en formato CIDR, o null si no configurada.")
     acl_in: Optional[str] = Field(None, description="Nombre/número de ACL aplicada en sentido entrante, o null.")
     acl_out: Optional[str] = Field(None, description="Nombre/número de ACL aplicada en sentido saliente, o null.")
@@ -90,17 +90,14 @@ class SVIDescriptionClearRequest(_SVITargetRequest):
 
 class SVIIpv4UpdateRequest(_SVITargetRequest):
     """Request body para ``PATCH /svis/ipv4`` (RF-INTERV-03)
-    -- asigna una dirección IPv4. Para limpiarla, ver
-    ``DELETE /svis/ipv4``. ``secondary=true`` aplica sobre
-    la IP secundaria en vez de la primaria -- requiere que ya exista una
-    primaria en la interfaz (chequeado contra estado real del device, no
-    algo que se pueda validar acá)."""
+    -- asigna la dirección IPv4 primaria. Para limpiarla, ver
+    ``DELETE /svis/ipv4``. Solo primaria -- la secundaria pasó a
+    add/remove por dirección puntual, ver ``SVIIpv4SecondaryAddRequest``/
+    ``SVIIpv4SecondaryRemoveRequest`` (ya no tiene sentido un flag
+    "secondary" que "asigna un único valor" sobre lo que ahora es una
+    lista)."""
 
     ipv4_address: str = Field(..., description="Dirección IPv4 en formato CIDR (ej. '10.10.10.11/24').")
-    secondary: bool = Field(
-        default=False,
-        description="Si true, aplica sobre la IP secundaria (RF-INTERV-03) en vez de la primaria.",
-    )
 
     @field_validator("ipv4_address")
     @classmethod
@@ -109,12 +106,8 @@ class SVIIpv4UpdateRequest(_SVITargetRequest):
 
 
 class SVIIpv4ClearRequest(_SVITargetRequest):
-    """Request body para ``DELETE /svis/ipv4`` (RF-INTERV-03)."""
-
-    secondary: bool = Field(
-        default=False,
-        description="Si true, limpia la IP secundaria en vez de la primaria.",
-    )
+    """Request body para ``DELETE /svis/ipv4`` (RF-INTERV-03) -- limpia la
+    IPv4 primaria. Solo primaria, mismo motivo que ``SVIIpv4UpdateRequest``."""
 
 
 class SVIIpv6UpdateRequest(_SVITargetRequest):
@@ -157,26 +150,29 @@ class SVIBatchRequest(BaseModel):
     ``""`` = limpiar (mismo criterio que el resto de esta clase),
     cualquier otro valor = asignar -- mismo significado que ya tiene cada
     campo en ``app.models.svi.SVI``, no se inventa nada nuevo.
-    ``dhcp_relay_add``/``dhcp_relay_remove`` SI entran al batch -- mismo
-    mecanismo que el resto (``VendorDriver.aplicar_lote()``), 1 sola
-    conexion real junto con cualquier otro campo que venga en el mismo
-    body. Mutuamente excluyentes (mismo criterio que ``SVI``). El front
-    limita a 1 solo cambio de DHCP relay encolado por Save, asi que nunca
-    hace falta plegar 2 deltas contra la misma lectura previa (ver
-    ``SVI._resolver_dhcp_relay_add``/``_resolver_dhcp_relay_remove``).
+    ``dhcp_relay_add``/``dhcp_relay_remove`` e ``ipv4_secondary_add``/
+    ``ipv4_secondary_remove`` SI entran al batch -- mismo mecanismo que el
+    resto (``VendorDriver.aplicar_lote()``), 1 sola conexion real junto
+    con cualquier otro campo que venga en el mismo body. Cada par es
+    mutuamente excluyente (mismo criterio que ``SVI``). El front limita a
+    1 solo cambio encolado por Save para cada uno de los 2 pares, asi que
+    nunca hace falta plegar 2 deltas contra la misma lectura previa (ver
+    ``SVI._resolver_dhcp_relay_add``/``_resolver_dhcp_relay_remove`` y
+    ``_resolver_ipv4_secondary_add``/``_resolver_ipv4_secondary_remove``).
     ``vlan_id`` es un segmento de la URL, no va en el body."""
 
     description: Optional[str] = Field(None, max_length=240)
     admin_up: Optional[bool] = None
     ipv4_address: Optional[str] = None
-    ipv4_address_secondary: Optional[str] = None
     ipv6_address: Optional[str] = None
     acl_in: Optional[str] = Field(None, description="Nombre/número de ACL, o '' para desasignar.")
     acl_out: Optional[str] = Field(None, description="Nombre/número de ACL, o '' para desasignar.")
     dhcp_relay_add: Optional[str] = Field(None, description="IP de 1 servidor DHCP relay a agregar.")
     dhcp_relay_remove: Optional[str] = Field(None, description="IP de 1 servidor DHCP relay a eliminar.")
+    ipv4_secondary_add: Optional[str] = Field(None, description="1 dirección IPv4 secundaria (CIDR) a agregar.")
+    ipv4_secondary_remove: Optional[str] = Field(None, description="1 dirección IPv4 secundaria (CIDR) a eliminar.")
 
-    @field_validator("ipv4_address", "ipv4_address_secondary")
+    @field_validator("ipv4_address")
     @classmethod
     def _validar_ipv4_o_vacio(cls, v: "str | None") -> "str | None":
         if v:
@@ -197,10 +193,25 @@ class SVIBatchRequest(BaseModel):
             _validar_ip_plana(v)
         return v
 
+    @field_validator("ipv4_secondary_add", "ipv4_secondary_remove")
+    @classmethod
+    def _validar_ipv4_secondary_cidr(cls, v: "str | None") -> "str | None":
+        # A diferencia de dhcp_relay (IP plana), la secundaria sigue
+        # necesitando CIDR/máscara -- mismo criterio que ipv4_address.
+        if v:
+            _validar_cidr(v, 4)
+        return v
+
     @model_validator(mode="after")
     def _validar_dhcp_relay_exclusivo(self) -> "SVIBatchRequest":
         if self.dhcp_relay_add is not None and self.dhcp_relay_remove is not None:
             raise ValueError("cannot set dhcp_relay_add and dhcp_relay_remove in the same call")
+        return self
+
+    @model_validator(mode="after")
+    def _validar_ipv4_secondary_exclusivo(self) -> "SVIBatchRequest":
+        if self.ipv4_secondary_add is not None and self.ipv4_secondary_remove is not None:
+            raise ValueError("cannot set ipv4_secondary_add and ipv4_secondary_remove in the same call")
         return self
 
 
@@ -231,3 +242,30 @@ class SVIDhcpRelayRemoveRequest(_SVITargetRequest):
     @classmethod
     def _validar_ip(cls, v: str) -> str:
         return _validar_ip_plana(v)
+
+
+class SVIIpv4SecondaryAddRequest(_SVITargetRequest):
+    """Request body para ``POST /svis/ipv4-secondary`` (RF-INTERV-03) --
+    agrega 1 dirección IPv4 secundaria, sin tocar las demás ya
+    configuradas. Mismo criterio de verbo-en-el-método que
+    ``SVIDhcpRelayAddRequest``. A diferencia de esa, la dirección va en
+    CIDR (necesita máscara), no IP plana."""
+
+    address: str = Field(..., description="Dirección IPv4 secundaria a agregar, en formato CIDR (ej. '10.10.10.12/24').")
+
+    @field_validator("address")
+    @classmethod
+    def _validar_ip(cls, v: str) -> str:
+        return _validar_cidr(v, 4)
+
+
+class SVIIpv4SecondaryRemoveRequest(_SVITargetRequest):
+    """Request body para ``DELETE /svis/ipv4-secondary`` (RF-INTERV-03) --
+    elimina 1 dirección IPv4 secundaria puntual, sin tocar las demás."""
+
+    address: str = Field(..., description="Dirección IPv4 secundaria a eliminar, en formato CIDR (ej. '10.10.10.12/24').")
+
+    @field_validator("address")
+    @classmethod
+    def _validar_ip(cls, v: str) -> str:
+        return _validar_cidr(v, 4)

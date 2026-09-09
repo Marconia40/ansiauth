@@ -7,7 +7,7 @@ export interface SVI {
   admin_up: boolean | null;
   operational_up: boolean | null;
   ipv4_address: string | null;
-  ipv4_address_secondary: string | null;
+  ipv4_address_secondary: string[] | null;
   ipv6_address: string | null;
   acl_in: string | null;
   acl_out: string | null;
@@ -56,19 +56,17 @@ export interface SVIDescriptionClearRequest {
 }
 
 // Body for PATCH /api/v1/svis/ipv4. CIDR (e.g. "10.10.10.11/24"),
-// value required. secondary=true targets the secondary IPv4 address instead
-// of the primary (requires a primary already configured). To clear an
-// address, use SVIIpv4ClearRequest instead.
+// value required. Primary only — for secondary addresses (multiple
+// allowed) see SVIIpv4SecondaryAddRequest/RemoveRequest below. To clear
+// the primary address, use SVIIpv4ClearRequest instead.
 export interface SVIIpv4UpdateRequest {
   vlan_id: number;
   ipv4_address: string;
-  secondary?: boolean;
 }
 
-// Body for DELETE /api/v1/svis/ipv4.
+// Body for DELETE /api/v1/svis/ipv4. Primary only.
 export interface SVIIpv4ClearRequest {
   vlan_id: number;
-  secondary?: boolean;
 }
 
 // Body for PATCH /api/v1/svis/ipv6. CIDR (e.g. "2001:db8::1/64"),
@@ -114,6 +112,22 @@ export interface SVIDhcpRelayRemoveRequest {
   server: string;
 }
 
+// Body for POST /api/v1/svis/ipv4-secondary. Adds 1 secondary IPv4
+// address (CIDR), incremental — leaves any other secondary address
+// already configured untouched.
+export interface SVIIpv4SecondaryAddRequest {
+  vlan_id: number;
+  address: string;
+}
+
+// Body for DELETE /api/v1/svis/ipv4-secondary. Removes 1 secondary IPv4
+// address (CIDR), incremental — leaves any other secondary address
+// already configured untouched.
+export interface SVIIpv4SecondaryRemoveRequest {
+  vlan_id: number;
+  address: string;
+}
+
 // Response shape — matches the orchestration envelope used by VLAN/port endpoints,
 // so the existing JobNotificationContext can track these jobs unchanged.
 export interface SVIJobResult {
@@ -130,16 +144,16 @@ export interface SVIOperationResult {
 // Body for PATCH /api/v1/devices/{name}/svis/{vlan_id}/batch. All fields
 // optional together on one object (unlike each individual endpoint, which
 // takes exactly one) — the server applies every set field in 1 SSH
-// connection instead of 1 per field. `""` clears a field (same meaning it
-// already has on every individual endpoint's clear variant), `null`/
-// omitted leaves it untouched. DHCP relay has no batch equivalent — it
-// stays immediate via POST/DELETE .../dhcp-relay. vlan_id is the URL
-// path segment, not part of this body.
+// connection instead of 1 per field, INCLUDING dhcp_relay_add/remove and
+// ipv4_secondary_add/remove (both go in the same batch/connection as
+// everything else — despite the name, neither is a separate immediate
+// request). `""` clears a field (same meaning it already has on every
+// individual endpoint's clear variant), `null`/omitted leaves it
+// untouched. vlan_id is the URL path segment, not part of this body.
 export interface SVIBatchRequest {
   description?: string | null;
   admin_up?: boolean | null;
   ipv4_address?: string | null;
-  ipv4_address_secondary?: string | null;
   ipv6_address?: string | null;
   acl_in?: string | null;
   acl_out?: string | null;
@@ -147,6 +161,11 @@ export interface SVIBatchRequest {
    * change per batch (server-side full-replace, see SVIEditModal). */
   dhcp_relay_add?: string | null;
   dhcp_relay_remove?: string | null;
+  /** Mutually exclusive with ipv4_secondary_remove — capped at 1 queued
+   * change per Save in the UI for consistency with DHCP relay, though
+   * the underlying device command is per-address (not full-replace). */
+  ipv4_secondary_add?: string | null;
+  ipv4_secondary_remove?: string | null;
 }
 
 // Response shape for PATCH .../svis/{vlan_id}/batch is the SAME
