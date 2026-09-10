@@ -25,10 +25,27 @@ _PATRONES_PERMANENTES: tuple[tuple[str, str], ...] = (
     ("incomplete command", "syntax"),
     ("syntax error", "syntax"),
     ("vlan already exists", "conflict"),
+    # Rechazo de IP/subred en conflicto con otra VLAN -- bug real
+    # encontrado en vivo: "% 192.168.121.0 overlaps with Vlan222" (Cisco)
+    # no matcheaba NINGÚN patrón permanente, así que cuando el mismo texto
+    # combinado también traía "closed by remote host" (la sesión se cierra
+    # después del rechazo, mismo patrón ya visto con storm-control), caía
+    # en _PATRONES_TRANSITORIOS y se clasificaba "connectivity" -- un
+    # conflicto de IP real y permanente, mostrado como si fuera un
+    # problema de red transitorio. "is assigned to" cubre la otra frase
+    # ya vista en vivo esta sesión (Cisco también, forma distinta del
+    # mismo rechazo).
+    ("overlaps with", "conflict"),
+    ("is assigned to", "conflict"),
     ("permission denied", "auth"),
     ("authentication failure", "auth"),
     ("authentication failed", "auth"),
     ("unsupported command", "syntax"),
+    # Huawei VRP's exact wording ("Error: Unrecognized command found at
+    # '^' position.") -- bug real encontrado en vivo: distinta de
+    # "unsupported command" (que sí estaba en la tabla), así que caía al
+    # catch-all "unknown" pese a ser un rechazo de sintaxis clarísimo.
+    ("unrecognized command", "syntax"),
     ("invalid input", "syntax"),
     ("invalid command", "syntax"),
     ("authorization failed", "auth"),

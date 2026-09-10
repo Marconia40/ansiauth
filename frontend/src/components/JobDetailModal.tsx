@@ -34,6 +34,60 @@ function deriveDurationMs(startedAt: string | null, finishedAt: string | null): 
   return Math.round(new Date(finishedAt).getTime() - new Date(startedAt).getTime());
 }
 
+// Strips leftover terminal-control artifacts from a raw SSH transcript --
+// e.g. a cursor-left sequence from the device's own line-wrap redraw shows
+// up as literal "[1D" text once the actual ESC byte is gone (confirmed live
+// against f3r9s2: "max-ra[1Dte percent 10" is really "max-ra" + cursor-left
+// 1 + "te percent 10", i.e. just "max-rate percent 10" redrawn). Matches
+// both the real \x1b-prefixed CSI form (if it ever survives) and the
+// bare leftover form -- deliberately narrow (cursor movement only, digit
+// required) so it doesn't also eat a device prompt's own brackets, e.g.
+// "[f3r9s2-GigabitEthernet0/0/23]" starts with "[f", which a looser
+// version of this regex (any letter, 0+ digits) wrongly stripped down to
+// "3r9s2-...".
+const _ANSI_CSI_RE = /\x1b?\[\d+[ABCD]/g;
+
+function cleanTranscript(raw: string): string {
+  return raw.replace(_ANSI_CSI_RE, '');
+}
+
+// A device's real rejection reason ("% Invalid input...", Cisco; "Error:
+// Unrecognized command...", Huawei) is 1-2 lines buried inside a full SSH
+// session transcript (banners, prompts, every command echoed back) --
+// confirmed as the actual complaint: "dificil decodificarlo... que error
+// tiró??". Mirrors the same marker ssh_direct_service.py's `_ERROR_RE`
+// already uses server-side to detect a rejection at all -- this just
+// re-finds those same lines client-side to surface them, it doesn't
+// invent a new definition of "error line".
+const _DEVICE_ERROR_LINE_RE = /^\s*(Error:.*|%\s.*)$/;
+
+interface DeviceErrorHit {
+  command: string | null;
+  error: string;
+}
+
+function extractDeviceErrors(raw: string): DeviceErrorHit[] {
+  const lines = cleanTranscript(raw).split(/\r?\n/);
+  const hits: DeviceErrorHit[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || !_DEVICE_ERROR_LINE_RE.test(line)) continue;
+    // Walk back past the "^" position-marker line (if present) and any
+    // blank lines to the actual command that got rejected -- that's the
+    // useful context, not just the error text alone.
+    let command: string | null = null;
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = lines[j].trim();
+      if (!prev || prev === '^') continue;
+      if (_DEVICE_ERROR_LINE_RE.test(prev)) break; // hit the previous error, stop
+      command = prev;
+      break;
+    }
+    hits.push({ command, error: line });
+  }
+  return hits;
+}
+
 // The backend dumps the FULL request dataclass as `parameters` (every
 // field the resource type can carry, e.g. every GlobalConfig field --
 // hostname, snmp_config, routes, acls...), not just what this particular
@@ -208,11 +262,47 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       {hasError && (
         <>
           <SectionHeader>Error details</SectionHeader>
-          <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all">
-            {job.error ?? job.last_error}
-          </div>
+          <DeviceErrorDetails raw={job.error ?? job.last_error ?? ''} />
         </>
       )}
+    </div>
+  );
+}
+
+// Renders the lines a device actually rejected (see extractDeviceErrors())
+// front and center; the full raw transcript stays available but collapsed
+// by default -- it's still occasionally useful (e.g. to see exactly which
+// port/step in a batch got there), just not the first thing to read.
+function DeviceErrorDetails({ raw }: { raw: string }) {
+  const hits = extractDeviceErrors(raw);
+  const cleaned = cleanTranscript(raw);
+  if (hits.length === 0) {
+    return (
+      <pre className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 whitespace-pre-wrap break-all">
+        {cleaned}
+      </pre>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1.5">
+        {hits.map((hit, i) => (
+          <div key={i} className="text-sm bg-danger/10 border border-danger/40 rounded p-2">
+            {hit.command && (
+              <div className="font-mono text-xs text-muted mb-0.5 break-all">{hit.command}</div>
+            )}
+            <div className="text-danger break-all">{hit.error}</div>
+          </div>
+        ))}
+      </div>
+      <details className="text-xs">
+        <summary className="cursor-pointer text-muted hover:text-text select-none">
+          Show full session transcript
+        </summary>
+        <pre className="mt-1.5 text-xs text-danger bg-danger/10 border border-danger/40 rounded p-2 whitespace-pre-wrap break-all max-h-64 overflow-auto">
+          {cleaned}
+        </pre>
+      </details>
     </div>
   );
 }
