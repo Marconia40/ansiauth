@@ -392,6 +392,78 @@ class TestRuidoBenigno:
         assert decision.classification == "transient"
         assert decision.reason == "closed by remote host"
 
+    def test_error_amigable_no_engancha_ruido_no_relacionado(self):
+        """Bug real encontrado en vivo contra f3r9s1: '% 192.168.100.0 is
+        assigned to Vlan10' (permanent/conflict, clasificado bien) +
+        'Connection ... closed by remote host' en el MISMO transcript (el
+        device corta la sesión justo después del rechazo). _MENSAJES_ERROR
+        no tiene grupo para 'is assigned to' pero SÍ para 'closed by
+        remote host' -- un rescan de texto libre enganchaba ese grupo
+        aunque no tuviera nada que ver con el rechazo real."""
+        from app.services.orquestador import Orquestador
+
+        inst = object.__new__(Orquestador)
+        raw = (
+            "Connection to 172.16.61.126 closed by remote host.\n"
+            "f3r9s1(config-if)#ip address 192.168.100.50 255.255.255.0 secondary\n"
+            "% 192.168.100.0 is assigned to Vlan10"
+        )
+        friendly = inst._error_amigable(raw)
+        assert friendly["error_type"] == "permanent"
+        assert friendly["error_reason"] == "is assigned to"
+        assert friendly["error_summary"] == "The requested change conflicts with the device's current configuration."
+
+    def test_invalid_address_es_permanente_no_transitorio(self):
+        """Bug real encontrado en vivo contra f3r9s1: 'ntp server
+        255.255.255.255' -> '% Invalid address' -- rechazo determinístico
+        que no matcheaba ningún patrón permanente, así que caía a
+        transitorio por el 'closed by remote host' que lo acompaña en el
+        mismo transcript. Costaba los 3 reintentos completos (~35s) en
+        algo que iba a fallar igual las 4 veces."""
+        from app.services.orquestador import Orquestador
+
+        inst = object.__new__(Orquestador)
+        raw = (
+            "Connection to 172.16.61.126 closed by remote host.\n"
+            "f3r9s1(config)#ntp server 255.255.255.255\n"
+            "% Invalid address"
+        )
+        decision = Orquestador._clasificar_error(inst, {"rc": 1, "stdout": raw, "stderr": ""})
+        assert decision.classification == "permanent"
+        assert decision.should_retry is False
+        assert decision.reason == "invalid address"
+
+    def test_is_invalid_es_permanente_no_unknown(self):
+        """Bug real encontrado en vivo contra f3r9s2 (Huawei): 'dns server
+        255.255.255.255' -> 'Error: The specified IP address is invalid.'
+        -- frase distinta de 'is not valid' (ya en la tabla) y de 'error:
+        invalid' (que matchea la forma corta 'Invalid IP address.' usada
+        por otros comandos del mismo device) -- caía a 'unknown' (1 retry
+        extra al pedo)."""
+        from app.services.orquestador import Orquestador
+
+        inst = object.__new__(Orquestador)
+        raw = "Error: The specified IP address is invalid."
+        decision = Orquestador._clasificar_error(inst, {"rc": 1, "stdout": raw, "stderr": ""})
+        assert decision.classification == "permanent"
+        assert decision.should_retry is False
+        assert decision.reason == "is invalid"
+
+    def test_can_not_support_es_permanente_no_unknown(self):
+        """Bug real encontrado en vivo contra f3r9s2 (Huawei): habilitar
+        PoE en un puerto/modelo sin soporte -> 'Error: Interface
+        GigabitEthernet0/0/19 can not support PoE.' -- rechazo de
+        hardware, 100% determinístico, caía a 'unknown' (1 retry extra
+        al pedo) porque no matcheaba 'unsupported command'."""
+        from app.services.orquestador import Orquestador
+
+        inst = object.__new__(Orquestador)
+        raw = "Error: Interface GigabitEthernet0/0/19 can not support PoE."
+        decision = Orquestador._clasificar_error(inst, {"rc": 1, "stdout": raw, "stderr": ""})
+        assert decision.classification == "permanent"
+        assert decision.should_retry is False
+        assert decision.reason == "can not support"
+
 
 # ── GlobalConfig: mismo tipo de bug que el de ACL, encontrado por auditoría ──
 

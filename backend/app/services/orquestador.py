@@ -86,6 +86,31 @@ _PATRONES_PERMANENTES: tuple[tuple[str, str], ...] = (
     ("is not valid", "syntax"),         # "IP address is not valid", etc.
     ("out of range", "syntax"),         # rango numérico rechazado (VLAN, threshold, etc.)
     ("in use by", "conflict"),          # "VLAN in use by port ..."
+    # Bug real encontrado en vivo (Cisco, f3r9s1): "ntp server
+    # 255.255.255.255" -> "% Invalid address" -- rechazo determinístico
+    # (el mismo valor va a fallar siempre) que no matcheaba ningún
+    # patrón permanente, así que caía a _PATRONES_TRANSITORIOS por el
+    # "closed by remote host" que lo acompaña en el mismo transcript
+    # (la sesión se corta después del rechazo, mismo patrón ya visto
+    # varias veces) -- el job gastaba los 3 reintentos completos (~35s)
+    # en algo que iba a fallar igual las 4 veces.
+    ("invalid address", "syntax"),
+    # Bug real encontrado en vivo (Huawei, f3r9s2): "dns server
+    # 255.255.255.255" -> "Error: The specified IP address is invalid."
+    # -- frase distinta de "is not valid" (ya en la tabla) y de "error:
+    # invalid" (que sí matchea la variante corta "Invalid IP address."
+    # usada por otros comandos de este mismo device) -- caía a "unknown"
+    # (1 retry extra al pedo) por esta forma puntual.
+    ("is invalid", "syntax"),
+    # Bug real encontrado en vivo (Huawei, f3r9s2): habilitar PoE en un
+    # puerto/modelo que no lo soporta -> "Error: Interface
+    # GigabitEthernet0/0/19 can not support PoE." -- rechazo de hardware,
+    # 100% determinístico (ese puerto NUNCA va a soportar PoE), caía a
+    # "unknown" (1 retry extra al pedo) porque no matcheaba
+    # "unsupported command" (frase distinta). Acotado a "can not
+    # support" (3 palabras) a propósito -- "support" solo no se agrega,
+    # mismo criterio que "not found"/"cannot be" ya descartados arriba.
+    ("can not support", "syntax"),
     # Tipos de excepción de auth de Paramiko/Netmiko -- llegan como prefijo
     # del str(exc) (ver _ejecutar_con_retry). Los ponemos como permanentes
     # antes de _PATRONES_TRANSITORIOS por defensa en profundidad: aunque el
@@ -902,29 +927,32 @@ class Orquestador:
         else:
             texto = error or ""
         decision = self._clasificar_error({"rc": 1, "stdout": "", "stderr": texto})
-        # Mismo filtro de ruido benigno que ``_clasificar_error`` -- ese
-        # método lo aplica sobre su propia copia interna de ``combinado``,
-        # no sobre este ``texto``, así que sin repetirlo acá el summary
-        # podía seguir mostrando "Referenced object does not exist..."
-        # para un texto que ``decision`` ya clasificó bien como transient.
-        lowered = _limpiar_ruido_benigno(texto).lower()
+        # Bug real encontrado en vivo: escanear TODO el texto contra
+        # _MENSAJES_ERROR (en vez de mirar solo el patrón puntual que
+        # `decision` ya matcheó) podía enganchar un grupo DISTINTO y
+        # CONTRADICTORIO -- caso real: "% 192.168.100.0 is assigned to
+        # Vlan10" (permanent/conflict, decision.reason="is assigned to",
+        # clasificado bien) apareció en el mismo transcript que
+        # "Connection ... closed by remote host" (el device corta la
+        # sesión justo después del rechazo, mismo patrón ya documentado
+        # en _PATRONES_PERMANENTES). _MENSAJES_ERROR no tiene ningún
+        # grupo para "is assigned to"/"overlaps with"/"conflicts with",
+        # pero SÍ tiene uno para "closed by remote host" -- el rescan de
+        # texto libre enganchaba ESE grupo en vez de caer al fallback por
+        # categoria, y ``error_summary`` terminaba diciendo "Connection
+        # dropped by the device (transient)." para un rechazo PERMANENTE
+        # real. Ahora se busca el patrón EXACTO que `decision.reason` ya
+        # matcheó -- no hay forma de que enganche ruido no relacionado.
         summary = None
         for patrones, mensaje in _MENSAJES_ERROR:
-            if any(p in lowered for p in patrones):
+            if decision.reason in patrones:
                 summary = mensaje
                 break
         if summary is None:
-            # Bug real encontrado en vivo: un patrón de _PATRONES_PERMANENTES/
-            # _PATRONES_TRANSITORIOS puede matchear (dándole a `decision` una
-            # `categoria` real, ej. "conflict") sin que ese mismo texto
-            # matchee TAMBIÉN algún grupo de _MENSAJES_ERROR (tabla
-            # independiente, mantenida a mano aparte) -- caso real: "Error:
-            # The specified address conflicts with another address."
-            # (Huawei SVI) clasificaba bien como permanent/conflict pero
-            # caía al genérico "Unclassified..." en vez de usar esa
-            # categoria. _resumir_error() ya sabe resolver por categoria
-            # antes de caer a un genérico por classification -- se reusa
-            # acá en vez de duplicar la lógica.
+            # decision.categoria (si hay) ya viene de la MISMA tabla de
+            # patrones que decidió permanent/transient -- _resumir_error()
+            # la usa antes de caer a un genérico por classification, más
+            # confiable que inventar un 2do match de texto libre.
             summary = _resumir_error(decision)
         return {
             "error_type": decision.classification,
