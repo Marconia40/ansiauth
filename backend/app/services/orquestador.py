@@ -7,6 +7,7 @@ from dataclasses import asdict, is_dataclass
 from app.core.exceptions import DeviceExecutionError, NotFoundError
 from app.models.domain_event import DomainEvent
 from app.models.retry_decision import RetryDecision
+from app.services.vendors.base import limpiar_ruido_benigno as _limpiar_ruido_benigno
 
 logger = logging.getLogger(__name__)
 
@@ -96,43 +97,12 @@ _PATRONES_PERMANENTES: tuple[tuple[str, str], ...] = (
     ("partialauthentication", "auth"),
 )
 
-# Ruido benigno que conviene descartar ANTES de clasificar -- avisos o
-# artefactos que terminan en el mismo transcript que clasificamos pero que
-# NO son un rechazo real del device, y que sin filtrar le ganan el match a
-# un patrón real (permanente o transitorio) por aparecer antes/matchear
-# primero. Cada entrada documenta el caso real que la motivó.
-_PATRONES_RUIDO_BENIGNO: tuple[re.Pattern, ...] = (
-    # 1) Bug real encontrado en vivo: al asignar ``switchport access vlan
-    # 1050`` sobre una VLAN inexistente, Cisco IOS no rechaza nada -- la
-    # crea sola y lo avisa con "% Access VLAN does not exist. Creating
-    # vlan 1050" (rc=0, el comando se aplicó). Ese texto contiene el
-    # patrón permanente "does not exist" (pensado para el rechazo DURO de
-    # Huawei, "Error: The VLAN does not exist"), así que cuando el mismo
-    # transcript también traía un problema real de conexión ("Connection
-    # ... closed by remote host", transitorio) la nota benigna de Cisco
-    # ganaba el match -- el job se clasificaba "permanent" y se le hacía
-    # ROLLBACK a un cambio que en realidad SÍ se había aplicado en el
-    # device.
-    re.compile(r"%\s*access vlan does not exist\.\s*creating vlan\s*\d*", re.IGNORECASE),
-    # 2) Bug real encontrado en vivo: ``set_access_mode`` de Huawei (ver
-    # commands.yaml) manda una "y" fija después de "port link-type
-    # access" para responder al prompt "Continue?[Y/N]" que VRP muestra
-    # SOLO cuando el puerto venía de trunk con VLANs asignadas (si no se
-    # responde, el resto del bloque -- "port default vlan"/"commit" -- ni
-    # se manda). Cuando el puerto NO tenía nada que perder ese prompt no
-    # aparece, y la "y" se manda como comando suelto -- VRP la rechaza con
-    # "Unrecognized command" (inofensivo, el resto del bloque se sigue
-    # aplicando bien) pero ese texto matcheaba el patrón permanente
-    # "unrecognized command" y fallaba el job entero por un artefacto de
-    # NUESTRO propio placeholder, no un rechazo real del device.
-    re.compile(r"\]y\r?\n\s*\^\r?\nError: Unrecognized command found at '\^' position\.", re.IGNORECASE),
-)
-
-
-def _limpiar_ruido_benigno(texto: str) -> str:
-    for patron in _PATRONES_RUIDO_BENIGNO:
-        texto = patron.sub("", texto)
-    return texto
+# Ruido benigno conocido (avisos/artefactos que no son un rechazo real del
+# device pero le ganan el match a un patrón real de no filtrarse) --
+# vive en vendors/base.py (texto específico de vendor, ver ese módulo;
+# import al principio de este archivo), compartido con
+# ssh_direct_service.py (que decide rc/success ANTES de que este módulo
+# vea el texto, así que necesita el MISMO filtro por separado).
 
 _PATRONES_TRANSITORIOS: tuple[tuple[str, str], ...] = (
     # Spec-required exact phrases

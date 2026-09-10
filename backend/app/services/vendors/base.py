@@ -18,6 +18,59 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Ruido benigno conocido de cada vendor -- avisos o artefactos que
+# terminan mezclados con el output real de un device pero que NO son un
+# rechazo real, y que sin filtrarlos pueden ganarle el match a una señal
+# real (clasificación de error en ``Orquestador``) o hacer que se marque
+# un comando como fallido cuando en realidad aplicó bien
+# (``ssh_direct_service._exito()``/``_tiene_error()``). Mismo criterio
+# que ``VendorDriver._UNSUPPORTED_COMMAND_MARKERS`` más abajo (texto
+# conocido que un vendor emite, no algo que inventamos) -- vive acá,
+# módulo de vendors, en vez de en ``orquestador.py``/
+# ``ssh_direct_service.py`` (los 2 consumidores, ninguno vendor-
+# específico por diseño) para no repartir conocimiento de Huawei/Cisco
+# fuera de este paquete. Cada entrada documenta el caso real que la
+# motivó -- no se agregan patrones especulativos, solo los confirmados
+# contra un device real.
+RUIDO_BENIGNO: "tuple[re.Pattern, ...]" = (
+    # 1) Bug real encontrado en vivo: al asignar ``switchport access vlan
+    # 1050`` sobre una VLAN inexistente, Cisco IOS no rechaza nada -- la
+    # crea sola y lo avisa con "% Access VLAN does not exist. Creating
+    # vlan 1050" (rc=0, el comando se aplicó). Ese texto contiene el
+    # patrón permanente "does not exist" (pensado para el rechazo DURO de
+    # Huawei, "Error: The VLAN does not exist"), así que cuando el mismo
+    # transcript también traía un problema real de conexión ("Connection
+    # ... closed by remote host", transitorio) la nota benigna de Cisco
+    # ganaba el match -- el job se clasificaba "permanent" y se le hacía
+    # ROLLBACK a un cambio que en realidad SÍ se había aplicado en el
+    # device.
+    re.compile(r"%\s*access vlan does not exist\.\s*creating vlan\s*\d*", re.IGNORECASE),
+    # 2) Bug real encontrado en vivo: ``set_access_mode`` de Huawei (ver
+    # huawei/commands.yaml) manda una "y" fija después de "port link-type
+    # access" para responder al prompt "Continue?[Y/N]" que VRP muestra
+    # SOLO cuando el puerto venía de trunk con VLANs asignadas (si no se
+    # responde, el resto del bloque -- "port default vlan"/"commit" -- ni
+    # se manda). Cuando el puerto NO tenía nada que perder ese prompt no
+    # aparece, y la "y" se manda como comando suelto -- VRP la rechaza con
+    # "Unrecognized command" (inofensivo, el resto del bloque se sigue
+    # aplicando bien) pero ese texto matcheaba tanto el patrón permanente
+    # "unrecognized command" (orquestador.py) como el chequeo genérico de
+    # error de ``ssh_direct_service`` -- fallaba el job entero por un
+    # artefacto de NUESTRO propio placeholder, no un rechazo real del
+    # device.
+    re.compile(r"\]y\r?\n\s*\^\r?\nError: Unrecognized command found at '\^' position\.", re.IGNORECASE),
+)
+
+
+def limpiar_ruido_benigno(texto: str) -> str:
+    """Devuelve *texto* con todo el ruido benigno conocido (``RUIDO_BENIGNO``)
+    eliminado -- seguro de llamar sobre cualquier transcript, un patrón
+    que no matchea nada es un no-op."""
+    for patron in RUIDO_BENIGNO:
+        texto = patron.sub("", texto or "")
+    return texto
+
+
 class VendorDriver(ABC):
     """Abstract base class every vendor driver must implement — VLAN and
     port operations fused into one contract (FINAL_ARCHITECTURE.md §1.6:

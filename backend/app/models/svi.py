@@ -301,15 +301,51 @@ class SVI:
             paso = device.driver.resolver_set_svi_ipv4_secondary(
                 self.vlan_id, anterior.ipv4_address_secondary, previa,
             )
+        elif campo == "ipv4_secondary_add":
+            # Gap real encontrado por auditoría: esta rama no existía --
+            # caía al ``else: return [], None`` genérico, así que un
+            # ipv4_secondary_add dentro de un lote que fallaba NUNCA se
+            # revertía, silenciosamente. Guard de estado fresco (mismo
+            # criterio que GlobalConfig) porque revertir = sacar una IP
+            # puntual (``set_svi_ipv4_secondary`` con ``current_acl_name``-
+            # style semantics) -- si el apply nunca llegó a aplicarse, no
+            # hay nada que sacar.
+            if actual_ahora is None:
+                return [], None
+            ip_add = self.ipv4_secondary_add
+            if ip_add not in (actual_ahora.ipv4_address_secondary or []):
+                return [], None
+            paso = device.driver.resolver_set_svi_ipv4_secondary(self.vlan_id, None, ip_add)
+        elif campo == "ipv4_secondary_remove":
+            # Revertir un remove es agregar la IP de vuelta -- idempotente
+            # aunque el remove original nunca haya tocado el device
+            # (mismo criterio que route_remove/ntp_server_remove de
+            # GlobalConfig), no necesita el guard de estado fresco.
+            paso = device.driver.resolver_set_svi_ipv4_secondary(
+                self.vlan_id, self.ipv4_secondary_remove, None,
+            )
         elif campo == "ipv6_address":
             paso = device.driver.resolver_set_svi_ipv6(self.vlan_id, anterior.ipv6_address)
         elif campo in ("acl_in", "acl_out"):
             if actual_ahora is None:
                 return [], None
             current_acl = getattr(actual_ahora, campo)
+            valor_anterior = getattr(anterior, campo)
+            # Bug real encontrado en vivo: nada atado antes (anterior=None)
+            # y nada atado ahora (current_acl=None, porque el apply que
+            # falló nunca llegó a aplicarse) es el mismo estado -- sin
+            # esta normalización (mismo criterio que ``_resolver_acl()``
+            # ya usa para el camino normal) se armaba un "undo
+            # traffic-filter ... acl name" SIN nombre (resolver_set_svi_acl
+            # confía en que el caller ya filtró este caso, no se auto-
+            # protege) -- VRP lo rechaza con "Incomplete command", una
+            # falla de rollback espuria sobre un cambio que nunca se
+            # había tocado.
+            if (valor_anterior or None) == (current_acl or None):
+                return [], None
             direccion = "in" if campo == "acl_in" else "out"
             paso = device.driver.resolver_set_svi_acl(
-                self.vlan_id, direccion, getattr(anterior, campo), current_acl_name=current_acl,
+                self.vlan_id, direccion, valor_anterior, current_acl_name=current_acl,
             )
         elif campo in ("dhcp_relay_add", "dhcp_relay_remove"):
             paso = device.driver.resolver_set_svi_dhcp_relay(
@@ -323,6 +359,17 @@ class SVI:
                 return False
             if campo in ("dhcp_relay_add", "dhcp_relay_remove"):
                 return set(actual.dhcp_relay_servers or []) == set(anterior.dhcp_relay_servers or [])
+            # Bug real encontrado por auditoría: sin estos 2 casos, el
+            # fallback genérico de abajo (``getattr(actual, campo) ==
+            # getattr(anterior, campo)``) comparaba
+            # ``ipv4_secondary_add``/``ipv4_secondary_remove`` -- campos
+            # de REQUEST, nunca poblados en un objeto leído del device --
+            # siempre ``None == None`` → ``True``, un falso positivo que
+            # jamás detectaría un rollback realmente fallido.
+            if campo == "ipv4_secondary_add":
+                return self.ipv4_secondary_add not in (actual.ipv4_address_secondary or [])
+            if campo == "ipv4_secondary_remove":
+                return self.ipv4_secondary_remove in (actual.ipv4_address_secondary or [])
             return getattr(actual, campo) == getattr(anterior, campo)
 
         return [paso], verificar
@@ -647,12 +694,22 @@ class SVI:
                     self.vlan_id, anterior.ipv4_address, device, device.password,
                 )
             elif campo == "ipv4_secondary_add":
-                # Revertir un add es sacar esa IP puntual -- a diferencia de
-                # dhcp_relay (full-replace), el comando es aditivo/quitable
-                # por dirección, así que no hace falta releer el device con
-                # reconciliar() para saber qué tocar (ver ipv4_address_secondary).
+                # Bug real encontrado por auditoría (mismo tipo que ya
+                # arreglado en GlobalConfig): revertir un add es sacar esa
+                # IP puntual -- sin releer el device antes, si el apply
+                # nunca llegó a tocarlo (rechazo permanente) esto intentaba
+                # "undo ip address ... sub" sobre una IP que nunca se
+                # agregó. El docstring del driver Huawei para este comando
+                # dice literalmente "no confirmado contra device real" --
+                # no vale la pena arriesgarse a mandarlo sin verificar
+                # primero que hay algo que sacar.
+                ip = self.ipv4_secondary_add
+                actual_ahora = self.reconciliar(device).get("actual")
+                esta_ahora = actual_ahora is not None and ip in (actual_ahora.ipv4_address_secondary or [])
+                if not esta_ahora:
+                    return False, None
                 resultado = device.driver.set_svi_ipv4_secondary(
-                    self.vlan_id, None, self.ipv4_secondary_add, device, device.password,
+                    self.vlan_id, None, ip, device, device.password,
                 )
             elif campo == "ipv4_secondary_remove":
                 resultado = device.driver.set_svi_ipv4_secondary(
@@ -752,14 +809,22 @@ class SVI:
                         self.vlan_id, self.ipv4_address_secondary,
                         actual_ahora.ipv4_address_secondary,
                     ))
+            # Normalización "" == None -- mismo criterio que
+            # ``_resolver_acl()``/``resolver_rollback()`` (gap latente
+            # encontrado por auditoría, no disparable hoy porque los
+            # parsers nunca producen ``""`` -- solo ``None`` o un nombre
+            # real -- pero defensa en profundidad barata contra el mismo
+            # bug real que ya pasó acá: ``resolver_set_svi_acl()`` no se
+            # auto-protege, confía en que el caller ya filtró "nada
+            # atado, nada pedido").
             if self.acl_in is not None:
-                if actual_ahora.acl_in != self.acl_in:
+                if (actual_ahora.acl_in or None) != (self.acl_in or None):
                     pasos.append(device.driver.resolver_set_svi_acl(
                         self.vlan_id, "in", self.acl_in,
                         current_acl_name=actual_ahora.acl_in,
                     ))
             if self.acl_out is not None:
-                if actual_ahora.acl_out != self.acl_out:
+                if (actual_ahora.acl_out or None) != (self.acl_out or None):
                     pasos.append(device.driver.resolver_set_svi_acl(
                         self.vlan_id, "out", self.acl_out,
                         current_acl_name=actual_ahora.acl_out,

@@ -527,6 +527,17 @@ class GlobalConfig:
             for actual_line in reglas_actuales
         )
 
+    def _leer_actual_fresco(self, device: "Device") -> "GlobalConfig | None":
+        """Estado real del device AHORA -- usado por ``ejecutar_rollback()``
+        antes de intentar revertir un campo incremental (``_add`` que se
+        revierte con un "remove") para confirmar que lo que se va a
+        revertir está efectivamente presente. Sin esto, un apply que
+        nunca llegó a tocar el device (rechazo permanente) generaba un
+        intento de "borrar algo que nunca se agregó" -- mismo bug real
+        que ya rompió con ``SVI`` ACL (ver ``resolver_rollback()``),
+        acá con el mismo criterio pero sin el mecanismo de lote."""
+        return self.reconciliar(device).get("actual")
+
     def _aplicar_acl_create(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """RF-GLOBAL-05. Crea la ACL si no existe, agrega las reglas
         nuevas si ya existe (mismo comando de driver sirve para ambos
@@ -714,6 +725,18 @@ class GlobalConfig:
                 )
                 if ya_existia:
                     return False, None
+                # Bug real encontrado por auditoría (mismo tipo que el de
+                # SVI ACL): sin releer el estado fresco, si el apply
+                # nunca llegó a tocar el device (rechazo permanente antes
+                # de aplicar nada) el rollback igual intentaba
+                # ``remove_route()`` sobre una ruta que nunca se agregó.
+                actual_ahora = self._leer_actual_fresco(device)
+                esta_ahora = actual_ahora is not None and any(
+                    r.get("destination") == destino and r.get("next_hop") == next_hop
+                    for r in (actual_ahora.routes or [])
+                )
+                if not esta_ahora:
+                    return False, None
                 resultado = device.driver.remove_route(destino, next_hop, device, device.password)
             elif campo == "route_remove":
                 destino = str(ipaddress.ip_network(self.route_remove["destination"], strict=False))
@@ -726,19 +749,40 @@ class GlobalConfig:
                     return False, None
                 resultado = device.driver.set_route(destino, next_hop, device, device.password)
             elif campo == "ntp_server_add":
-                resultado = device.driver.remove_ntp_server(self.ntp_server_add["server"], device, device.password)
+                # Sin guard alguno originalmente -- bug real encontrado
+                # por auditoría, mismo criterio que ``route_add`` arriba:
+                # el apply pudo no haber tocado el device en absoluto.
+                server = self.ntp_server_add["server"]
+                if server in (anterior.ntp_servers or []):
+                    return False, None
+                actual_ahora = self._leer_actual_fresco(device)
+                if actual_ahora is None or server not in (actual_ahora.ntp_servers or []):
+                    return False, None
+                resultado = device.driver.remove_ntp_server(server, device, device.password)
             elif campo == "ntp_server_remove":
                 resultado = device.driver.add_ntp_server(
                     self.ntp_server_remove["server"], False, device, device.password,
                 )
             elif campo == "dns_server_add":
-                resultado = device.driver.remove_dns_server(self.dns_server_add["server"], device, device.password)
+                server = self.dns_server_add["server"]
+                if server in (anterior.dns_servers or []):
+                    return False, None
+                actual_ahora = self._leer_actual_fresco(device)
+                if actual_ahora is None or server not in (actual_ahora.dns_servers or []):
+                    return False, None
+                resultado = device.driver.remove_dns_server(server, device, device.password)
             elif campo == "dns_server_remove":
                 resultado = device.driver.add_dns_server(self.dns_server_remove["server"], device, device.password)
             elif campo == "dns_domain_set":
                 return False, None
             elif campo == "log_server_add":
-                resultado = device.driver.remove_log_server(self.log_server_add["server"], device, device.password)
+                server = self.log_server_add["server"]
+                if server in (anterior.log_servers or []):
+                    return False, None
+                actual_ahora = self._leer_actual_fresco(device)
+                if actual_ahora is None or server not in (actual_ahora.log_servers or []):
+                    return False, None
+                resultado = device.driver.remove_log_server(server, device, device.password)
             elif campo == "log_server_remove":
                 resultado = device.driver.add_log_server(
                     self.log_server_remove["server"], None, device, device.password,
@@ -746,15 +790,36 @@ class GlobalConfig:
             elif campo == "acl_create":
                 name = self.acl_create["name"]
                 existia_antes = bool(anterior.acls) and any(a.get("name") == name for a in anterior.acls)
+                actual_ahora = self._leer_actual_fresco(device)
                 if not existia_antes:
+                    # Bug real encontrado por auditoría: sin este guard,
+                    # una ACL cuyo create nunca llegó a tocar el device
+                    # (rechazo permanente) igual disparaba un
+                    # ``delete_acl()`` sobre algo que nunca se creó.
+                    existe_ahora = actual_ahora is not None and bool(actual_ahora.acls) and any(
+                        a.get("name") == name for a in actual_ahora.acls
+                    )
+                    if not existe_ahora:
+                        return False, None
                     resultado = device.driver.delete_acl(name, device, device.password)
                 else:
                     previas = self._reglas_acl_actuales(anterior, name)
-                    agregadas = [
+                    nuevas_relativas_a_anterior = [
                         formateada for r in self.acl_create["rules"]
                         if not self._regla_ya_presente(
                             formateada := device.driver.formatear_regla_acl(r), previas,
                         )
+                    ]
+                    if not nuevas_relativas_a_anterior:
+                        return False, None
+                    # Mismo guard que arriba: de las reglas que son NUEVAS
+                    # relativo a *anterior*, solo revertimos (removemos)
+                    # las que el fresh read confirma que de verdad llegaron
+                    # a aplicarse -- no todas las "pedidas".
+                    previas_ahora = self._reglas_acl_actuales(actual_ahora, name) if actual_ahora else []
+                    agregadas = [
+                        r for r in nuevas_relativas_a_anterior
+                        if self._regla_ya_presente(r, previas_ahora)
                     ]
                     if not agregadas:
                         return False, None
