@@ -56,6 +56,24 @@ export interface GlobalConfigRead {
   acls: GlobalConfigAclInfo[] | null;
 }
 
+// 1 device inside DashboardSummary.global_config (GET /dashboard/summary
+// with ?include_global_config=true). Same shape as GlobalConfigRead minus
+// `routes` (out of scope for the cross-device view), plus sync metadata —
+// mirrors backend/app/schemas/dashboard.py GlobalConfigScopeDeviceEntry.
+export interface GlobalConfigScopeDeviceEntry {
+  device: string;
+  vendor: string | null;
+  hostname: string | null;
+  snmp: GlobalConfigSnmpInfo;
+  ntp: GlobalConfigNtpInfo;
+  dns: GlobalConfigDnsInfo;
+  logging: GlobalConfigLoggingInfo;
+  acls: GlobalConfigAclInfo[] | null;
+  synced_at: string | null;
+  sync_error: string | null;
+  sync_in_progress: boolean;
+}
+
 export interface GlobalConfigVersionRead {
   device: string;
   vendor: string | null;

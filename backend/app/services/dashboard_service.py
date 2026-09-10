@@ -15,6 +15,14 @@ VLAN name discrepancy: NO se calcula acá. Se devuelve la lista de
 names únicos por VLAN y el frontend chequea ``names.length > 1``.
 Decisión de diseño para mantener la lógica que ya tiene el frontend
 y no duplicarla.
+
+``global_config`` (SNMP/NTP/DNS/logging/ACLs por device) es una
+sección aparte, opt-in vía ``include_global_config`` -- no forma parte
+del summary/refresh por default. Reusa el mismo endpoint en vez de un
+router/servicio propio (ver ``_resumen_global_config``/
+``build_global_config_payload``), pero se mantiene fuera del refresh
+automático porque ``global_config`` está excluido del combo ``"all"``
+de ``sync_device_task`` a propósito (Decisión 3, ``app/tasks.py``).
 """
 from __future__ import annotations
 
@@ -24,6 +32,7 @@ from typing import Optional
 from sqlalchemy import and_, func, or_
 
 from app.db.models import (
+    DeviceGlobalConfigModel,
     DeviceGroupModel,
     DeviceModel,
     DevicePortModel,
@@ -33,6 +42,50 @@ from app.db.models import (
 )
 from app.db.session import get_session
 from app.models.visibility_scope import VisibilityScope
+
+
+def build_global_config_payload(device: str, vendor: "str | None", config) -> dict:
+    """Arma el dict wire-format (``GlobalConfigRead`` + device/vendor) a
+    partir de un objeto con los campos de ``GlobalConfig``/
+    ``DeviceGlobalConfigModel`` (mismos nombres de atributo en ambos --
+    domain object y fila ORM son intercambiables acá). ``config`` puede
+    ser ``None`` (device sin sync todavía).
+
+    Compartido por ``GET /devices/{name}/global-config/``
+    (``api/global_config.py``, pasa el domain object del repository) y
+    ``DashboardService._resumen_global_config`` (pasa la fila ORM
+    directo, sin pasar por el repository, para poder traer N devices en
+    1 sola query -- ver docstring de ``_resumen_global_config``)."""
+    from app.schemas.global_config import (
+        GlobalConfigDnsInfo,
+        GlobalConfigLoggingInfo,
+        GlobalConfigNtpInfo,
+        GlobalConfigRead,
+        GlobalConfigSnmpInfo,
+    )
+
+    return {
+        "device": device,
+        "vendor": vendor,
+        **GlobalConfigRead(
+            hostname=config.hostname if config else None,
+            snmp=GlobalConfigSnmpInfo(
+                enabled=config.snmp_enabled if config else None,
+                version=config.snmp_version if config else None,
+                community=config.snmp_community if config else None,
+                permission=config.snmp_permission if config else None,
+                trap_hosts=config.snmp_trap_hosts if config else None,
+            ),
+            ntp=GlobalConfigNtpInfo(servers=config.ntp_servers if config else None),
+            dns=GlobalConfigDnsInfo(servers=config.dns_servers if config else None),
+            logging=GlobalConfigLoggingInfo(
+                servers=config.log_servers if config else None,
+                level=config.log_level if config else None,
+            ),
+            routes=config.routes if config else None,
+            acls=config.acls if config else None,
+        ).model_dump(),
+    }
 
 
 class DashboardService:
@@ -53,6 +106,7 @@ class DashboardService:
         device_name: Optional[str],
         jobs_days: int,
         visibility_scope: VisibilityScope,
+        include_global_config: bool = False,
     ) -> dict:
         """Resolver el scope y devolver el payload completo del dashboard.
 
@@ -64,6 +118,14 @@ class DashboardService:
         FastAPI) traduzca el resultado a NotFoundError si hace falta.
         Retorna ``None`` cuando el scope resource no existe (site/group/
         device inexistente) para que el caller responda 404.
+
+        ``include_global_config``: opt-in, default ``False``. Agrega la
+        sección ``global_config`` (SNMP/NTP/DNS/logging/ACLs por device)
+        al payload. Deliberadamente NO default-on: a diferencia de
+        vlans/ports/svis, global_config queda afuera del refresh
+        automático/reactivo (ver ``sync_device_task`` scope ``"all"`` en
+        ``app/tasks.py`` -- "Decisión 3", trae running-configs completos)
+        y no debe pesar en el dashboard normal que sí se abre siempre.
         """
         # 1. Resolver nombres del scope + display name (para el header UI)
         resuelto = self.resolver_devices_del_scope(
@@ -80,7 +142,7 @@ class DashboardService:
         svis = self._resumen_svis(device_names)
         jobs = self._resumen_jobs(device_names, jobs_days, visibility_scope)
 
-        return {
+        payload = {
             "scope": {
                 "kind": scope_kind,
                 "id": scope_id,
@@ -93,6 +155,9 @@ class DashboardService:
             "svis": svis,
             "jobs": jobs,
         }
+        if include_global_config:
+            payload["global_config"] = self._resumen_global_config(device_names)
+        return payload
 
     # ── Resolver scope → set de device names ──────────────────────────────
 
@@ -440,3 +505,61 @@ class DashboardService:
             "by_status": by_status,
             "rollback_performed_count": int(rollback_count),
         }
+
+    def _resumen_global_config(self, device_names: set[str]) -> list[dict]:
+        """A diferencia de vlans/ports/svis (N filas por device), acá hay
+        1 sola fila por device (PK simple en ``device_global_config``) --
+        no hace falta agregación, solo traer y armar el payload wire-format
+        de cada uno. 2 queries totales (config + metadata de sync), sin
+        pasar por ``global_config_repository.get()`` N veces.
+        """
+        if not device_names:
+            return []
+
+        # Columnas explícitas (no el modelo ORM completo) -- mismo criterio
+        # que el resto de este archivo (ver _resumen_vlans/_resumen_ports):
+        # ``get_session()`` hace commit+close al salir del ``with``, lo que
+        # expira las instancias ORM; acceder a sus atributos después
+        # (fuera del with) tira DetachedInstanceError. Con tuplas de
+        # columnas planas no hay ese problema.
+        with get_session() as session:
+            config_rows = (
+                session.query(
+                    DeviceGlobalConfigModel.device,
+                    DeviceGlobalConfigModel.hostname,
+                    DeviceGlobalConfigModel.snmp_enabled,
+                    DeviceGlobalConfigModel.snmp_version,
+                    DeviceGlobalConfigModel.snmp_community,
+                    DeviceGlobalConfigModel.snmp_permission,
+                    DeviceGlobalConfigModel.snmp_trap_hosts,
+                    DeviceGlobalConfigModel.ntp_servers,
+                    DeviceGlobalConfigModel.dns_servers,
+                    DeviceGlobalConfigModel.log_servers,
+                    DeviceGlobalConfigModel.log_level,
+                    DeviceGlobalConfigModel.routes,
+                    DeviceGlobalConfigModel.acls,
+                )
+                .filter(DeviceGlobalConfigModel.device.in_(device_names))
+                .all()
+            )
+            meta_rows = (
+                session.query(
+                    DeviceModel.name,
+                    DeviceModel.vendor,
+                    DeviceModel.global_config_synced_at,
+                    DeviceModel.global_config_sync_error,
+                )
+                .filter(DeviceModel.name.in_(device_names))
+                .all()
+            )
+
+        configs_by_device = {row.device: row for row in config_rows}
+
+        entries = []
+        for name, vendor, synced_at, sync_error in meta_rows:
+            entry = build_global_config_payload(name, vendor, configs_by_device.get(name))
+            entry["synced_at"] = synced_at
+            entry["sync_error"] = sync_error
+            entry["sync_in_progress"] = self._coordinator.esta_ocupado(name)
+            entries.append(entry)
+        return sorted(entries, key=lambda e: e["device"])

@@ -5,6 +5,8 @@
 // vlans.entries[i].names.length > 1 significa que ese VLAN ID tiene
 // nombres distintos entre devices.
 
+import type { GlobalConfigScopeDeviceEntry } from '@/types/global-config';
+
 export type DashboardScopeKind = 'org' | 'site' | 'group' | 'device';
 
 export interface DashboardScope {
@@ -57,6 +59,9 @@ export interface DashboardSummary {
   ports: PortsSummary;
   svis: SvisSummary;
   jobs: JobsSummary;
+  // Solo presente si se pidió `?include_global_config=true` — null (no [])
+  // cuando no se pidió, para distinguir "no lo pedí" de "scope vacío".
+  global_config?: GlobalConfigScopeDeviceEntry[] | null;
 }
 
 // Params que acepta el endpoint.
@@ -65,4 +70,5 @@ export interface DashboardSummaryParams {
   id?: number;
   name?: string;
   jobs_days?: number;
+  includeGlobalConfig?: boolean;
 }

@@ -33,8 +33,10 @@ export type Scope =
   | { kind: 'group'; groupId: number }
   | { kind: 'device'; deviceName: string };
 
-/** Convierte el Scope del frontend en los query params que espera el endpoint. */
-function scopeToSummaryParams(scope: Scope): DashboardSummaryParams {
+/** Convierte el Scope del frontend en los query params que espera el endpoint.
+ * Exportada para reuso -- `scopeGlobalConfig.ts` la usa para pedir la misma
+ * agregación con `includeGlobalConfig: true`. */
+export function scopeToSummaryParams(scope: Scope): DashboardSummaryParams {
   switch (scope.kind) {
     case 'org':
       return { scope: 'org' };

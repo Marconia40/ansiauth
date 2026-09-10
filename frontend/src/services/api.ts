@@ -909,8 +909,11 @@ export async function getGroupJob(groupJobId: string): Promise<GroupJob> {
 export async function getDashboardSummary(
   params: DashboardSummaryParams,
 ): Promise<DashboardSummary> {
+  const { includeGlobalConfig, ...rest } = params;
   return unwrap<DashboardSummary>(
-    client.get<ApiResponse<DashboardSummary>>('/dashboard/summary', { params }),
+    client.get<ApiResponse<DashboardSummary>>('/dashboard/summary', {
+      params: { ...rest, include_global_config: includeGlobalConfig || undefined },
+    }),
   );
 }
 
@@ -923,6 +926,10 @@ export interface DashboardRefreshResult {
   devices_skipped_coalesced?: number;
   /** Same as devices_queued -- kept for backwards compatibility. */
   tasks_dispatched: number;
+  /** Only present when the request set includeGlobalConfig. */
+  global_config_devices_queued?: number;
+  global_config_devices_skipped_fresh?: number;
+  global_config_devices_skipped_coalesced?: number;
 }
 
 /** Reactive-refresh endpoint: pide al backend que sincronice sólo los
@@ -932,14 +939,20 @@ export interface DashboardRefreshResult {
  * ``sync_in_progress_count`` vuelve a 0. Reemplaza al viejo botón manual
  * de refresh global -- el barrido periódico completo lo hace ahora Celery
  * Beat (``sync_stale_devices_task``). */
+export type DashboardRefreshParams = Pick<
+  DashboardSummaryParams,
+  'scope' | 'id' | 'name' | 'includeGlobalConfig'
+>;
+
 export async function refreshDashboardScope(
-  params: Pick<DashboardSummaryParams, 'scope' | 'id' | 'name'>,
+  params: DashboardRefreshParams,
 ): Promise<DashboardRefreshResult> {
+  const { includeGlobalConfig, ...rest } = params;
   return unwrap<DashboardRefreshResult>(
     client.post<ApiResponse<DashboardRefreshResult>>(
       '/dashboard/refresh',
       undefined,
-      { params },
+      { params: { ...rest, include_global_config: includeGlobalConfig || undefined } },
     ),
   );
 }

@@ -19,6 +19,14 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.global_config import (
+    GlobalConfigAclInfo,
+    GlobalConfigDnsInfo,
+    GlobalConfigLoggingInfo,
+    GlobalConfigNtpInfo,
+    GlobalConfigSnmpInfo,
+)
+
 
 class DashboardScope(BaseModel):
     """Identifica el scope agregado en la respuesta."""
@@ -90,6 +98,27 @@ class JobsSummary(BaseModel):
     rollback_performed_count: int
 
 
+class GlobalConfigScopeDeviceEntry(BaseModel):
+    """1 device dentro de la sección opt-in ``global_config`` (ver
+    ``?include_global_config=true``). Mismo shape que ``GlobalConfigRead``
+    (`schemas/global_config.py`) más device/vendor/metadata de sync —
+    reusa las mismas sub-schemas, no duplica el mapeo de campos."""
+
+    device: str
+    vendor: Optional[str] = None
+    hostname: Optional[str] = None
+    snmp: GlobalConfigSnmpInfo = Field(default_factory=GlobalConfigSnmpInfo)
+    ntp: GlobalConfigNtpInfo = Field(default_factory=GlobalConfigNtpInfo)
+    dns: GlobalConfigDnsInfo = Field(default_factory=GlobalConfigDnsInfo)
+    logging: GlobalConfigLoggingInfo = Field(default_factory=GlobalConfigLoggingInfo)
+    acls: Optional[list[GlobalConfigAclInfo]] = Field(
+        None, description="ACLs configuradas en el device, con sus reglas, o null.",
+    )
+    synced_at: Optional[datetime] = Field(None, description="Último sync de global_config para este device, o null si nunca sincronizó.")
+    sync_error: Optional[str] = Field(None, description="Último error de sync de global_config, o null.")
+    sync_in_progress: bool = Field(..., description="True si hay un sync de global_config corriendo ahora mismo para este device.")
+
+
 class DashboardSummaryResponse(BaseModel):
     """Payload que devuelve GET /api/v1/dashboard/summary."""
 
@@ -100,3 +129,11 @@ class DashboardSummaryResponse(BaseModel):
     ports: PortsSummary
     svis: SvisSummary
     jobs: JobsSummary
+    global_config: Optional[list[GlobalConfigScopeDeviceEntry]] = Field(
+        None,
+        description=(
+            "SNMP/NTP/DNS/logging/ACLs por device — solo presente si se pidió "
+            "`?include_global_config=true`. Null (no `[]`) cuando no se pidió, "
+            "para que el frontend pueda distinguir 'no lo pedí' de 'scope vacío'."
+        ),
+    )
