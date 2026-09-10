@@ -90,6 +90,58 @@ function extractDeviceErrors(raw: string): DeviceErrorHit[] {
   return hits;
 }
 
+// Shape of a successful driver result -- {rc, stdout, stderr, stdouts,
+// success} for Puerto/SVI/GlobalConfig operations that go through a real
+// SSH session (see aplicar_paso()/aplicar_lote() in the backend); `noop`/
+// `accion` are added by the resource's own aplicar() before Orquestador
+// ever sees it. Not every resource type produces this exact shape (VLAN's
+// simpler operations may not), so DeviceResultDetails falls back to the
+// raw JSON dump for anything that doesn't look like it.
+interface DeviceResultShape {
+  rc?: number;
+  stdout?: string;
+  success?: boolean;
+  noop?: boolean;
+}
+
+// Same idea as DeviceErrorDetails, mirrored for the success case: the raw
+// stdout is a full SSH session transcript (VTY banners, every command
+// echoed back, and -- as of tonight -- sometimes a benign rejection like
+// the "y" placeholder for Huawei's Y/N confirmation, see
+// vendors/base.py::RUIDO_BENIGNO) that looks alarming even though the job
+// succeeded. Surface a plain confirmation by default; keep the full
+// transcript one click away for anyone who wants to verify exactly what
+// was sent, instead of dumping it unprompted like before.
+function DeviceResultDetails({ result }: { result: unknown }) {
+  if (result == null || typeof result !== 'object') {
+    return <JsonBlock data={result} />;
+  }
+  const r = result as DeviceResultShape;
+  if (typeof r.stdout !== 'string') {
+    return <JsonBlock data={result} />;
+  }
+  const cleaned = cleanTranscript(r.stdout);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <p className="text-sm text-green-600">
+        {r.noop
+          ? 'No changes needed — device already matched the requested state.'
+          : '✓ Applied successfully.'}
+      </p>
+      {cleaned.trim() !== '' && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted hover:text-text select-none">
+            Show full session transcript
+          </summary>
+          <pre className="mt-1.5 text-xs text-text bg-panel-elev/60 border border-panel-border rounded p-2 whitespace-pre-wrap break-all max-h-64 overflow-auto">
+            {cleaned}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
 // The backend dumps the FULL request dataclass as `parameters` (every
 // field the resource type can carry, e.g. every GlobalConfig field --
 // hostname, snmp_config, routes, acls...), not just what this particular
@@ -429,7 +481,7 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       {hasResult && (
         <>
           <SectionHeader>Result</SectionHeader>
-          <JsonBlock data={job.result} />
+          <DeviceResultDetails result={job.result} />
         </>
       )}
 
