@@ -71,9 +71,28 @@ _SSH_LEGACY_OPTS = [
 # que ya lo detecte por nosotros.
 _ERROR_RE = re.compile(r"^\s*(Error:|%\s)", re.MULTILINE)
 
+# Ruido benigno propio -- bug real encontrado en vivo contra f3r9s2:
+# ``set_access_mode`` (huawei/commands.yaml) manda una "y" fija después de
+# "port link-type access" para contestar el prompt "Continue?[Y/N]" que VRP
+# muestra SOLO cuando el puerto venía de trunk con VLANs asignadas. Cuando
+# el puerto no tenía nada que perder ese prompt no aparece, y la "y" se
+# manda como comando suelto -- VRP la rechaza con "Unrecognized command"
+# (inofensivo: el resto del bloque, "port default vlan"/"commit", se sigue
+# mandando y aplica bien). Sin este filtro, ``_tiene_error()`` -- que mira
+# TODO el stdout, no comando por comando -- marcaba el bloque entero como
+# fallido (rc=1) por un artefacto de nuestro propio placeholder, no un
+# rechazo real del device. Mismo bug, mismo criterio que
+# ``Orquestador._PATRONES_RUIDO_BENIGNO`` (orquestador.py) -- ahí se
+# filtra para no clasificar mal el error; acá hace falta filtrarlo TAMBIÉN
+# porque el rc ya se decide antes de que ese código lo vea.
+_RUIDO_BENIGNO_RE = re.compile(
+    r"\]y\r?\n\s*\^\r?\nError: Unrecognized command found at '\^' position\.", re.IGNORECASE,
+)
+
 
 def _tiene_error(texto: str) -> bool:
-    return bool(_ERROR_RE.search(texto or ""))
+    texto = _RUIDO_BENIGNO_RE.sub("", texto or "")
+    return bool(_ERROR_RE.search(texto))
 
 
 _AGENT_LINE_RE = re.compile(r"(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);")

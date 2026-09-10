@@ -388,6 +388,519 @@ class Puerto:
             return self._resolver_poe(device, actual)
         raise ValueError(f"Puerto.resolver_paso(): no hay driver call para el campo {campo!r}")
 
+    def resolver_rollback(
+        self, pre_state: dict, device: "Device", actual_ahora: "Puerto | None" = None,
+    ) -> "tuple[list, Any]":
+        """Versión "plan" de un futuro rollback single-recurso -- devuelve
+        ``(pasos, verificar)`` sin tocar el device, para que
+        ``Orquestador._rollback_lote()`` la use polimórficamente igual que
+        ``resolver_paso()`` (sin ``if tipo == "puerto"``, ver
+        ``RecursoGestionable.resolver_rollback``).
+
+        - ``pasos``: lista de ``(op_key, variant, vars)``, lista para
+          batching con ``driver.aplicar_lote()``. Vacía = no-op.
+        - ``verificar``: closure que recibe el ``actual`` post-rollback y
+          devuelve bool. ``None`` = confiar en el rc del driver.
+
+        ``actual_ahora`` -- Puerto no lo necesita (todos sus branches
+        derivan puramente de ``pre_state``), a diferencia de ``SVI`` --
+        se acepta igual para que ``_rollback_lote()`` pueda llamar el
+        mismo método con la misma firma en cualquier tipo de recurso."""
+        if not pre_state.get("existed"):
+            return [], None
+        anterior = pre_state.get("actual")
+        if anterior is None:
+            return [], None
+
+        if self.reset:
+            return self._resolver_rollback_reset(anterior, device)
+
+        campos = self.mutation_fields
+        paso = None
+
+        if self.mode in ("access", "trunk"):
+            if anterior.mode == "access":
+                if anterior.access_vlan is None:
+                    return [], None
+                paso = device.driver.resolver_set_access_mode(self.interface, int(anterior.access_vlan))
+            elif anterior.mode == "trunk":
+                if anterior.access_vlan is None or not anterior.allowed_vlans:
+                    return [], None
+                paso = device.driver.resolver_set_trunk_mode(
+                    self.interface, int(anterior.access_vlan), list(anterior.allowed_vlans),
+                )
+            else:
+                return [], None
+        else:
+            campo = next(iter(campos))
+            if campo == "description":
+                valor = anterior.description or ""
+                paso = device.driver.resolver_update_port_description(self.interface, valor)
+            elif campo == "admin_up":
+                if anterior.admin_up is None:
+                    return [], None
+                paso = device.driver.resolver_set_port_admin_state(self.interface, bool(anterior.admin_up))
+            elif campo == "access_vlan":
+                if anterior.access_vlan is None:
+                    return [], None
+                if anterior.mode == "trunk":
+                    paso = device.driver.resolver_set_trunk_pvid_vlan(self.interface, int(anterior.access_vlan))
+                else:
+                    paso = device.driver.resolver_set_port_access_vlan(self.interface, int(anterior.access_vlan))
+            elif campo == "allowed_vlans":
+                if not anterior.allowed_vlans:
+                    return [], None
+                paso = device.driver.resolver_set_trunk_allowed_vlans(self.interface, list(anterior.allowed_vlans))
+            elif campo == "poe_enabled":
+                # Reader gap -- mismo criterio documentado en el resto de
+                # la clase para este campo.
+                if anterior.poe_enabled is None:
+                    return [], None
+                paso = device.driver.resolver_set_port_poe(self.interface, bool(anterior.poe_enabled))
+            elif campo in ("storm_control_enabled", "storm_control_threshold"):
+                if anterior.storm_control_enabled is None:
+                    return [], None
+                threshold_previo = (
+                    int(anterior.storm_control_threshold)
+                    if anterior.storm_control_threshold is not None else 0
+                )
+                paso = device.driver.resolver_set_storm_control(
+                    self.interface, bool(anterior.storm_control_enabled), threshold_previo,
+                )
+            else:
+                return [], None
+
+        return [paso], self._verificar_rollback(anterior, campos)
+
+    def _resolver_rollback_reset(self, anterior: "Any", device: "Device") -> "tuple[list, Any]":
+        """Versión "plan" del rollback de ``self.reset`` -- devuelve la
+        lista de N pasos que hay que mandar para reconstruir la config
+        anterior (mode+vlan, description, admin_up, storm-control) sin
+        tocar el device. PoE queda fuera por el reader gap conocido."""
+        pasos = []
+        if anterior.mode == "access" and anterior.access_vlan is not None:
+            pasos.append(device.driver.resolver_set_access_mode(
+                self.interface, int(anterior.access_vlan),
+            ))
+        elif anterior.mode == "trunk" and anterior.access_vlan is not None and anterior.allowed_vlans:
+            pasos.append(device.driver.resolver_set_trunk_mode(
+                self.interface, int(anterior.access_vlan), list(anterior.allowed_vlans),
+            ))
+        if anterior.description is not None:
+            pasos.append(device.driver.resolver_update_port_description(
+                self.interface, anterior.description,
+            ))
+        if anterior.admin_up is not None:
+            pasos.append(device.driver.resolver_set_port_admin_state(
+                self.interface, bool(anterior.admin_up),
+            ))
+        if anterior.storm_control_enabled is not None:
+            threshold_previo = (
+                int(anterior.storm_control_threshold)
+                if anterior.storm_control_threshold is not None else 0
+            )
+            pasos.append(device.driver.resolver_set_storm_control(
+                self.interface, bool(anterior.storm_control_enabled), threshold_previo,
+            ))
+
+        def verificar(actual):
+            if actual is None:
+                return False
+            comparaciones = (
+                ("description", anterior.description),
+                ("admin_up", anterior.admin_up),
+                ("mode", anterior.mode),
+                ("access_vlan", anterior.access_vlan),
+                ("storm_control_enabled", anterior.storm_control_enabled),
+            )
+            for campo_ver, ant_val in comparaciones:
+                if ant_val is None:
+                    continue
+                act_val = getattr(actual, campo_ver, None)
+                if act_val is None:
+                    continue  # reader gap
+                if act_val != ant_val:
+                    return False
+            if anterior.allowed_vlans:
+                if set(actual.allowed_vlans or []) != set(anterior.allowed_vlans):
+                    return False
+            return True
+
+        return pasos, verificar
+
+    @staticmethod
+    def _verificar_rollback(anterior: "Any", campos: "set[str]"):
+        """Closure de verificación campo-por-campo con la misma lenientud
+        para reader gaps que el resto de la clase (act_val=None con
+        ant_val=/=None -> no falla, se confía en el rc del driver)."""
+        def verificar(actual):
+            if actual is None:
+                return False
+            for c in campos:
+                if not hasattr(anterior, c):
+                    continue
+                act_val = getattr(actual, c)
+                ant_val = getattr(anterior, c)
+                if act_val is None and ant_val is not None:
+                    continue
+                if act_val != ant_val:
+                    return False
+            return True
+        return verificar
+
+    def ejecutar_rollback(self, pre_state: dict, device: "Device") -> "tuple[bool, Any]":
+        """Ver ``VLAN.ejecutar_rollback``/``SVI.ejecutar_rollback`` --
+        mismo criterio de polimorfismo (``Orquestador._rollback()`` llama
+        a esto sin saber que existe ``Puerto``), pero esta versión
+        EJECUTA contra el device de inmediato (a diferencia de
+        ``resolver_rollback()``, que solo arma el plan para el camino
+        batcheado) -- usada por el rollback single-recurso de
+        ``ejecutar()``.
+
+        Ramas explícitas, calzadas 1 a 1 con el dispatch de ``aplicar()``
+        (``self.reset`` -> ``self.mode`` -> storm-control -> campo
+        único) -- cada campo tiene su propia rama para que un batch que
+        falla a mitad de camino revierta exactamente lo que sí llegó a
+        aplicarse, no solo el subconjunto que un ``else`` genérico
+        reconoce.
+
+        Guards de "reader gap" para PoE (``port_parser.py:140/708``
+        hardcodean ``poe_enabled=None`` -- el device se puede escribir
+        pero no leer todavía): si ``anterior.<campo>`` no vino del
+        reader, retornamos ``(False, None)`` en vez de intentar un
+        rollback ciego contra un valor que no conocemos. Storm-control SÍ
+        se lee (``port_parser.py:135``/``:705``), así que ese path sí
+        revierte end-to-end contra un valor real."""
+        if not pre_state.get("existed"):
+            return False, None
+        anterior = pre_state.get("actual")
+        if anterior is None:
+            return False, None
+
+        # ``self.reset`` es exclusivo con el resto de los campos (ver
+        # ``validar()``) -- tratado antes que ``self.mode`` para evitar
+        # el ``next(iter(campos))`` sobre un ``mutation_fields`` vacío
+        # (reset no cuenta como mutation_field, es un flag aparte).
+        if self.reset:
+            return self._ejecutar_rollback_reset(anterior, device)
+
+        campos = self.mutation_fields
+        try:
+            if self.mode in ("access", "trunk"):
+                # aplicar() cambió el modo del puerto -- restaurar significa
+                # devolverlo al modo/VLAN que tenía ANTES, que puede ser
+                # distinto al que se acaba de aplicar (venía de trunk y se
+                # cambió a access, o viceversa).
+                if anterior.mode == "access":
+                    if anterior.access_vlan is None:
+                        return False, None
+                    resultado = device.driver.set_access_mode(self.interface, int(anterior.access_vlan), device, device.password)
+                elif anterior.mode == "trunk":
+                    if anterior.access_vlan is None or not anterior.allowed_vlans:
+                        return False, None
+                    resultado = device.driver.set_trunk_mode(
+                        self.interface, int(anterior.access_vlan), list(anterior.allowed_vlans),
+                        device, device.password,
+                    )
+                else:
+                    # modo previo desconocido/no reconocido -- no hay forma
+                    # segura de reconstruirlo.
+                    return False, None
+                exitoso = resultado.get("rc", 1) == 0
+            elif "storm_control_enabled" in campos:
+                # Mismo criterio que la rama de "mode" arriba -- 2+ campos
+                # (storm_control_enabled/threshold, y action/trap aunque
+                # esos 2 no sean mutation_fields) se aplican juntos en 1
+                # solo comando, así que se revierten juntos también.
+                if anterior.storm_control_enabled is None:
+                    return False, None
+                # enabled=True con threshold=None es un estado real y
+                # documentado (config preexistente en pps/bps, no percent
+                # -- ver storm_control_threshold), no "desconocido". Sin
+                # este guard, bool(True) elegía la variante "enabled" y
+                # mandaba threshold=None derecho al device -- VRP lo
+                # interpola literal como "percent None", comando basura
+                # que el device rechaza como "Unrecognized command". No
+                # hay forma segura de restaurar un valor que nunca se
+                # pudo leer en la unidad que nuestro write path entiende
+                # (percent) -- mismo criterio que el guard de arriba.
+                if anterior.storm_control_enabled and anterior.storm_control_threshold is None:
+                    return False, None
+                resultado = device.driver.set_storm_control(
+                    self.interface, bool(anterior.storm_control_enabled), anterior.storm_control_threshold,
+                    anterior.storm_control_action or "shutdown",
+                    anterior.storm_control_trap if anterior.storm_control_trap is not None else True,
+                    device, device.password,
+                )
+                exitoso = resultado.get("rc", 1) == 0
+            else:
+                campo = next(iter(campos))
+                if campo == "description":
+                    valor = anterior.description or ""
+                    resultado = device.driver.update_port_description(self.interface, valor, device, device.password)
+                    exitoso = resultado.get("rc", 1) == 0
+                elif campo == "admin_up":
+                    if anterior.admin_up is None:
+                        return False, None
+                    resultado = device.driver.set_port_admin_state(self.interface, bool(anterior.admin_up), device, device.password)
+                    exitoso = resultado.get("rc", 1) == 0
+                elif campo == "access_vlan":
+                    if anterior.access_vlan is None:
+                        return False, None
+                    if anterior.mode == "trunk":
+                        resultado = device.driver.set_trunk_pvid_vlan(self.interface, int(anterior.access_vlan), device, device.password)
+                    else:
+                        resultado = device.driver.set_port_access_vlan(self.interface, int(anterior.access_vlan), device, device.password)
+                    exitoso = resultado.get("rc", 1) == 0
+                elif campo == "allowed_vlans":
+                    if not anterior.allowed_vlans:
+                        return False, None
+                    resultado = device.driver.set_trunk_allowed_vlans(self.interface, list(anterior.allowed_vlans), device, device.password)
+                    exitoso = resultado.get("rc", 1) == 0
+                elif campo == "poe_enabled":
+                    # Reader gap: ``poe_enabled`` no se lee todavía (ver
+                    # docstring del método). Sin valor previo real no
+                    # tiene sentido inventar un rollback -- devolver
+                    # ``(False, None)`` es consistente con "no hay nada
+                    # que restaurar" (mismo shape que devuelve la rama
+                    # ``admin_up`` cuando ``anterior.admin_up is None``).
+                    # Cuando el parser aprenda a leer PoE (agregando un
+                    # 4to comando en ``list_ports``), este branch va a
+                    # empezar a funcionar sin cambios acá.
+                    if anterior.poe_enabled is None:
+                        return False, None
+                    resultado = device.driver.set_port_poe(
+                        self.interface, bool(anterior.poe_enabled), device, device.password,
+                    )
+                    exitoso = resultado.get("rc", 1) == 0
+                elif campo in ("storm_control_enabled", "storm_control_threshold"):
+                    # ``expandir_a_puertos`` siempre agrupa storm-control
+                    # como enabled+threshold en un solo ``Puerto`` (ver
+                    # ``api/ports.py``), así que ambos campos viajan
+                    # juntos y ``anterior`` los tiene ambos legibles. Si
+                    # el reader no pudo capturar el estado previo (device
+                    # sin storm-control soportado -- ``storm_control_*``
+                    # quedan en ``None``), no revertimos.
+                    if anterior.storm_control_enabled is None:
+                        return False, None
+                    threshold_previo = (
+                        int(anterior.storm_control_threshold)
+                        if anterior.storm_control_threshold is not None else 0
+                    )
+                    resultado = device.driver.set_storm_control(
+                        self.interface, bool(anterior.storm_control_enabled),
+                        threshold_previo, device, device.password,
+                    )
+                    exitoso = resultado.get("rc", 1) == 0
+                else:
+                    return False, None
+        except Exception:
+            return True, False
+
+        if not exitoso:
+            return True, False
+
+        try:
+            puertos = device.driver.list_ports(device, device.password)
+            actual = next((p for p in puertos if p.interface == self.interface), None)
+            if actual is None:
+                verificado = False
+            else:
+                # Verificación campo por campo -- con lenientud para el
+                # caso "reader gap" (``actual.<campo> is None`` cuando el
+                # parser no lee ese campo todavía, ej. PoE): confiar en
+                # el ``rc=0`` del driver que ya validamos arriba es mejor
+                # que reportar ``rollback_success=false`` por un campo
+                # que sabemos que no se lee.
+                verificado = True
+                for c in campos:
+                    if not hasattr(anterior, c):
+                        continue
+                    act_val = getattr(actual, c)
+                    ant_val = getattr(anterior, c)
+                    if act_val is None and ant_val is not None:
+                        continue  # reader gap -- no falla la verificación
+                    if act_val != ant_val:
+                        verificado = False
+                        break
+        except Exception:
+            verificado = False
+        return True, verificado
+
+    def _ejecutar_rollback_reset(self, anterior: "Any", device: "Device") -> "tuple[bool, Any]":
+        """Rollback de ``self.reset`` -- reset devuelve el puerto a
+        defaults (``default interface`` en Cisco, ``clear configuration
+        interface`` en Huawei), así que revertir significa reconstruir la
+        config anterior desde ``pre_state.actual``, campo por campo. Es
+        la única rama con múltiples llamadas al driver -- todas las demás
+        son 1 campo, 1 llamada. Si ALGUNA subllamada falla, seguimos
+        igual con las restantes (idea: dejar el puerto lo más cerca del
+        estado anterior que se pueda) y reportamos ``(True, False)`` al
+        final. PoE no se restaura -- reader gap conocido (ver rama
+        ``poe_enabled`` de ``ejecutar_rollback()``); cuando el parser
+        aprenda a leerlo, agregar acá el ``set_port_poe(anterior.poe_enabled)``."""
+        ok = True
+
+        def _correr(fn, *args):
+            nonlocal ok
+            try:
+                r = fn(*args, device, device.password)
+                if r.get("rc", 1) != 0:
+                    ok = False
+            except Exception:
+                ok = False
+
+        # Mode + VLAN(s) -- restaurar antes que el resto porque un cambio
+        # de modo pisa description/admin/etc. en muchos dispositivos.
+        if anterior.mode == "access" and anterior.access_vlan is not None:
+            _correr(device.driver.set_access_mode, self.interface, int(anterior.access_vlan))
+        elif anterior.mode == "trunk" and anterior.access_vlan is not None and anterior.allowed_vlans:
+            _correr(
+                device.driver.set_trunk_mode, self.interface,
+                int(anterior.access_vlan), list(anterior.allowed_vlans),
+            )
+
+        if anterior.description is not None:
+            _correr(device.driver.update_port_description, self.interface, anterior.description)
+
+        if anterior.admin_up is not None:
+            _correr(device.driver.set_port_admin_state, self.interface, bool(anterior.admin_up))
+
+        if anterior.storm_control_enabled is not None:
+            threshold_previo = (
+                int(anterior.storm_control_threshold)
+                if anterior.storm_control_threshold is not None else 0
+            )
+            _correr(
+                device.driver.set_storm_control, self.interface,
+                bool(anterior.storm_control_enabled), threshold_previo,
+            )
+
+        # Verificación final -- misma lenientud que ``ejecutar_rollback``
+        # (reader gap = campo tolerado si volvemos a leerlo como None).
+        try:
+            puertos = device.driver.list_ports(device, device.password)
+            actual = next((p for p in puertos if p.interface == self.interface), None)
+            if actual is None:
+                return True, False
+            verificado = True
+            comparaciones = (
+                ("description", anterior.description),
+                ("admin_up", anterior.admin_up),
+                ("mode", anterior.mode),
+                ("access_vlan", anterior.access_vlan),
+                ("storm_control_enabled", anterior.storm_control_enabled),
+            )
+            for campo, ant_val in comparaciones:
+                if ant_val is None:
+                    continue
+                act_val = getattr(actual, campo, None)
+                if act_val is None:
+                    continue  # reader gap
+                if act_val != ant_val:
+                    verificado = False
+                    break
+            if verificado and anterior.allowed_vlans:
+                actuales = set(actual.allowed_vlans or [])
+                if actuales != set(anterior.allowed_vlans):
+                    verificado = False
+        except Exception:
+            verificado = False
+        return True, ok and verificado
+
+    def resolver_restore(self, device: "Device", actual_ahora: "Puerto | None" = None) -> "tuple[list, Any]":
+        """Pasos para restaurar TODO campo legible de este puerto al valor
+        de ``self`` (usado como snapshot) -- forma más agresiva que
+        ``ejecutar_rollback()``/``resolver_rollback()`` (que solo
+        revierten el campo que el request original había cambiado).
+        Usado por ``Orquestador.retry_rollback()``: el pre_state guardado
+        es la única fuente de verdad, así que restauramos todo lo que se
+        pueda leer, no solo el campo específico.
+
+        PoE queda fuera -- reader gap conocido (``port_parser.py:140``/
+        ``:708`` hardcodean ``None``). Si ``self`` dice
+        ``poe_enabled=True/False`` no es info real, es siempre ``None``
+        y sería intentar restaurar contra un valor inventado.
+
+        Filtrado por ``actual_ahora``: si viene, se saltean campos que
+        ya coinciden (device ya restaurado por otra vía -- consola,
+        otro job, retry previo). Si es ``None`` (fresh read falló), se
+        mandan TODOS los pasos -- degradación segura, peor caso son
+        comandos idempotentes que no cambian nada, no incorrección.
+
+        Devuelve ``(pasos, verificar)`` -- mismo shape que
+        ``resolver_rollback()``, para que ``retry_rollback()`` pueda
+        verificar cada recurso individualmente después de un apply
+        exitoso (mismo criterio en 2 fases que ``Orquestador._rollback_lote()``:
+        fase 1, si el apply mismo falla, no hay señal para distinguir
+        per-recurso; fase 2, si el apply confirma rc=0, se relee 1 vez
+        batcheado y se verifica cada uno con SU PROPIA closure)."""
+        pasos = []
+        if self.mode == "access" and self.access_vlan is not None:
+            if actual_ahora is None or (
+                actual_ahora.mode != "access"
+                or actual_ahora.access_vlan != self.access_vlan
+            ):
+                pasos.append(device.driver.resolver_set_access_mode(
+                    self.interface, int(self.access_vlan),
+                ))
+        elif self.mode == "trunk" and self.access_vlan is not None and self.allowed_vlans:
+            if actual_ahora is None or (
+                actual_ahora.mode != "trunk"
+                or actual_ahora.access_vlan != self.access_vlan
+                or set(actual_ahora.allowed_vlans or []) != set(self.allowed_vlans)
+            ):
+                pasos.append(device.driver.resolver_set_trunk_mode(
+                    self.interface, int(self.access_vlan), list(self.allowed_vlans),
+                ))
+        if self.description is not None:
+            if actual_ahora is None or actual_ahora.description != self.description:
+                pasos.append(device.driver.resolver_update_port_description(
+                    self.interface, self.description,
+                ))
+        if self.admin_up is not None:
+            if actual_ahora is None or actual_ahora.admin_up != self.admin_up:
+                pasos.append(device.driver.resolver_set_port_admin_state(
+                    self.interface, bool(self.admin_up),
+                ))
+        if self.storm_control_enabled is not None:
+            threshold = (
+                int(self.storm_control_threshold)
+                if self.storm_control_threshold is not None else 0
+            )
+            if actual_ahora is None or (
+                actual_ahora.storm_control_enabled != self.storm_control_enabled
+                or actual_ahora.storm_control_threshold != self.storm_control_threshold
+            ):
+                pasos.append(device.driver.resolver_set_storm_control(
+                    self.interface, bool(self.storm_control_enabled), threshold,
+                ))
+
+        def verificar(actual):
+            if actual is None:
+                return False
+            comparaciones = (
+                ("description", self.description),
+                ("admin_up", self.admin_up),
+                ("mode", self.mode),
+                ("access_vlan", self.access_vlan),
+                ("storm_control_enabled", self.storm_control_enabled),
+            )
+            for campo, val in comparaciones:
+                if val is None:
+                    continue
+                act_val = getattr(actual, campo, None)
+                if act_val is None:
+                    continue  # reader gap
+                if act_val != val:
+                    return False
+            if self.allowed_vlans:
+                if set(actual.allowed_vlans or []) != set(self.allowed_vlans):
+                    return False
+            return True
+
+        return pasos, verificar
+
     def _aplicar_modo_access(self, device: "Device") -> dict:
         """Cambia el puerto a modo access con ``self.access_vlan``,
         atómico -- reemplaza la rama ``_es_composite`` vieja para este caso

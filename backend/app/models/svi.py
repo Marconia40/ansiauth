@@ -242,6 +242,91 @@ class SVI:
             return self._resolver_ipv4_secondary_remove(device, actual)
         raise ValueError(f"SVI.resolver_paso(): campo no batcheable {campo!r}")
 
+    # Le dice a ``Orquestador._rollback_lote()`` que necesita 1
+    # ``reconciliar_lote()`` EXTRA (estado post-apply-fallido) antes de
+    # poder planear su rollback -- ver ``resolver_rollback()`` más abajo,
+    # los 3 campos que lo piden. Mismo mecanismo opcional-por-atributo que
+    # ya usa ``ajustar_estados_lote`` (``getattr(cls, ..., False)`` en vez
+    # de que el orquestador pregunte "sos una SVI?"). ``Puerto`` no lo
+    # declara -- default ``False``, todos sus branches derivan de
+    # ``pre_state`` solo.
+    NECESITA_ESTADO_FRESCO_ROLLBACK = True
+
+    def resolver_rollback(
+        self, pre_state: dict, device: "Device", actual_ahora: "SVI | None" = None,
+    ) -> "tuple[list, Any]":
+        """Versión "plan" de un futuro rollback single-recurso -- devuelve
+        ``(pasos, verificar)`` sin tocar el device, para que
+        ``Orquestador._rollback_lote()`` la use polimórficamente igual que
+        ``resolver_paso()`` (sin ``if tipo == "svi"``, ver
+        ``RecursoGestionable.resolver_rollback``).
+
+        Acepta ``actual_ahora`` para los 3 campos que necesitan el estado
+        POST-apply-fallido del device para construir su comando de revert
+        (``ipv4_address_secondary``, ``acl_in``, ``acl_out``) -- mismo
+        motivo por el que ``_resolver_ipv4_secondary_add/_remove()`` lo
+        piden vía ``actual`` en el camino normal. Si el orquestador no
+        pudo leer el estado fresco (``actual_ahora=None``, ver
+        ``NECESITA_ESTADO_FRESCO_ROLLBACK`` arriba), esos 3 se degradan a
+        no-op -- mejor no revertir que mandar un comando basado en info
+        stale."""
+        if not pre_state.get("existed"):
+            return [], None
+        anterior = pre_state.get("actual")
+        if anterior is None:
+            return [], None
+
+        campos = self.mutation_fields
+        if len(campos) != 1:
+            return [], None
+        campo = next(iter(campos))
+        paso = None
+
+        if campo == "description":
+            paso = device.driver.resolver_set_svi_description(
+                self.vlan_id, anterior.description or "",
+            )
+        elif campo == "admin_up":
+            if anterior.admin_up is None:
+                return [], None
+            paso = device.driver.resolver_set_svi_admin_state(
+                self.vlan_id, bool(anterior.admin_up),
+            )
+        elif campo == "ipv4_address":
+            paso = device.driver.resolver_set_svi_ipv4(self.vlan_id, anterior.ipv4_address)
+        elif campo == "ipv4_address_secondary":
+            if actual_ahora is None:
+                return [], None
+            previa = actual_ahora.ipv4_address_secondary
+            paso = device.driver.resolver_set_svi_ipv4_secondary(
+                self.vlan_id, anterior.ipv4_address_secondary, previa,
+            )
+        elif campo == "ipv6_address":
+            paso = device.driver.resolver_set_svi_ipv6(self.vlan_id, anterior.ipv6_address)
+        elif campo in ("acl_in", "acl_out"):
+            if actual_ahora is None:
+                return [], None
+            current_acl = getattr(actual_ahora, campo)
+            direccion = "in" if campo == "acl_in" else "out"
+            paso = device.driver.resolver_set_svi_acl(
+                self.vlan_id, direccion, getattr(anterior, campo), current_acl_name=current_acl,
+            )
+        elif campo in ("dhcp_relay_add", "dhcp_relay_remove"):
+            paso = device.driver.resolver_set_svi_dhcp_relay(
+                self.vlan_id, list(anterior.dhcp_relay_servers or []),
+            )
+        else:
+            return [], None
+
+        def verificar(actual):
+            if actual is None:
+                return False
+            if campo in ("dhcp_relay_add", "dhcp_relay_remove"):
+                return set(actual.dhcp_relay_servers or []) == set(anterior.dhcp_relay_servers or [])
+            return getattr(actual, campo) == getattr(anterior, campo)
+
+        return [paso], verificar
+
     def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """Mismo criterio que ``VLAN.aplicar()``/``Puerto.aplicar()``: el
         dict devuelto siempre incluye "accion", agregado acá, no por el
@@ -515,6 +600,196 @@ class SVI:
         op_key, variant, vars = paso
         resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "eliminar_dhcp_relay_svi"}
+
+    def ejecutar_rollback(self, pre_state: dict, device: "Device") -> "tuple[bool, Any]":
+        """Ver ``VLAN.ejecutar_rollback``/``Puerto.ejecutar_rollback`` --
+        mismo criterio de polimorfismo (``Orquestador._rollback()`` llama
+        a esto sin saber que existe ``SVI``), pero esta versión EJECUTA
+        contra el device de inmediato (a diferencia de
+        ``resolver_rollback()``, que solo arma el plan para el camino
+        batcheado) -- usada por el rollback single-recurso de
+        ``ejecutar()``. Mismo criterio que ``Puerto.ejecutar_rollback()``
+        (exactamente 1 campo de mutación por instancia, restaura contra
+        ``pre_state.actual``, verifica releyendo después).
+
+        ``acl_in``/``acl_out`` necesitan el valor ACTUAL del device (no el
+        de *pre_state*) para armar su "undo" -- mismo motivo que
+        ``_resolver_acl()`` lo pide vía ``actual`` en el camino normal,
+        acá se relee 1 vez con ``self.reconciliar(device)`` en vez de
+        asumir que *pre_state* sigue vigente. ``ipv4_secondary_add``/
+        ``_remove`` NO necesitan esto -- a diferencia del viejo campo de
+        valor único, cada op ya sabe exactamente qué IP puntual agregar/
+        sacar, sin depender de una lectura fresca del resto de la
+        lista."""
+        if not pre_state.get("existed"):
+            return False, None
+        anterior = pre_state.get("actual")
+        if anterior is None:
+            return False, None
+
+        campos = self.mutation_fields
+        if len(campos) != 1:
+            return False, None
+        campo = next(iter(campos))
+        try:
+            if campo == "description":
+                resultado = device.driver.set_svi_description(
+                    self.vlan_id, anterior.description or "", device, device.password,
+                )
+            elif campo == "admin_up":
+                if anterior.admin_up is None:
+                    return False, None
+                resultado = device.driver.set_svi_admin_state(
+                    self.vlan_id, bool(anterior.admin_up), device, device.password,
+                )
+            elif campo == "ipv4_address":
+                resultado = device.driver.set_svi_ipv4(
+                    self.vlan_id, anterior.ipv4_address, device, device.password,
+                )
+            elif campo == "ipv4_secondary_add":
+                # Revertir un add es sacar esa IP puntual -- a diferencia de
+                # dhcp_relay (full-replace), el comando es aditivo/quitable
+                # por dirección, así que no hace falta releer el device con
+                # reconciliar() para saber qué tocar (ver ipv4_address_secondary).
+                resultado = device.driver.set_svi_ipv4_secondary(
+                    self.vlan_id, None, self.ipv4_secondary_add, device, device.password,
+                )
+            elif campo == "ipv4_secondary_remove":
+                resultado = device.driver.set_svi_ipv4_secondary(
+                    self.vlan_id, self.ipv4_secondary_remove, None, device, device.password,
+                )
+            elif campo == "ipv6_address":
+                resultado = device.driver.set_svi_ipv6(
+                    self.vlan_id, anterior.ipv6_address, device, device.password,
+                )
+            elif campo in ("acl_in", "acl_out"):
+                actual_ahora = self.reconciliar(device).get("actual")
+                current_acl = getattr(actual_ahora, campo) if actual_ahora is not None else None
+                direccion = "in" if campo == "acl_in" else "out"
+                resultado = device.driver.set_svi_acl(
+                    self.vlan_id, direccion, getattr(anterior, campo), device, device.password,
+                    current_acl_name=current_acl,
+                )
+            elif campo in ("dhcp_relay_add", "dhcp_relay_remove"):
+                resultado = device.driver.set_svi_dhcp_relay(
+                    self.vlan_id, list(anterior.dhcp_relay_servers or []), device, device.password,
+                )
+            else:
+                return False, None
+            exitoso = resultado.get("rc", 1) == 0
+        except Exception:
+            return True, False
+
+        if not exitoso:
+            return True, False
+
+        try:
+            actual_final = self.reconciliar(device).get("actual")
+            if actual_final is None:
+                verificado = False
+            elif campo in ("dhcp_relay_add", "dhcp_relay_remove"):
+                verificado = set(actual_final.dhcp_relay_servers or []) == set(anterior.dhcp_relay_servers or [])
+            elif campo in ("ipv4_secondary_add", "ipv4_secondary_remove"):
+                verificado = (
+                    set(actual_final.ipv4_address_secondary or [])
+                    == set(anterior.ipv4_address_secondary or [])
+                )
+            else:
+                verificado = getattr(actual_final, campo) == getattr(anterior, campo)
+        except Exception:
+            verificado = False
+        return True, verificado
+
+    def resolver_restore(self, device: "Device", actual_ahora: "SVI | None" = None) -> "tuple[list, Any]":
+        """Pasos para restaurar TODO campo legible de esta SVI al valor de
+        ``self`` (usado como snapshot). Same shape que
+        ``Puerto.resolver_restore()`` -- acepta ``actual_ahora`` para (a)
+        resolver 3 campos que lo necesitan (``ipv4_address_secondary``/
+        ``acl_in``/``acl_out``) y (b) saltear campos que ya coinciden con
+        el estado del device. Si ``actual_ahora`` es ``None`` (fresh read
+        falló) los 3 campos que lo REQUIEREN se saltean; los demás se
+        mandan sin filtro.
+
+        Devuelve ``(pasos, verificar)`` -- mismo shape/motivo que
+        ``Puerto.resolver_restore()``: le permite a
+        ``Orquestador.retry_rollback()`` verificar cada recurso
+        individualmente tras un apply exitoso, mismo criterio en 2 fases
+        que ``_rollback_lote()``."""
+        pasos = []
+        if self.description is not None:
+            if actual_ahora is None or actual_ahora.description != self.description:
+                pasos.append(device.driver.resolver_set_svi_description(
+                    self.vlan_id, self.description,
+                ))
+        if self.admin_up is not None:
+            if actual_ahora is None or actual_ahora.admin_up != self.admin_up:
+                pasos.append(device.driver.resolver_set_svi_admin_state(
+                    self.vlan_id, bool(self.admin_up),
+                ))
+        if self.ipv4_address is not None:
+            if actual_ahora is None or actual_ahora.ipv4_address != self.ipv4_address:
+                pasos.append(device.driver.resolver_set_svi_ipv4(
+                    self.vlan_id, self.ipv4_address,
+                ))
+        if self.ipv6_address is not None:
+            if actual_ahora is None or actual_ahora.ipv6_address != self.ipv6_address:
+                pasos.append(device.driver.resolver_set_svi_ipv6(
+                    self.vlan_id, self.ipv6_address,
+                ))
+        if self.dhcp_relay_servers:
+            if actual_ahora is None or (
+                set(actual_ahora.dhcp_relay_servers or []) != set(self.dhcp_relay_servers)
+            ):
+                pasos.append(device.driver.resolver_set_svi_dhcp_relay(
+                    self.vlan_id, list(self.dhcp_relay_servers),
+                ))
+        # Campos que REQUIEREN actual_ahora para el resolver -- si no
+        # tenemos fresh read (None), se saltean por seguridad.
+        if actual_ahora is not None:
+            if self.ipv4_address_secondary is not None:
+                if actual_ahora.ipv4_address_secondary != self.ipv4_address_secondary:
+                    pasos.append(device.driver.resolver_set_svi_ipv4_secondary(
+                        self.vlan_id, self.ipv4_address_secondary,
+                        actual_ahora.ipv4_address_secondary,
+                    ))
+            if self.acl_in is not None:
+                if actual_ahora.acl_in != self.acl_in:
+                    pasos.append(device.driver.resolver_set_svi_acl(
+                        self.vlan_id, "in", self.acl_in,
+                        current_acl_name=actual_ahora.acl_in,
+                    ))
+            if self.acl_out is not None:
+                if actual_ahora.acl_out != self.acl_out:
+                    pasos.append(device.driver.resolver_set_svi_acl(
+                        self.vlan_id, "out", self.acl_out,
+                        current_acl_name=actual_ahora.acl_out,
+                    ))
+
+        def verificar(actual):
+            if actual is None:
+                return False
+            comparaciones = (
+                ("description", self.description),
+                ("admin_up", self.admin_up),
+                ("ipv4_address", self.ipv4_address),
+                ("ipv6_address", self.ipv6_address),
+                ("acl_in", self.acl_in),
+                ("acl_out", self.acl_out),
+            )
+            for campo, val in comparaciones:
+                if val is None:
+                    continue
+                if getattr(actual, campo, None) != val:
+                    return False
+            if self.dhcp_relay_servers:
+                if set(actual.dhcp_relay_servers or []) != set(self.dhcp_relay_servers):
+                    return False
+            if self.ipv4_address_secondary is not None:
+                if actual.ipv4_address_secondary != self.ipv4_address_secondary:
+                    return False
+            return True
+
+        return pasos, verificar
 
     def repositorio(self) -> str:
         return "svi"

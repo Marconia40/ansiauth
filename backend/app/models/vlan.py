@@ -165,6 +165,49 @@ class VLAN:
         resultado = device.driver.create_vlan(self.vlan_id, self.name, device, device.password)
         return {**resultado, "accion": "crear_vlan"}
 
+    def ejecutar_rollback(self, pre_state: dict, device: "Device") -> "tuple[bool, bool | None]":
+        """Ver ``Puerto.resolver_rollback``/``SVI.resolver_rollback`` --
+        mismo criterio de polimorfismo (``Orquestador._rollback()`` llama
+        a esto sin saber que existe ``VLAN``), pero esta versión EJECUTA
+        contra el device (no es un "plan" batcheable -- VLAN no tiene
+        endpoint de lote, ver ``RecursoGestionable``). Nunca propaga --
+        el único ``try/except`` cubre la llamada al driver; la
+        verificación posterior tiene el suyo propio, separado."""
+        existia = pre_state.get("existed")
+        nombre_previo = pre_state.get("name")
+        try:
+            if self.eliminar:
+                if not existia:
+                    return False, None  # no existía antes -- nada que restaurar
+                resultado = device.driver.create_vlan(self.vlan_id, nombre_previo or self.name, device, device.password)
+            elif existia and nombre_previo != self.name:
+                resultado = device.driver.update_vlan(self.vlan_id, nombre_previo, device, device.password)
+            elif not existia:
+                resultado = device.driver.delete_vlan(self.vlan_id, device, device.password)
+            else:
+                return False, None
+        except Exception:
+            return True, False
+
+        if resultado.get("rc", 1) != 0:
+            return True, False
+
+        try:
+            actuales = device.driver.get_vlans(device, device.password)
+            actual = next((v for v in actuales if v.vlan_id == self.vlan_id), None)
+            if self.eliminar:
+                # se había borrado -- el rollback la recreó, debe volver a existir
+                verificado = actual is not None
+            elif existia and nombre_previo != self.name:
+                # se había renombrado -- el rollback restauró el nombre anterior
+                verificado = actual is not None and actual.name == nombre_previo
+            else:
+                # se había creado -- el rollback la borró, no debe existir más
+                verificado = actual is None
+        except Exception:
+            verificado = False
+        return True, verificado
+
     def repositorio(self) -> str:
         return "vlan"
 

@@ -509,10 +509,24 @@ reset_port:
 
 set_access_mode:
   primary:
+    # "port link-type access" pide confirmación interactiva ("Warning:
+    # This command will delete VLANs on this port. Continue?[Y/N]:") SOLO
+    # cuando el puerto venía de trunk con VLANs asignadas -- bug real
+    # encontrado en vivo contra f3r9s2: sin la "y" de acá, ese prompt se
+    # quedaba sin respuesta, el resto del bloque (`port default vlan`,
+    # `commit`) nunca se mandaba, y la sesión cortaba con un "n" -- el job
+    # terminaba "completed" (rc=0 a nivel transporte) sin haber cambiado
+    # nada en el device. Mismo patrón ya confirmado en vivo para
+    # `reset_port` (ver comentario ahí). Cuando el puerto YA está en
+    # access (o nunca tuvo VLANs que borrar) el prompt no aparece -- la
+    # "y" se manda como comando suelto en el próximo prompt normal, que
+    # VRP rechaza con "Unrecognized command" (texto inofensivo dentro del
+    # mismo bloque, no aborta lo que sigue).
     block:
       - "system-view"
       - "interface {interface}"
       - "port link-type access"
+      - "y"
       - "port default vlan {vlan_id}"
       - "commit"
       - "quit"
@@ -523,6 +537,7 @@ set_access_mode:
         - "system-view"
         - "interface {interface_full}"
         - "port link-type access"
+        - "y"
         - "port default vlan {vlan_id}"
         - "quit"
         - "quit"
@@ -531,6 +546,7 @@ set_access_mode:
         - "system-view"
         - "interface {interface}"
         - "port link-type access"
+        - "y"
         - "port default vlan {vlan_id}"
         - "quit"
         - "quit"
