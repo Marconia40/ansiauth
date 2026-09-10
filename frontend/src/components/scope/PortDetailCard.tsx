@@ -40,10 +40,6 @@ function allowedLabel(port: Port): string {
   return list.join(', ');
 }
 
-function speedLabel(_port: Port): string {
-  return '—';
-}
-
 /** OFF cuando el device confirmó que no hay storm-control; el porcentaje
  * cuando lo hay; ON sin % si el device lo tiene configurado en pps/bps
  * (nuestro write path solo produce percent, esto solo pasa con configs
@@ -91,7 +87,6 @@ export function PortDetailCard({ port, emptyLabel }: Props) {
         <DetailRow label="NATIVE VLAN" value={vlanLabel(port)} />
         <DetailRow label="POE" value={poeLabel(port)} />
         <DetailRow label="SHUTDOWN" value={shutdownLabel(port)} />
-        <DetailRow label="UPLINK" value={speedLabel(port)} />
         <DetailRow
           label="ALLOWED VLANS"
           value={allowedLabel(port)}

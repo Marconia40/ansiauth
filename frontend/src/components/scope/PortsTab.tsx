@@ -207,6 +207,7 @@ export function PortsTab({ scope }: Props) {
         open={openAction === 'reset'}
         onClose={() => setOpenAction(null)}
         selection={selection}
+        portsByDevice={portsByDevice}
         onDone={handleDone}
       />
     </div>

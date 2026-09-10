@@ -38,9 +38,13 @@ _PATRONES_PERMANENTES: tuple[tuple[str, str], ...] = (
     # conflicto de IP real y permanente, mostrado como si fuera un
     # problema de red transitorio. "is assigned to" cubre la otra frase
     # ya vista en vivo esta sesión (Cisco también, forma distinta del
-    # mismo rechazo).
+    # mismo rechazo). "conflicts with" cubre una 3ra variante encontrada
+    # en vivo en Huawei (SVI): "Error: The specified address conflicts
+    # with another address." -- mismo tipo de rechazo (IP ya asignada a
+    # otra interfaz), texto totalmente distinto de las otras 2 formas.
     ("overlaps with", "conflict"),
     ("is assigned to", "conflict"),
+    ("conflicts with", "conflict"),
     ("permission denied", "auth"),
     ("authentication failure", "auth"),
     ("authentication failed", "auth"),
@@ -90,6 +94,23 @@ _PATRONES_PERMANENTES: tuple[tuple[str, str], ...] = (
     ("authenticationexception", "auth"),
     ("badauthenticationtype", "auth"),
     ("partialauthentication", "auth"),
+)
+
+# Ruido benigno que conviene descartar ANTES de clasificar -- bug real
+# encontrado en vivo: al asignar ``switchport access vlan 1050`` sobre una
+# VLAN inexistente, Cisco IOS no rechaza nada -- la crea sola y lo avisa
+# con "% Access VLAN does not exist. Creating vlan 1050" (rc=0, el comando
+# se aplicó). Ese texto contiene el patrón permanente "does not exist"
+# (pensado para el rechazo DURO de Huawei, "Error: The VLAN does not
+# exist"), así que cuando el mismo transcript también traía un problema
+# real de conexión ("Connection ... closed by remote host", transitorio)
+# la nota benigna de Cisco ganaba el match -- el job se clasificaba
+# "permanent" y se le hacía ROLLBACK a un cambio que en realidad SÍ se
+# había aplicado en el device. Se filtra este aviso puntual antes de
+# clasificar en vez de sacar "does not exist" de la tabla (que sigue
+# haciendo falta para el rechazo real de Huawei).
+_RUIDO_BENIGNO_RE = re.compile(
+    r"%\s*access vlan does not exist\.\s*creating vlan\s*\d*", re.IGNORECASE,
 )
 
 _PATRONES_TRANSITORIOS: tuple[tuple[str, str], ...] = (
@@ -890,18 +911,30 @@ class Orquestador:
         else:
             texto = error or ""
         decision = self._clasificar_error({"rc": 1, "stdout": "", "stderr": texto})
-        lowered = texto.lower()
+        # Mismo filtro de ruido benigno que ``_clasificar_error`` -- ese
+        # método lo aplica sobre su propia copia interna de ``combinado``,
+        # no sobre este ``texto``, así que sin repetirlo acá el summary
+        # podía seguir mostrando "Referenced object does not exist..."
+        # para un texto que ``decision`` ya clasificó bien como transient.
+        lowered = _RUIDO_BENIGNO_RE.sub("", texto).lower()
         summary = None
         for patrones, mensaje in _MENSAJES_ERROR:
             if any(p in lowered for p in patrones):
                 summary = mensaje
                 break
         if summary is None:
-            # No matchea ninguna tabla -- honestos, no inventamos. El
-            # ``error`` crudo sigue disponible para debug; ``error_summary``
-            # solo agrega valor cuando de verdad podemos traducir a algo
-            # útil.
-            summary = "Unclassified device or connection error — see raw output for details."
+            # Bug real encontrado en vivo: un patrón de _PATRONES_PERMANENTES/
+            # _PATRONES_TRANSITORIOS puede matchear (dándole a `decision` una
+            # `categoria` real, ej. "conflict") sin que ese mismo texto
+            # matchee TAMBIÉN algún grupo de _MENSAJES_ERROR (tabla
+            # independiente, mantenida a mano aparte) -- caso real: "Error:
+            # The specified address conflicts with another address."
+            # (Huawei SVI) clasificaba bien como permanent/conflict pero
+            # caía al genérico "Unclassified..." en vez de usar esa
+            # categoria. _resumir_error() ya sabe resolver por categoria
+            # antes de caer a un genérico por classification -- se reusa
+            # acá en vez de duplicar la lógica.
+            summary = _resumir_error(decision)
         return {
             "error_type": decision.classification,
             "error_reason": decision.reason,
@@ -917,6 +950,7 @@ class Orquestador:
                 reason=f"ansible rc={resultado.get('rc')}",
             )
         combinado = (resultado.get("stderr") or "") + " " + (resultado.get("stdout") or "")
+        combinado = _RUIDO_BENIGNO_RE.sub("", combinado)
         lowered = combinado.lower()
         for patron, categoria in _PATRONES_PERMANENTES:
             if patron in lowered:
