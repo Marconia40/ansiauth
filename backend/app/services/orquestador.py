@@ -1314,6 +1314,314 @@ class Orquestador:
 
         return [paso], verificar
 
+    def retry_rollback(
+        self, original_job: "Job", new_job: "Job", actor: str,
+    ) -> None:
+        """Manual retry of a failed rollback -- reconstruye los pasos de
+        reversión desde ``original_job.pre_state`` (ya persistido) y los
+        manda batched al device. NO toca al ``original_job``; el
+        ``new_job`` lleva su propio ciclo de vida completo.
+
+        Feature de recovery para el caso: el rollback original falló
+        (device inaccesible por segundos, sesión SSH cortada, etc.)
+        pero el ``pre_state`` sigue guardado en la fila del job vieja.
+        En vez de exigir al usuario que edite manualmente el device
+        para llevarlo al estado previo (que además es la parte donde
+        más fácil se equivoca), reusamos el snapshot para replicar el
+        rollback tantas veces como haga falta.
+
+        Solo soporta ``puerto`` y ``svi`` -- son los tipos con
+        ``reconciliar_lote()`` y ``resolver_*`` en el driver. VLAN y
+        GlobalConfig tienen su propio path de rollback per-operación y
+        no fue nunca batched -- si hace falta acá se agrega, pero hoy
+        no aplica.
+
+        Semántica del ``new_job``:
+        - ``parameters={"retry_of_job_id": <original>}`` -- linkeo
+          buscable.
+        - Si al terminar todo salió bien, ``marcar_completado``. Si
+          alguno falla (device rechaza / timeout / verify mismatch),
+          ``marcar_fallido`` con la misma clasificación amigable que
+          usa ``ejecutar_lote``. NUNCA se dispara un "rollback del
+          retry-rollback" -- si esto también falla es intervención
+          manual, no otro nivel de auto-recovery."""
+        from app.models.port import Puerto
+        from app.models.svi import SVI
+
+        _TIPO_CLS = {"puerto": Puerto, "svi": SVI}
+        tipo = original_job.operation
+        if tipo not in _TIPO_CLS:
+            self._retry_rollback_fallar(
+                new_job, actor, device=None, recurso_referencia=None,
+                error=f"retry_rollback: unsupported operation type {tipo!r} "
+                      f"(only 'puerto'/'svi' are supported)",
+            )
+            return
+
+        if not original_job.pre_state:
+            self._retry_rollback_fallar(
+                new_job, actor, device=None, recurso_referencia=None,
+                error="retry_rollback: original job has no pre_state to restore from",
+            )
+            return
+
+        device = self._device_repo.get(original_job.device)
+        if device is None:
+            self._retry_rollback_fallar(
+                new_job, actor, device=None, recurso_referencia=None,
+                error=f"retry_rollback: device {original_job.device!r} no existe",
+            )
+            return
+
+        cls = _TIPO_CLS[tipo]
+        pre_state = original_job.pre_state
+        entries = (
+            pre_state["lote"]
+            if isinstance(pre_state, dict) and isinstance(pre_state.get("lote"), list)
+            else [pre_state]
+        )
+
+        # Deserializar snapshot per entry: pre_state["actual"] llegó como
+        # dict (via _pre_state_json_safe/asdict al persistir). Saltea las
+        # entries sin ``existed`` (nada que restaurar) y las que perdieron
+        # el ``actual`` (job antiguo pre-Fase-5 que no lo capturaba).
+        snapshots = []
+        for entry in entries:
+            if not entry.get("existed"):
+                continue
+            actual_dict = entry.get("actual")
+            if not actual_dict:
+                continue
+            actual = cls.from_dict(actual_dict)
+            actual.device = device.name
+            snapshots.append(actual)
+
+        if not snapshots:
+            # Nada que restaurar (todo el pre_state indica "nada existía
+            # antes"). No-op limpio -- new_job termina completado sin
+            # tocar el device.
+            new_job.marcar_iniciado()
+            self._jobs.add(new_job)
+            new_job.marcar_completado({
+                "rc": 0, "success": True, "changed": False, "noop": True,
+                "accion": "retry_rollback",
+                "retry_of_job_id": original_job.job_id,
+            })
+            self._jobs.add(new_job)
+            return
+
+        try:
+            new_job.marcar_iniciado()
+            self._jobs.add(new_job)
+            with self._coordinador.bloquear(device.name):
+                self._coordinador.limitar(device.name)
+
+                # SVI: fresh state es necesario para resolver
+                # ipv4_address_secondary/acl_in/acl_out (mismo motivo
+                # que ``_rollback_lote``). Puerto no lo necesita.
+                actuales_ahora_map: dict = {}
+                if tipo == "svi":
+                    try:
+                        estados_ahora = cls.reconciliar_lote(snapshots, device)
+                        for snap, est in zip(snapshots, estados_ahora):
+                            actuales_ahora_map[snap.vlan_id] = est.get("actual")
+                    except Exception:
+                        logger.exception(
+                            "retry_rollback: fresh reconciliar_lote() falló para tipo=svi "
+                            "device=%s -- se degradan los 3 campos que la necesitan a "
+                            "no-op (mismo criterio que _rollback_lote).", device.name,
+                        )
+
+                # Construir pasos per snapshot
+                pasos_all = []
+                for snap in snapshots:
+                    if tipo == "puerto":
+                        pasos = self._plan_restore_puerto(snap, device)
+                    else:
+                        pasos = self._plan_restore_svi(
+                            snap, device, actuales_ahora_map.get(snap.vlan_id),
+                        )
+                    pasos_all.extend(pasos)
+
+                if not pasos_all:
+                    resultado = {
+                        "rc": 0, "success": True, "changed": False, "noop": True,
+                        "accion": "retry_rollback",
+                        "retry_of_job_id": original_job.job_id,
+                    }
+                else:
+                    def _hacer_retry_rollback():
+                        return device.driver.aplicar_lote(
+                            pasos_all, device, device.password,
+                            op_label=f"retry_rollback_{tipo}",
+                        )
+                    resultado, _ = self._ejecutar_con_retry(
+                        _hacer_retry_rollback, new_job, device.name,
+                        max_retries=new_job.max_retries,
+                    )
+                    if resultado.get("rc", 0) != 0:
+                        raise DeviceExecutionError(
+                            resultado.get("stderr") or resultado.get("stdout")
+                            or "retry_rollback apply failed"
+                        )
+                    resultado = {**resultado, "retry_of_job_id": original_job.job_id}
+        except Exception as error:
+            friendly = self._error_amigable(error)
+            # No hacemos un "rollback del retry-rollback" -- si ESTO
+            # también falla el usuario tiene que ver el device
+            # manualmente. Marcar False/None hace explícito que no hubo
+            # ni intento (no queremos que el UI muestre "rollback
+            # attempted" para un job que YA ERA un intento de rollback).
+            new_job.marcar_fallido(str(error), False, None, **friendly)
+            self._jobs.add(new_job)
+            self._eventos.despachar([DomainEvent(
+                "recurso_fallido", snapshots[0], device, actor,
+                {
+                    "error": str(error),
+                    "retry_of_job_id": original_job.job_id,
+                    "rollback_performed": False,
+                    "rollback_success": None,
+                    **friendly,
+                },
+                exitoso=False,
+            )])
+            raise
+        else:
+            new_job.marcar_completado(resultado)
+            self._jobs.add(new_job)
+            try:
+                self._eventos.despachar([DomainEvent(
+                    "recurso_aplicado", snapshots[0], device, actor,
+                    {**resultado, "retry_of_job_id": original_job.job_id},
+                )])
+            except Exception:
+                logger.exception(
+                    "retry_rollback: dispatch de evento recurso_aplicado falló para "
+                    "job=%s (original=%s) -- audit trail puede quedar incompleto.",
+                    new_job.job_id, original_job.job_id,
+                )
+        finally:
+            if not new_job.esta_en_estado_terminal():
+                new_job.asegurar_estado_final()
+                self._jobs.add(new_job)
+
+    def _retry_rollback_fallar(self, new_job, actor, device, recurso_referencia, error: str) -> None:
+        """Wrapper para los early-exit de ``retry_rollback`` (job antiguo
+        sin pre_state, tipo no soportado, device eliminado post-original-
+        job) -- marca el job como failed con clasificación permanente y
+        despacha un evento acorde, sin haber tocado el device."""
+        try:
+            if not new_job.esta_en_estado_terminal() and new_job.status == "pending":
+                new_job.marcar_iniciado()
+                self._jobs.add(new_job)
+        except Exception:
+            pass
+        friendly = {
+            "error_type": "permanent",
+            "error_reason": "retry_rollback precondition",
+            "error_summary": error,
+        }
+        new_job.marcar_fallido(error, False, None, **friendly)
+        self._jobs.add(new_job)
+        if device is not None and recurso_referencia is not None:
+            try:
+                self._eventos.despachar([DomainEvent(
+                    "recurso_fallido", recurso_referencia, device, actor,
+                    {"error": error, "rollback_performed": False, "rollback_success": None, **friendly},
+                    exitoso=False,
+                )])
+            except Exception:
+                logger.exception("retry_rollback: dispatch de evento de fallo temprano falló")
+
+    def _plan_restore_puerto(self, actual: "Puerto", device: "Device") -> list:
+        """Pasos para restaurar TODO campo legible de un puerto al valor
+        del snapshot -- forma más agresiva que ``_plan_rollback_puerto``
+        (que solo revertía el campo que el request original había
+        cambiado). Usado por ``retry_rollback``: el pre_state guardado
+        es la única fuente de verdad, así que restauramos todo lo que se
+        pueda leer, no solo el campo específico.
+
+        PoE queda fuera -- reader gap conocido (``port_parser.py:140``/
+        ``:708`` hardcodean ``None``). Si el snapshot dice
+        ``poe_enabled=True/False`` no es info real, es siempre ``None``
+        y sería intentar restaurar contra un valor inventado."""
+        pasos = []
+        if actual.mode == "access" and actual.access_vlan is not None:
+            pasos.append(device.driver.resolver_set_access_mode(
+                actual.interface, int(actual.access_vlan),
+            ))
+        elif actual.mode == "trunk" and actual.access_vlan is not None and actual.allowed_vlans:
+            pasos.append(device.driver.resolver_set_trunk_mode(
+                actual.interface, int(actual.access_vlan), list(actual.allowed_vlans),
+            ))
+        if actual.description is not None:
+            pasos.append(device.driver.resolver_update_port_description(
+                actual.interface, actual.description,
+            ))
+        if actual.admin_up is not None:
+            pasos.append(device.driver.resolver_set_port_admin_state(
+                actual.interface, bool(actual.admin_up),
+            ))
+        if actual.storm_control_enabled is not None:
+            threshold = (
+                int(actual.storm_control_threshold)
+                if actual.storm_control_threshold is not None else 0
+            )
+            pasos.append(device.driver.resolver_set_storm_control(
+                actual.interface, bool(actual.storm_control_enabled), threshold,
+            ))
+        return pasos
+
+    def _plan_restore_svi(
+        self, actual: "SVI", device: "Device", actual_ahora: "SVI | None",
+    ) -> list:
+        """Pasos para restaurar TODO campo legible de un SVI al snapshot.
+        Same shape que ``_plan_restore_puerto`` pero acepta
+        ``actual_ahora`` para los 3 campos cuyo resolver necesita el
+        estado post-fallo del device (``ipv4_address_secondary``,
+        ``acl_in``, ``acl_out``). Si ``actual_ahora`` es ``None`` (fresh
+        read falló, ver ``retry_rollback``) esos 3 se saltean --
+        mejor no restaurar que mandar un comando con info stale."""
+        pasos = []
+        if actual.description is not None:
+            pasos.append(device.driver.resolver_set_svi_description(
+                actual.vlan_id, actual.description,
+            ))
+        if actual.admin_up is not None:
+            pasos.append(device.driver.resolver_set_svi_admin_state(
+                actual.vlan_id, bool(actual.admin_up),
+            ))
+        if actual.ipv4_address is not None:
+            pasos.append(device.driver.resolver_set_svi_ipv4(
+                actual.vlan_id, actual.ipv4_address,
+            ))
+        if actual.ipv6_address is not None:
+            pasos.append(device.driver.resolver_set_svi_ipv6(
+                actual.vlan_id, actual.ipv6_address,
+            ))
+        if actual.dhcp_relay_servers:
+            pasos.append(device.driver.resolver_set_svi_dhcp_relay(
+                actual.vlan_id, list(actual.dhcp_relay_servers),
+            ))
+        # Campos que requieren actual_ahora
+        if actual_ahora is not None:
+            if actual.ipv4_address_secondary is not None:
+                pasos.append(device.driver.resolver_set_svi_ipv4_secondary(
+                    actual.vlan_id, actual.ipv4_address_secondary,
+                    actual_ahora.ipv4_address_secondary,
+                ))
+            if actual.acl_in is not None:
+                pasos.append(device.driver.resolver_set_svi_acl(
+                    actual.vlan_id, "in", actual.acl_in,
+                    current_acl_name=actual_ahora.acl_in,
+                ))
+            if actual.acl_out is not None:
+                pasos.append(device.driver.resolver_set_svi_acl(
+                    actual.vlan_id, "out", actual.acl_out,
+                    current_acl_name=actual_ahora.acl_out,
+                ))
+        return pasos
+
     def _rollback(self, recurso: "RecursoGestionable", pre_state: dict, device: "Device") -> tuple[bool, "bool | None"]:
         """Unifica vlan_execution_service.py: _rollback_create/_rollback_delete/
         _rollback_update + los 7 equivalentes de puerto

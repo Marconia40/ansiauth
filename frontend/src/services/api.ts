@@ -817,6 +817,18 @@ export async function cancelJob(jobId: string) {
   return unwrap(client.post(`/jobs/${jobId}/cancel`));
 }
 
+/** Manually re-attempt the rollback of a job whose original rollback
+ * failed (rollback_success=false). Creates a NEW job with
+ * operation='retry_rollback' that runs the batched revert against the
+ * device using the failed job's persisted pre_state snapshot. The
+ * original job stays as-is. Only supported for puerto/svi jobs.
+ * Returns the new job id + group_job_id for polling. */
+export async function retryJobRollback(
+  jobId: string,
+): Promise<{ job_id: string; group_job_id: string; status: string; retry_of_job_id: string }> {
+  return unwrap(client.post(`/jobs/${jobId}/retry-rollback`));
+}
+
 export async function getGroupJob(groupJobId: string): Promise<GroupJob> {
   return unwrap(client.get<ApiResponse<GroupJob>>(`/group-jobs/${groupJobId}`));
 }
