@@ -49,9 +49,25 @@ export interface Job {
   // Raw device/verify message explaining WHY the rollback failed --
   // complements `error` (which is the apply-side failure).
   rollback_error: string | null;
+  // Retry-rollback jobs whose `parameters.retry_of_job_id` points at this
+  // one. Populated by the backend only when `rollback_success=false`
+  // (the only case where a retry could be initiated). Ordered by
+  // created_at desc (most recent first). The frontend uses this to
+  // enable/disable the "Retry rollback" button:
+  //   * any pending/running retry  -> button disabled ("in progress")
+  //   * most recent completed one  -> button disabled ("already recovered")
+  //   * empty / only failed        -> button enabled
+  retry_rollback_jobs: RetryRollbackJobRef[];
   current_step: string | null;
   group_job_id: string | null;
   execution_summary: JobExecutionSummary | null;
+}
+
+export interface RetryRollbackJobRef {
+  job_id: string;
+  status: JobStatus;
+  created_at: string | null;
+  finished_at: string | null;
 }
 
 // Statuses that mean the job is still running and should be polled

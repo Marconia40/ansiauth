@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.response import ok
 from app.core.scope import authorize_device, obtener_scope, require_authenticated
 from app.models.audit import AuditRecord
@@ -16,6 +16,20 @@ router = APIRouter()
 _VALID_STATUSES = frozenset({"pending", "running", "completed", "failed", "cancelled"})
 
 
+def _format_retry_ref(job) -> dict:
+    """Shape reducido de un ``retry_rollback`` job para la lista
+    ``retry_rollback_jobs`` que devuelve ``GET /jobs/{id}``. El frontend
+    lo usa para deshabilitar el botón "Retry rollback" cuando hay uno
+    ya en curso o recientemente completado -- no hace falta devolver el
+    Job entero, solo el mínimo para renderizar el estado + linkear."""
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
 def _format_job(job) -> dict:
     started = _ensure_aware(job.started_at)
     finished = _ensure_aware(job.finished_at)
@@ -23,6 +37,14 @@ def _format_job(job) -> dict:
         round((finished - started).total_seconds() * 1000)
         if started and finished else None
     )
+    # Retry-rollback references -- lista de jobs que corrieron
+    # ``POST /jobs/{id}/retry-rollback`` para este job. Solo tiene
+    # sentido para jobs con un rollback failed (no vale la pena la
+    # query extra en el 99% de jobs que no aplican).
+    retry_jobs: list[dict] = []
+    if job.rollback_performed and job.rollback_success is False:
+        from app.composition import job_repository
+        retry_jobs = [_format_retry_ref(j) for j in job_repository.list_retry_rollbacks(job.job_id)]
     return {
         "job_id": job.job_id,
         "status": job.status,
@@ -53,6 +75,10 @@ def _format_job(job) -> dict:
         # ``rollback_success=false``. Complementa a ``error`` que es
         # el motivo del apply. NULL en jobs sin rollback fallido.
         "rollback_error": job.rollback_error,
+        # Ver ``_format_retry_ref`` -- el frontend usa esta lista para
+        # el estado del botón "Retry rollback" (deshabilitar si hay uno
+        # in-progress o mostrar link al último completado).
+        "retry_rollback_jobs": retry_jobs,
         "current_step": job.current_step,
         "group_job_id": job.group_job_id,
         "execution_summary": {
@@ -211,6 +237,26 @@ def retry_job_rollback(
 
     if original.device:
         _check_device_scope(scope, original.device, min_role="operator")
+
+    # Guard contra retries duplicados concurrentes -- si el usuario clickea
+    # el botón 2 veces (o dos usuarios lo hacen en paralelo), sin este
+    # chequeo se crearían N jobs de retry-rollback que apuntarían al
+    # mismo device sobre el mismo pre_state, y los N se serializarían
+    # por el lock Redis del device pero igual gastarían N sesiones SSH y
+    # llenarían el historial. Bloqueamos solo los pending/running --
+    # completed/failed anteriores NO bloquean (el device puede haber
+    # divergido de nuevo desde entonces por consola o por otro job).
+    existing = job_repository.list_retry_rollbacks(original.job_id, limit=10)
+    en_curso = next(
+        (r for r in existing if r.status in ("pending", "running", "retrying")),
+        None,
+    )
+    if en_curso is not None:
+        raise ConflictError(
+            f"Retry-rollback already {en_curso.status} for this job "
+            f"(job_id={en_curso.job_id}). Wait for it to finish, then check "
+            "the device state before starting another retry."
+        )
 
     # Create the recovery job -- separate Job so the original's failure
     # record stays intact (audit trail preserved) and multiple retries

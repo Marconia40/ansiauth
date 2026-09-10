@@ -109,6 +109,38 @@ class JobRepository(Repository):
                 n += 1
             return n
 
+    def list_retry_rollbacks(self, original_job_id: str, limit: int = 10) -> list[Job]:
+        """Lista los ``retry_rollback`` jobs cuyo ``parameters.retry_of_job_id``
+        apunta a *original_job_id*, ordenados por ``created_at`` DESC (más
+        reciente primero). Usado por a) ``GET /jobs/{id}`` para poblar
+        ``retry_rollback_jobs`` (el frontend deshabilita el botón "Retry
+        rollback" cuando ve uno pending/running/completed reciente), y por
+        b) ``POST /jobs/{id}/retry-rollback`` para rechazar duplicados
+        concurrentes con 409.
+
+        Implementación: filtro por ``operation="retry_rollback"`` en SQL
+        + match del ``retry_of_job_id`` en Python. El shape del JSON es
+        chico y estable (``{"retry_of_job_id": "<uuid>", ...}``), y la
+        cardinalidad de ``operation="retry_rollback"`` va a ser baja en
+        producción (una minoría de los jobs son retries), así que no vale
+        la pena tirar de operadores JSON vendor-specific de Postgres --
+        pierdo compat con SQLite (que se usa en tests). Si algún día la
+        tabla crece, se agrega un índice funcional sobre
+        ``(parameters->>'retry_of_job_id')`` en Postgres."""
+        with get_session() as session:
+            rows = (
+                session.query(JobModel)
+                .filter(JobModel.operation == "retry_rollback")
+                .order_by(JobModel.created_at.desc())
+                .limit(200)  # tope defensivo, ordenados por created_at desc
+                .all()
+            )
+            matches = [
+                _to_domain(row) for row in rows
+                if row.parameters and row.parameters.get("retry_of_job_id") == original_job_id
+            ]
+            return matches[:limit]
+
     def resumen_de_grupo(self, group_job_id: str) -> "dict | None":
         """Reemplaza GroupJob completo (A2) -- agrega los Job reales al vuelo,
         sin estado duplicado. Devuelve None si no hay ningún Job con este

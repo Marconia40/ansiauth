@@ -1416,38 +1416,55 @@ class Orquestador:
             with self._coordinador.bloquear(device.name):
                 self._coordinador.limitar(device.name)
 
-                # SVI: fresh state es necesario para resolver
-                # ipv4_address_secondary/acl_in/acl_out (mismo motivo
-                # que ``_rollback_lote``). Puerto no lo necesita.
+                # Fresh state read ANTES de armar pasos. Doble propósito:
+                # (a) SVI necesita el ``actual_ahora`` para 3 campos cuyos
+                #     resolvers lo piden (mismo motivo que
+                #     ``_rollback_lote``), y (b) tanto Port como SVI usan
+                #     esta relectura para saltear pasos donde el device
+                #     YA está en el valor del snapshot -- alguien pudo
+                #     haber restaurado la config por consola / vía otro
+                #     job / vía un retry-rollback previo entre que este
+                #     job se creó y ahora. Sin este pre-flight
+                #     mandaríamos pasos idempotentes al pedo, con su
+                #     conexión SSH y su ruido en logs.
                 actuales_ahora_map: dict = {}
-                if tipo == "svi":
-                    try:
-                        estados_ahora = cls.reconciliar_lote(snapshots, device)
-                        for snap, est in zip(snapshots, estados_ahora):
-                            actuales_ahora_map[snap.vlan_id] = est.get("actual")
-                    except Exception:
-                        logger.exception(
-                            "retry_rollback: fresh reconciliar_lote() falló para tipo=svi "
-                            "device=%s -- se degradan los 3 campos que la necesitan a "
-                            "no-op (mismo criterio que _rollback_lote).", device.name,
-                        )
+                try:
+                    estados_ahora = cls.reconciliar_lote(snapshots, device)
+                    key = "vlan_id" if tipo == "svi" else "interface"
+                    for snap, est in zip(snapshots, estados_ahora):
+                        actuales_ahora_map[getattr(snap, key)] = est.get("actual")
+                except Exception:
+                    logger.exception(
+                        "retry_rollback: fresh reconciliar_lote() falló para tipo=%s "
+                        "device=%s -- degradamos a plan sin filtrar (todos los pasos "
+                        "se van a mandar, incluso los que ya coinciden con el device).",
+                        tipo, device.name,
+                    )
 
-                # Construir pasos per snapshot
+                # Construir pasos per snapshot -- planners saltean campos
+                # que ya coinciden con actual_ahora, así el batch queda
+                # con solo lo que hace falta cambiar.
                 pasos_all = []
                 for snap in snapshots:
+                    key = snap.vlan_id if tipo == "svi" else snap.interface
+                    actual_ahora = actuales_ahora_map.get(key)
                     if tipo == "puerto":
-                        pasos = self._plan_restore_puerto(snap, device)
+                        pasos = self._plan_restore_puerto(snap, device, actual_ahora)
                     else:
-                        pasos = self._plan_restore_svi(
-                            snap, device, actuales_ahora_map.get(snap.vlan_id),
-                        )
+                        pasos = self._plan_restore_svi(snap, device, actual_ahora)
                     pasos_all.extend(pasos)
 
                 if not pasos_all:
+                    # Device ya está en pre_state (o alguien lo restauró
+                    # por otra vía). Marcar el retry como completed-noop:
+                    # legítimo éxito, no fallo -- el intento del usuario
+                    # se cumplió (device está OK), aunque no hayamos
+                    # abierto ninguna sesión de write.
                     resultado = {
                         "rc": 0, "success": True, "changed": False, "noop": True,
                         "accion": "retry_rollback",
                         "retry_of_job_id": original_job.job_id,
+                        "reason": "device already at pre_state -- no restore steps needed",
                     }
                 else:
                     def _hacer_retry_rollback():
@@ -1533,7 +1550,9 @@ class Orquestador:
             except Exception:
                 logger.exception("retry_rollback: dispatch de evento de fallo temprano falló")
 
-    def _plan_restore_puerto(self, actual: "Puerto", device: "Device") -> list:
+    def _plan_restore_puerto(
+        self, snap: "Puerto", device: "Device", actual_ahora: "Puerto | None" = None,
+    ) -> list:
         """Pasos para restaurar TODO campo legible de un puerto al valor
         del snapshot -- forma más agresiva que ``_plan_rollback_puerto``
         (que solo revertía el campo que el request original había
@@ -1544,82 +1563,114 @@ class Orquestador:
         PoE queda fuera -- reader gap conocido (``port_parser.py:140``/
         ``:708`` hardcodean ``None``). Si el snapshot dice
         ``poe_enabled=True/False`` no es info real, es siempre ``None``
-        y sería intentar restaurar contra un valor inventado."""
+        y sería intentar restaurar contra un valor inventado.
+
+        Filtrado por ``actual_ahora``: si viene, se saltean campos que
+        ya coinciden (device ya restaurado por otra vía -- consola,
+        otro job, retry previo). Si es ``None`` (fresh read falló), se
+        mandan TODOS los pasos -- degradación segura, peor caso son
+        comandos idempotentes que no cambian nada, no incorrección."""
         pasos = []
-        if actual.mode == "access" and actual.access_vlan is not None:
-            pasos.append(device.driver.resolver_set_access_mode(
-                actual.interface, int(actual.access_vlan),
-            ))
-        elif actual.mode == "trunk" and actual.access_vlan is not None and actual.allowed_vlans:
-            pasos.append(device.driver.resolver_set_trunk_mode(
-                actual.interface, int(actual.access_vlan), list(actual.allowed_vlans),
-            ))
-        if actual.description is not None:
-            pasos.append(device.driver.resolver_update_port_description(
-                actual.interface, actual.description,
-            ))
-        if actual.admin_up is not None:
-            pasos.append(device.driver.resolver_set_port_admin_state(
-                actual.interface, bool(actual.admin_up),
-            ))
-        if actual.storm_control_enabled is not None:
+        if snap.mode == "access" and snap.access_vlan is not None:
+            if actual_ahora is None or (
+                actual_ahora.mode != "access"
+                or actual_ahora.access_vlan != snap.access_vlan
+            ):
+                pasos.append(device.driver.resolver_set_access_mode(
+                    snap.interface, int(snap.access_vlan),
+                ))
+        elif snap.mode == "trunk" and snap.access_vlan is not None and snap.allowed_vlans:
+            if actual_ahora is None or (
+                actual_ahora.mode != "trunk"
+                or actual_ahora.access_vlan != snap.access_vlan
+                or set(actual_ahora.allowed_vlans or []) != set(snap.allowed_vlans)
+            ):
+                pasos.append(device.driver.resolver_set_trunk_mode(
+                    snap.interface, int(snap.access_vlan), list(snap.allowed_vlans),
+                ))
+        if snap.description is not None:
+            if actual_ahora is None or actual_ahora.description != snap.description:
+                pasos.append(device.driver.resolver_update_port_description(
+                    snap.interface, snap.description,
+                ))
+        if snap.admin_up is not None:
+            if actual_ahora is None or actual_ahora.admin_up != snap.admin_up:
+                pasos.append(device.driver.resolver_set_port_admin_state(
+                    snap.interface, bool(snap.admin_up),
+                ))
+        if snap.storm_control_enabled is not None:
             threshold = (
-                int(actual.storm_control_threshold)
-                if actual.storm_control_threshold is not None else 0
+                int(snap.storm_control_threshold)
+                if snap.storm_control_threshold is not None else 0
             )
-            pasos.append(device.driver.resolver_set_storm_control(
-                actual.interface, bool(actual.storm_control_enabled), threshold,
-            ))
+            if actual_ahora is None or (
+                actual_ahora.storm_control_enabled != snap.storm_control_enabled
+                or actual_ahora.storm_control_threshold != snap.storm_control_threshold
+            ):
+                pasos.append(device.driver.resolver_set_storm_control(
+                    snap.interface, bool(snap.storm_control_enabled), threshold,
+                ))
         return pasos
 
     def _plan_restore_svi(
-        self, actual: "SVI", device: "Device", actual_ahora: "SVI | None",
+        self, snap: "SVI", device: "Device", actual_ahora: "SVI | None",
     ) -> list:
         """Pasos para restaurar TODO campo legible de un SVI al snapshot.
-        Same shape que ``_plan_restore_puerto`` pero acepta
-        ``actual_ahora`` para los 3 campos cuyo resolver necesita el
-        estado post-fallo del device (``ipv4_address_secondary``,
-        ``acl_in``, ``acl_out``). Si ``actual_ahora`` es ``None`` (fresh
-        read falló, ver ``retry_rollback``) esos 3 se saltean --
-        mejor no restaurar que mandar un comando con info stale."""
+        Same shape que ``_plan_restore_puerto`` -- acepta ``actual_ahora``
+        para (a) resolver 3 campos que lo necesitan
+        (``ipv4_address_secondary``/``acl_in``/``acl_out``) y (b) saltear
+        campos que ya coinciden con el estado del device. Si
+        ``actual_ahora`` es ``None`` (fresh read falló) los 3 campos que
+        lo REQUIEREN se saltean; los demás se mandan sin filtro."""
         pasos = []
-        if actual.description is not None:
-            pasos.append(device.driver.resolver_set_svi_description(
-                actual.vlan_id, actual.description,
-            ))
-        if actual.admin_up is not None:
-            pasos.append(device.driver.resolver_set_svi_admin_state(
-                actual.vlan_id, bool(actual.admin_up),
-            ))
-        if actual.ipv4_address is not None:
-            pasos.append(device.driver.resolver_set_svi_ipv4(
-                actual.vlan_id, actual.ipv4_address,
-            ))
-        if actual.ipv6_address is not None:
-            pasos.append(device.driver.resolver_set_svi_ipv6(
-                actual.vlan_id, actual.ipv6_address,
-            ))
-        if actual.dhcp_relay_servers:
-            pasos.append(device.driver.resolver_set_svi_dhcp_relay(
-                actual.vlan_id, list(actual.dhcp_relay_servers),
-            ))
-        # Campos que requieren actual_ahora
+        if snap.description is not None:
+            if actual_ahora is None or actual_ahora.description != snap.description:
+                pasos.append(device.driver.resolver_set_svi_description(
+                    snap.vlan_id, snap.description,
+                ))
+        if snap.admin_up is not None:
+            if actual_ahora is None or actual_ahora.admin_up != snap.admin_up:
+                pasos.append(device.driver.resolver_set_svi_admin_state(
+                    snap.vlan_id, bool(snap.admin_up),
+                ))
+        if snap.ipv4_address is not None:
+            if actual_ahora is None or actual_ahora.ipv4_address != snap.ipv4_address:
+                pasos.append(device.driver.resolver_set_svi_ipv4(
+                    snap.vlan_id, snap.ipv4_address,
+                ))
+        if snap.ipv6_address is not None:
+            if actual_ahora is None or actual_ahora.ipv6_address != snap.ipv6_address:
+                pasos.append(device.driver.resolver_set_svi_ipv6(
+                    snap.vlan_id, snap.ipv6_address,
+                ))
+        if snap.dhcp_relay_servers:
+            if actual_ahora is None or (
+                set(actual_ahora.dhcp_relay_servers or []) != set(snap.dhcp_relay_servers)
+            ):
+                pasos.append(device.driver.resolver_set_svi_dhcp_relay(
+                    snap.vlan_id, list(snap.dhcp_relay_servers),
+                ))
+        # Campos que REQUIEREN actual_ahora para el resolver -- si no
+        # tenemos fresh read (None), se saltean por seguridad.
         if actual_ahora is not None:
-            if actual.ipv4_address_secondary is not None:
-                pasos.append(device.driver.resolver_set_svi_ipv4_secondary(
-                    actual.vlan_id, actual.ipv4_address_secondary,
-                    actual_ahora.ipv4_address_secondary,
-                ))
-            if actual.acl_in is not None:
-                pasos.append(device.driver.resolver_set_svi_acl(
-                    actual.vlan_id, "in", actual.acl_in,
-                    current_acl_name=actual_ahora.acl_in,
-                ))
-            if actual.acl_out is not None:
-                pasos.append(device.driver.resolver_set_svi_acl(
-                    actual.vlan_id, "out", actual.acl_out,
-                    current_acl_name=actual_ahora.acl_out,
-                ))
+            if snap.ipv4_address_secondary is not None:
+                if actual_ahora.ipv4_address_secondary != snap.ipv4_address_secondary:
+                    pasos.append(device.driver.resolver_set_svi_ipv4_secondary(
+                        snap.vlan_id, snap.ipv4_address_secondary,
+                        actual_ahora.ipv4_address_secondary,
+                    ))
+            if snap.acl_in is not None:
+                if actual_ahora.acl_in != snap.acl_in:
+                    pasos.append(device.driver.resolver_set_svi_acl(
+                        snap.vlan_id, "in", snap.acl_in,
+                        current_acl_name=actual_ahora.acl_in,
+                    ))
+            if snap.acl_out is not None:
+                if actual_ahora.acl_out != snap.acl_out:
+                    pasos.append(device.driver.resolver_set_svi_acl(
+                        snap.vlan_id, "out", snap.acl_out,
+                        current_acl_name=actual_ahora.acl_out,
+                    ))
         return pasos
 
     def _rollback(self, recurso: "RecursoGestionable", pre_state: dict, device: "Device") -> tuple[bool, "bool | None"]:
