@@ -25,7 +25,6 @@ def _to_domain(row: JobModel) -> Job:
         parameters_summary=row.parameters_summary,
         result=row.result,
         error=row.error,
-        error_summary=row.error_summary,
         created_at=_ensure_utc(row.created_at),
         started_at=_ensure_utc(row.started_at),
         finished_at=_ensure_utc(row.finished_at),
@@ -35,6 +34,10 @@ def _to_domain(row: JobModel) -> Job:
         rollback_success=row.rollback_success,
         pre_state=row.pre_state,
         last_error=row.last_error,
+        error_type=row.error_type,
+        error_reason=row.error_reason,
+        error_summary=row.error_summary,
+        rollback_error=row.rollback_error,
         current_step=row.current_step,
         group_job_id=row.group_job_id,
     )
@@ -44,11 +47,14 @@ def _to_orm(j: Job) -> JobModel:
     return JobModel(
         job_id=j.job_id, status=j.status, operation=j.operation, playbook=j.playbook,
         device=j.device, parameters=j.parameters, parameters_summary=j.parameters_summary,
-        result=j.result, error=j.error, error_summary=j.error_summary,
+        result=j.result, error=j.error,
         created_at=j.created_at, started_at=j.started_at, finished_at=j.finished_at,
         retry_count=j.retry_count, max_retries=j.max_retries,
         rollback_performed=j.rollback_performed, rollback_success=j.rollback_success,
-        pre_state=j.pre_state, last_error=j.last_error, current_step=j.current_step,
+        pre_state=j.pre_state, last_error=j.last_error,
+        error_type=j.error_type, error_reason=j.error_reason, error_summary=j.error_summary,
+        rollback_error=j.rollback_error,
+        current_step=j.current_step,
         group_job_id=j.group_job_id,
     )
 
@@ -104,6 +110,38 @@ class JobRepository(Repository):
                 row.finished_at = job.finished_at
                 n += 1
             return n
+
+    def list_retry_rollbacks(self, original_job_id: str, limit: int = 10) -> list[Job]:
+        """Lista los ``retry_rollback`` jobs cuyo ``parameters.retry_of_job_id``
+        apunta a *original_job_id*, ordenados por ``created_at`` DESC (más
+        reciente primero). Usado por a) ``GET /jobs/{id}`` para poblar
+        ``retry_rollback_jobs`` (el frontend deshabilita el botón "Retry
+        rollback" cuando ve uno pending/running/completed reciente), y por
+        b) ``POST /jobs/{id}/retry-rollback`` para rechazar duplicados
+        concurrentes con 409.
+
+        Implementación: filtro por ``operation="retry_rollback"`` en SQL
+        + match del ``retry_of_job_id`` en Python. El shape del JSON es
+        chico y estable (``{"retry_of_job_id": "<uuid>", ...}``), y la
+        cardinalidad de ``operation="retry_rollback"`` va a ser baja en
+        producción (una minoría de los jobs son retries), así que no vale
+        la pena tirar de operadores JSON vendor-specific de Postgres --
+        pierdo compat con SQLite (que se usa en tests). Si algún día la
+        tabla crece, se agrega un índice funcional sobre
+        ``(parameters->>'retry_of_job_id')`` en Postgres."""
+        with get_session() as session:
+            rows = (
+                session.query(JobModel)
+                .filter(JobModel.operation == "retry_rollback")
+                .order_by(JobModel.created_at.desc())
+                .limit(200)  # tope defensivo, ordenados por created_at desc
+                .all()
+            )
+            matches = [
+                _to_domain(row) for row in rows
+                if row.parameters and row.parameters.get("retry_of_job_id") == original_job_id
+            ]
+            return matches[:limit]
 
     def resumen_de_grupo(self, group_job_id: str) -> "dict | None":
         """Reemplaza GroupJob completo (A2) -- agrega los Job reales al vuelo,
@@ -167,7 +205,13 @@ class JobRepository(Repository):
                     "current_step": j.current_step, "retry_count": j.retry_count,
                     "rollback_performed": j.rollback_performed,
                     "rollback_success": j.rollback_success, "error": j.error,
+                    # Clasificación amigable poblada por
+                    # ``Orquestador._clasificar_error()``/``_resumir_error()``
+                    # -- ver docstring en app/models/job.py.
+                    "error_type": j.error_type,
+                    "error_reason": j.error_reason,
                     "error_summary": j.error_summary,
+                    "rollback_error": j.rollback_error,
                     "duration_ms": _duration_ms(j),
                 }
                 for j in jobs

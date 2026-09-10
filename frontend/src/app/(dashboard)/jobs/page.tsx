@@ -516,6 +516,11 @@ export default function JobsPage() {
                               className="mt-0.5 text-xs text-danger truncate max-w-[220px]"
                               title={job.error ?? job.last_error ?? undefined}
                             >
+                              {/* Prefer the classified summary -- see
+                                  JobDetailModal for the same treatment.
+                                  The raw error stays available as a
+                                  tooltip for quick hover-inspect without
+                                  opening the details modal. */}
                               {job.error_summary ?? job.error ?? job.last_error}
                             </p>
                           )}

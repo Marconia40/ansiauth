@@ -50,15 +50,6 @@ class Job:
     parameters_summary: Optional[str] = None
     result: Optional[dict] = None
     error: Optional[str] = None
-    # Frase corta y legible de POR QUÉ falló el job (ej. "Authentication or
-    # permission problem — check the device credentials."), calculada por
-    # Orquestador._resumir_error() a partir de la misma clasificación que ya
-    # decide si conviene reintentar (RetryDecision). Solo se setea cuando el
-    # error vino de un DeviceExecutionError real (rechazo del device) -- un
-    # bug interno de la app deja esto en None a propósito, no se le inventa
-    # una "explicación amigable" a algo que no vino del device. Ver `error`
-    # para el texto crudo completo.
-    error_summary: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -68,6 +59,33 @@ class Job:
     rollback_success: Optional[bool] = None
     pre_state: Optional[dict] = None
     last_error: Optional[str] = None
+    # Clasificación amigable del error final (poblados por
+    # ``Orquestador._clasificar_error()``/``_resumir_error()`` al marcar el
+    # job como failed). El ``error`` crudo se sigue guardando para debug --
+    # estos 3 son el resumen legible que ``GET /jobs/{id}`` devuelve al
+    # frontend sin que haya que re-derivar la clasificación cada vez.
+    #
+    # - ``error_type``: "permanent" | "transient" | "unknown" (mismo eje que
+    #   ``RetryDecision.classification``).
+    # - ``error_reason``: patrón crudo que matcheó en las tablas de
+    #   ``_clasificar_error`` (ej. "invalid input", "unable to open
+    #   channel") -- útil para tunear patterns con datos reales.
+    # - ``error_summary``: frase corta en inglés para mostrar en UI (ej.
+    #   "The device rejected the command as invalid or unsupported."). Solo
+    #   se setea cuando el error vino de un DeviceExecutionError real
+    #   (rechazo del device) -- un bug interno de la app deja esto en None
+    #   a propósito, no se le inventa una "explicación amigable" a algo que
+    #   no vino del device. Preferido sobre el ``error`` crudo para render.
+    error_type: Optional[str] = None
+    error_reason: Optional[str] = None
+    error_summary: Optional[str] = None
+    # Cuando además del apply falla el rollback (device rechaza el revert,
+    # timeout, o el verify per-recurso no coincide con el pre_state), acá
+    # queda el motivo crudo -- Orquestador._rollback_lote() lo captura y
+    # el orquestador lo persiste antes de despachar el evento. Sin esto
+    # el usuario veía ``rollback_success: false`` sin poder saber POR
+    # QUÉ (device error / verify mismatch / timeout).
+    rollback_error: Optional[str] = None
     current_step: Optional[str] = None
     group_job_id: Optional[str] = None
 
@@ -94,14 +112,21 @@ class Job:
         self.current_step = "completed"
 
     def marcar_fallido(
-        self, error: str, rollback_performed: bool = False, rollback_success: Optional[bool] = None,
+        self,
+        error: str,
+        rollback_performed: bool = False,
+        rollback_success: Optional[bool] = None,
+        error_type: Optional[str] = None,
+        error_reason: Optional[str] = None,
         error_summary: Optional[str] = None,
     ) -> None:
         self._transicionar("failed")
         self.error = _truncar(error, _LIMITE_ERROR)
-        self.error_summary = error_summary
         self.rollback_performed = rollback_performed
         self.rollback_success = rollback_success
+        self.error_type = error_type
+        self.error_reason = error_reason
+        self.error_summary = error_summary
         self.finished_at = datetime.now(timezone.utc)
         self.current_step = "failed"
 

@@ -282,10 +282,6 @@ class JobModel(Base):
     parameters_summary = Column(Text, nullable=True)
     result = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
-    # Frase legible de POR QUÉ falló -- Job.error_summary, ver docstring del
-    # campo en models/job.py. None cuando el fallo no vino de un rechazo del
-    # device (bug interno, no clasificable).
-    error_summary = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, index=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
@@ -295,6 +291,21 @@ class JobModel(Base):
     rollback_success = Column(Boolean, nullable=True)
     pre_state = Column(JSON, nullable=True)
     last_error = Column(Text, nullable=True)
+    # Clasificación amigable del error final -- ver docstring en
+    # ``app/models/job.py`` para el criterio. Los 3 son opcionales: quedan
+    # en NULL para jobs completados con éxito o generados antes de las
+    # migraciones que las agregan (``error_summary`` ->
+    # ``t14msp19_job_error_summary``; ``error_type``/``error_reason`` ->
+    # ``t14msp19_job_err_class``, agregada después/encadenada detrás por
+    # el merge de ``fix/batch-rollback``).
+    error_type = Column(String, nullable=True)
+    error_reason = Column(String, nullable=True)
+    error_summary = Column(Text, nullable=True)
+    # Motivo del fallo del rollback (raw, del device o del verify) --
+    # complementario a ``rollback_success=False``. NULL para jobs sin
+    # rollback fallido o generados antes de la migración
+    # u15msp20_job_rollback_error.
+    rollback_error = Column(Text, nullable=True)
     current_step = Column(String, nullable=True)
     group_job_id = Column(String, nullable=True, index=True)
 

@@ -1,10 +1,12 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { getJob, getGroupJob } from '@/services/api';
+import { getJob, getGroupJob, retryJobRollback } from '@/services/api';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ElapsedTimer } from '@/components/ElapsedTimer';
+import { useHasRole } from '@/components/RequireRole';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Job, GroupJob, GroupJobDeviceResult } from '@/types/job';
 
 // Mirrors JobNotificationContext's JOB_POLL_INTERVAL_MS -- kept as its own
@@ -168,15 +170,173 @@ function RollbackRow({ performed, success }: { performed: boolean; success: bool
   );
 }
 
+// Small pill next to the Error label -- gives the user a one-glance
+// answer to "was this a permanent bug or a transient hiccup?" without
+// having to read the raw stderr. Colors match the semantic weight
+// (permanent = red, transient = amber, unknown = neutral).
+function ErrorTypeBadge({ type }: { type: string | null }) {
+  if (!type) return null;
+  const colors =
+    type === 'permanent' ? 'bg-danger/15 text-danger'
+    : type === 'transient' ? 'bg-warning/15 text-warning'
+    : 'bg-muted/15 text-muted';
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide ${colors}`}>
+      {type}
+    </span>
+  );
+}
+
+// Rendered when rollback ran and did NOT succeed. Two-part display:
+// friendly summary on top (safe to show in list rows and tooltips),
+// raw device output below for debug when the user needs the exact
+// bytes. Also hosts the "Retry rollback" action so the user can trigger
+// recovery from the same modal without navigating away.
+function RollbackFailureSection({
+  job,
+  onRetry,
+  retryState,
+}: {
+  job: Job;
+  onRetry: () => void;
+  retryState: { pending: boolean; error: string | null; newJobId: string | null };
+}) {
+  // Only supported operations can be retried -- the endpoint enforces
+  // this too, but hiding the button avoids the user clicking and
+  // getting a 400 for no reason.
+  const canRetryOperation = job.operation === 'puerto' || job.operation === 'svi';
+  // Role gate (UX only -- the backend also enforces
+  // ``min_role="operator"`` on POST /jobs/{id}/retry-rollback via
+  // ``authorize_device()``, and device-scope filtering, so this is
+  // just about not showing an action the user can never succeed at).
+  const hasWriteRole = useHasRole('operator');
+  const canRetry = canRetryOperation && hasWriteRole;
+
+  // Existing retry-rollback jobs -- the source of truth for "has this
+  // already been retried?" that persists across modal reopens (unlike
+  // the local retryState, which is lost when the modal closes). The
+  // backend populates the list only when this job has
+  // rollback_success=false (see api/jobs.py:_format_job).
+  const existingRetries = job.retry_rollback_jobs ?? [];
+  const inProgress = existingRetries.find(
+    (r) => r.status === 'pending' || r.status === 'running' || r.status === 'retrying',
+  );
+  const latestCompleted = existingRetries.find((r) => r.status === 'completed');
+
+  return (
+    <>
+      <SectionHeader>Rollback failure</SectionHeader>
+      {job.rollback_error && (
+        <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all mb-2">
+          {job.rollback_error}
+        </div>
+      )}
+      {!job.rollback_error && (
+        <p className="text-xs text-muted/70 mb-2">
+          Rollback failed but no explanatory output was captured (legacy job
+          created before rollback-error persistence was added).
+        </p>
+      )}
+      {canRetry ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={onRetry}
+            // Button is disabled in 4 cases:
+            //  1. an API call is in flight (pending)
+            //  2. the current session already queued one (newJobId)
+            //  3. there's a pending/running retry from any session (inProgress)
+            //  4. a completed retry already succeeded (latestCompleted)
+            // Cases 3-4 come from the backend-supplied
+            // retry_rollback_jobs list and are the guard against
+            // "click retry, close modal, reopen, click retry again".
+            disabled={
+              retryState.pending
+              || retryState.newJobId !== null
+              || inProgress !== undefined
+              || latestCompleted !== undefined
+            }
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-warning/20 text-warning hover:bg-warning/30 disabled:opacity-50 disabled:cursor-not-allowed transition"
+          >
+            {retryState.pending ? '↻ Queuing...' : '↩ Retry rollback'}
+          </button>
+          {/* Backend-persistent state takes precedence over local -- if
+              we already know a retry ran, don't show a stale "queued"
+              message from an earlier session. */}
+          {inProgress ? (
+            <span className="text-xs text-amber-600">
+              ↻ Retry in progress (job {inProgress.job_id.slice(0, 8)}...)
+            </span>
+          ) : latestCompleted ? (
+            <span className="text-xs text-green-600">
+              ✓ Already recovered by job {latestCompleted.job_id.slice(0, 8)}...
+              {latestCompleted.finished_at && (
+                <> at {new Date(latestCompleted.finished_at).toLocaleString(undefined, {
+                  hour: '2-digit', minute: '2-digit',
+                })}</>
+              )}
+            </span>
+          ) : retryState.newJobId ? (
+            <span className="text-xs text-green-600">
+              ✓ Queued as new job — track it in notifications
+            </span>
+          ) : null}
+          {retryState.error && (
+            <span className="text-xs text-red-600">{retryState.error}</span>
+          )}
+        </div>
+      ) : !canRetryOperation ? (
+        <p className="text-xs text-muted/70">
+          Retry-rollback is only available for port and SVI jobs.
+        </p>
+      ) : (
+        // canRetryOperation but !hasWriteRole -- observer role. Give a
+        // clear reason instead of just hiding the section (they'd still
+        // see "Rollback failure" and the raw error, so a note is more
+        // useful than mystery).
+        <p className="text-xs text-muted/70">
+          Retry-rollback requires operator role or higher.
+        </p>
+      )}
+    </>
+  );
+}
+
 // ── Single job view ───────────────────────────────────────────────────────────
 
 function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: string; onBack?: () => void }) {
+  const { trackJob } = useJobNotifications();
   const durationMs = job.execution_summary?.duration_ms ?? deriveDurationMs(job.started_at, job.finished_at);
   const attempts = job.execution_summary?.attempts;
   const isActive = (ACTIVE_JOB_STATUSES as string[]).includes(job.status);
   const hasPreState = job.pre_state != null;
   const hasResult = job.result != null;
   const hasError = !!(job.error || job.last_error);
+  // error_summary is the short English one-liner produced by the
+  // backend classifier. Preferred for display; the raw `error` still
+  // shows below in the Full Error section for debug.
+  const errorSummary = job.error_summary;
+  const showRollbackFailure = job.rollback_performed && job.rollback_success === false;
+
+  // Retry-rollback state -- posts to /jobs/{id}/retry-rollback and
+  // hands the returned job id to the notification tracker so the user
+  // sees the recovery job's progress in the toast area.
+  const [retryState, setRetryState] = useState<{ pending: boolean; error: string | null; newJobId: string | null }>({
+    pending: false, error: null, newJobId: null,
+  });
+  const handleRetryRollback = useCallback(async () => {
+    setRetryState({ pending: true, error: null, newJobId: null });
+    try {
+      const res = await retryJobRollback(job.job_id);
+      // Hook the new job into notifications so the user gets live
+      // status updates on the recovery attempt without having to
+      // manually navigate to it.
+      trackJob(res.job_id, 'retry_rollback', job.device ?? undefined);
+      setRetryState({ pending: false, error: null, newJobId: res.job_id });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to queue retry';
+      setRetryState({ pending: false, error: message, newJobId: null });
+    }
+  }, [job.job_id, job.device, trackJob]);
 
   return (
     <div>
@@ -206,9 +366,15 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       </Field>
       {hasError && (
         <Field label="Error">
-          <span className="text-red-600 text-xs truncate block max-w-full">
-            {job.error_summary ?? job.error ?? job.last_error}
-          </span>
+          <div className="flex items-start gap-2 flex-wrap">
+            <ErrorTypeBadge type={job.error_type} />
+            {/* Prefer the friendly one-liner. Fall back to the raw first
+                line if the backend didn't classify (legacy jobs / brand
+                new device errors that no pattern has caught yet). */}
+            <span className="text-red-600 text-xs flex-1 min-w-0">
+              {errorSummary ?? job.error ?? job.last_error}
+            </span>
+          </div>
         </Field>
       )}
       <Field label="Device">{job.device}</Field>
@@ -238,6 +404,14 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       />
       {job.current_step && (
         <Field label="Current step" mono>{job.current_step}</Field>
+      )}
+
+      {showRollbackFailure && (
+        <RollbackFailureSection
+          job={job}
+          onRetry={handleRetryRollback}
+          retryState={retryState}
+        />
       )}
 
       <SectionHeader>Timing</SectionHeader>
@@ -326,9 +500,13 @@ function DeviceRow({
 }) {
   const { icon, className } = deviceIcon(dr.status);
   const isDeviceActive = dr.status === 'running' || dr.status === 'retrying';
+  // Same "hover for details, click for full modal" pattern as the /jobs
+  // listing -- the summary is safe/short enough to preview inline; raw
+  // error stays available as a tooltip without needing to drill in.
+  const summary = dr.status === 'failed' ? (dr.error_summary ?? dr.error) : null;
   return (
-    <div className="py-1.5 text-sm border-b border-gray-50 last:border-0">
-      <div className="flex items-center gap-2">
+    <div className="border-b border-gray-50 last:border-0">
+      <div className="flex items-center gap-2 py-1.5 text-sm">
         <span className={`font-mono w-4 text-center flex-shrink-0 ${className}`}>{icon}</span>
         <span className="flex-1 text-text min-w-0 truncate">{dr.device}</span>
         <span className="flex-shrink-0">
@@ -343,7 +521,12 @@ function DeviceRow({
           <span className="text-xs text-amber-600 flex-shrink-0">↺{dr.retry_count}</span>
         )}
         {dr.rollback_performed && (
-          <span className="text-xs text-orange-500 flex-shrink-0">↩</span>
+          <span
+            className={`text-xs flex-shrink-0 ${dr.rollback_success === false ? 'text-red-600' : 'text-orange-500'}`}
+            title={dr.rollback_success === false ? (dr.rollback_error ?? 'Rollback failed') : 'Rollback executed'}
+          >
+            ↩
+          </span>
         )}
         {dr.job_id && (
           <button
@@ -357,9 +540,12 @@ function DeviceRow({
       {/* Short reason inline, no drill-down needed for the common case --
           before this, a device's error was invisible unless you clicked
           into its own job. */}
-      {dr.status === 'failed' && (dr.error_summary || dr.error) && (
-        <p className="mt-0.5 pl-6 text-xs text-danger truncate">
-          {dr.error_summary ?? dr.error}
+      {summary && (
+        <p
+          className="pl-6 pb-1.5 text-xs text-danger truncate"
+          title={dr.error ?? undefined}
+        >
+          {summary}
         </p>
       )}
     </div>

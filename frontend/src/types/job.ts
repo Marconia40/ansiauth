@@ -25,7 +25,6 @@ export interface Job {
   device: string | null;
   result: unknown;
   error: string | null;
-  error_summary: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -35,9 +34,40 @@ export interface Job {
   rollback_success: boolean | null;
   pre_state: unknown;
   last_error: string | null;
+  // Friendly error classification populated by Orquestador._error_amigable()
+  // when the job ends as `failed`. Null for successful jobs and for jobs
+  // created before backend migration t14msp19_job_error_classification.
+  //   - error_type:    "permanent" | "transient" | "unknown"
+  //   - error_reason:  raw pattern that matched (e.g. "invalid input")
+  //   - error_summary: short English message ready to render in UI
+  // Prefer `error_summary` over the raw `error` field when displaying to
+  // users -- `error` still carries the raw device/stack output for debug.
+  error_type: string | null;
+  error_reason: string | null;
+  error_summary: string | null;
+  // Populated only when rollback ran and failed (`rollback_success=false`).
+  // Raw device/verify message explaining WHY the rollback failed --
+  // complements `error` (which is the apply-side failure).
+  rollback_error: string | null;
+  // Retry-rollback jobs whose `parameters.retry_of_job_id` points at this
+  // one. Populated by the backend only when `rollback_success=false`
+  // (the only case where a retry could be initiated). Ordered by
+  // created_at desc (most recent first). The frontend uses this to
+  // enable/disable the "Retry rollback" button:
+  //   * any pending/running retry  -> button disabled ("in progress")
+  //   * most recent completed one  -> button disabled ("already recovered")
+  //   * empty / only failed        -> button enabled
+  retry_rollback_jobs: RetryRollbackJobRef[];
   current_step: string | null;
   group_job_id: string | null;
   execution_summary: JobExecutionSummary | null;
+}
+
+export interface RetryRollbackJobRef {
+  job_id: string;
+  status: JobStatus;
+  created_at: string | null;
+  finished_at: string | null;
 }
 
 // Statuses that mean the job is still running and should be polled
@@ -54,7 +84,11 @@ export interface GroupJobDeviceResult {
   rollback_performed: boolean;
   rollback_success: boolean | null;
   error: string | null;
+  // Friendly error classification -- see Job.error_summary docstring.
+  error_type: string | null;
+  error_reason: string | null;
   error_summary: string | null;
+  rollback_error: string | null;
   duration_ms: number | null;
 }
 

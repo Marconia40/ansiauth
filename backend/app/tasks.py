@@ -84,6 +84,28 @@ def ejecutar_lote_task(
     orquestador.ejecutar_lote(recursos, device_name, actor, job)
 
 
+@celery_app.task(name="ansiauth.orquestador.retry_rollback")
+def retry_rollback_task(original_job_id: str, new_job_id: str, actor: str) -> None:
+    """Ejecuta ``Orquestador.retry_rollback`` en background -- disparado
+    por ``POST /jobs/{id}/retry-rollback`` para recuperar un job cuyo
+    rollback original falló (``rollback_success=false``). El
+    ``original_job`` se lee solo para su ``pre_state``; el resultado se
+    escribe sobre el ``new_job`` (creado por el endpoint) que también
+    quedó en ``pending`` a la espera de esta task."""
+    from app.composition import job_repository, orquestador
+
+    original = job_repository.get(original_job_id)
+    new_job = job_repository.get(new_job_id)
+    if original is None or new_job is None:
+        logger.warning(
+            "retry_rollback_task: original=%s o new_job=%s no existe -- "
+            "saltando (probablemente eliminado post-encolar).",
+            original_job_id, new_job_id,
+        )
+        return
+    orquestador.retry_rollback(original, new_job, actor)
+
+
 @celery_app.task(name="ansiauth.device.sync")
 def sync_device_task(device_name: str, scope: str) -> None:
     """Sincroniza la caché en DB (``device_vlans`` / ``device_ports`` /
