@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { createVlan } from '@/services/api';
+import { createVlan, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import { Modal } from './Modal';
@@ -24,6 +24,7 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
   const [name, setName] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   // Device scope: the modal shouldn't offer a picker — the current device is
   // always the target. We keep `selected` in sync so the submit body includes it.
@@ -47,7 +48,9 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
       resetAndClose();
     },
     onError: (err: unknown) => {
-      setError(extractMessage(err, 'Create failed.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Create failed.'));
     },
   });
 
@@ -56,6 +59,7 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
     setName('');
     setSelected(new Set());
     setError(null);
+    setFieldErrors(null);
     onClose();
   }
 
@@ -96,6 +100,7 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
               VLAN id must be an integer between 1 and 4094.
             </p>
           )}
+          <FieldError message={fieldErrors?.vlan_id} />
         </FieldRow>
 
         <FieldRow label="Name">
@@ -106,6 +111,7 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
             placeholder="e.g. MANAGEMENT"
             className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
           />
+          <FieldError message={fieldErrors?.name} />
         </FieldRow>
 
         <FieldRow label="Target devices">
@@ -128,6 +134,17 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
 }
 
 // ── Reused primitives ────────────────────────────────────────────────────────
+
+// Inline field-level validation message -- see parseFieldErrors() in
+// services/api.ts. Shown right under the input it's about, so a rejected
+// value is visible in the same box where it was typed instead of only in
+// a generic banner at the bottom of the modal (or, before that, only in
+// the Audit Logs' raw JSON). Shared here since every write modal in this
+// app already imports FieldRow/ModalPrimary/etc. from this same file.
+export function FieldError({ message }: { message?: string }) {
+  if (!message) return null;
+  return <p className="text-xs text-danger mt-1">{message}</p>;
+}
 
 export function FieldRow({
   label,

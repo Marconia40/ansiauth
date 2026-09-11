@@ -25,6 +25,18 @@ function solidGroupToastClass(status: GroupJobNotification['status']): string {
   return 'bg-success text-white';
 }
 
+// A failed/partial group job's toast used to say nothing about why -- pick
+// the first device that actually failed and show its short reason (falls
+// back to the raw error, then a generic count, so this never renders
+// empty).
+function groupFailureReason(gj: GroupJobNotification): string | null {
+  if (gj.status !== 'failed' && gj.status !== 'partial_success') return null;
+  const failedDevice = gj.deviceResults.find((dr) => dr.status === 'failed');
+  if (failedDevice) return failedDevice.error_summary ?? failedDevice.error ?? null;
+  if (gj.failed > 0) return `${gj.failed} device(s) failed`;
+  return null;
+}
+
 function GroupJobCard({
   gj,
   onOpen,
@@ -34,6 +46,7 @@ function GroupJobCard({
   onOpen: () => void;
   onDismiss: () => void;
 }) {
+  const reason = groupFailureReason(gj);
   return (
     <div
       role="button"
@@ -52,6 +65,7 @@ function GroupJobCard({
           &times;
         </button>
       </div>
+      {reason && <p className="mt-0.5 text-xs text-white/80 truncate">{reason}</p>}
     </div>
   );
 }
@@ -95,6 +109,12 @@ function JobCard({
           &times;
         </button>
       </div>
+      {/* Before this, a failed toast said nothing about why -- `message` was
+          already computed (JobNotificationContext, preferring
+          error_summary) but never read here. */}
+      {job.status === 'failed' && (
+        <p className="mt-0.5 text-xs text-white/80 truncate">{job.message}</p>
+      )}
     </div>
   );
 }

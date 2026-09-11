@@ -134,6 +134,8 @@ class HuaweiPortParser(PortParser):
                     allowed_vlans=vlan.allowed_vlans if vlan else None,
                     storm_control_enabled=storm.enabled if storm else None,
                     storm_control_threshold=storm.threshold if storm else None,
+                    storm_control_action=storm.action if storm else None,
+                    storm_control_trap=storm.trap if storm else None,
                     # Step 1.1 is intentionally limited to the three commands
                     # above; PoE / speed / duplex are not exposed and remain
                     # None per the "do not invent values" rule.
@@ -516,9 +518,14 @@ class _StormRow:
     ``threshold`` es percent 0-100 cuando el device lo expresa así;
     None cuando está en pps/bps u otra unidad -- el frontend muestra
     "ON" sin porcentaje en ese caso.
-    """
+    ``action``/``trap`` -- ver ``Puerto.storm_control_action``/
+    ``storm_control_trap``. Solo tienen sentido cuando ``enabled=True``;
+    ``None`` mientras no se haya terminado de cerrar la fila (ver
+    ``_cerrar_actual()``-style default abajo)."""
     enabled: bool | None
     threshold: float | None
+    action: str | None = None
+    trap: bool | None = None
 
 
 # Matchea la línea "storm control broadcast ..." o "storm-control broadcast
@@ -583,19 +590,127 @@ def parse_vrp_storm_control(output: str) -> dict[str, _StormRow]:
             continue
         # Línea de storm control dentro de la sección actual.
         if "storm control" in stripped or "storm-control" in stripped:
-            # "storm control action ..." / "... enable trap" no son
-            # umbrales; los ignoramos para el threshold pero igual
-            # cuentan como enabled=True.
             existing = rows[current]
             threshold = existing.threshold
+            action = existing.action
+            trap = existing.trap
             match = _STORM_LEVEL_PERCENT.search(stripped)
             if match:
                 threshold = float(match.group(1) or match.group(2))
-            rows[current] = _StormRow(enabled=True, threshold=threshold)
+            # "... action shutdown"/"... action block"/"... action
+            # error-down" y "... enable trap" no son umbrales -- se
+            # extraen acá (ver Puerto.storm_control_action/storm_control_
+            # trap), pero igual cuentan como enabled=True. "error-down" es
+            # real, no un typo -- confirmado en vivo contra f3r9s2: al
+            # escribir "storm-control action shutdown" (el keyword que el
+            # comando de escritura acepta), el device lo normaliza y lo
+            # guarda en su config como "error-down" -- mismo estado
+            # (puerto se cae), nombre distinto entre input y config-dump.
+            if "action" in stripped:
+                if "shutdown" in stripped or "error-down" in stripped:
+                    action = "shutdown"
+                elif "block" in stripped:
+                    action = "filter"
+            if "enable trap" in stripped:
+                trap = True
+            rows[current] = _StormRow(enabled=True, threshold=threshold, action=action, trap=trap)
+    # Config preexistente escrita fuera de esta app puede tener storm
+    # control habilitado sin una línea de "action"/"trap" explícita (ej.
+    # solo el broadcast/multicast rate) -- default al mismo comportamiento
+    # implícito del device: sin acción configurada, filtra sin bajar el
+    # puerto (equivalente a "filter"); sin línea de trap, no hay trap.
+    for row in rows.values():
+        if row.enabled:
+            if row.action is None:
+                row.action = "filter"
+            if row.trap is None:
+                row.trap = False
     return rows
 
 
 # ── Cisco IOS ────────────────────────────────────────────────────────────────
+
+# Mismo criterio que ``_VRP_IFACE_ABBREV`` -- ``show running-config |
+# section ^interface`` imprime el nombre completo ("GigabitEthernet0/1"),
+# pero el resto de los comandos de puertos (status/description/switchport)
+# usan la forma corta ("Gi0/1"), que es la clave que usa el resto de este
+# dict. Orden más largo primero para que "TenGigabitEthernet"/
+# "TwentyFiveGigE" no matcheen parcial contra un prefijo más corto antes.
+_IOS_IFACE_ABBREV = (
+    ("TwentyFiveGigE", "Tw"),
+    ("TwoGigabitEthernet", "Tw"),
+    ("TenGigabitEthernet", "Te"),
+    ("HundredGigE", "Hu"),
+    ("FortyGigabitEthernet", "Fo"),
+    ("GigabitEthernet", "Gi"),
+    ("FastEthernet", "Fa"),
+    ("Port-channel", "Po"),
+    ("Ethernet", "Et"),
+)
+
+
+def _abreviar_nombre_interfaz_ios(name: str) -> str:
+    for full, short in _IOS_IFACE_ABBREV:
+        if name.startswith(full):
+            return short + name[len(full):]
+    return name
+
+
+_IOS_PORT_IFACE_HEADER = re.compile(r"^interface\s+(\S+)\s*$", re.IGNORECASE)
+_IOS_STORM_ACTION = re.compile(r"^\s*storm-control\s+action\s+(shutdown|trap)\s*$", re.IGNORECASE)
+
+
+def parse_ios_storm_control_actions(running_config_output: str) -> dict[str, tuple[str, bool]]:
+    """Parse ``show running-config | section ^interface`` para extraer
+    ``storm-control action shutdown``/``storm-control action trap`` por
+    puerto -- ninguna de las 2 aparece en ``show storm-control broadcast``
+    (esa tabla es estado operacional: forwarding/blocking, no "qué acción
+    está configurada"). Mismo patrón de secciones por interfaz que
+    ``svi_parser.py``'s ``_IOS_IFACE_HEADER``, generalizado a cualquier
+    interfaz física (no solo Vlan) vía ``CiscoPortParser.is_physical_port()``.
+
+    Returns
+    -------
+    dict[str, tuple[str, bool]]
+        Mapping ``interface_name (forma corta) -> (action, trap)``. Solo
+        interfaces con storm-control habilitado (con o sin línea de action
+        explícita) aparecen acá -- el default "sin action explícita ->
+        filter" se aplica en el caller, que sabe si ``enabled=True`` por
+        la tabla operacional (acá no se puede inferir "habilitado" de forma
+        confiable, la sección puede tener storm-control por broadcast/
+        multicast rate sin ninguna línea de action)."""
+    result: dict[str, tuple[str, bool]] = {}
+    current: str | None = None
+    action: str | None = None
+    trap = False
+
+    def _cerrar_actual() -> None:
+        if current is not None and (action is not None or trap):
+            result[current] = (action or "filter", trap)
+
+    for raw in running_config_output.splitlines():
+        line = strip_ansi(raw).rstrip()
+        header = _IOS_PORT_IFACE_HEADER.match(line.strip())
+        if header:
+            _cerrar_actual()
+            name = _abreviar_nombre_interfaz_ios(header.group(1))
+            current = name if CiscoPortParser.is_physical_port(name) else None
+            action = None
+            trap = False
+            continue
+        if current is None:
+            continue
+        m = _IOS_STORM_ACTION.match(line)
+        if m:
+            verb = m.group(1).lower()
+            if verb == "shutdown":
+                action = "shutdown"
+            else:
+                trap = True
+            continue
+    _cerrar_actual()
+    return result
+
 
 class CiscoPortParser(PortParser):
     # IOS reports interface names in their short form in every read command
@@ -631,8 +746,9 @@ class CiscoPortParser(PortParser):
         description_output: str,
         switchport_output: str,
         storm_output: str = "",
+        running_config_output: str = "",
     ) -> list[Puerto]:
-        """Combine four IOS read commands into a normalized port inventory.
+        """Combine five IOS read commands into a normalized port inventory.
 
         Source-of-truth strategy
         ------------------------
@@ -643,8 +759,14 @@ class CiscoPortParser(PortParser):
         * **Description / admin state / operational state** come from
           ``show interfaces description``.  When that command does not list the
           port (rare), we fall back to ``show interfaces status``.
-        * **Storm-control** comes from ``show storm-control broadcast`` --
-          match por interface name; falta = None (no inventar).
+        * **Storm-control enabled/threshold** come from ``show storm-control
+          broadcast`` -- match por interface name; falta = None (no inventar).
+        * **Storm-control action/trap** come from ``show running-config |
+          section ^interface`` -- ``show storm-control broadcast`` es
+          estado operacional (forwarding/blocking), no expone qué acción
+          está configurada. Sin línea de action explícita pero
+          storm-control habilitado -> default "filter" (ver
+          ``parse_ios_storm_control_actions()``).
         * **PoE / speed / duplex** are deliberately left as ``None`` per the
           step 1.3 spec.  ``show interfaces status`` does expose speed and
           duplex but populating them is reserved for a future step.
@@ -661,6 +783,9 @@ class CiscoPortParser(PortParser):
             Raw stdout of ``show storm-control broadcast``. Default empty
             string por retrocompat con callers viejos que no lo pasaban --
             el sync real siempre lo pasa.
+        running_config_output:
+            Raw stdout of ``show running-config | section ^interface``.
+            Mismo criterio de default vacío que ``storm_output``.
 
         Returns
         -------
@@ -671,6 +796,9 @@ class CiscoPortParser(PortParser):
         desc_rows = parse_ios_interface_description(description_output) if description_output else {}
         sw_rows = parse_ios_switchport(switchport_output) if switchport_output else {}
         storm_rows = parse_ios_storm_control(storm_output) if storm_output else {}
+        storm_actions = (
+            parse_ios_storm_control_actions(running_config_output) if running_config_output else {}
+        )
 
         ports: list[Puerto] = []
         # Source of truth for the port set: switchport_output (real L2 ports).
@@ -693,6 +821,11 @@ class CiscoPortParser(PortParser):
                 operational_up = None
                 description = None
 
+            action, trap = storm_actions.get(name, (None, None))
+            if storm and storm.enabled and action is None:
+                action = "filter"
+                trap = False
+
             ports.append(
                 Puerto(
                     interface=name,
@@ -704,6 +837,8 @@ class CiscoPortParser(PortParser):
                     allowed_vlans=sw.allowed_vlans,
                     storm_control_enabled=storm.enabled if storm else None,
                     storm_control_threshold=storm.threshold if storm else None,
+                    storm_control_action=action,
+                    storm_control_trap=trap,
                     # Step 1.3 explicitly leaves these as None.
                     poe_enabled=None,
                     speed=None,

@@ -75,6 +75,8 @@ def _puerto_to_orm(p: "Puerto"):
         allowed_vlans=p.allowed_vlans, poe_enabled=p.poe_enabled,
         storm_control_enabled=p.storm_control_enabled,
         storm_control_threshold=p.storm_control_threshold,
+        storm_control_action=p.storm_control_action,
+        storm_control_trap=p.storm_control_trap,
         operational_up=p.operational_up, speed=p.speed, duplex=p.duplex,
     )
 
@@ -87,6 +89,8 @@ def _puerto_to_domain(row) -> "Puerto":
         allowed_vlans=row.allowed_vlans, poe_enabled=row.poe_enabled,
         storm_control_enabled=row.storm_control_enabled,
         storm_control_threshold=row.storm_control_threshold,
+        storm_control_action=row.storm_control_action,
+        storm_control_trap=row.storm_control_trap,
         operational_up=row.operational_up, speed=row.speed, duplex=row.duplex,
     )
 

@@ -13,21 +13,20 @@ export interface ScopeTab {
 
 /**
  * Standard set of tabs available at every scope level (Org/Site/Group/Device).
- * Global-config solo está habilitada en scope device -- hostname/SNMP/etc.
- * son 1-a-1 con cada equipo, no tiene sentido fusionarlos a nivel site/
- * group. El layout de device override esta lista para activarla.
+ * Global-config está habilitada tanto en device scope (hostname/SNMP/NTP/DNS/
+ * logging/routes/ACLs/ARP-MAC/logs/running-config de 1 equipo puntual,
+ * GlobalConfigTab.tsx) como en site/group scope (SNMP/NTP/DNS/Log servers +
+ * ACLs comparadas entre todos los equipos del scope, GlobalConfigScopeTab.tsx
+ * -- ARP/MAC/Logs/Running-config quedan afuera de esa vista cruzada porque
+ * son inherentemente por-device). El layout de device override esta lista
+ * para apuntar al componente de device scope.
  */
 export const STANDARD_TABS: ScopeTab[] = [
   { label: 'Dashboard', segment: '' },
   { label: 'VLAN', segment: 'vlan' },
   { label: 'PORTS', segment: 'ports' },
   { label: 'VIRTUAL-INTERFACES', segment: 'virtual-interfaces' },
-  {
-    label: 'GLOBAL_CONFIG',
-    segment: 'global-config',
-    disabled: true,
-    disabledReason: 'Available at device scope',
-  },
+  { label: 'GLOBAL_CONFIG', segment: 'global-config' },
 ];
 
 export function ScopeTabs({

@@ -14,20 +14,15 @@ from app.schemas.global_config import (
     GlobalConfigAclCreateRequest,
     GlobalConfigAclDeleteRequest,
     GlobalConfigAclRuleRemoveRequest,
-    GlobalConfigDnsInfo,
     GlobalConfigDnsRemoveRequest,
     GlobalConfigDnsRequest,
     GlobalConfigHostnameUpdateRequest,
-    GlobalConfigLoggingInfo,
     GlobalConfigLogServerAddRequest,
     GlobalConfigLogServerRemoveRequest,
     GlobalConfigNtpAddRequest,
-    GlobalConfigNtpInfo,
     GlobalConfigNtpRemoveRequest,
-    GlobalConfigRead,
     GlobalConfigRunningConfigRead,
     GlobalConfigRouteAddRequest,
-    GlobalConfigSnmpInfo,
     GlobalConfigSnmpTrapHostRemoveRequest,
     GlobalConfigSnmpUpdateRequest,
     GlobalConfigVersionRead,
@@ -112,32 +107,12 @@ def get_global_config(
     scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.composition import device_sync_service, global_config_repository, redis_coordinator
+    from app.services.dashboard_service import build_global_config_payload
 
     _authz_device(scope, name, min_role="observer")
     dev = require_device(name)
     config = global_config_repository.get(name)
-    payload = {
-        "device": dev.name,
-        "vendor": dev.vendor,
-        **GlobalConfigRead(
-            hostname=config.hostname if config else None,
-            snmp=GlobalConfigSnmpInfo(
-                enabled=config.snmp_enabled if config else None,
-                version=config.snmp_version if config else None,
-                community=config.snmp_community if config else None,
-                permission=config.snmp_permission if config else None,
-                trap_hosts=config.snmp_trap_hosts if config else None,
-            ),
-            ntp=GlobalConfigNtpInfo(servers=config.ntp_servers if config else None),
-            dns=GlobalConfigDnsInfo(servers=config.dns_servers if config else None),
-            logging=GlobalConfigLoggingInfo(
-                servers=config.log_servers if config else None,
-                level=config.log_level if config else None,
-            ),
-            routes=config.routes if config else None,
-            acls=config.acls if config else None,
-        ).model_dump(),
-    }
+    payload = build_global_config_payload(dev.name, dev.vendor, config)
     synced_at, sync_error = device_sync_service.metadata(name, "global_config")
     envelope = SyncedResource(
         data=payload,

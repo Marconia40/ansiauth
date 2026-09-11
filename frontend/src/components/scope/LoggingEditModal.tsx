@@ -5,11 +5,13 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   addGlobalConfigLogServer,
   removeGlobalConfigLogServer,
+  parseFieldErrors,
 } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -42,6 +44,7 @@ export function LoggingEditModal({
   const [levelDraft, setLevelDraft] = useState('');
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -51,6 +54,7 @@ export function LoggingEditModal({
     setLevelDraft('');
     setPending(null);
     setError(null);
+    setFieldErrors(null);
   }, [open, currentServers]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -70,6 +74,7 @@ export function LoggingEditModal({
     }
     setPending('add');
     setError(null);
+    setFieldErrors(null);
     try {
       const result = await addGlobalConfigLogServer(deviceName, {
         server: s,
@@ -84,7 +89,9 @@ export function LoggingEditModal({
       setLevelDraft('');
       invalidate();
     } catch (err) {
-      setError(extractMessage(err, 'Add log server failed.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Add log server failed.'));
     } finally {
       setPending(null);
     }
@@ -167,6 +174,7 @@ export function LoggingEditModal({
                 placeholder="e.g. 10.0.0.10"
                 className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
               />
+              <FieldError message={fieldErrors?.server} />
             </FieldRow>
             <FieldRow label="Level (optional, device-wide)">
               <input
@@ -176,6 +184,7 @@ export function LoggingEditModal({
                 placeholder="e.g. informational"
                 className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
               />
+              <FieldError message={fieldErrors?.level} />
             </FieldRow>
           </div>
           <p className="text-xs text-muted">

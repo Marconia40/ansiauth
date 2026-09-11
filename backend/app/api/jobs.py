@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.response import ok
 from app.core.scope import authorize_device, obtener_scope, require_authenticated
 from app.models.audit import AuditRecord
@@ -16,6 +16,20 @@ router = APIRouter()
 _VALID_STATUSES = frozenset({"pending", "running", "completed", "failed", "cancelled"})
 
 
+def _format_retry_ref(job) -> dict:
+    """Shape reducido de un ``retry_rollback`` job para la lista
+    ``retry_rollback_jobs`` que devuelve ``GET /jobs/{id}``. El frontend
+    lo usa para deshabilitar el botón "Retry rollback" cuando hay uno
+    ya en curso o recientemente completado -- no hace falta devolver el
+    Job entero, solo el mínimo para renderizar el estado + linkear."""
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
 def _format_job(job) -> dict:
     started = _ensure_aware(job.started_at)
     finished = _ensure_aware(job.finished_at)
@@ -23,6 +37,14 @@ def _format_job(job) -> dict:
         round((finished - started).total_seconds() * 1000)
         if started and finished else None
     )
+    # Retry-rollback references -- lista de jobs que corrieron
+    # ``POST /jobs/{id}/retry-rollback`` para este job. Solo tiene
+    # sentido para jobs con un rollback failed (no vale la pena la
+    # query extra en el 99% de jobs que no aplican).
+    retry_jobs: list[dict] = []
+    if job.rollback_performed and job.rollback_success is False:
+        from app.composition import job_repository
+        retry_jobs = [_format_retry_ref(j) for j in job_repository.list_retry_rollbacks(job.job_id)]
     return {
         "job_id": job.job_id,
         "status": job.status,
@@ -41,6 +63,22 @@ def _format_job(job) -> dict:
         "rollback_success": job.rollback_success,
         "pre_state": job.pre_state,
         "last_error": job.last_error,
+        # Clasificación amigable del error final -- se pobla en
+        # ``Orquestador._error_amigable()`` al marcar el job como failed
+        # (queda en NULL para jobs completados con éxito). ``error_summary``
+        # es el string EN corto pensado para render directo en UI;
+        # ``error_type``/``error_reason`` sirven para agrupar/filtrar.
+        "error_type": job.error_type,
+        "error_reason": job.error_reason,
+        "error_summary": job.error_summary,
+        # Motivo del fallo del rollback (raw) -- se pobla solo cuando
+        # ``rollback_success=false``. Complementa a ``error`` que es
+        # el motivo del apply. NULL en jobs sin rollback fallido.
+        "rollback_error": job.rollback_error,
+        # Ver ``_format_retry_ref`` -- el frontend usa esta lista para
+        # el estado del botón "Retry rollback" (deshabilitar si hay uno
+        # in-progress o mostrar link al último completado).
+        "retry_rollback_jobs": retry_jobs,
         "current_step": job.current_step,
         "group_job_id": job.group_job_id,
         "execution_summary": {
@@ -131,6 +169,125 @@ def _check_device_scope(
     core.scope.authorize_device() (single implementation shared with
     api/vlans.py/api/ports.py, replacing 3 independent copies)."""
     authorize_device(scope, device_name, "job_device_op", min_role)
+
+
+@router.post(
+    "/{job_id}/retry-rollback",
+    status_code=202,
+    summary="Retry a failed rollback",
+    description=(
+        "Manually re-attempt the rollback of a previously failed job "
+        "whose original rollback did not succeed (typically because the "
+        "device was temporarily unreachable / rejected a revert command / "
+        "hit an SSH session cap). Uses the persisted `pre_state` snapshot "
+        "of the failed job to rebuild the revert steps and runs them as a "
+        "single batched apply against the device. Creates a **new job** "
+        "with `operation='retry_rollback'` and `parameters.retry_of_job_id "
+        "= <original>`; the original job is not modified (its "
+        "`rollback_success=false` stays as the record of the first "
+        "attempt). Only supported for `puerto` and `svi` operations. "
+        "Requires operator role or higher; site-scoped users may only "
+        "target their allowed devices."
+    ),
+)
+def retry_job_rollback(
+    job_id: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    import uuid
+
+    from app.composition import job_repository
+    from app.models.job import Job
+
+    original = job_repository.get(job_id)
+    if original is None:
+        raise NotFoundError(f"Job '{job_id}' not found")
+
+    # Preconditions: only failed jobs whose rollback attempt actually ran
+    # and did not succeed are candidates. Everything else is either
+    # nothing to retry (rollback never ran, or ran OK), or a category
+    # mismatch (still pending/running).
+    if original.status != "failed":
+        raise ValidationError(
+            f"cannot retry rollback of a job in status {original.status!r} -- "
+            "only jobs in 'failed' state are candidates"
+        )
+    if not original.rollback_performed:
+        raise ValidationError(
+            "cannot retry rollback: original job never attempted one "
+            "(rollback_performed=false) -- there is nothing to retry"
+        )
+    if original.rollback_success is not False:
+        raise ValidationError(
+            "cannot retry rollback: original rollback did not fail "
+            f"(rollback_success={original.rollback_success}) -- nothing to recover"
+        )
+    if not original.pre_state:
+        raise ValidationError(
+            "cannot retry rollback: original job has no pre_state snapshot "
+            "(likely a legacy job created before pre_state persistence was added)"
+        )
+    if original.operation not in ("puerto", "svi"):
+        raise ValidationError(
+            f"cannot retry rollback: operation {original.operation!r} is not "
+            "supported (only 'puerto' and 'svi' have the batched rollback "
+            "machinery required for a retry-rollback)"
+        )
+
+    if original.device:
+        _check_device_scope(scope, original.device, min_role="operator")
+
+    # Guard contra retries duplicados concurrentes -- si el usuario clickea
+    # el botón 2 veces (o dos usuarios lo hacen en paralelo), sin este
+    # chequeo se crearían N jobs de retry-rollback que apuntarían al
+    # mismo device sobre el mismo pre_state, y los N se serializarían
+    # por el lock Redis del device pero igual gastarían N sesiones SSH y
+    # llenarían el historial. Bloqueamos solo los pending/running --
+    # completed/failed anteriores NO bloquean (el device puede haber
+    # divergido de nuevo desde entonces por consola o por otro job).
+    existing = job_repository.list_retry_rollbacks(original.job_id, limit=10)
+    en_curso = next(
+        (r for r in existing if r.status in ("pending", "running", "retrying")),
+        None,
+    )
+    if en_curso is not None:
+        raise ConflictError(
+            f"Retry-rollback already {en_curso.status} for this job "
+            f"(job_id={en_curso.job_id}). Wait for it to finish, then check "
+            "the device state before starting another retry."
+        )
+
+    # Create the recovery job -- separate Job so the original's failure
+    # record stays intact (audit trail preserved) and multiple retries
+    # can each have their own row.
+    new_job = Job(
+        operation="retry_rollback",
+        device=original.device,
+        # Buscable por ambos lados: podés partir del nuevo y saber cuál
+        # original está retrying, y podés listar los retries hechos
+        # sobre un original filtrando por este campo.
+        parameters={"retry_of_job_id": original.job_id, "original_operation": original.operation},
+        parameters_summary=(
+            f"Retry rollback of failed {original.operation} job "
+            f"{original.job_id[:8]}... on device {original.device}"
+        ),
+        # group_job_id nuevo -- este retry es su propio grupo (1 device,
+        # 1 job). Mantener el mismo shape que el resto de la API para
+        # no romper el flujo del frontend que polea por group_job_id.
+        group_job_id=str(uuid.uuid4()),
+    )
+    job_repository.add(new_job)
+
+    from app.tasks import retry_rollback_task
+    retry_rollback_task.delay(original.job_id, new_job.job_id, current_user["username"])
+
+    return ok({
+        "job_id": new_job.job_id,
+        "group_job_id": new_job.group_job_id,
+        "status": new_job.status,
+        "retry_of_job_id": original.job_id,
+    })
 
 
 @router.post(

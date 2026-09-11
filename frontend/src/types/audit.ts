@@ -8,6 +8,7 @@ export interface AuditLog {
   resource_id: string | null;
   status: string;
   details: Record<string, unknown>;
+  summary: string | null;
   job_id: string | null;
   device: string | null;
   request_id: string | null;

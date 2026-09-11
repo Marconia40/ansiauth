@@ -2,17 +2,32 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { createSVI } from '@/services/api';
+import { createSVI, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import { Modal } from './Modal';
 import { DeviceSelector } from './DeviceSelector';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
 } from './VlanCreateModal';
+
+// mutationFn collapses a Promise.allSettled loop (1 call per device) down
+// to a single thrown Error for React Query's onError -- which strips away
+// the real axios error's `response.data` entirely. Stashing the first
+// failing device's parsed field errors as a property on that Error is the
+// only way onError can still see them (parseFieldErrors(err) itself
+// wouldn't find anything on a synthetic Error with no `response`).
+class SviCreateBatchError extends Error {
+  fieldErrors: Record<string, string> | null;
+  constructor(message: string, fieldErrors: Record<string, string> | null) {
+    super(message);
+    this.fieldErrors = fieldErrors;
+  }
+}
 
 interface Props {
   open: boolean;
@@ -35,6 +50,7 @@ export function SVICreateModal({ open, onClose, scope, deviceName }: Props) {
   const [description, setDescription] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(
     null,
   );
@@ -79,8 +95,9 @@ export function SVICreateModal({ open, onClose, scope, deviceName }: Props) {
         // genérico "N failed". El resto del detalle igual queda en el
         // console si hace falta debug.
         const firstErr = (failed[0] as PromiseRejectedResult).reason;
-        throw new Error(
+        throw new SviCreateBatchError(
           `${failed.length} of ${devices.length} device(s) failed: ${extractMessage(firstErr, 'Create failed.')}`,
+          parseFieldErrors(firstErr),
         );
       }
     },
@@ -88,7 +105,14 @@ export function SVICreateModal({ open, onClose, scope, deviceName }: Props) {
       invalidateSviQueries(queryClient);
       resetAndClose();
     },
-    onError: (err: unknown) => setError(extractMessage(err, 'Create failed.')),
+    onError: (err: unknown) => {
+      // vlan_id is the only field with real validation here, shared by
+      // every device in the batch -- the banner keeps the "N of M failed"
+      // count (info the field-level detail alone doesn't carry), field
+      // detail goes under the input same as everywhere else.
+      setFieldErrors(err instanceof SviCreateBatchError ? err.fieldErrors : null);
+      setError(extractMessage(err, 'Create failed.'));
+    },
   });
 
   function resetAndClose() {
@@ -96,6 +120,7 @@ export function SVICreateModal({ open, onClose, scope, deviceName }: Props) {
     setDescription('');
     setSelected(new Set());
     setError(null);
+    setFieldErrors(null);
     setProgress(null);
     onClose();
   }
@@ -141,6 +166,7 @@ export function SVICreateModal({ open, onClose, scope, deviceName }: Props) {
               VLAN id must be an integer between 1 and 4094.
             </p>
           )}
+          <FieldError message={fieldErrors?.vlan_id} />
           <p className="text-xs text-muted mt-1">
             The VLAN must already exist on the target device — the backend
             will reject the create otherwise.

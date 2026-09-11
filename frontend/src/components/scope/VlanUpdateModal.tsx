@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { updateVlan } from '@/services/api';
+import { updateVlan, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import type { VlanRow } from './scopeVlans';
@@ -10,6 +10,7 @@ import { Modal } from './Modal';
 import { DeviceSelector } from './DeviceSelector';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -38,6 +39,7 @@ export function VlanUpdateModal({
   const [description, setDescription] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   const picked = useMemo(
     () => rows.find((r) => r.vlanId === pickedId) ?? null,
@@ -78,7 +80,11 @@ export function VlanUpdateModal({
       invalidateVlanQueries(queryClient);
       resetAndClose();
     },
-    onError: (err: unknown) => setError(extractMessage(err, 'Update failed.')),
+    onError: (err: unknown) => {
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Update failed.'));
+    },
   });
 
   function resetAndClose() {
@@ -86,6 +92,7 @@ export function VlanUpdateModal({
     setDescription('');
     setSelected(new Set());
     setError(null);
+    setFieldErrors(null);
     onClose();
   }
 
@@ -135,6 +142,7 @@ export function VlanUpdateModal({
                 onChange={(e) => setDescription(e.target.value)}
                 className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
               />
+              <FieldError message={fieldErrors?.description} />
             </FieldRow>
 
             <FieldRow label="Target devices">

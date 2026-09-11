@@ -527,6 +527,17 @@ class GlobalConfig:
             for actual_line in reglas_actuales
         )
 
+    def _leer_actual_fresco(self, device: "Device") -> "GlobalConfig | None":
+        """Estado real del device AHORA -- usado por ``ejecutar_rollback()``
+        antes de intentar revertir un campo incremental (``_add`` que se
+        revierte con un "remove") para confirmar que lo que se va a
+        revertir está efectivamente presente. Sin esto, un apply que
+        nunca llegó a tocar el device (rechazo permanente) generaba un
+        intento de "borrar algo que nunca se agregó" -- mismo bug real
+        que ya rompió con ``SVI`` ACL (ver ``resolver_rollback()``),
+        acá con el mismo criterio pero sin el mecanismo de lote."""
+        return self.reconciliar(device).get("actual")
+
     def _aplicar_acl_create(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """RF-GLOBAL-05. Crea la ACL si no existe, agrega las reglas
         nuevas si ya existe (mismo comando de driver sirve para ambos
@@ -575,6 +586,382 @@ class GlobalConfig:
             return self._noop_resultado("borrar_acl")
         resultado = device.driver.delete_acl(self.acl_delete, device, device.password)
         return {**resultado, "accion": "borrar_acl"}
+
+    # Mismo prefijo que agrega cada vendor al leer una regla de ACL (número
+    # de secuencia Cisco -- "10 permit ...", o "rule N" Huawei) -- hace
+    # falta pelarlo para volver a mandar la regla como input (mismo shape
+    # que produce ``driver.formatear_regla_acl()``, sin el número que el
+    # device asigna solo). Complementa a ``_SUFIJO_CONTADOR_RE`` (pela el
+    # contador de hits del otro extremo de la línea).
+    _PREFIJO_REGLA_ACL_RE = re.compile(r"^\s*(?:rule\s+)?\d+\s+")
+    _NUMERO_PREFIJO_REGLA_ACL_RE = re.compile(r"^\s*(?:rule\s+)?(\d+)\s+")
+
+    @classmethod
+    def _pelar_regla_acl(cls, raw_line: str) -> str:
+        sin_contador = cls._SUFIJO_CONTADOR_RE.sub("", raw_line)
+        return cls._PREFIJO_REGLA_ACL_RE.sub("", sin_contador).strip()
+
+    @classmethod
+    def _regla_con_secuencia_original(cls, bare: str, previas: list[str]) -> str:
+        """Busca en *previas* (líneas crudas, con el prefijo que agrega el
+        device al leer) la que corresponde a *bare* (el mismo shape que
+        produce ``formatear_regla_acl()``) y devuelve *bare* con su número
+        de secuencia ORIGINAL antepuesto -- ver el comentario en la rama
+        ``acl_rule_remove`` de ``ejecutar_rollback()`` para el motivo real
+        (evitar que la regla restaurada quede después de un catch-all y
+        nunca se evalúe). Si no encuentra match (no debería pasar,
+        ``sacadas_input`` ya filtró por presencia), devuelve *bare* tal
+        cual -- se auto-asigna al final, mismo comportamiento que antes de
+        este fix."""
+        for raw in previas:
+            sin_contador = cls._SUFIJO_CONTADOR_RE.sub("", raw)
+            if sin_contador.rstrip().endswith(bare):
+                m = cls._NUMERO_PREFIJO_REGLA_ACL_RE.match(sin_contador)
+                if m:
+                    return f"{m.group(1)} {bare}"
+                break
+        return bare
+
+    def ejecutar_rollback(self, pre_state: dict, device: "Device") -> "tuple[bool, bool | None]":
+        """Ver ``Puerto.resolver_rollback``/``SVI.resolver_rollback`` --
+        mismo criterio de polimorfismo (``Orquestador._rollback()`` llama
+        a esto sin saber que existe ``GlobalConfig``), pero esta versión
+        EJECUTA contra el device (no es un "plan" batcheable -- no hay
+        endpoint de lote para este tipo, ver ``RecursoGestionable``).
+
+        A diferencia de VLAN/Puerto/SVI, varios campos acá son deltas
+        incrementales (``_add``/``_remove`` sobre una lista, no un "set a
+        X") -- revertir un ``X_add`` es un ``remove_X`` del mismo valor y
+        viceversa, no hay "valor anterior" que restaurar en el sentido de
+        los otros tipos.
+
+        2 campos NO son revertibles con la información que tenemos y se
+        dejan explícitamente como no-op (``return False, None``) en vez de
+        adivinar:
+        - ``dns_domain_set``: no existe lectura de domain-name en ningún
+          driver (ver docstring de ``_aplicar_dns_domain()``) -- no hay
+          valor previo posible de recuperar.
+        - ``snmp_config`` sub-campos ``trap_source``/``trap_host``: no hay
+          campo de solo-lectura para ``trap_source``, y agregar un
+          ``trap_host`` no tiene contraparte "remove" en el driver -- se
+          revierten ``version``/``community`` (sí legibles) cuando son
+          parte del cambio, el resto queda aplicado.
+
+        Las 3 ramas de ACL (``acl_create``/``acl_rule_remove``/
+        ``acl_delete``) reconstruyen las reglas a re-aplicar pelando el
+        prefijo/contador que el device agrega al leerlas (ver
+        ``_pelar_regla_acl()``) -- son las de mayor riesgo (la regla viaja
+        como texto ya formateado, no como el dict estructurado original),
+        confirmadas en vivo antes de darlas por buenas."""
+        if not pre_state.get("existed"):
+            return False, None
+        anterior = pre_state.get("actual")
+        if anterior is None:
+            return False, None
+
+        campos = self.mutation_fields
+        if len(campos) != 1:
+            return False, None
+        campo = next(iter(campos))
+        try:
+            if campo == "hostname":
+                if not anterior.hostname or anterior.hostname == self.hostname:
+                    return False, None
+                resultado = device.driver.set_hostname(anterior.hostname, device, device.password)
+            elif campo == "snmp_config":
+                cambios = {}
+                if self.snmp_config.get("version") is not None and anterior.snmp_version is not None:
+                    cambios["version"] = anterior.snmp_version
+                if self.snmp_config.get("community") is not None and anterior.snmp_community is not None:
+                    cambios["community"] = anterior.snmp_community
+                rcs = []
+                if cambios:
+                    rcs.append(device.driver.set_snmp(cambios, device, device.password).get("rc", 1))
+                # trap_host es un campo aparte de version/community -- se
+                # agregó de nuevo (no existía en anterior), revertir es
+                # sacarlo. Reusa la MISMA community que se mandó en esta
+                # request (o la general del device si no vino) -- mismo
+                # cálculo que ``_aplicar_snmp_config()`` ya hace para
+                # construir ese trap host.
+                trap_host = self.snmp_config.get("trap_host")
+                if trap_host is not None and trap_host not in (anterior.snmp_trap_hosts or []):
+                    community_usada = self.snmp_config.get("community") or anterior.snmp_community
+                    if community_usada:
+                        rcs.append(
+                            device.driver.remove_snmp_trap_host(
+                                trap_host, device, device.password, community=community_usada,
+                            ).get("rc", 1)
+                        )
+                if not rcs:
+                    return False, None
+                resultado = {"rc": 0 if all(rc == 0 for rc in rcs) else 1}
+            elif campo == "snmp_trap_host_remove":
+                # Sin no-op check contra anterior.snmp_trap_hosts a
+                # propósito -- mismo motivo que
+                # ``_aplicar_snmp_trap_host_remove()`` (ver su docstring):
+                # en Huawei esa lista viene de la ACL del agente, no del
+                # target-host real que este mecanismo agrega/saca, así que
+                # un host manejado 100% por target-host nunca aparecería
+                # ahí. Re-agregar directo con la MISMA community que se
+                # mandó para sacarlo (tuvo que ser la correcta para que el
+                # remove original haya funcionado) es seguro -- si por
+                # algún motivo el remove original nunca llegó a aplicar,
+                # esto en el peor caso es un re-add redundante, no rompe
+                # nada.
+                resultado = device.driver.set_snmp(
+                    {
+                        "trap_host": self.snmp_trap_host_remove["host"],
+                        "trap_host_community": self.snmp_trap_host_remove["community"],
+                        "trap_version": anterior.snmp_version or "2c",
+                    },
+                    device, device.password,
+                )
+            elif campo == "route_add":
+                destino = str(ipaddress.ip_network(self.route_add["destination"], strict=False))
+                next_hop = self.route_add["next_hop"]
+                ya_existia = any(
+                    r.get("destination") == destino and r.get("next_hop") == next_hop
+                    for r in (anterior.routes or [])
+                )
+                if ya_existia:
+                    return False, None
+                # Bug real encontrado por auditoría (mismo tipo que el de
+                # SVI ACL): sin releer el estado fresco, si el apply
+                # nunca llegó a tocar el device (rechazo permanente antes
+                # de aplicar nada) el rollback igual intentaba
+                # ``remove_route()`` sobre una ruta que nunca se agregó.
+                actual_ahora = self._leer_actual_fresco(device)
+                esta_ahora = actual_ahora is not None and any(
+                    r.get("destination") == destino and r.get("next_hop") == next_hop
+                    for r in (actual_ahora.routes or [])
+                )
+                if not esta_ahora:
+                    return False, None
+                resultado = device.driver.remove_route(destino, next_hop, device, device.password)
+            elif campo == "route_remove":
+                destino = str(ipaddress.ip_network(self.route_remove["destination"], strict=False))
+                next_hop = self.route_remove["next_hop"]
+                existia = any(
+                    r.get("destination") == destino and r.get("next_hop") == next_hop
+                    for r in (anterior.routes or [])
+                )
+                if not existia:
+                    return False, None
+                resultado = device.driver.set_route(destino, next_hop, device, device.password)
+            elif campo == "ntp_server_add":
+                # Sin guard alguno originalmente -- bug real encontrado
+                # por auditoría, mismo criterio que ``route_add`` arriba:
+                # el apply pudo no haber tocado el device en absoluto.
+                server = self.ntp_server_add["server"]
+                if server in (anterior.ntp_servers or []):
+                    return False, None
+                actual_ahora = self._leer_actual_fresco(device)
+                if actual_ahora is None or server not in (actual_ahora.ntp_servers or []):
+                    return False, None
+                resultado = device.driver.remove_ntp_server(server, device, device.password)
+            elif campo == "ntp_server_remove":
+                resultado = device.driver.add_ntp_server(
+                    self.ntp_server_remove["server"], False, device, device.password,
+                )
+            elif campo == "dns_server_add":
+                server = self.dns_server_add["server"]
+                if server in (anterior.dns_servers or []):
+                    return False, None
+                actual_ahora = self._leer_actual_fresco(device)
+                if actual_ahora is None or server not in (actual_ahora.dns_servers or []):
+                    return False, None
+                resultado = device.driver.remove_dns_server(server, device, device.password)
+            elif campo == "dns_server_remove":
+                resultado = device.driver.add_dns_server(self.dns_server_remove["server"], device, device.password)
+            elif campo == "dns_domain_set":
+                return False, None
+            elif campo == "log_server_add":
+                server = self.log_server_add["server"]
+                if server in (anterior.log_servers or []):
+                    return False, None
+                actual_ahora = self._leer_actual_fresco(device)
+                if actual_ahora is None or server not in (actual_ahora.log_servers or []):
+                    return False, None
+                resultado = device.driver.remove_log_server(server, device, device.password)
+            elif campo == "log_server_remove":
+                resultado = device.driver.add_log_server(
+                    self.log_server_remove["server"], None, device, device.password,
+                )
+            elif campo == "acl_create":
+                name = self.acl_create["name"]
+                existia_antes = bool(anterior.acls) and any(a.get("name") == name for a in anterior.acls)
+                actual_ahora = self._leer_actual_fresco(device)
+                if not existia_antes:
+                    # Bug real encontrado por auditoría: sin este guard,
+                    # una ACL cuyo create nunca llegó a tocar el device
+                    # (rechazo permanente) igual disparaba un
+                    # ``delete_acl()`` sobre algo que nunca se creó.
+                    existe_ahora = actual_ahora is not None and bool(actual_ahora.acls) and any(
+                        a.get("name") == name for a in actual_ahora.acls
+                    )
+                    if not existe_ahora:
+                        return False, None
+                    resultado = device.driver.delete_acl(name, device, device.password)
+                else:
+                    previas = self._reglas_acl_actuales(anterior, name)
+                    nuevas_relativas_a_anterior = [
+                        formateada for r in self.acl_create["rules"]
+                        if not self._regla_ya_presente(
+                            formateada := device.driver.formatear_regla_acl(r), previas,
+                        )
+                    ]
+                    if not nuevas_relativas_a_anterior:
+                        return False, None
+                    # Mismo guard que arriba: de las reglas que son NUEVAS
+                    # relativo a *anterior*, solo revertimos (removemos)
+                    # las que el fresh read confirma que de verdad llegaron
+                    # a aplicarse -- no todas las "pedidas".
+                    previas_ahora = self._reglas_acl_actuales(actual_ahora, name) if actual_ahora else []
+                    agregadas = [
+                        r for r in nuevas_relativas_a_anterior
+                        if self._regla_ya_presente(r, previas_ahora)
+                    ]
+                    if not agregadas:
+                        return False, None
+                    resultado = device.driver.remove_acl_rules(name, agregadas, device, device.password)
+            elif campo == "acl_rule_remove":
+                name = self.acl_rule_remove["name"]
+                previas = self._reglas_acl_actuales(anterior, name)
+                sacadas_input = [
+                    r for r in self.acl_rule_remove["rules"]
+                    if self._regla_ya_presente(device.driver.formatear_regla_acl(r), previas)
+                ]
+                if not sacadas_input:
+                    return False, None
+                # Sin número de secuencia, IOS/VRP auto-asignan al final --
+                # bug real encontrado probando esto: si la ACL tiene un
+                # "deny ip any any" (u otro catch-all) antes de esa
+                # posición, la regla restaurada queda inalcanzable (el
+                # catch-all la corta antes de que evalúe nunca). Reinsertar
+                # con su número de secuencia ORIGINAL (extraído de
+                # *previas*, ver ``_regla_con_secuencia_original()``) hace
+                # que quede exactamente donde estaba -- Cisco acepta el
+                # número como prefijo directo del texto de la regla; VRP
+                # también, porque ``create_or_update_acl()`` antepone
+                # "rule " a cada línea, entonces "{N} permit ..." termina
+                # como "rule {N} permit ...", la sintaxis real de VRP para
+                # insertar en una posición puntual.
+                rule_lines = [
+                    self._regla_con_secuencia_original(device.driver.formatear_regla_acl(r), previas)
+                    for r in sacadas_input
+                ]
+                resultado = device.driver.create_or_update_acl(name, rule_lines, device, device.password)
+            elif campo == "acl_delete":
+                previas = self._reglas_acl_actuales(anterior, self.acl_delete)
+                if not previas:
+                    return False, None
+                rule_lines = [self._pelar_regla_acl(r) for r in previas]
+                resultado = device.driver.create_or_update_acl(self.acl_delete, rule_lines, device, device.password)
+            else:
+                return False, None
+            exitoso = resultado.get("rc", 1) == 0
+        except Exception:
+            return True, False
+
+        if not exitoso:
+            return True, False
+
+        # Las 3 ramas de ACL no comparten 1 sola forma de "verificar" --
+        # cada una espera algo distinto del estado final (ACL borrada del
+        # todo / ciertas reglas ausentes / ciertas reglas presentes de
+        # nuevo) -- bug real encontrado probando esto: un chequeo genérico
+        # de "¿la ACL existe?" reportaba rollback_success=False para el
+        # caso "ACL nueva, revertir = borrarla" (donde NO existir es el
+        # resultado CORRECTO), aunque el borrado hubiera funcionado bien
+        # en el device real. Se verifica acá mismo, con el contexto de
+        # cada rama todavía en scope, en vez de un helper genérico ciego a
+        # qué caso es cada uno.
+        try:
+            actual_final = device.driver.get_global_config(device, device.password)
+            if actual_final is None:
+                verificado = False
+            elif campo == "acl_create":
+                if not existia_antes:
+                    verificado = not (
+                        actual_final.acls and any(a.get("name") == name for a in actual_final.acls)
+                    )
+                else:
+                    reglas_ahora = self._reglas_acl_actuales(actual_final, name)
+                    verificado = not any(
+                        self._regla_ya_presente(r, reglas_ahora) for r in agregadas
+                    )
+            elif campo == "acl_rule_remove":
+                # rule_lines acá trae el número de secuencia original
+                # (ver el bloque de arriba) -- _regla_ya_presente() espera
+                # la forma SIN prefijo (mismo shape que devuelve
+                # formatear_regla_acl()), por eso se re-deriva de
+                # sacadas_input en vez de reusar rule_lines directo.
+                reglas_ahora = self._reglas_acl_actuales(actual_final, name)
+                verificado = all(
+                    self._regla_ya_presente(device.driver.formatear_regla_acl(r), reglas_ahora)
+                    for r in sacadas_input
+                )
+            elif campo == "acl_delete":
+                existe_ahora = bool(actual_final.acls) and any(
+                    a.get("name") == self.acl_delete for a in actual_final.acls
+                )
+                reglas_ahora = self._reglas_acl_actuales(actual_final, self.acl_delete) if existe_ahora else []
+                verificado = existe_ahora and all(
+                    self._regla_ya_presente(r, reglas_ahora) for r in rule_lines
+                )
+            else:
+                verificado = self._verificar_rollback(campo, anterior, actual_final)
+        except Exception:
+            verificado = False
+        return True, verificado
+
+    def _verificar_rollback(self, campo: str, anterior, actual_final) -> bool:
+        if actual_final is None:
+            return False
+        if campo == "hostname":
+            return actual_final.hostname == anterior.hostname
+        if campo == "snmp_config":
+            trap_host = self.snmp_config.get("trap_host")
+            trap_ok = (
+                trap_host is None
+                or trap_host in (anterior.snmp_trap_hosts or [])
+                or trap_host not in (actual_final.snmp_trap_hosts or [])
+            )
+            return (
+                actual_final.snmp_version == anterior.snmp_version
+                and actual_final.snmp_community == anterior.snmp_community
+                and trap_ok
+            )
+        if campo == "snmp_trap_host_remove":
+            # No se puede verificar releyendo -- mismo motivo que el no-op
+            # check que se sacó de _aplicar_snmp_trap_host_remove() (ver su
+            # docstring): en Huawei actual_final.snmp_trap_hosts viene de
+            # la ACL del agente, nunca del target-host real que este
+            # mecanismo re-agrega -- confirmado en vivo que el re-add
+            # funciona perfecto contra el device real pero esta lista
+            # nunca lo refleja. Se confía en el rc del driver (ya
+            # verificado que reporta correcto en los 2 sentidos, ver
+            # pruebas en vivo de esta misma sesión) en vez de una
+            # relectura que sabemos que da falso negativo acá.
+            return True
+        if campo in ("route_add", "route_remove"):
+            return (actual_final.routes or []) == (anterior.routes or [])
+        if campo == "ntp_server_add":
+            return self.ntp_server_add["server"] not in (actual_final.ntp_servers or [])
+        if campo == "ntp_server_remove":
+            return self.ntp_server_remove["server"] in (actual_final.ntp_servers or [])
+        if campo == "dns_server_add":
+            return self.dns_server_add["server"] not in (actual_final.dns_servers or [])
+        if campo == "dns_server_remove":
+            return self.dns_server_remove["server"] in (actual_final.dns_servers or [])
+        if campo == "log_server_add":
+            return self.log_server_add["server"] not in (actual_final.log_servers or [])
+        if campo == "log_server_remove":
+            return self.log_server_remove["server"] in (actual_final.log_servers or [])
+        # acl_create/acl_rule_remove/acl_delete NO llegan acá -- se
+        # verifican inline en ejecutar_rollback(), donde todavía está en
+        # scope el contexto de cada rama (ver su comentario).
+        return False
 
     def repositorio(self) -> str:
         return "global_config"

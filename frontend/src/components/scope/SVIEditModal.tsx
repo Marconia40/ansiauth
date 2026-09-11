@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { batchUpdateSvi } from '@/services/api';
+import { batchUpdateSvi, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { SVIBatchRequest } from '@/types/svi';
 import type { SviRow } from './scopeSvis';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -16,6 +17,23 @@ import {
 import { invalidateSviQueries } from './SVICreateModal';
 
 type Tab = 'general' | 'ipv4' | 'ipv6' | 'acl' | 'dhcp';
+
+// Maps the wire field name (Pydantic error `loc`'s last segment, see
+// `parseFieldErrors()`) to the tab that field's input lives on -- used to
+// jump straight to the right tab when Save comes back with a field error,
+// instead of leaving the user on whichever tab they happened to be on.
+const FIELD_TO_TAB: Record<string, Tab> = {
+  description: 'general',
+  admin_up: 'general',
+  ipv4_address: 'ipv4',
+  ipv4_secondary_add: 'ipv4',
+  ipv4_secondary_remove: 'ipv4',
+  ipv6_address: 'ipv6',
+  acl_in: 'acl',
+  acl_out: 'acl',
+  dhcp_relay_add: 'dhcp',
+  dhcp_relay_remove: 'dhcp',
+};
 
 interface Props {
   open: boolean;
@@ -51,7 +69,15 @@ export function SVIEditModal({ open, onClose, row }: Props) {
 
   // IPv4
   const [ipv4Primary, setIpv4Primary] = useState('');
-  const [ipv4Secondary, setIpv4Secondary] = useState('');
+  // Secundarias -- misma forma de estado que dhcpServers/dhcpDraft/dhcpAdding
+  // abajo (lista local + delta contra `initial`, ver ipv4SecondaryDelta).
+  // A diferencia de DHCP relay, el comando de device es aditivo/quitable
+  // por dirección puntual (no full-replace) -- el cap a 1 cambio por Save
+  // se mantiene igual solo por consistencia de UX con DHCP relay, no
+  // porque el batch pudiera pisarse (ver SVI.ipv4_address_secondary).
+  const [ipv4SecondaryList, setIpv4SecondaryList] = useState<string[]>([]);
+  const [ipv4SecondaryDraft, setIpv4SecondaryDraft] = useState('');
+  const [ipv4SecondaryAdding, setIpv4SecondaryAdding] = useState(false);
 
   // IPv6
   const [ipv6, setIpv6] = useState('');
@@ -69,6 +95,10 @@ export function SVIEditModal({ open, onClose, row }: Props) {
   const [dhcpAdding, setDhcpAdding] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+  // Per-field validation messages (see parseFieldErrors()) -- rendered
+  // inline under the actual input on the tab it belongs to, instead of
+  // only as one generic string at the bottom of the modal.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   // Re-hidrata el form cada vez que cambia la row objetivo (o se abre el modal).
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -78,7 +108,9 @@ export function SVIEditModal({ open, onClose, row }: Props) {
     setAdminUp(row.adminUp);
     setDescription(row.description ?? '');
     setIpv4Primary(row.ipv4 ?? '');
-    setIpv4Secondary(row.ipv4Secondary ?? '');
+    setIpv4SecondaryList(row.ipv4SecondaryAddresses.slice());
+    setIpv4SecondaryDraft('');
+    setIpv4SecondaryAdding(false);
     setIpv6(row.ipv6 ?? '');
     setAclIn(row.aclIn ?? '');
     setAclOut(row.aclOut ?? '');
@@ -86,6 +118,7 @@ export function SVIEditModal({ open, onClose, row }: Props) {
     setDhcpDraft('');
     setDhcpAdding(false);
     setError(null);
+    setFieldErrors(null);
   }, [row, open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -110,6 +143,22 @@ export function SVIEditModal({ open, onClose, row }: Props) {
   // componente. Evita el bug de colisión de raíz (nunca hay 2 deltas para
   // plegar) sin construir el mecanismo de plegado.
   const dhcpTotalDelta = dhcpDelta.adds.length + dhcpDelta.removes.length;
+
+  // Mismo criterio que dhcpDelta, para las IPv4 secundarias.
+  const ipv4SecondaryDelta = useMemo(() => {
+    if (!initial) return { adds: [] as string[], removes: [] as string[] };
+    const originalSet = new Set(initial.ipv4SecondaryAddresses);
+    const currentSet = new Set(ipv4SecondaryList);
+    return {
+      adds: ipv4SecondaryList.filter((s) => !originalSet.has(s)),
+      removes: initial.ipv4SecondaryAddresses.filter((s) => !currentSet.has(s)),
+    };
+  }, [initial, ipv4SecondaryList]);
+
+  // Mismo cap que dhcpTotalDelta -- por consistencia de UX, no porque el
+  // comando de device (aditivo por dirección) pudiera pisarse (ver
+  // docstring de ipv4SecondaryList más arriba).
+  const ipv4SecondaryTotalDelta = ipv4SecondaryDelta.adds.length + ipv4SecondaryDelta.removes.length;
 
   // Delta de campos cambiados -> 1 solo body para PATCH .../batch (antes
   // eran N llamadas individuales en serie, ver docstring del componente).
@@ -140,12 +189,6 @@ export function SVIEditModal({ open, onClose, row }: Props) {
       labels.push(p4Next === '' ? 'clear IPv4 primary' : 'set IPv4 primary');
     }
 
-    const s4Next = ipv4Secondary.trim();
-    if (s4Next !== (initial.ipv4Secondary ?? '')) {
-      body.ipv4_address_secondary = s4Next;
-      labels.push(s4Next === '' ? 'clear IPv4 secondary' : 'set IPv4 secondary');
-    }
-
     const v6Next = ipv6.trim();
     if (v6Next !== (initial.ipv6 ?? '')) {
       body.ipv6_address = v6Next;
@@ -174,17 +217,26 @@ export function SVIEditModal({ open, onClose, row }: Props) {
       labels.push(`add DHCP relay ${dhcpDelta.adds[0]}`);
     }
 
+    // Mismo criterio que el bloque de DHCP relay arriba.
+    if (ipv4SecondaryDelta.removes.length > 0) {
+      body.ipv4_secondary_remove = ipv4SecondaryDelta.removes[0];
+      labels.push(`remove IPv4 secondary ${ipv4SecondaryDelta.removes[0]}`);
+    } else if (ipv4SecondaryDelta.adds.length > 0) {
+      body.ipv4_secondary_add = ipv4SecondaryDelta.adds[0];
+      labels.push(`add IPv4 secondary ${ipv4SecondaryDelta.adds[0]}`);
+    }
+
     return { body, labels };
   }, [
     initial,
     description,
     adminUp,
     ipv4Primary,
-    ipv4Secondary,
     ipv6,
     aclIn,
     aclOut,
     dhcpDelta,
+    ipv4SecondaryDelta,
   ]);
 
   const totalChanges = pending.labels.length;
@@ -199,7 +251,8 @@ export function SVIEditModal({ open, onClose, row }: Props) {
         (adminUp !== null && adminUp !== initial.adminUp),
       ipv4:
         ipv4Primary.trim() !== (initial.ipv4 ?? '') ||
-        ipv4Secondary.trim() !== (initial.ipv4Secondary ?? ''),
+        ipv4SecondaryDelta.adds.length > 0 ||
+        ipv4SecondaryDelta.removes.length > 0,
       ipv6: ipv6.trim() !== (initial.ipv6 ?? ''),
       acl:
         aclIn.trim() !== (initial.aclIn ?? '') ||
@@ -211,12 +264,22 @@ export function SVIEditModal({ open, onClose, row }: Props) {
     description,
     adminUp,
     ipv4Primary,
-    ipv4Secondary,
     ipv6,
     aclIn,
     aclOut,
     dhcpDelta,
+    ipv4SecondaryDelta,
   ]);
+
+  const errorTabs = useMemo(() => {
+    const tabs = new Set<Tab>();
+    if (!fieldErrors) return tabs;
+    for (const field of Object.keys(fieldErrors)) {
+      const t = FIELD_TO_TAB[field];
+      if (t) tabs.add(t);
+    }
+    return tabs;
+  }, [fieldErrors]);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -233,7 +296,23 @@ export function SVIEditModal({ open, onClose, row }: Props) {
       onClose();
     },
     onSettled: () => invalidateSviQueries(queryClient),
-    onError: (err: unknown) => setError(extractMessage(err, 'Save failed.')),
+    onError: (err: unknown) => {
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      // The generic banner is redundant noise once a field-level message
+      // is already shown next to the input it's about -- only fall back
+      // to it when there's no field detail to show instead.
+      setError(fields ? null : extractMessage(err, 'Save failed.'));
+      // Jump to the tab holding the first field error so it's visible
+      // immediately -- before this, a rejected IPv4/ACL/etc value on a
+      // tab you weren't looking at was invisible without digging through
+      // the Audit Logs' raw JSON.
+      if (fields) {
+        const firstField = Object.keys(fields)[0];
+        const targetTab = FIELD_TO_TAB[firstField];
+        if (targetTab) setTab(targetTab);
+      }
+    },
   });
 
   function queueAddDhcpServer() {
@@ -257,6 +336,27 @@ export function SVIEditModal({ open, onClose, row }: Props) {
     const isNewlyAdded = !(initial?.dhcpRelayServers ?? []).includes(s);
     if (!isNewlyAdded && dhcpTotalDelta >= 1) return;
     setDhcpServers(dhcpServers.filter((x) => x !== s));
+  }
+
+  // Mismo criterio que queueAddDhcpServer/queueRemoveDhcpServer.
+  function queueAddIpv4Secondary() {
+    if (ipv4SecondaryTotalDelta >= 1) return;
+    const v = ipv4SecondaryDraft.trim();
+    if (!v) return;
+    if (ipv4SecondaryList.includes(v)) {
+      setIpv4SecondaryDraft('');
+      setIpv4SecondaryAdding(false);
+      return;
+    }
+    setIpv4SecondaryList([...ipv4SecondaryList, v]);
+    setIpv4SecondaryDraft('');
+    setIpv4SecondaryAdding(false);
+  }
+
+  function queueRemoveIpv4Secondary(s: string) {
+    const isNewlyAdded = !(initial?.ipv4SecondaryAddresses ?? []).includes(s);
+    if (!isNewlyAdded && ipv4SecondaryTotalDelta >= 1) return;
+    setIpv4SecondaryList(ipv4SecondaryList.filter((x) => x !== s));
   }
 
   const canSubmit = totalChanges > 0 && !mutation.isPending;
@@ -290,6 +390,7 @@ export function SVIEditModal({ open, onClose, row }: Props) {
           tab={tab}
           onChange={setTab}
           dirty={dirtyByTab}
+          errorTabs={errorTabs}
           disabled={mutation.isPending}
         />
 
@@ -300,19 +401,28 @@ export function SVIEditModal({ open, onClose, row }: Props) {
             initialAdminUp={initial?.adminUp ?? null}
             description={description}
             onDescriptionChange={setDescription}
+            descriptionError={fieldErrors?.description}
           />
         )}
         {tab === 'ipv4' && (
           <Ipv4Tab
             primary={ipv4Primary}
             onPrimaryChange={setIpv4Primary}
-            secondary={ipv4Secondary}
-            onSecondaryChange={setIpv4Secondary}
-            initialPrimary={initial?.ipv4 ?? ''}
+            secondaryList={ipv4SecondaryList}
+            originalSecondaryList={initial?.ipv4SecondaryAddresses ?? []}
+            secondaryAddDisabled={ipv4SecondaryTotalDelta >= 1}
+            secondaryDraft={ipv4SecondaryDraft}
+            onSecondaryDraftChange={setIpv4SecondaryDraft}
+            secondaryAdding={ipv4SecondaryAdding}
+            onSecondaryAddingChange={setIpv4SecondaryAdding}
+            onSecondaryAdd={queueAddIpv4Secondary}
+            onSecondaryRemove={queueRemoveIpv4Secondary}
+            primaryError={fieldErrors?.ipv4_address}
+            secondaryError={fieldErrors?.ipv4_secondary_add ?? fieldErrors?.ipv4_secondary_remove}
           />
         )}
         {tab === 'ipv6' && (
-          <Ipv6Tab value={ipv6} onChange={setIpv6} />
+          <Ipv6Tab value={ipv6} onChange={setIpv6} error={fieldErrors?.ipv6_address} />
         )}
         {tab === 'acl' && (
           <AclTab
@@ -320,12 +430,15 @@ export function SVIEditModal({ open, onClose, row }: Props) {
             onAclInChange={setAclIn}
             aclOut={aclOut}
             onAclOutChange={setAclOut}
+            aclInError={fieldErrors?.acl_in}
+            aclOutError={fieldErrors?.acl_out}
           />
         )}
         {tab === 'dhcp' && (
-          <DhcpTab
-            servers={dhcpServers}
-            originalServers={initial?.dhcpRelayServers ?? []}
+          <EditableAddressListTab
+            title="DHCP relay servers"
+            items={dhcpServers}
+            originalItems={initial?.dhcpRelayServers ?? []}
             addDisabled={dhcpTotalDelta >= 1}
             draft={dhcpDraft}
             onDraftChange={setDhcpDraft}
@@ -333,6 +446,10 @@ export function SVIEditModal({ open, onClose, row }: Props) {
             onAddingChange={setDhcpAdding}
             onAdd={queueAddDhcpServer}
             onRemove={queueRemoveDhcpServer}
+            placeholder="e.g. 10.0.0.53"
+            removeAriaLabel={(s) => `Remove relay ${s}`}
+            capWarningText="Only 1 DHCP relay change can be queued per Save — undo it or Save first before queuing another."
+            footerNote="Queued locally — applied together when you click Save, same as the other tabs (1 DHCP relay change per Save)."
           />
         )}
 
@@ -352,11 +469,13 @@ function TabBar({
   tab,
   onChange,
   dirty,
+  errorTabs,
   disabled,
 }: {
   tab: Tab;
   onChange: (t: Tab) => void;
   dirty: Record<Tab, boolean>;
+  errorTabs: Set<Tab>;
   disabled?: boolean;
 }) {
   const items: Array<{ key: Tab; label: string }> = [
@@ -383,7 +502,12 @@ function TabBar({
             }`}
           >
             {it.label}
-            {dirty[it.key] && (
+            {errorTabs.has(it.key) ? (
+              <span
+                className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-danger align-middle"
+                title="This tab has a field with an error"
+              />
+            ) : dirty[it.key] && (
               <span
                 className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-warning align-middle"
                 title="Unsaved changes"
@@ -402,12 +526,14 @@ function GeneralTab({
   initialAdminUp,
   description,
   onDescriptionChange,
+  descriptionError,
 }: {
   adminUp: boolean | null;
   onAdminUpChange: (v: boolean) => void;
   initialAdminUp: boolean | null;
   description: string;
   onDescriptionChange: (v: string) => void;
+  descriptionError?: string;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -419,6 +545,7 @@ function GeneralTab({
           placeholder="Leave empty to clear"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
         />
+        <FieldError message={descriptionError} />
         <p className="text-xs text-muted mt-1">
           Clearing the field and saving will DELETE the description on the device.
         </p>
@@ -454,17 +581,33 @@ function GeneralTab({
 function Ipv4Tab({
   primary,
   onPrimaryChange,
-  secondary,
-  onSecondaryChange,
-  initialPrimary,
+  secondaryList,
+  originalSecondaryList,
+  secondaryAddDisabled,
+  secondaryDraft,
+  onSecondaryDraftChange,
+  secondaryAdding,
+  onSecondaryAddingChange,
+  onSecondaryAdd,
+  onSecondaryRemove,
+  primaryError,
+  secondaryError,
 }: {
   primary: string;
   onPrimaryChange: (v: string) => void;
-  secondary: string;
-  onSecondaryChange: (v: string) => void;
-  initialPrimary: string;
+  secondaryList: string[];
+  originalSecondaryList: string[];
+  secondaryAddDisabled: boolean;
+  secondaryDraft: string;
+  onSecondaryDraftChange: (v: string) => void;
+  secondaryAdding: boolean;
+  onSecondaryAddingChange: (v: boolean) => void;
+  onSecondaryAdd: () => void;
+  onSecondaryRemove: (s: string) => void;
+  primaryError?: string;
+  secondaryError?: string;
 }) {
-  const secondaryBlocked = primary.trim() === '' && secondary.trim() !== '';
+  const secondaryBlocked = primary.trim() === '' && secondaryList.length > 0;
   return (
     <div className="flex flex-col gap-4">
       <FieldRow label="Primary address (CIDR)">
@@ -475,29 +618,32 @@ function Ipv4Tab({
           placeholder="e.g. 10.10.10.11/24 — empty to clear"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
         />
-      </FieldRow>
-
-      <FieldRow label="Secondary address (CIDR)">
-        <input
-          type="text"
-          value={secondary}
-          onChange={(e) => onSecondaryChange(e.target.value)}
-          placeholder="Optional — requires a primary already configured"
-          className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
-        />
+        <FieldError message={primaryError} />
         {secondaryBlocked && (
           <p className="text-xs text-danger mt-1">
             The device rejects a secondary without a primary. Save will fail
-            if you clear the primary while keeping a secondary.
-          </p>
-        )}
-        {initialPrimary === '' && secondary.trim() !== '' && primary.trim() !== '' && (
-          <p className="text-xs text-muted mt-1">
-            Primary is being set for the first time — the secondary edit is
-            queued after it, so the order matters (both fire in sequence).
+            if you clear the primary while keeping any secondary.
           </p>
         )}
       </FieldRow>
+
+      <EditableAddressListTab
+        title="Secondary addresses (CIDR)"
+        items={secondaryList}
+        originalItems={originalSecondaryList}
+        addDisabled={secondaryAddDisabled}
+        draft={secondaryDraft}
+        onDraftChange={onSecondaryDraftChange}
+        adding={secondaryAdding}
+        onAddingChange={onSecondaryAddingChange}
+        onAdd={onSecondaryAdd}
+        onRemove={onSecondaryRemove}
+        placeholder="e.g. 10.10.10.12/24 — requires a primary already configured"
+        removeAriaLabel={(s) => `Remove secondary address ${s}`}
+        capWarningText="Only 1 secondary address change can be queued per Save — undo it or Save first before queuing another."
+        footerNote="Queued locally — applied together when you click Save, same as the other tabs (1 secondary address change per Save)."
+        error={secondaryError}
+      />
     </div>
   );
 }
@@ -505,9 +651,11 @@ function Ipv4Tab({
 function Ipv6Tab({
   value,
   onChange,
+  error,
 }: {
   value: string;
   onChange: (v: string) => void;
+  error?: string;
 }) {
   return (
     <FieldRow label="IPv6 address (CIDR)">
@@ -518,6 +666,7 @@ function Ipv6Tab({
         placeholder="e.g. 2001:db8::1/64 — empty to clear"
         className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
       />
+      <FieldError message={error} />
     </FieldRow>
   );
 }
@@ -527,11 +676,15 @@ function AclTab({
   onAclInChange,
   aclOut,
   onAclOutChange,
+  aclInError,
+  aclOutError,
 }: {
   aclIn: string;
   onAclInChange: (v: string) => void;
   aclOut: string;
   onAclOutChange: (v: string) => void;
+  aclInError?: string;
+  aclOutError?: string;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -543,6 +696,7 @@ function AclTab({
           placeholder="ACL must already exist on the device — empty to unbind"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
         />
+        <FieldError message={aclInError} />
       </FieldRow>
       <FieldRow label="ACL name — outbound">
         <input
@@ -552,14 +706,24 @@ function AclTab({
           placeholder="ACL must already exist on the device — empty to unbind"
           className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info font-mono"
         />
+        <FieldError message={aclOutError} />
       </FieldRow>
     </div>
   );
 }
 
-function DhcpTab({
-  servers,
-  originalServers,
+/** Lista de valores con add/remove en cola local, aplicada recién al
+ * Save (junto con el resto del batch, 1 sola conexión) -- generalizado a
+ * partir del que originalmente era ``DhcpTab``, reusado ahora también
+ * para las IPv4 secundarias (``Ipv4Tab``). El cap "1 cambio por Save"
+ * (``addDisabled``/``capWarningText``) es opcional -- para DHCP relay es
+ * necesario (comando full-replace del lado del device, ver docstring del
+ * componente padre); para IPv4 secundaria es solo por consistencia de UX,
+ * no por necesidad técnica, pero ambos casos lo pasan igual hoy. */
+function EditableAddressListTab({
+  title,
+  items,
+  originalItems,
   addDisabled,
   draft,
   onDraftChange,
@@ -567,9 +731,15 @@ function DhcpTab({
   onAddingChange,
   onAdd,
   onRemove,
+  placeholder,
+  removeAriaLabel,
+  capWarningText,
+  footerNote,
+  error,
 }: {
-  servers: string[];
-  originalServers: string[];
+  title: string;
+  items: string[];
+  originalItems: string[];
   addDisabled: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -577,16 +747,21 @@ function DhcpTab({
   onAddingChange: (v: boolean) => void;
   onAdd: () => void;
   onRemove: (s: string) => void;
+  placeholder: string;
+  removeAriaLabel: (s: string) => string;
+  capWarningText?: string;
+  footerNote: string;
+  error?: string;
 }) {
   return (
     <div className="flex flex-col gap-3">
       <div className="rounded-md border border-panel-border p-3 flex flex-col gap-2">
         <p className="text-xs font-semibold uppercase tracking-wider text-muted mb-1">
-          DHCP relay servers
+          {title}
         </p>
 
-        {servers.map((s) => {
-          const isNewlyAdded = !originalServers.includes(s);
+        {items.map((s) => {
+          const isNewlyAdded = !originalItems.includes(s);
           const removeDisabled = addDisabled && !isNewlyAdded;
           return (
             <div key={s} className="flex items-center gap-2">
@@ -597,7 +772,7 @@ function DhcpTab({
                 type="button"
                 onClick={() => onRemove(s)}
                 disabled={removeDisabled}
-                aria-label={`Remove relay ${s}`}
+                aria-label={removeAriaLabel(s)}
                 className="rounded-md border border-danger/50 text-danger px-3 py-2 text-sm leading-none hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed transition"
               >
                 −
@@ -623,7 +798,7 @@ function DhcpTab({
                   onAddingChange(false);
                 }
               }}
-              placeholder="e.g. 10.0.0.53"
+              placeholder={placeholder}
               className="flex-1 rounded-md bg-panel-elev border border-info px-3 py-2 text-sm text-text font-mono focus:outline-none focus:ring-2 focus:ring-info"
             />
             <button
@@ -652,23 +827,17 @@ function DhcpTab({
             disabled={addDisabled}
             className="w-full rounded-md border-2 border-dashed border-panel-border px-3 py-2 text-sm text-muted hover:text-text hover:border-muted disabled:opacity-40 disabled:cursor-not-allowed transition"
           >
-            + Add server
+            + Add
           </button>
         )}
+        <FieldError message={error} />
       </div>
 
-      {addDisabled && (
-        <p className="text-xs text-warning">
-          Only 1 DHCP relay change can be queued per Save — undo it or Save
-          first before queuing another.
-        </p>
+      {addDisabled && capWarningText && (
+        <p className="text-xs text-warning">{capWarningText}</p>
       )}
 
-      <p className="text-xs text-muted italic">
-        Queued locally — applied together when you click Save, same as the
-        other tabs. Only 1 server add/remove per Save (still its own request,
-        not combined into a single connection with the rest).
-      </p>
+      <p className="text-xs text-muted italic">{footerNote}</p>
     </div>
   );
 }

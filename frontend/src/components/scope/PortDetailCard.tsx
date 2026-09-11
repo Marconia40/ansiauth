@@ -40,10 +40,6 @@ function allowedLabel(port: Port): string {
   return list.join(', ');
 }
 
-function speedLabel(_port: Port): string {
-  return '—';
-}
-
 /** OFF cuando el device confirmó que no hay storm-control; el porcentaje
  * cuando lo hay; ON sin % si el device lo tiene configurado en pps/bps
  * (nuestro write path solo produce percent, esto solo pasa con configs
@@ -51,14 +47,20 @@ function speedLabel(_port: Port): string {
 function stormControlLabel(port: Port): string {
   if (port.storm_control_enabled === false) return 'OFF';
   if (port.storm_control_enabled === true) {
+    let base: string;
     if (port.storm_control_threshold === null || port.storm_control_threshold === undefined) {
-      return 'ON';
+      base = 'ON';
+    } else {
+      // Redondear los decimales cuando son .00 para mostrar "10%" en vez de
+      // "10.00%" -- match visual con lo que muestra Cisco al operador.
+      const t = port.storm_control_threshold;
+      const shown = Number.isInteger(t) ? String(t) : t.toFixed(2);
+      base = `${shown}%`;
     }
-    // Redondear los decimales cuando son .00 para mostrar "10%" en vez de
-    // "10.00%" -- match visual con lo que muestra Cisco al operador.
-    const t = port.storm_control_threshold;
-    const shown = Number.isInteger(t) ? String(t) : t.toFixed(2);
-    return `${shown}%`;
+    const extras: string[] = [];
+    if (port.storm_control_action) extras.push(port.storm_control_action);
+    if (port.storm_control_trap) extras.push('trap');
+    return extras.length > 0 ? `${base} · ${extras.join(' · ')}` : base;
   }
   return '—';
 }
@@ -85,7 +87,6 @@ export function PortDetailCard({ port, emptyLabel }: Props) {
         <DetailRow label="NATIVE VLAN" value={vlanLabel(port)} />
         <DetailRow label="POE" value={poeLabel(port)} />
         <DetailRow label="SHUTDOWN" value={shutdownLabel(port)} />
-        <DetailRow label="UPLINK" value={speedLabel(port)} />
         <DetailRow
           label="ALLOWED VLANS"
           value={allowedLabel(port)}

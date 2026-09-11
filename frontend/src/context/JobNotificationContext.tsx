@@ -197,7 +197,14 @@ export function JobNotificationProvider({ children }: { children: ReactNode }) {
           reason = result?.reason;
         } else if (job.status === 'failed' || job.status === 'cancelled') {
           status = 'failed';
+          // Prefer the backend's friendly one-liner (populated by
+          // Orquestador._error_amigable()) over the raw device output --
+          // toasts have very little room, and the raw error is often
+          // multi-line device bytes that get truncated meaninglessly.
+          // The raw error stays available in the JobDetailModal for
+          // debug via its "Full Error" section.
           message =
+            job.error_summary ??
             job.error ??
             job.last_error ??
             (job.result as { message?: string } | null)?.message ??

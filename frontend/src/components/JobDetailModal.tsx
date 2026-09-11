@@ -1,10 +1,12 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { getJob, getGroupJob } from '@/services/api';
+import { getJob, getGroupJob, retryJobRollback } from '@/services/api';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ElapsedTimer } from '@/components/ElapsedTimer';
+import { useHasRole } from '@/components/RequireRole';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
+import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Job, GroupJob, GroupJobDeviceResult } from '@/types/job';
 
 // Mirrors JobNotificationContext's JOB_POLL_INTERVAL_MS -- kept as its own
@@ -32,6 +34,112 @@ function formatDateTime(iso: string | null | undefined): string {
 function deriveDurationMs(startedAt: string | null, finishedAt: string | null): number | null {
   if (!startedAt || !finishedAt) return null;
   return Math.round(new Date(finishedAt).getTime() - new Date(startedAt).getTime());
+}
+
+// Strips leftover terminal-control artifacts from a raw SSH transcript --
+// e.g. a cursor-left sequence from the device's own line-wrap redraw shows
+// up as literal "[1D" text once the actual ESC byte is gone (confirmed live
+// against f3r9s2: "max-ra[1Dte percent 10" is really "max-ra" + cursor-left
+// 1 + "te percent 10", i.e. just "max-rate percent 10" redrawn). Matches
+// both the real \x1b-prefixed CSI form (if it ever survives) and the
+// bare leftover form -- deliberately narrow (cursor movement only, digit
+// required) so it doesn't also eat a device prompt's own brackets, e.g.
+// "[f3r9s2-GigabitEthernet0/0/23]" starts with "[f", which a looser
+// version of this regex (any letter, 0+ digits) wrongly stripped down to
+// "3r9s2-...".
+const _ANSI_CSI_RE = /\x1b?\[\d+[ABCD]/g;
+
+function cleanTranscript(raw: string): string {
+  return raw.replace(_ANSI_CSI_RE, '');
+}
+
+// A device's real rejection reason ("% Invalid input...", Cisco; "Error:
+// Unrecognized command...", Huawei) is 1-2 lines buried inside a full SSH
+// session transcript (banners, prompts, every command echoed back) --
+// confirmed as the actual complaint: "dificil decodificarlo... que error
+// tiró??". Mirrors the same marker ssh_direct_service.py's `_ERROR_RE`
+// already uses server-side to detect a rejection at all -- this just
+// re-finds those same lines client-side to surface them, it doesn't
+// invent a new definition of "error line".
+const _DEVICE_ERROR_LINE_RE = /^\s*(Error:.*|%\s.*)$/;
+
+interface DeviceErrorHit {
+  command: string | null;
+  error: string;
+}
+
+function extractDeviceErrors(raw: string): DeviceErrorHit[] {
+  const lines = cleanTranscript(raw).split(/\r?\n/);
+  const hits: DeviceErrorHit[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || !_DEVICE_ERROR_LINE_RE.test(line)) continue;
+    // Walk back past the "^" position-marker line (if present) and any
+    // blank lines to the actual command that got rejected -- that's the
+    // useful context, not just the error text alone.
+    let command: string | null = null;
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = lines[j].trim();
+      if (!prev || prev === '^') continue;
+      if (_DEVICE_ERROR_LINE_RE.test(prev)) break; // hit the previous error, stop
+      command = prev;
+      break;
+    }
+    hits.push({ command, error: line });
+  }
+  return hits;
+}
+
+// Shape of a successful driver result -- {rc, stdout, stderr, stdouts,
+// success} for Puerto/SVI/GlobalConfig operations that go through a real
+// SSH session (see aplicar_paso()/aplicar_lote() in the backend); `noop`/
+// `accion` are added by the resource's own aplicar() before Orquestador
+// ever sees it. Not every resource type produces this exact shape (VLAN's
+// simpler operations may not), so DeviceResultDetails falls back to the
+// raw JSON dump for anything that doesn't look like it.
+interface DeviceResultShape {
+  rc?: number;
+  stdout?: string;
+  success?: boolean;
+  noop?: boolean;
+}
+
+// Same idea as DeviceErrorDetails, mirrored for the success case: the raw
+// stdout is a full SSH session transcript (VTY banners, every command
+// echoed back, and -- as of tonight -- sometimes a benign rejection like
+// the "y" placeholder for Huawei's Y/N confirmation, see
+// vendors/base.py::RUIDO_BENIGNO) that looks alarming even though the job
+// succeeded. Surface a plain confirmation by default; keep the full
+// transcript one click away for anyone who wants to verify exactly what
+// was sent, instead of dumping it unprompted like before.
+function DeviceResultDetails({ result }: { result: unknown }) {
+  if (result == null || typeof result !== 'object') {
+    return <JsonBlock data={result} />;
+  }
+  const r = result as DeviceResultShape;
+  if (typeof r.stdout !== 'string') {
+    return <JsonBlock data={result} />;
+  }
+  const cleaned = cleanTranscript(r.stdout);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <p className="text-sm text-green-600">
+        {r.noop
+          ? 'No changes needed — device already matched the requested state.'
+          : '✓ Applied successfully.'}
+      </p>
+      {cleaned.trim() !== '' && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted hover:text-text select-none">
+            Show full session transcript
+          </summary>
+          <pre className="mt-1.5 text-xs text-text bg-panel-elev/60 border border-panel-border rounded p-2 whitespace-pre-wrap break-all max-h-64 overflow-auto">
+            {cleaned}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
 }
 
 // The backend dumps the FULL request dataclass as `parameters` (every
@@ -114,15 +222,173 @@ function RollbackRow({ performed, success }: { performed: boolean; success: bool
   );
 }
 
+// Small pill next to the Error label -- gives the user a one-glance
+// answer to "was this a permanent bug or a transient hiccup?" without
+// having to read the raw stderr. Colors match the semantic weight
+// (permanent = red, transient = amber, unknown = neutral).
+function ErrorTypeBadge({ type }: { type: string | null }) {
+  if (!type) return null;
+  const colors =
+    type === 'permanent' ? 'bg-danger/15 text-danger'
+    : type === 'transient' ? 'bg-warning/15 text-warning'
+    : 'bg-muted/15 text-muted';
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide ${colors}`}>
+      {type}
+    </span>
+  );
+}
+
+// Rendered when rollback ran and did NOT succeed. Two-part display:
+// friendly summary on top (safe to show in list rows and tooltips),
+// raw device output below for debug when the user needs the exact
+// bytes. Also hosts the "Retry rollback" action so the user can trigger
+// recovery from the same modal without navigating away.
+function RollbackFailureSection({
+  job,
+  onRetry,
+  retryState,
+}: {
+  job: Job;
+  onRetry: () => void;
+  retryState: { pending: boolean; error: string | null; newJobId: string | null };
+}) {
+  // Only supported operations can be retried -- the endpoint enforces
+  // this too, but hiding the button avoids the user clicking and
+  // getting a 400 for no reason.
+  const canRetryOperation = job.operation === 'puerto' || job.operation === 'svi';
+  // Role gate (UX only -- the backend also enforces
+  // ``min_role="operator"`` on POST /jobs/{id}/retry-rollback via
+  // ``authorize_device()``, and device-scope filtering, so this is
+  // just about not showing an action the user can never succeed at).
+  const hasWriteRole = useHasRole('operator');
+  const canRetry = canRetryOperation && hasWriteRole;
+
+  // Existing retry-rollback jobs -- the source of truth for "has this
+  // already been retried?" that persists across modal reopens (unlike
+  // the local retryState, which is lost when the modal closes). The
+  // backend populates the list only when this job has
+  // rollback_success=false (see api/jobs.py:_format_job).
+  const existingRetries = job.retry_rollback_jobs ?? [];
+  const inProgress = existingRetries.find(
+    (r) => r.status === 'pending' || r.status === 'running' || r.status === 'retrying',
+  );
+  const latestCompleted = existingRetries.find((r) => r.status === 'completed');
+
+  return (
+    <>
+      <SectionHeader>Rollback failure</SectionHeader>
+      {job.rollback_error && (
+        <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all mb-2">
+          {job.rollback_error}
+        </div>
+      )}
+      {!job.rollback_error && (
+        <p className="text-xs text-muted/70 mb-2">
+          Rollback failed but no explanatory output was captured (legacy job
+          created before rollback-error persistence was added).
+        </p>
+      )}
+      {canRetry ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={onRetry}
+            // Button is disabled in 4 cases:
+            //  1. an API call is in flight (pending)
+            //  2. the current session already queued one (newJobId)
+            //  3. there's a pending/running retry from any session (inProgress)
+            //  4. a completed retry already succeeded (latestCompleted)
+            // Cases 3-4 come from the backend-supplied
+            // retry_rollback_jobs list and are the guard against
+            // "click retry, close modal, reopen, click retry again".
+            disabled={
+              retryState.pending
+              || retryState.newJobId !== null
+              || inProgress !== undefined
+              || latestCompleted !== undefined
+            }
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-warning/20 text-warning hover:bg-warning/30 disabled:opacity-50 disabled:cursor-not-allowed transition"
+          >
+            {retryState.pending ? '↻ Queuing...' : '↩ Retry rollback'}
+          </button>
+          {/* Backend-persistent state takes precedence over local -- if
+              we already know a retry ran, don't show a stale "queued"
+              message from an earlier session. */}
+          {inProgress ? (
+            <span className="text-xs text-amber-600">
+              ↻ Retry in progress (job {inProgress.job_id.slice(0, 8)}...)
+            </span>
+          ) : latestCompleted ? (
+            <span className="text-xs text-green-600">
+              ✓ Already recovered by job {latestCompleted.job_id.slice(0, 8)}...
+              {latestCompleted.finished_at && (
+                <> at {new Date(latestCompleted.finished_at).toLocaleString(undefined, {
+                  hour: '2-digit', minute: '2-digit',
+                })}</>
+              )}
+            </span>
+          ) : retryState.newJobId ? (
+            <span className="text-xs text-green-600">
+              ✓ Queued as new job — track it in notifications
+            </span>
+          ) : null}
+          {retryState.error && (
+            <span className="text-xs text-red-600">{retryState.error}</span>
+          )}
+        </div>
+      ) : !canRetryOperation ? (
+        <p className="text-xs text-muted/70">
+          Retry-rollback is only available for port and SVI jobs.
+        </p>
+      ) : (
+        // canRetryOperation but !hasWriteRole -- observer role. Give a
+        // clear reason instead of just hiding the section (they'd still
+        // see "Rollback failure" and the raw error, so a note is more
+        // useful than mystery).
+        <p className="text-xs text-muted/70">
+          Retry-rollback requires operator role or higher.
+        </p>
+      )}
+    </>
+  );
+}
+
 // ── Single job view ───────────────────────────────────────────────────────────
 
 function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: string; onBack?: () => void }) {
+  const { trackJob } = useJobNotifications();
   const durationMs = job.execution_summary?.duration_ms ?? deriveDurationMs(job.started_at, job.finished_at);
   const attempts = job.execution_summary?.attempts;
   const isActive = (ACTIVE_JOB_STATUSES as string[]).includes(job.status);
   const hasPreState = job.pre_state != null;
   const hasResult = job.result != null;
   const hasError = !!(job.error || job.last_error);
+  // error_summary is the short English one-liner produced by the
+  // backend classifier. Preferred for display; the raw `error` still
+  // shows below in the Full Error section for debug.
+  const errorSummary = job.error_summary;
+  const showRollbackFailure = job.rollback_performed && job.rollback_success === false;
+
+  // Retry-rollback state -- posts to /jobs/{id}/retry-rollback and
+  // hands the returned job id to the notification tracker so the user
+  // sees the recovery job's progress in the toast area.
+  const [retryState, setRetryState] = useState<{ pending: boolean; error: string | null; newJobId: string | null }>({
+    pending: false, error: null, newJobId: null,
+  });
+  const handleRetryRollback = useCallback(async () => {
+    setRetryState({ pending: true, error: null, newJobId: null });
+    try {
+      const res = await retryJobRollback(job.job_id);
+      // Hook the new job into notifications so the user gets live
+      // status updates on the recovery attempt without having to
+      // manually navigate to it.
+      trackJob(res.job_id, 'retry_rollback', job.device ?? undefined);
+      setRetryState({ pending: false, error: null, newJobId: res.job_id });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to queue retry';
+      setRetryState({ pending: false, error: message, newJobId: null });
+    }
+  }, [job.job_id, job.device, trackJob]);
 
   return (
     <div>
@@ -150,11 +416,17 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
           )}
         </div>
       </Field>
-      {hasError && job.status === 'failed' && (
+      {hasError && (
         <Field label="Error">
-          <span className="text-red-600 text-xs truncate block max-w-full">
-            {job.error ?? job.last_error}
-          </span>
+          <div className="flex items-start gap-2 flex-wrap">
+            <ErrorTypeBadge type={job.error_type} />
+            {/* Prefer the friendly one-liner. Fall back to the raw first
+                line if the backend didn't classify (legacy jobs / brand
+                new device errors that no pattern has caught yet). */}
+            <span className="text-red-600 text-xs flex-1 min-w-0">
+              {errorSummary ?? job.error ?? job.last_error}
+            </span>
+          </div>
         </Field>
       )}
       <Field label="Device">{job.device}</Field>
@@ -186,6 +458,14 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
         <Field label="Current step" mono>{job.current_step}</Field>
       )}
 
+      {showRollbackFailure && (
+        <RollbackFailureSection
+          job={job}
+          onRetry={handleRetryRollback}
+          retryState={retryState}
+        />
+      )}
+
       <SectionHeader>Timing</SectionHeader>
       <Field label="Created">{formatDateTime(job.created_at)}</Field>
       <Field label="Started">{formatDateTime(job.started_at)}</Field>
@@ -201,26 +481,54 @@ function SingleJobView({ job, backLabel, onBack }: { job: Job; backLabel?: strin
       {hasResult && (
         <>
           <SectionHeader>Result</SectionHeader>
-          <JsonBlock data={job.result} />
+          <DeviceResultDetails result={job.result} />
         </>
       )}
 
-      {hasError && job.status !== 'failed' && (
+      {hasError && (
         <>
-          <SectionHeader>Error</SectionHeader>
-          <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all">
-            {job.error ?? job.last_error}
-          </div>
+          <SectionHeader>Error details</SectionHeader>
+          <DeviceErrorDetails raw={job.error ?? job.last_error ?? ''} />
         </>
       )}
-      {hasError && job.status === 'failed' && (
-        <>
-          <SectionHeader>Full Error</SectionHeader>
-          <div className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 break-all">
-            {job.error ?? job.last_error}
+    </div>
+  );
+}
+
+// Renders the lines a device actually rejected (see extractDeviceErrors())
+// front and center; the full raw transcript stays available but collapsed
+// by default -- it's still occasionally useful (e.g. to see exactly which
+// port/step in a batch got there), just not the first thing to read.
+function DeviceErrorDetails({ raw }: { raw: string }) {
+  const hits = extractDeviceErrors(raw);
+  const cleaned = cleanTranscript(raw);
+  if (hits.length === 0) {
+    return (
+      <pre className="text-sm text-danger bg-danger/10 border border-danger/40 rounded p-2 whitespace-pre-wrap break-all">
+        {cleaned}
+      </pre>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1.5">
+        {hits.map((hit, i) => (
+          <div key={i} className="text-sm bg-danger/10 border border-danger/40 rounded p-2">
+            {hit.command && (
+              <div className="font-mono text-xs text-muted mb-0.5 break-all">{hit.command}</div>
+            )}
+            <div className="text-danger break-all">{hit.error}</div>
           </div>
-        </>
-      )}
+        ))}
+      </div>
+      <details className="text-xs">
+        <summary className="cursor-pointer text-muted hover:text-text select-none">
+          Show full session transcript
+        </summary>
+        <pre className="mt-1.5 text-xs text-danger bg-danger/10 border border-danger/40 rounded p-2 whitespace-pre-wrap break-all max-h-64 overflow-auto">
+          {cleaned}
+        </pre>
+      </details>
     </div>
   );
 }
@@ -244,31 +552,53 @@ function DeviceRow({
 }) {
   const { icon, className } = deviceIcon(dr.status);
   const isDeviceActive = dr.status === 'running' || dr.status === 'retrying';
+  // Same "hover for details, click for full modal" pattern as the /jobs
+  // listing -- the summary is safe/short enough to preview inline; raw
+  // error stays available as a tooltip without needing to drill in.
+  const summary = dr.status === 'failed' ? (dr.error_summary ?? dr.error) : null;
   return (
-    <div className="flex items-center gap-2 py-1.5 text-sm border-b border-gray-50 last:border-0">
-      <span className={`font-mono w-4 text-center flex-shrink-0 ${className}`}>{icon}</span>
-      <span className="flex-1 text-text min-w-0 truncate">{dr.device}</span>
-      <span className="flex-shrink-0">
-        <StatusBadge status={dr.status} />
-      </span>
-      {isDeviceActive ? (
-        <span className="text-xs text-muted/50 flex-shrink-0">running</span>
-      ) : dr.duration_ms != null ? (
-        <span className="text-xs text-muted/70 flex-shrink-0">{formatMs(dr.duration_ms)}</span>
-      ) : null}
-      {dr.retry_count > 0 && (
-        <span className="text-xs text-amber-600 flex-shrink-0">↺{dr.retry_count}</span>
-      )}
-      {dr.rollback_performed && (
-        <span className="text-xs text-orange-500 flex-shrink-0">↩</span>
-      )}
-      {dr.job_id && (
-        <button
-          onClick={() => onDrillDown(dr.job_id!)}
-          className="flex-shrink-0 text-xs text-info hover:underline"
+    <div className="border-b border-gray-50 last:border-0">
+      <div className="flex items-center gap-2 py-1.5 text-sm">
+        <span className={`font-mono w-4 text-center flex-shrink-0 ${className}`}>{icon}</span>
+        <span className="flex-1 text-text min-w-0 truncate">{dr.device}</span>
+        <span className="flex-shrink-0">
+          <StatusBadge status={dr.status} />
+        </span>
+        {isDeviceActive ? (
+          <span className="text-xs text-muted/50 flex-shrink-0">running</span>
+        ) : dr.duration_ms != null ? (
+          <span className="text-xs text-muted/70 flex-shrink-0">{formatMs(dr.duration_ms)}</span>
+        ) : null}
+        {dr.retry_count > 0 && (
+          <span className="text-xs text-amber-600 flex-shrink-0">↺{dr.retry_count}</span>
+        )}
+        {dr.rollback_performed && (
+          <span
+            className={`text-xs flex-shrink-0 ${dr.rollback_success === false ? 'text-red-600' : 'text-orange-500'}`}
+            title={dr.rollback_success === false ? (dr.rollback_error ?? 'Rollback failed') : 'Rollback executed'}
+          >
+            ↩
+          </span>
+        )}
+        {dr.job_id && (
+          <button
+            onClick={() => onDrillDown(dr.job_id!)}
+            className="flex-shrink-0 text-xs text-info hover:underline"
+          >
+            Details
+          </button>
+        )}
+      </div>
+      {/* Short reason inline, no drill-down needed for the common case --
+          before this, a device's error was invisible unless you clicked
+          into its own job. */}
+      {summary && (
+        <p
+          className="pl-6 pb-1.5 text-xs text-danger truncate"
+          title={dr.error ?? undefined}
         >
-          Details
-        </button>
+          {summary}
+        </p>
       )}
     </div>
   );

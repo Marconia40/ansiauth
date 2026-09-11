@@ -18,6 +18,36 @@ class AuditRecord(BaseModel):
     device: Optional[str] = None
     request_id: Optional[str] = None
     parent_audit_id: Optional[str] = None
+    # Frase corta y legible de qué se hizo (ej. "SVI 300 on f3r9s1: set
+    # description to 'x'"), o de por qué falló -- ver _resumir(). None para
+    # eventos que no vienen de un RecursoGestionable (auth/users/sites/...,
+    # que arman su AuditRecord a mano sin pasar por Orquestador) -- se deja
+    # así a propósito en vez de inventar un resumen genérico. `details`
+    # sigue disponible sin cambios para quien quiera el payload técnico
+    # completo (rc/stdout/stderr crudos).
+    summary: Optional[str] = None
+
+    @staticmethod
+    def _resumir(evento: "DomainEvent") -> "str | None":
+        recurso = evento.recurso
+        # Un lote (Orquestador.ejecutar_lote()) manda TODOS los resumen_intento()
+        # ya unidos en el payload -- evento.recurso ahí es solo recursos[0]
+        # (representativo, no la lista completa), así que sin esto un batch de
+        # 3 cambios mostraba nada más que el primero + "(part of a 3-item
+        # batch)", perdiendo los otros 2 por completo.
+        resumen_lote = evento.payload.get("resumen_lote")
+        if resumen_lote:
+            intento = resumen_lote
+        elif hasattr(recurso, "resumen_intento"):
+            intento = recurso.resumen_intento()
+        else:
+            return None
+        if not evento.exitoso:
+            razon = evento.payload.get("error_summary")
+            return f"{intento} — failed: {razon}" if razon else f"{intento} — failed"
+        if evento.payload.get("noop"):
+            return f"{intento} (no changes needed)"
+        return intento
 
     @classmethod
     def desde(cls, evento: "DomainEvent") -> "AuditRecord":
@@ -47,6 +77,7 @@ class AuditRecord(BaseModel):
             resource=evento.recurso.repositorio() if hasattr(evento.recurso, "repositorio") else type(evento.recurso).__name__.lower(),
             resource_id=str(resource_id) if resource_id is not None else None,
             details=evento.payload,
+            summary=cls._resumir(evento),
             status="success" if evento.exitoso else "failure",
             device=getattr(evento.device, "name", None),
         )

@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 
 _PLAYBOOK = "vendors/cisco/run.yml"
 
-# The Cisco get_ports read issues 3 commands in this order.  If that order
+# The Cisco get_ports read issues 5 commands in this order.  If that order
 # changes, these indices must be updated alongside it.
 _STATUS_INDEX = 0
 _DESCRIPTION_INDEX = 1
 _SWITCHPORT_INDEX = 2
 _STORM_INDEX = 3
+_RUNNING_CONFIG_INDEX = 4
 
 # RF-GLOBAL-01 -- líneas de metadata al principio de "show running-config"
 # que no son config real, confirmadas en vivo contra f3r9s1 ("Building
@@ -138,8 +139,9 @@ class CiscoVendor(VendorDriver):
         description = stdouts[_DESCRIPTION_INDEX] if len(stdouts) > _DESCRIPTION_INDEX else ""
         switchport = stdouts[_SWITCHPORT_INDEX] if len(stdouts) > _SWITCHPORT_INDEX else ""
         storm = stdouts[_STORM_INDEX] if len(stdouts) > _STORM_INDEX else ""
+        running_config = stdouts[_RUNNING_CONFIG_INDEX] if len(stdouts) > _RUNNING_CONFIG_INDEX else ""
         try:
-            ports = CiscoPortParser.parse_ports(status, description, switchport, storm)
+            ports = CiscoPortParser.parse_ports(status, description, switchport, storm, running_config)
         except Exception as exc:
             raise RuntimeError(f"Cannot determine port state on device '{device.name}': {exc}") from exc
         return ports
@@ -198,15 +200,26 @@ class CiscoVendor(VendorDriver):
         return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def resolver_set_storm_control(
-        self, interface: str, enabled: bool, threshold: "float | None",
+        self, interface: str, enabled: bool, threshold: "float | None", action: str = "shutdown", trap: bool = True,
     ) -> tuple[str, "str | None", dict]:
         variant = "enabled" if enabled else "disabled"
-        return "set_storm_control", variant, {"interface": interface, "threshold": threshold}
+        # "filter" (sin shutdown) + trap=False -> ninguna línea, mismo
+        # default implícito de IOS cuando no hay "storm-control action"
+        # configurado. Ambas líneas son independientes y combinables
+        # (a diferencia de Huawei, que las trata como excluyentes).
+        action_lines = (
+            (["storm-control action shutdown"] if action == "shutdown" else [])
+            + (["storm-control action trap"] if trap else [])
+        )
+        return "set_storm_control", variant, {
+            "interface": interface, "threshold": threshold, "action_lines": action_lines,
+        }
 
     def set_storm_control(
-        self, interface: str, enabled: bool, threshold: "float | None", device: Device, password: str,
+        self, interface: str, enabled: bool, threshold: "float | None", action: str, trap: bool,
+        device: Device, password: str,
     ) -> dict:
-        op_key, variant, vars = self.resolver_set_storm_control(interface, enabled, threshold)
+        op_key, variant, vars = self.resolver_set_storm_control(interface, enabled, threshold, action, trap)
         return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def resolver_reset_port(self, interface: str) -> tuple[str, "str | None", dict]:
@@ -403,8 +416,9 @@ class CiscoVendor(VendorDriver):
         description = port_out[_DESCRIPTION_INDEX] if len(port_out) > _DESCRIPTION_INDEX else ""
         switchport = port_out[_SWITCHPORT_INDEX] if len(port_out) > _SWITCHPORT_INDEX else ""
         storm = port_out[_STORM_INDEX] if len(port_out) > _STORM_INDEX else ""
+        running_config_ports = port_out[_RUNNING_CONFIG_INDEX] if len(port_out) > _RUNNING_CONFIG_INDEX else ""
         try:
-            ports = CiscoPortParser.parse_ports(status, description, switchport, storm)
+            ports = CiscoPortParser.parse_ports(status, description, switchport, storm, running_config_ports)
         except Exception as exc:
             raise RuntimeError(
                 f"Cannot determine port state on device '{device.name}': {exc}",

@@ -25,7 +25,7 @@ export interface SviRow {
   adminUp: boolean | null;
   operationalUp: boolean | null;
   ipv4: string | null;
-  ipv4Secondary: string | null;
+  ipv4SecondaryAddresses: string[];
   ipv6: string | null;
   aclIn: string | null;
   aclOut: string | null;
@@ -82,7 +82,7 @@ export function useScopeSvis(scope: Scope) {
           adminUp: svi.admin_up,
           operationalUp: svi.operational_up,
           ipv4: svi.ipv4_address,
-          ipv4Secondary: svi.ipv4_address_secondary,
+          ipv4SecondaryAddresses: svi.ipv4_address_secondary ?? [],
           ipv6: svi.ipv6_address,
           aclIn: svi.acl_in,
           aclOut: svi.acl_out,

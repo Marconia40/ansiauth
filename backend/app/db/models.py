@@ -163,6 +163,10 @@ class DevicePortModel(Base):
     # sistema, nuestro write siempre produce percent-form.
     storm_control_enabled = Column(Boolean, nullable=True)
     storm_control_threshold = Column(Float, nullable=True)
+    # "filter"/"shutdown" -- ver Puerto.storm_control_action. Leído del
+    # running-config/current-configuration (no es estado operacional).
+    storm_control_action = Column(String, nullable=True)
+    storm_control_trap = Column(Boolean, nullable=True)
     # Read-only, provienen del getter del driver, no de escrituras del usuario.
     operational_up = Column(Boolean, nullable=True)
     speed = Column(String, nullable=True)
@@ -183,7 +187,7 @@ class DeviceSVIModel(Base):
     description = Column(String, nullable=True)
     admin_up = Column(Boolean, nullable=True)
     ipv4_address = Column(String, nullable=True)
-    ipv4_address_secondary = Column(String, nullable=True)
+    ipv4_address_secondary = Column(JSON, nullable=True)  # lista de str
     ipv6_address = Column(String, nullable=True)
     acl_in = Column(String, nullable=True)
     acl_out = Column(String, nullable=True)
@@ -269,6 +273,13 @@ class JobModel(Base):
     playbook = Column(String, nullable=True)
     device = Column(String, nullable=True)
     parameters = Column(JSON, nullable=True)
+    # Frase legible de la intención del request (ej. "Add route
+    # 192.168.100.0/24 -> 10.10.100.1") -- Job.parameters_summary. Faltaba
+    # esta columna desde que el campo se agregó (bug real encontrado y
+    # cerrado en la misma vuelta que agrega error_summary abajo): sin ella
+    # ni _to_orm() ni _to_domain() podían mapearlo, así que nunca
+    # sobrevivía un roundtrip por la base.
+    parameters_summary = Column(Text, nullable=True)
     result = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, index=True)
@@ -280,6 +291,21 @@ class JobModel(Base):
     rollback_success = Column(Boolean, nullable=True)
     pre_state = Column(JSON, nullable=True)
     last_error = Column(Text, nullable=True)
+    # Clasificación amigable del error final -- ver docstring en
+    # ``app/models/job.py`` para el criterio. Los 3 son opcionales: quedan
+    # en NULL para jobs completados con éxito o generados antes de las
+    # migraciones que las agregan (``error_summary`` ->
+    # ``t14msp19_job_error_summary``; ``error_type``/``error_reason`` ->
+    # ``t14msp19_job_err_class``, agregada después/encadenada detrás por
+    # el merge de ``fix/batch-rollback``).
+    error_type = Column(String, nullable=True)
+    error_reason = Column(String, nullable=True)
+    error_summary = Column(Text, nullable=True)
+    # Motivo del fallo del rollback (raw, del device o del verify) --
+    # complementario a ``rollback_success=False``. NULL para jobs sin
+    # rollback fallido o generados antes de la migración
+    # u15msp20_job_rollback_error.
+    rollback_error = Column(Text, nullable=True)
     current_step = Column(String, nullable=True)
     group_job_id = Column(String, nullable=True, index=True)
 
@@ -320,6 +346,10 @@ class AuditLogModel(Base):
     resource_id = Column(String, nullable=True)
     status = Column(String, nullable=False, default="success")
     details = Column(JSON, nullable=False, default=dict)
+    # Frase legible de qué se hizo (o por qué falló) -- AuditRecord.summary,
+    # ver docstring del campo y de _resumir() en models/audit.py. None para
+    # eventos sin un RecursoGestionable detrás (auth/users/sites/...).
+    summary = Column(Text, nullable=True)
     job_id = Column(String, nullable=True)
     device = Column(String, nullable=True)
     request_id = Column(String, nullable=True)

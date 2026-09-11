@@ -52,6 +52,12 @@ list_ports:
       # así que ese caso se degrada a storm_control=None por puerto en vez
       # de tirar el read entero.
       - "show storm-control broadcast"
+      # 5to comando: "show storm-control broadcast" es estado OPERACIONAL
+      # (forwarding/blocking), no expone qué "action" está configurada
+      # (shutdown/trap) -- eso solo aparece como líneas de config real,
+      # mismo criterio que ya usa svi_parser.py para SVIs. Tolerante igual
+      # que el comando anterior via partial_ok+_filter_unsupported.
+      - "show running-config | section ^interface"
 
 update_port_description:
   set:
@@ -103,7 +109,11 @@ set_port_poe:
 # "include multicast" hace que el umbral de broadcast también cuente
 # tráfico multicast -- Cisco no tiene un "storm-control multicast level"
 # separado como podría esperarse. "action" admite 2 líneas simultáneas
-# (shutdown + trap), no son mutuamente excluyentes acá.
+# (shutdown + trap), no son mutuamente excluyentes acá -- `action_lines`
+# (Puerto.storm_control_action/storm_control_trap, cisco/driver.py's
+# resolver_set_storm_control()) ya viene resuelta a 0-2 líneas: ninguna
+# cuando action="filter" y trap=False (default implícito del device, sin
+# esas 2 líneas no hay shutdown ni trap).
 set_storm_control:
   enabled:
     primary:
@@ -111,8 +121,9 @@ set_storm_control:
       lines:
       - "storm-control broadcast include multicast"
       - "storm-control broadcast level {threshold}"
-      - "storm-control action shutdown"
-      - "storm-control action trap"
+      repeat:
+        over: "action_lines"
+        line: "{item}"
 
   disabled:
     # Mismo criterio "no X" de siempre en IOS, invierte las 4 líneas del

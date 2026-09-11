@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { createOrUpdateGlobalConfigAcl } from '@/services/api';
+import { createOrUpdateGlobalConfigAcl, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { Modal } from './Modal';
 import {
   FieldRow,
+  FieldError,
   ModalPrimary,
   ModalSecondary,
   extractMessage,
@@ -48,6 +49,7 @@ export function AclCreateOrAddModal({
   const [name, setName] = useState('');
   const [drafts, setDrafts] = useState<RuleDraft[]>([makeEmptyDraft()]);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -55,6 +57,7 @@ export function AclCreateOrAddModal({
     setName(lockedName ?? '');
     setDrafts([makeEmptyDraft()]);
     setError(null);
+    setFieldErrors(null);
   }, [open, lockedName]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -86,7 +89,9 @@ export function AclCreateOrAddModal({
       onClose();
     },
     onError: (err: unknown) => {
-      setError(extractMessage(err, 'Failed to queue the ACL change.'));
+      const fields = parseFieldErrors(err);
+      setFieldErrors(fields);
+      setError(fields ? null : extractMessage(err, 'Failed to queue the ACL change.'));
     },
   });
 
@@ -128,6 +133,7 @@ export function AclCreateOrAddModal({
             placeholder="e.g. ACL_MGMT"
             className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-60"
           />
+          <FieldError message={fieldErrors?.name} />
         </FieldRow>
 
         {!lockedName && (
@@ -141,6 +147,7 @@ export function AclCreateOrAddModal({
           value={drafts}
           onChange={setDrafts}
           disabled={mutation.isPending}
+          fieldErrors={fieldErrors}
         />
 
         {rulesReady.length === 0 && (

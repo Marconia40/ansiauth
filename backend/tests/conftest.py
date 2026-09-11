@@ -24,6 +24,27 @@ elif _db_url.startswith("postgresql"):
     # Postgres: drop every table in the public schema so each test run starts
     # from a known-empty state. Cheaper than dropping the database itself —
     # avoids needing a separate admin connection.
+    #
+    # Guard added after a real incident: DATABASE_URL is set unconditionally
+    # by docker-compose on the `backend`/`worker` services, pointing at the
+    # actual dev database -- `setdefault()` above is a no-op there, so
+    # running pytest *inside* those containers silently DROP SCHEMA CASCADE'd
+    # the real dev DB (all devices/jobs/audit history, gone, no backup
+    # existed). Refuse to touch anything whose database name doesn't look
+    # like a disposable test DB -- forces callers to point pytest at a
+    # dedicated database instead of trusting whatever DATABASE_URL happens
+    # to be set in the environment it's invoked from.
+    from urllib.parse import urlparse as _urlparse
+    _db_name = (_urlparse(_db_url).path or "").lstrip("/")
+    if "test" not in _db_name.lower():
+        raise RuntimeError(
+            f"Refusing to run tests against database {_db_name!r} (from "
+            f"DATABASE_URL) -- its name doesn't contain 'test'. This guard "
+            f"exists because this exact mistake already wiped the real dev "
+            f"database once (conftest.py runs DROP SCHEMA CASCADE). Point "
+            f"DATABASE_URL at a dedicated test database, e.g. "
+            f"postgresql://.../ansiauth_test, before running pytest."
+        )
     import sqlalchemy as _sa
     _engine = _sa.create_engine(_db_url)
     with _engine.begin() as _conn:

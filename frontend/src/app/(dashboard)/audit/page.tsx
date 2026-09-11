@@ -536,6 +536,70 @@ function ExportMenu({ onExport, busy, pageCount, totalCount }: ExportMenuProps) 
   );
 }
 
+// ── Details cell (per-row toggle to hide raw device output on success) ───────
+
+/** Raw device / Ansible output keys that clutter the audit view without
+ * adding forensic value once we already know `success: true` — the exit code
+ * is redundant with success, stderr is empty on success, and stdout / stdouts
+ * are pages of vendor banners + Ansible boilerplate that duplicate what the
+ * intent field (`accion`, `lote_size`) already conveys. Hidden by default on
+ * success rows; users can still toggle them open per row. On failure rows we
+ * show everything — the actionable error is often inside these fields. */
+const NOISY_DETAIL_KEYS = ['rc', 'stdout', 'stdouts', 'stderr'] as const;
+
+function stripNoisyKeys(details: Record<string, unknown>): {
+  compact: Record<string, unknown>;
+  hiddenCount: number;
+} {
+  const compact: Record<string, unknown> = {};
+  let hiddenCount = 0;
+  for (const [k, v] of Object.entries(details)) {
+    if ((NOISY_DETAIL_KEYS as readonly string[]).includes(k)) {
+      hiddenCount += 1;
+      continue;
+    }
+    compact[k] = v;
+  }
+  return { compact, hiddenCount };
+}
+
+function DetailsCell({
+  details,
+  status,
+}: {
+  details: Record<string, unknown>;
+  status: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  // Only success rows get the compact treatment — failures usually carry the
+  // actionable info in `error` (which isn't in the noisy list) but sometimes
+  // the useful trace is in `stdout`, so we don't hide anything there.
+  const isSuccess = status === 'success' || status === 'completed';
+  const { compact, hiddenCount } = isSuccess
+    ? stripNoisyKeys(details)
+    : { compact: details, hiddenCount: 0 };
+  const canToggle = isSuccess && hiddenCount > 0;
+  const shown = expanded ? details : compact;
+  return (
+    <div className="flex flex-col gap-1">
+      <pre className="text-xs text-text bg-panel-elev/60 border border-panel-border rounded p-2 max-w-xs overflow-auto max-h-64 whitespace-pre-wrap">
+        {JSON.stringify(shown, null, 2)}
+      </pre>
+      {canToggle && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="self-start text-[11px] text-info hover:underline"
+        >
+          {expanded
+            ? 'Hide device output'
+            : `Show device output (${hiddenCount} field${hiddenCount === 1 ? '' : 's'})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Main content (uses useSearchParams — must be inside Suspense) ────────────
 
 const KNOWN_RESOURCES = ['vlan', 'job', 'auth', 'device', 'user', 'audit_log', 'request'];
@@ -835,9 +899,11 @@ function AuditPageContent() {
                     {log.status}
                   </td>
                   <td className="px-4 py-2">
-                    <pre className="text-xs text-text bg-panel-elev/60 border border-panel-border rounded p-2 max-w-xs overflow-auto max-h-32 whitespace-pre-wrap">
-                      {JSON.stringify(log.details, null, 2)}
-                    </pre>
+                    {log.summary ? (
+                      <p className="text-xs text-text">{log.summary}</p>
+                    ) : (
+                      <DetailsCell details={log.details} status={log.status} />
+                    )}
                   </td>
                 </tr>
               ))}

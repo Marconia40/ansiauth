@@ -36,7 +36,10 @@ router = APIRouter()
         "Autorización: cualquier user autenticado. Si el user no tiene "
         "visibilidad sobre nada del scope pedido, la respuesta vuelve "
         "con contadores en cero (no 403). Si el site/group/device de la "
-        "URL no existe: 404."
+        "URL no existe: 404.\n\n"
+        "`?include_global_config=true` agrega una sección adicional con "
+        "SNMP/NTP/DNS/logging/ACLs por device (opt-in, no forma parte del "
+        "dashboard normal)."
     ),
 )
 def get_dashboard_summary(
@@ -59,6 +62,15 @@ def get_dashboard_summary(
         ge=1,
         le=30,
         description="Ventana temporal de jobs a agregar (1–30 días).",
+    ),
+    include_global_config: bool = Query(
+        default=False,
+        description=(
+            "Opt-in: agrega la sección `global_config` (SNMP/NTP/DNS/"
+            "logging/ACLs por device). Default false — el dashboard normal "
+            "no paga este costo; solo lo pide la vista de Global Config "
+            "cruzada."
+        ),
     ),
     current_user: dict = Depends(require_authenticated),
     visibility_scope: VisibilityScope = Depends(obtener_scope),
@@ -83,6 +95,7 @@ def get_dashboard_summary(
         device_name=name,
         jobs_days=jobs_days,
         visibility_scope=visibility_scope,
+        include_global_config=include_global_config,
     )
 
     if payload is None:
@@ -113,7 +126,13 @@ def get_dashboard_summary(
         "Devuelve 202 con lista de task_ids encolados. El frontend "
         "sigue polling ``GET /dashboard/summary`` — cuando "
         "``devices.sync_in_progress_count`` vuelve a 0 los syncs "
-        "terminaron."
+        "terminaron.\n\n"
+        "`?include_global_config=true` además encola, con el mismo "
+        "criterio de staleness/coalescing, un sync scope=``global_config`` "
+        "(SNMP/NTP/DNS/logging/ACLs) independiente del combo ``all`` de "
+        "arriba. Opt-in a propósito — ``global_config`` está excluido del "
+        "refresh automático porque trae running-configs completos; solo "
+        "la vista de Global Config cruzada debe pedirlo explícitamente."
     ),
 )
 def refresh_dashboard_scope(
@@ -126,6 +145,14 @@ def refresh_dashboard_scope(
         le=86400,
         description="Un device se considera 'stale' si su último sync es "
                     "más viejo que este umbral en segundos (0 fuerza refresh).",
+    ),
+    include_global_config: bool = Query(
+        default=False,
+        description=(
+            "Opt-in: además encola sync scope=global_config para los "
+            "devices cuyo global_config_synced_at está stale. Default "
+            "false — nunca se activa como parte del refresh automático."
+        ),
     ),
     current_user: dict = Depends(require_authenticated),
     visibility_scope: VisibilityScope = Depends(obtener_scope),
@@ -190,9 +217,43 @@ def refresh_dashboard_scope(
         if _encolar_sync_si_no_pendiente(device_name, "all"):
             encolados += 1
 
-    return ok({
+    gc_encolados = 0
+    gc_stale_count = 0
+    if include_global_config:
+        # Staleness de global_config es independiente del combo de arriba
+        # -- 1 sola columna (no hay 3 sub-scopes), y a propósito nunca se
+        # calcula/encola salvo que el caller lo pida explícito (Decisión 3,
+        # ver app/tasks.py).
+        with get_session() as session:
+            gc_stale_rows = (
+                session.query(DeviceModel.name)
+                .filter(DeviceModel.name.in_(device_names))
+                .filter(
+                    or_(
+                        DeviceModel.global_config_synced_at.is_(None),
+                        DeviceModel.global_config_synced_at < threshold,
+                    )
+                )
+                .order_by(DeviceModel.name.asc())
+                .all()
+            )
+        gc_stale_names = [n for (n,) in gc_stale_rows]
+        gc_stale_count = len(gc_stale_names)
+        for device_name in gc_stale_names:
+            if _encolar_sync_si_no_pendiente(device_name, "global_config"):
+                gc_encolados += 1
+
+    result = {
         "devices_queued": encolados,
         "devices_skipped_fresh": len(device_names) - len(stale_names),
         "devices_skipped_coalesced": len(stale_names) - encolados,
         "tasks_dispatched": encolados,
-    })
+    }
+    if include_global_config:
+        # Solo se agregan estas keys si se pidieron -- de lo contrario
+        # "skipped_fresh" mentiría (diría "todos frescos" cuando en
+        # realidad no se calculó nada, ver docstring de arriba).
+        result["global_config_devices_queued"] = gc_encolados
+        result["global_config_devices_skipped_fresh"] = len(device_names) - gc_stale_count
+        result["global_config_devices_skipped_coalesced"] = gc_stale_count - gc_encolados
+    return ok(result)

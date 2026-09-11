@@ -33,6 +33,8 @@ import re
 import signal
 import subprocess
 
+from app.services.vendors.base import limpiar_ruido_benigno as _limpiar_ruido_benigno
+
 logger = logging.getLogger(__name__)
 
 _SSH_CONNECT_TIMEOUT = int(os.environ.get("SSH_DIRECT_CONNECT_TIMEOUT", "15"))
@@ -69,11 +71,25 @@ _SSH_LEGACY_OPTS = [
 # `triggered_by_error` de huawei/commands.yaml -- no se inventa nada nuevo,
 # solo se aplica el mismo criterio acá donde no hay un módulo de Ansible
 # que ya lo detecte por nosotros.
+#
+# Limitación conocida, aceptada por ahora: esto escanea TODO el stdout
+# combinado de un bloque multi-comando, sin saber a qué comando pertenece
+# cada línea -- 2 bugs reales de esta sesión salieron de acá (un aviso
+# benigno de Cisco, y un placeholder "y" propio rechazado por VRP en
+# devices que no lo necesitaban, ver ``vendors/base.py::RUIDO_BENIGNO``).
+# Un parser que trackee resultado por-comando (no por-blob) cerraría esta
+# clase de bug de raíz, pero es una reescritura real de
+# ``_run_ssh_interactive()``/``_extraer_salida_comando()`` con riesgo alto
+# (2 vendors, prompts interactivos que rompen el matching de eco, submodos
+# de config que cambian el prompt a mitad de bloque) -- evaluado y
+# diferido a propósito, no un descuido. Mientras tanto, el ruido benigno
+# conocido se filtra acá (ver ``vendors/base.py``, compartido con
+# ``orquestador.py``).
 _ERROR_RE = re.compile(r"^\s*(Error:|%\s)", re.MULTILINE)
 
 
 def _tiene_error(texto: str) -> bool:
-    return bool(_ERROR_RE.search(texto or ""))
+    return bool(_ERROR_RE.search(_limpiar_ruido_benigno(texto)))
 
 
 _AGENT_LINE_RE = re.compile(r"(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);")

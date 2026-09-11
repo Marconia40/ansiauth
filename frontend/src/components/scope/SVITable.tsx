@@ -73,7 +73,7 @@ export function SVITable({ scope, rows, isLoading, isError, onEdit }: Props) {
                 <StateBadges adminUp={row.adminUp} operationalUp={row.operationalUp} />
               </td>
               <td className="px-4 py-2 text-text tabular-nums">
-                <Ipv4Cell primary={row.ipv4} secondary={row.ipv4Secondary} />
+                <Ipv4Cell primary={row.ipv4} secondary={row.ipv4SecondaryAddresses} />
               </td>
               <td className="px-4 py-2 text-text tabular-nums">
                 {row.ipv6 || <span className="text-muted italic">—</span>}
@@ -153,17 +153,23 @@ function Ipv4Cell({
   secondary,
 }: {
   primary: string | null;
-  secondary: string | null;
+  secondary: string[] | null;
 }) {
-  if (!primary && !secondary) {
+  const secondaries = secondary ?? [];
+  if (!primary && secondaries.length === 0) {
     return <span className="text-muted italic">—</span>;
   }
   return (
     <div className="flex flex-col gap-0.5">
       <span>{primary || <span className="text-muted italic">— (no primary)</span>}</span>
-      {secondary && (
+      {secondaries.length === 1 && (
         <span className="text-xs text-muted">
-          <span className="opacity-70">sec:</span> {secondary}
+          <span className="opacity-70">sec:</span> {secondaries[0]}
+        </span>
+      )}
+      {secondaries.length > 1 && (
+        <span className="text-xs text-muted" title={secondaries.join('\n')}>
+          <span className="opacity-70">sec:</span> {secondaries.length} addresses
         </span>
       )}
     </div>

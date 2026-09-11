@@ -39,6 +39,8 @@ import type {
   SVIDhcpRelayAddRequest,
   SVIDhcpRelayRemoveRequest,
   SVIIpv4ClearRequest,
+  SVIIpv4SecondaryAddRequest,
+  SVIIpv4SecondaryRemoveRequest,
   SVIIpv4UpdateRequest,
   SVIIpv6ClearRequest,
   SVIIpv6UpdateRequest,
@@ -306,6 +308,50 @@ export function extractMessage(error: unknown, fallback: string): string {
   } | null;
   const validationMsg = e?.response?.data?.details?.errors?.[0]?.msg;
   return validationMsg ?? e?.response?.data?.message ?? e?.message ?? fallback;
+}
+
+/** Pydantic validation errors (`RequestValidationError`, see
+ * `request_validation_error_handler` in `backend/app/main.py`) come back
+ * as `details.errors: [{loc: ["body", "ipv4_address"], msg: "..."}]` --
+ * `extractMessage()` above only ever surfaces the FIRST one as a single
+ * generic string, with no link back to which field it's about, so a form
+ * with several inputs (e.g. SVIEditModal's IPv4/IPv6/ACL tabs) had no way
+ * to show the real reason next to the field the user is actually looking
+ * at -- it either showed nothing useful or a bottom-of-modal message the
+ * user had to go find in the Audit Logs' raw JSON to actually read.
+ *
+ * Returns a `{fieldName: message}` map keyed by the full `loc` path (minus
+ * the leading `"body"`), dot-joined -- for a flat body this is just the
+ * field name (`ipv4_address`, matching this app's convention of naming a
+ * form's local state after the wire field name), but for a field nested
+ * inside a list (e.g. GlobalConfigAcl's `rules: [...]`,
+ * `["body","rules",2,"protocol"]`) it's `"rules.2.protocol"` -- keeping the
+ * index means an error on rule 2 doesn't collide with the same field name
+ * on rule 0. Multiple errors on the same field are joined with '; '.
+ * Returns `null` for any error shape that isn't this validation response
+ * (network error, a different 4xx/5xx, etc.) so callers can tell "no
+ * field-level detail available" apart from "no errors at all". */
+export function parseFieldErrors(error: unknown): Record<string, string> | null {
+  const e = error as {
+    response?: { data?: { details?: { errors?: Array<{ loc?: unknown[]; msg?: string }> } } };
+  } | null;
+  const errors = e?.response?.data?.details?.errors;
+  if (!errors || errors.length === 0) return null;
+  const fields: Record<string, string> = {};
+  for (const err of errors) {
+    const loc = Array.isArray(err.loc) ? err.loc : [];
+    // Full loc path (minus the leading "body"), dot-joined, not just the
+    // last segment -- a flat body (`["body","ipv4_address"]`) still keys
+    // as `"ipv4_address"` (unchanged), but a nested/indexed one (a rule
+    // inside GlobalConfigAcl's `rules: [...]`, `["body","rules",2,"protocol"]`)
+    // keys as `"rules.2.protocol"` instead of colliding with every other
+    // rule's `"protocol"` under the same last-segment-only key.
+    const segments = loc.filter((s) => s !== 'body').map(String);
+    const field = segments.length > 0 ? segments.join('.') : null;
+    if (!field || !err.msg) continue;
+    fields[field] = fields[field] ? `${fields[field]}; ${err.msg}` : err.msg;
+  }
+  return Object.keys(fields).length > 0 ? fields : null;
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -740,9 +786,31 @@ export async function removeSVIDhcpRelay(
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
 
+export async function addSVIIpv4Secondary(
+  device: string,
+  body: SVIIpv4SecondaryAddRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.post<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/ipv4-secondary`, body),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+export async function removeSVIIpv4Secondary(
+  device: string,
+  body: SVIIpv4SecondaryRemoveRequest,
+): Promise<SVIOperationResult> {
+  const result = await unwrap<SVIOperationResult>(
+    client.delete<ApiResponse<SVIOperationResult>>(`/devices/${device}/svis/ipv4-secondary`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
 /** PATCH /devices/{name}/svis/{vlan_id}/batch — N field changes on 1 SVI
- * applied in 1 SSH connection instead of 1 per field. See SVIBatchRequest.
- * DHCP relay isn't included, it stays immediate via the 2 functions above. */
+ * applied in 1 SSH connection instead of 1 per field. See SVIBatchRequest --
+ * DHCP relay and secondary-IPv4 add/remove both fold into this same batch,
+ * despite the dedicated functions above existing for API parity (neither
+ * is actually called by SVIEditModal, which always goes through this one). */
 export async function batchUpdateSvi(
   device: string,
   vlanId: number,
@@ -817,6 +885,18 @@ export async function cancelJob(jobId: string) {
   return unwrap(client.post(`/jobs/${jobId}/cancel`));
 }
 
+/** Manually re-attempt the rollback of a job whose original rollback
+ * failed (rollback_success=false). Creates a NEW job with
+ * operation='retry_rollback' that runs the batched revert against the
+ * device using the failed job's persisted pre_state snapshot. The
+ * original job stays as-is. Only supported for puerto/svi jobs.
+ * Returns the new job id + group_job_id for polling. */
+export async function retryJobRollback(
+  jobId: string,
+): Promise<{ job_id: string; group_job_id: string; status: string; retry_of_job_id: string }> {
+  return unwrap(client.post(`/jobs/${jobId}/retry-rollback`));
+}
+
 export async function getGroupJob(groupJobId: string): Promise<GroupJob> {
   return unwrap(client.get<ApiResponse<GroupJob>>(`/group-jobs/${groupJobId}`));
 }
@@ -829,8 +909,11 @@ export async function getGroupJob(groupJobId: string): Promise<GroupJob> {
 export async function getDashboardSummary(
   params: DashboardSummaryParams,
 ): Promise<DashboardSummary> {
+  const { includeGlobalConfig, ...rest } = params;
   return unwrap<DashboardSummary>(
-    client.get<ApiResponse<DashboardSummary>>('/dashboard/summary', { params }),
+    client.get<ApiResponse<DashboardSummary>>('/dashboard/summary', {
+      params: { ...rest, include_global_config: includeGlobalConfig || undefined },
+    }),
   );
 }
 
@@ -843,6 +926,10 @@ export interface DashboardRefreshResult {
   devices_skipped_coalesced?: number;
   /** Same as devices_queued -- kept for backwards compatibility. */
   tasks_dispatched: number;
+  /** Only present when the request set includeGlobalConfig. */
+  global_config_devices_queued?: number;
+  global_config_devices_skipped_fresh?: number;
+  global_config_devices_skipped_coalesced?: number;
 }
 
 /** Reactive-refresh endpoint: pide al backend que sincronice sólo los
@@ -852,14 +939,20 @@ export interface DashboardRefreshResult {
  * ``sync_in_progress_count`` vuelve a 0. Reemplaza al viejo botón manual
  * de refresh global -- el barrido periódico completo lo hace ahora Celery
  * Beat (``sync_stale_devices_task``). */
+export type DashboardRefreshParams = Pick<
+  DashboardSummaryParams,
+  'scope' | 'id' | 'name' | 'includeGlobalConfig'
+>;
+
 export async function refreshDashboardScope(
-  params: Pick<DashboardSummaryParams, 'scope' | 'id' | 'name'>,
+  params: DashboardRefreshParams,
 ): Promise<DashboardRefreshResult> {
+  const { includeGlobalConfig, ...rest } = params;
   return unwrap<DashboardRefreshResult>(
     client.post<ApiResponse<DashboardRefreshResult>>(
       '/dashboard/refresh',
       undefined,
-      { params },
+      { params: { ...rest, include_global_config: includeGlobalConfig || undefined } },
     ),
   );
 }

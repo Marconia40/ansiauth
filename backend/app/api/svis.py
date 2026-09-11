@@ -22,6 +22,8 @@ from app.schemas.svi import (
     SVIDhcpRelayAddRequest,
     SVIDhcpRelayRemoveRequest,
     SVIIpv4ClearRequest,
+    SVIIpv4SecondaryAddRequest,
+    SVIIpv4SecondaryRemoveRequest,
     SVIIpv4UpdateRequest,
     SVIIpv6ClearRequest,
     SVIIpv6UpdateRequest,
@@ -300,16 +302,15 @@ def clear_svi_description(
 @router.patch(
     "/ipv4",
     status_code=202,
-    summary="Set virtual interface IPv4 address",
+    summary="Set virtual interface primary IPv4 address",
     description=(
-        "Assign the IPv4 address of a virtual interface (SVI) (RF-INTERV-03). "
-        "Address is given in CIDR notation (e.g. '10.10.10.11/24'). "
-        "`secondary=true` targets the secondary IPv4 address instead of "
-        "the primary — requires a primary already configured on the "
-        "interface, checked against live device state when the job runs. "
-        "To clear an address, use `DELETE .../ipv4` instead. Executed "
-        "asynchronously: the response carries a `group_job_id` and "
-        "per-device job entry. Requires operator role or higher; "
+        "Assign the primary IPv4 address of a virtual interface (SVI) "
+        "(RF-INTERV-03). Address is given in CIDR notation (e.g. "
+        "'10.10.10.11/24'). Primary only -- for secondary addresses "
+        "(multiple allowed) see `POST/DELETE .../ipv4-secondary`. "
+        "To clear the primary address, use `DELETE .../ipv4` instead. "
+        "Executed asynchronously: the response carries a `group_job_id` "
+        "and per-device job entry. Requires operator role or higher; "
         "site-scoped users may only target devices in their allowed sites."
     ),
 )
@@ -321,8 +322,7 @@ def set_svi_ipv4(
 ):
     from app.composition import group_operation_runner
 
-    campo = "ipv4_address_secondary" if data.secondary else "ipv4_address"
-    entidad = SVI(vlan_id=data.vlan_id, **{campo: data.ipv4_address})
+    entidad = SVI(vlan_id=data.vlan_id, ipv4_address=data.ipv4_address)
     try:
         entidad.validar()
     except ValueError as exc:
@@ -330,7 +330,7 @@ def set_svi_ipv4(
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _require_driver_with(dev, "set_svi_ipv4_secondary" if data.secondary else "set_svi_ipv4")
+    _require_driver_with(dev, "set_svi_ipv4")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -339,14 +339,14 @@ def set_svi_ipv4(
 @router.delete(
     "/ipv4",
     status_code=202,
-    summary="Clear virtual interface IPv4 address",
+    summary="Clear virtual interface primary IPv4 address",
     description=(
-        "Clear the IPv4 address of a virtual interface (SVI) (RF-INTERV-03). "
-        "`secondary=true` clears the secondary IPv4 address instead of the "
-        "primary. Executed asynchronously: the response carries a "
-        "`group_job_id` and per-device job entry. Requires operator role "
-        "or higher; site-scoped users may only target devices in their "
-        "allowed sites."
+        "Clear the primary IPv4 address of a virtual interface (SVI) "
+        "(RF-INTERV-03). Primary only, same as `PATCH .../ipv4` -- see "
+        "`POST/DELETE .../ipv4-secondary` for secondary addresses. "
+        "Executed asynchronously: the response carries a `group_job_id` "
+        "and per-device job entry. Requires operator role or higher; "
+        "site-scoped users may only target devices in their allowed sites."
     ),
 )
 def clear_svi_ipv4(
@@ -357,13 +357,85 @@ def clear_svi_ipv4(
 ):
     from app.composition import group_operation_runner
 
-    campo = "ipv4_address_secondary" if data.secondary else "ipv4_address"
-    entidad = SVI(vlan_id=data.vlan_id, **{campo: ""})
+    entidad = SVI(vlan_id=data.vlan_id, ipv4_address="")
     entidad.validar()
 
     dev = require_device(name)
     _authz_device(scope, name, min_role="operator", device=dev)
-    _require_driver_with(dev, "set_svi_ipv4_secondary" if data.secondary else "set_svi_ipv4")
+    _require_driver_with(dev, "set_svi_ipv4")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.post(
+    "/ipv4-secondary",
+    status_code=202,
+    summary="Add a virtual interface secondary IPv4 address",
+    description=(
+        "Add a single secondary IPv4 address to a virtual interface (SVI) "
+        "(RF-INTERV-03), incremental — leaves any other secondary address "
+        "already configured untouched. Rejected when the interface has no "
+        "primary IPv4 address configured; a no-op when the address is "
+        "already present. Executed asynchronously: the response carries a "
+        "`group_job_id` and per-device job entry. Requires operator role "
+        "or higher; site-scoped users may only target devices in their "
+        "allowed sites."
+    ),
+)
+def add_svi_ipv4_secondary(
+    name: str,
+    data: SVIIpv4SecondaryAddRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = SVI(vlan_id=data.vlan_id, ipv4_secondary_add=data.address)
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
+    _require_driver_with(dev, "set_svi_ipv4_secondary")
+
+    group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
+    return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.delete(
+    "/ipv4-secondary",
+    status_code=202,
+    summary="Remove a virtual interface secondary IPv4 address",
+    description=(
+        "Remove a single secondary IPv4 address from a virtual interface "
+        "(SVI) (RF-INTERV-03), incremental — leaves any other secondary "
+        "address already configured untouched. A no-op when the address "
+        "is not present. Executed asynchronously: the response carries a "
+        "`group_job_id` and per-device job entry. Requires operator role "
+        "or higher; site-scoped users may only target devices in their "
+        "allowed sites."
+    ),
+)
+def remove_svi_ipv4_secondary(
+    name: str,
+    data: SVIIpv4SecondaryRemoveRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    entidad = SVI(vlan_id=data.vlan_id, ipv4_secondary_remove=data.address)
+    try:
+        entidad.validar()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+    dev = require_device(name)
+    _authz_device(scope, name, min_role="operator", device=dev)
+    _require_driver_with(dev, "set_svi_ipv4_secondary")
 
     group_job_id, jobs = group_operation_runner.encolar(entidad, [name], current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
@@ -602,8 +674,6 @@ def expandir_a_svis(vlan_id: int, cambios: SVIBatchRequest) -> list[SVI]:
         svis.append(SVI(vlan_id=vlan_id, admin_up=cambios.admin_up))
     if cambios.ipv4_address is not None:
         svis.append(SVI(vlan_id=vlan_id, ipv4_address=cambios.ipv4_address))
-    if cambios.ipv4_address_secondary is not None:
-        svis.append(SVI(vlan_id=vlan_id, ipv4_address_secondary=cambios.ipv4_address_secondary))
     if cambios.ipv6_address is not None:
         svis.append(SVI(vlan_id=vlan_id, ipv6_address=cambios.ipv6_address))
     if cambios.acl_in is not None:
@@ -614,6 +684,10 @@ def expandir_a_svis(vlan_id: int, cambios: SVIBatchRequest) -> list[SVI]:
         svis.append(SVI(vlan_id=vlan_id, dhcp_relay_add=cambios.dhcp_relay_add))
     if cambios.dhcp_relay_remove is not None:
         svis.append(SVI(vlan_id=vlan_id, dhcp_relay_remove=cambios.dhcp_relay_remove))
+    if cambios.ipv4_secondary_add is not None:
+        svis.append(SVI(vlan_id=vlan_id, ipv4_secondary_add=cambios.ipv4_secondary_add))
+    if cambios.ipv4_secondary_remove is not None:
+        svis.append(SVI(vlan_id=vlan_id, ipv4_secondary_remove=cambios.ipv4_secondary_remove))
     if not svis:
         raise ValueError("no changes provided")
     return svis
