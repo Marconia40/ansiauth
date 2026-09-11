@@ -26,7 +26,18 @@ export default function LoginPage() {
     if (!isInitializing && user) router.push('/');
   }, [user, isInitializing, router]);
 
-  if (isInitializing) return null;
+  if (isInitializing) {
+    return (
+      <div className="login-shell relative min-h-screen flex items-center justify-center">
+        <Brand
+          variant="iso"
+          tone="white"
+          className="h-24 w-auto animate-pulse"
+          title="Loading AnsiAuth"
+        />
+      </div>
+    );
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
