@@ -4,6 +4,7 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { consumeSessionExpiredFlag, login } from '@/services/api';
+import { Brand } from '@/components/Brand';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -44,59 +45,112 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-      <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-sm">
-        <h1 className="text-2xl font-bold text-gray-900 mb-1">AnsiAuth</h1>
-        <p className="text-sm text-gray-500 mb-6">Network Automation Platform</p>
+    <div className="login-shell relative min-h-screen flex items-center justify-center overflow-hidden">
+      <NetworkPattern />
 
-        {notice && (
-          <div className="mb-4 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-            {notice}
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Username
-            </label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              autoComplete="username"
-              required
-            />
+      <div className="relative z-10 w-full max-w-md mx-4">
+        <div className="rounded-2xl bg-white/95 backdrop-blur-sm shadow-2xl border border-white/60 p-8">
+          <div className="flex flex-col items-center mb-6">
+            <Brand variant="wordmark" tone="color" className="h-14 w-auto" />
+            <p className="mt-2 text-sm text-gray-500 tracking-wide">
+              Network Automation Platform
+            </p>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Password
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              autoComplete="current-password"
-              required
-            />
-          </div>
-
-          {error && (
-            <p className="text-sm text-red-600">{error}</p>
+          {notice && (
+            <div className="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+              {notice}
+            </div>
           )}
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-2 px-4 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
-          >
-            {loading ? 'Signing in…' : 'Sign In'}
-          </button>
-        </form>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-gray-600 mb-1.5">
+                Username
+              </label>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-md text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#2f4b7c] focus:border-[#2f4b7c] transition"
+                autoComplete="username"
+                autoFocus
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-gray-600 mb-1.5">
+                Password
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-md text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#2f4b7c] focus:border-[#2f4b7c] transition"
+                autoComplete="current-password"
+                required
+              />
+            </div>
+
+            {error && (
+              <p className="text-sm text-red-600" role="alert">
+                {error}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-2.5 px-4 bg-[#2f4b7c] text-white text-sm font-semibold rounded-md hover:bg-[#26406b] disabled:opacity-60 disabled:cursor-not-allowed transition-colors shadow-sm"
+            >
+              {loading ? 'Signing in…' : 'Sign In'}
+            </button>
+          </form>
+        </div>
+
+        <p className="mt-6 text-center text-xs text-white/60">
+          © {new Date().getFullYear()} AnsiAuth · Secure network orchestration
+        </p>
       </div>
     </div>
+  );
+}
+
+function NetworkPattern() {
+  return (
+    <>
+      <div aria-hidden className="absolute inset-0 -z-0" />
+      <svg
+        aria-hidden
+        className="absolute inset-0 h-full w-full opacity-[0.08] pointer-events-none"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <defs>
+          <pattern
+            id="grid"
+            width="48"
+            height="48"
+            patternUnits="userSpaceOnUse"
+          >
+            <path
+              d="M 48 0 L 0 0 0 48"
+              fill="none"
+              stroke="#ffffff"
+              strokeWidth="1"
+            />
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid)" />
+      </svg>
+      <div
+        aria-hidden
+        className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-[#6c9bd1] opacity-20 blur-3xl pointer-events-none"
+      />
+      <div
+        aria-hidden
+        className="absolute -bottom-40 -right-32 h-[28rem] w-[28rem] rounded-full bg-[#2f4b7c] opacity-40 blur-3xl pointer-events-none"
+      />
+    </>
   );
 }
