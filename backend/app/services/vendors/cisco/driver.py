@@ -88,18 +88,31 @@ class CiscoVendor(VendorDriver):
 
     # ── VLAN mutation operations ──────────────────────────────────────────────
 
+    # Same split as the port methods: ``resolver_XXX`` decides op_key/
+    # variant/vars without touching the device (so ``VLAN.resolver_paso()``
+    # can batch N VLAN ops into 1 ``aplicar_lote()`` call), the public
+    # method keeps the single-operation entry point unchanged.
+
+    def resolver_create_vlan(self, vlan_id: int, name: str) -> tuple[str, "str | None", dict]:
+        return "create_vlan", None, {"vlan_id": vlan_id, "name": name}
+
     def create_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template(
-            "create_vlan", {"vlan_id": vlan_id, "name": name}, device, password,
-        )
+        op_key, variant, vars = self.resolver_create_vlan(vlan_id, name)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_delete_vlan(self, vlan_id: int) -> tuple[str, "str | None", dict]:
+        return "delete_vlan", None, {"vlan_id": vlan_id}
 
     def delete_vlan(self, vlan_id: int, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template("delete_vlan", {"vlan_id": vlan_id}, device, password)
+        op_key, variant, vars = self.resolver_delete_vlan(vlan_id)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
+
+    def resolver_update_vlan(self, vlan_id: int, name: str) -> tuple[str, "str | None", dict]:
+        return "update_vlan", None, {"vlan_id": vlan_id, "name": name}
 
     def update_vlan(self, vlan_id: int, name: str, device: Device, password: str) -> dict:
-        return self._aplicar_desde_template(
-            "update_vlan", {"vlan_id": vlan_id, "name": name}, device, password,
-        )
+        op_key, variant, vars = self.resolver_update_vlan(vlan_id, name)
+        return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def save_config(self, device: Device, password: str) -> dict:
         """Persist the running configuration via ``write`` (exec-mode

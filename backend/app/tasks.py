@@ -76,8 +76,9 @@ def ejecutar_lote_task(
     from app.composition import job_repository, orquestador
     from app.models.svi import SVI
     from app.models.port import Puerto
+    from app.models.vlan import VLAN
 
-    _TIPOS = {"puerto": Puerto, "svi": SVI}
+    _TIPOS = {"puerto": Puerto, "svi": SVI, "vlan": VLAN}
     cls = _TIPOS[tipo_recurso]
     recursos = [cls(**d) for d in recursos_dict]
     job = job_repository.get(job_id)
