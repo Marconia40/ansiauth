@@ -35,7 +35,7 @@ export function Topbar() {
   return (
     <header className="h-14 bg-header text-header-fg flex items-center justify-between px-4 shrink-0 shadow">
       <Link href="/" className="flex items-center" aria-label="AnsiAuth home">
-        <Brand variant="wordmark" tone="white" className="h-9 w-auto" />
+        <Brand variant="wordmark" tone="white" tight className="h-7 w-auto" />
       </Link>
 
       <div className="flex items-center gap-1">

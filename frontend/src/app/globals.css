@@ -75,20 +75,9 @@ body {
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
 
-/* Login backdrop: brand-blue diagonal gradient with an optional bg image
-   overlay. Drop a file at public/login-bg.jpg and set
-   --login-bg-image: url('/login-bg.jpg') to swap in a photo. */
-:root {
-  --login-bg-image: none;
-}
-
+/* Login backdrop: brand-blue diagonal gradient. */
 .login-shell {
   background-color: #1a2438;
-  background-image:
-    var(--login-bg-image),
-    linear-gradient(135deg, #1a2438 0%, #2f4b7c 55%, #1e2934 100%);
-  background-size: cover;
-  background-position: center;
-  background-blend-mode: overlay;
+  background-image: linear-gradient(135deg, #1a2438 0%, #2f4b7c 55%, #1e2934 100%);
   color: var(--color-text-inverse);
 }

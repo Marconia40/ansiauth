@@ -46,13 +46,11 @@ export default function LoginPage() {
 
   return (
     <div className="login-shell relative min-h-screen flex items-center justify-center overflow-hidden">
-      <NetworkPattern />
-
-      <div className="relative z-10 w-full max-w-md mx-4">
-        <div className="rounded-2xl bg-white/95 backdrop-blur-sm shadow-2xl border border-white/60 p-8">
+      <div className="relative z-10 w-full max-w-sm mx-4">
+        <div className="rounded-2xl bg-white/95 backdrop-blur-sm shadow-2xl border border-white/60 px-7 py-6">
           <div className="flex flex-col items-center mb-6">
-            <Brand variant="wordmark" tone="color" className="h-14 w-auto" />
-            <p className="mt-2 text-sm text-gray-500 tracking-wide">
+            <Brand variant="wordmark" tone="color" className="h-28 w-auto" />
+            <p className="mt-1 text-xs text-gray-500 tracking-wide">
               Network Automation Platform
             </p>
           </div>
@@ -117,40 +115,3 @@ export default function LoginPage() {
   );
 }
 
-function NetworkPattern() {
-  return (
-    <>
-      <div aria-hidden className="absolute inset-0 -z-0" />
-      <svg
-        aria-hidden
-        className="absolute inset-0 h-full w-full opacity-[0.08] pointer-events-none"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <defs>
-          <pattern
-            id="grid"
-            width="48"
-            height="48"
-            patternUnits="userSpaceOnUse"
-          >
-            <path
-              d="M 48 0 L 0 0 0 48"
-              fill="none"
-              stroke="#ffffff"
-              strokeWidth="1"
-            />
-          </pattern>
-        </defs>
-        <rect width="100%" height="100%" fill="url(#grid)" />
-      </svg>
-      <div
-        aria-hidden
-        className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-[#6c9bd1] opacity-20 blur-3xl pointer-events-none"
-      />
-      <div
-        aria-hidden
-        className="absolute -bottom-40 -right-32 h-[28rem] w-[28rem] rounded-full bg-[#2f4b7c] opacity-40 blur-3xl pointer-events-none"
-      />
-    </>
-  );
-}
