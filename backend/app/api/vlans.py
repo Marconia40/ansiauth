@@ -8,7 +8,7 @@ from app.core.scope import authorize_device, obtener_scope, require_authenticate
 from app.models.visibility_scope import VisibilityScope
 from app.models.vlan import VLAN
 from app.schemas.device_sync import SyncedResource
-from app.schemas.vlan import VLANCreate, VLANDelete, VLANUpdate
+from app.schemas.vlan import VLANBatchRequest, VLANCreate, VLANDelete, VLANUpdate
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -176,6 +176,64 @@ def delete_vlan(
     _authz_devices(scope, data.devices, min_role="admin", resolved_by_name=devices_by_name)
     group_job_id, jobs = group_operation_runner.encolar(entidad, data.devices, current_user["username"])
     return ok({"group_job_id": group_job_id, "jobs": jobs})
+
+
+@router.post(
+    "/batch",
+    status_code=202,
+    summary="Batch VLAN operations on multiple devices in 1 SSH session per device",
+    description=(
+        "Apply N VLAN operations (create / rename / delete, in any mix) to M "
+        "devices. Each device gets **one** background job that runs every "
+        "operation in a **single** SSH session -- instead of N jobs with N "
+        "sessions. Response carries a `group_job_id` and one job entry per "
+        "device. Per-entry no-op detection still applies (e.g. a create for "
+        "a VLAN that already has the same name is skipped). If the batch "
+        "fails partway, rollback attempts to restore every entry that did "
+        "change. A batch containing at least one deletion requires admin "
+        "role on every target device; create/rename-only batches accept "
+        "operator role."
+    ),
+)
+def batch_vlans(
+    data: VLANBatchRequest,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import group_operation_runner
+
+    recursos: list[VLAN] = []
+    try:
+        for change in data.changes:
+            if change.eliminar:
+                entidad = VLAN(vlan_id=change.vlan_id, eliminar=True)
+            else:
+                entidad = VLAN(vlan_id=change.vlan_id, name=change.name or "")
+                entidad.validar()
+            recursos.append(entidad)
+    except ValueError as e:
+        raise ValidationError(str(e))
+
+    devices_by_name = {name: require_device(name) for name in data.devices}
+    # A batch that contains any deletion requires admin on every device --
+    # matches the single-endpoint policy (DELETE /vlans/{id} is admin, POST/
+    # PATCH are operator); the strictest role in the batch wins.
+    any_delete = any(r.eliminar for r in recursos)
+    min_role = "admin" if any_delete else "operator"
+    _authz_devices(scope, data.devices, min_role=min_role, resolved_by_name=devices_by_name)
+
+    # 1 job per device -- inside each device's job, all N recursos run in
+    # the same SSH session via Orquestador.ejecutar_lote(). Same group_job_id
+    # for every device so the UI can track the whole batch as one operation.
+    import uuid
+    group_job_id = str(uuid.uuid4())
+    job_entries: list[dict] = []
+    for device_name in data.devices:
+        _, entry = group_operation_runner.encolar_lote(
+            recursos, device_name, current_user["username"], group_job_id=group_job_id,
+        )
+        job_entries.append(entry)
+    return ok({"group_job_id": group_job_id, "jobs": job_entries})
 
 
 @router.patch(

@@ -126,6 +126,72 @@ class VLAN:
             "name": existente.name if existente is not None else None,
         }
 
+    @staticmethod
+    def reconciliar_lote(recursos: "list[VLAN]", device: "Device") -> "list[dict]":
+        """Shared read for ``Orquestador.ejecutar_lote()``: a single
+        ``get_vlans()`` (which already returns the full VLAN table) instead
+        of one call per VLAN in the batch. Returns 1 dict per entry in
+        *recursos*, IN THE SAME ORDER. The batched path (``resolver_paso``/
+        ``resolver_rollback``) reads ``actual`` (a ``VLAN`` or ``None``);
+        ``name``/``existed`` are also emitted so the audit ``pre_state``
+        JSON is consistent with the single-path ``reconciliar()`` shape.
+        Same rationale as ``Puerto.reconciliar_lote()``."""
+        vlans_actuales = device.driver.get_vlans(device, device.password)
+        por_id = {v.vlan_id: v for v in vlans_actuales}
+        return [
+            {
+                "existed": r.vlan_id in por_id,
+                "name": por_id[r.vlan_id].name if r.vlan_id in por_id else None,
+                "actual": por_id.get(r.vlan_id),
+            }
+            for r in recursos
+        ]
+
+    def resolver_paso(
+        self, device: "Device", actual: "VLAN | None",
+    ) -> "tuple[str, str | None, dict] | None":
+        """See ``RecursoGestionable.resolver_paso`` — same dispatch as
+        ``aplicar()`` (delete vs. rename vs. create) but returns the step
+        without touching the device. Returns ``None`` for a genuine no-op
+        against *actual* (VLAN already deleted, or already exists with the
+        desired name). Delegates to per-vendor ``resolver_*`` methods.
+
+        *actual* is the current ``VLAN`` on the device (or ``None`` if the
+        VLAN does not exist), as populated by ``reconciliar_lote()``."""
+        if self.eliminar:
+            if actual is None:
+                return None
+            return device.driver.resolver_delete_vlan(self.vlan_id)
+        if actual is not None and actual.name == self.name:
+            return None
+        if actual is not None:
+            return device.driver.resolver_update_vlan(self.vlan_id, self.name)
+        return device.driver.resolver_create_vlan(self.vlan_id, self.name)
+
+    def resolver_rollback(
+        self, pre_state: dict, device: "Device", actual_ahora: "VLAN | None" = None,
+    ) -> "tuple[list, object | None]":
+        """Batched-rollback plan for a VLAN — see
+        ``RecursoGestionable.resolver_rollback``. Mirrors the branches of
+        ``ejecutar_rollback()`` (single path) but returns the steps
+        without touching the device, so ``Orquestador._rollback_lote()``
+        can concatenate N rollbacks into one ``aplicar_lote()`` call.
+
+        *actual_ahora* is not used by VLAN — every branch derives purely
+        from *pre_state* (same as Puerto). Kept in the signature for
+        polymorphism with the other resource types."""
+        existia = pre_state.get("existed")
+        nombre_previo = pre_state.get("name")
+        if self.eliminar:
+            if not existia:
+                return [], None
+            return [device.driver.resolver_create_vlan(self.vlan_id, nombre_previo or self.name)], None
+        if existia and nombre_previo != self.name:
+            return [device.driver.resolver_update_vlan(self.vlan_id, nombre_previo)], None
+        if not existia:
+            return [device.driver.resolver_delete_vlan(self.vlan_id)], None
+        return [], None
+
     def aplicar(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """Aplica esta VLAN contra *device* — decide sola si es create, update,
         delete o no-op. Reemplaza vlan_execution_service.py: create_vlan_on_device()/

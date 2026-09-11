@@ -1,8 +1,39 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def _validar_ip_unica(v: Optional[str]) -> Optional[str]:
+    """Una sola IP (v4 o v6), sin /prefijo -- reusada por todo campo
+    'server'/'host'/'next_hop' de esta capa. Mismo criterio que
+    ``GlobalConfigAclRuleEndpoint._exactly_one()`` ya aplica a las ACL
+    (encontrado en vivo: un valor con /prefijo colado en un campo que
+    espera 1 sola IP pasaba sin chequeo hasta el device real)."""
+    if v is None:
+        return v
+    try:
+        ipaddress.ip_address(v)
+    except ValueError:
+        raise ValueError(f"must be a single valid IP address (e.g. '192.0.2.5'), got {v!r}") from None
+    return v
+
+
+def _validar_red_cidr(v: Optional[str]) -> Optional[str]:
+    """Red en notación CIDR -- exige /prefijo (a diferencia de
+    ``ipaddress.ip_network()`` solo, que aceptaría una IP suelta como
+    /32 implícito, ambiguo con ``_validar_ip_unica``)."""
+    if v is None:
+        return v
+    if "/" not in v:
+        raise ValueError(f"must include a prefix length (e.g. '192.168.99.0/24'), got {v!r}") from None
+    try:
+        ipaddress.ip_network(v, strict=False)
+    except ValueError:
+        raise ValueError(f"must be a valid CIDR network (e.g. '192.168.99.0/24'), got {v!r}") from None
+    return v
 
 
 class GlobalConfigHostnameUpdateRequest(BaseModel):
@@ -26,6 +57,11 @@ class GlobalConfigSnmpUpdateRequest(BaseModel):
     trap_source: Optional[str] = Field(None, min_length=1, description="Interfaz de administración usada como origen de los traps.")
     trap_host: Optional[str] = Field(None, min_length=1, description="IP destino de los traps SNMP.")
     trap_version: Optional[str] = Field(None, min_length=1, description="Versión SNMP del trap-host (ej. '2c'). Requerido junto con trap_host.")
+
+    @field_validator("trap_host")
+    @classmethod
+    def _validar_trap_host(cls, v: Optional[str]) -> Optional[str]:
+        return _validar_ip_unica(v)
 
     @model_validator(mode="after")
     def _validate(self) -> "GlobalConfigSnmpUpdateRequest":
@@ -52,6 +88,11 @@ class GlobalConfigSnmpTrapHostRemoveRequest(BaseModel):
         description="Community usada al agregar este trap host. Requerida en ambos vendors.",
     )
 
+    @field_validator("host")
+    @classmethod
+    def _validar_host(cls, v: str) -> str:
+        return _validar_ip_unica(v)
+
 
 class GlobalConfigLogServerAddRequest(BaseModel):
     """Request body para ``POST /global-config/log-servers`` (RF-GLOBAL-09,
@@ -62,11 +103,21 @@ class GlobalConfigLogServerAddRequest(BaseModel):
     server: str = Field(..., min_length=1, description="IP del servidor de Syslog a agregar.")
     level: Optional[str] = Field(None, min_length=1, description="Nivel de severidad a configurar junto con este server.")
 
+    @field_validator("server")
+    @classmethod
+    def _validar_server(cls, v: str) -> str:
+        return _validar_ip_unica(v)
+
 
 class GlobalConfigLogServerRemoveRequest(BaseModel):
     """Request body para ``DELETE /global-config/log-servers``."""
 
     server: str = Field(..., min_length=1, description="IP del servidor de Syslog a sacar.")
+
+    @field_validator("server")
+    @classmethod
+    def _validar_server(cls, v: str) -> str:
+        return _validar_ip_unica(v)
 
 
 class GlobalConfigRouteAddRequest(BaseModel):
@@ -80,6 +131,16 @@ class GlobalConfigRouteAddRequest(BaseModel):
     destination: str = Field(..., min_length=1, description="Red destino en notación CIDR (ej. '192.168.99.0/24').")
     next_hop: str = Field(..., min_length=1, description="IP del next-hop.")
 
+    @field_validator("destination")
+    @classmethod
+    def _validar_destination(cls, v: str) -> str:
+        return _validar_red_cidr(v)
+
+    @field_validator("next_hop")
+    @classmethod
+    def _validar_next_hop(cls, v: str) -> str:
+        return _validar_ip_unica(v)
+
 
 class GlobalConfigNtpAddRequest(BaseModel):
     """Request body para ``POST /global-config/ntp`` (RF-GLOBAL-09, NTP
@@ -89,11 +150,21 @@ class GlobalConfigNtpAddRequest(BaseModel):
     server: str = Field(..., min_length=1, description="IP del servidor NTP a agregar.")
     prefer: Optional[bool] = Field(None, description="Marca este server como preferido (Cisco). Sin efecto confirmado en Huawei.")
 
+    @field_validator("server")
+    @classmethod
+    def _validar_server(cls, v: str) -> str:
+        return _validar_ip_unica(v)
+
 
 class GlobalConfigNtpRemoveRequest(BaseModel):
     """Request body para ``DELETE /global-config/ntp``."""
 
     server: str = Field(..., min_length=1, description="IP del servidor NTP a sacar.")
+
+    @field_validator("server")
+    @classmethod
+    def _validar_server(cls, v: str) -> str:
+        return _validar_ip_unica(v)
 
 
 class GlobalConfigDnsRequest(BaseModel):
@@ -104,6 +175,11 @@ class GlobalConfigDnsRequest(BaseModel):
 
     server: Optional[str] = Field(None, min_length=1, description="IP de un DNS server a agregar.")
     domain_name: Optional[str] = Field(None, min_length=1, description="Domain-name a configurar en el device.")
+
+    @field_validator("server")
+    @classmethod
+    def _validar_server(cls, v: Optional[str]) -> Optional[str]:
+        return _validar_ip_unica(v)
 
     @model_validator(mode="after")
     def _exactly_one(self) -> "GlobalConfigDnsRequest":
@@ -117,6 +193,11 @@ class GlobalConfigDnsRemoveRequest(BaseModel):
     servers (no hay "clear domain_name" en esta vuelta)."""
 
     server: str = Field(..., min_length=1, description="IP del DNS server a sacar.")
+
+    @field_validator("server")
+    @classmethod
+    def _validar_server(cls, v: str) -> str:
+        return _validar_ip_unica(v)
 
 
 class GlobalConfigVersionRead(BaseModel):
@@ -253,6 +334,32 @@ class GlobalConfigAclRuleEndpoint(BaseModel):
         provided = [v for v in (self.any, self.host, self.network) if v not in (None, False)]
         if len(provided) != 1:
             raise ValueError("exactly one of 'any', 'host', 'network' must be provided")
+        # Encontrado en vivo: un 'host' con un /prefijo pegado (ej.
+        # '192.168.103.1/24') pasaba sin chequeo hasta el device real --
+        # Cisco rechaza 'host X.X.X.X/YY' con "% Invalid input detected".
+        # 'network' sin prefijo es el error inverso: ambiguo con 'host',
+        # así que también se exige acá en vez de dejarlo pasar como /32
+        # implícito de ipaddress.ip_network().
+        if self.host is not None:
+            try:
+                ipaddress.ip_address(self.host)
+            except ValueError:
+                raise ValueError(
+                    "'host' must be a single IP address with no prefix "
+                    "(e.g. '192.0.2.5') -- use 'network' for a CIDR range"
+                )
+        if self.network is not None:
+            if "/" not in self.network:
+                raise ValueError(
+                    "'network' must include a prefix length (e.g. '172.28.138.0/24') "
+                    "-- use 'host' for a single IP"
+                )
+            try:
+                ipaddress.ip_network(self.network, strict=False)
+            except ValueError:
+                raise ValueError(
+                    "'network' must be a valid CIDR range (e.g. '172.28.138.0/24')"
+                )
         return self
 
 

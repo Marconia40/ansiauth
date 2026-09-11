@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { deleteVlan } from '@/services/api';
+import { batchVlans } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import type { VlanRow } from './scopeVlans';
@@ -37,9 +37,6 @@ export function VlanRemoveModal({
   const [pickedIds, setPickedIds] = useState<Set<number>>(new Set());
   const [selectedDevices, setSelectedDevices] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(
-    null,
-  );
 
   const effectiveDevices = useMemo(() => {
     if (scope.kind === 'device' && deviceName) return new Set([deviceName]);
@@ -50,42 +47,31 @@ export function VlanRemoveModal({
     mutationFn: async () => {
       const ids = Array.from(pickedIds);
       const devices = Array.from(effectiveDevices);
-      setProgress({ done: 0, total: ids.length });
-      const results = await Promise.allSettled(
-        ids.map((id) => deleteVlan(id, { devices })),
-      );
-      setProgress({ done: ids.length, total: ids.length });
-
-      // Track every job that DID get queued, even if some ids in the batch
-      // failed below -- a partial failure shouldn't hide live status for the
-      // deletes that actually went through.
-      const label = `Remove VLAN from ${effectiveDevices.size} device(s)`;
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          trackGroupJob(r.value.group_job_id, label);
-        }
-      }
-
-      const failed = results.filter((r) => r.status === 'rejected');
-      if (failed.length > 0) {
-        throw new Error(
-          `${failed.length} of ${ids.length} VLAN(s) failed to delete.`,
-        );
-      }
+      // One batch call: N deletions × M devices lands as M jobs (one per
+      // device), each running every deletion in a single SSH session --
+      // replacing the earlier N × M loop that created N × M jobs.
+      return batchVlans({
+        changes: ids.map((id) => ({ vlan_id: id, eliminar: true })),
+        devices,
+      });
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
+      const label =
+        pickedIds.size === 1
+          ? `Remove VLAN from ${effectiveDevices.size} device(s)`
+          : `Remove ${pickedIds.size} VLANs from ${effectiveDevices.size} device(s)`;
+      trackGroupJob(result.group_job_id, label);
       invalidateVlanQueries(queryClient);
       resetAndClose();
     },
     onError: (err: unknown) =>
-      setError(extractMessage(err, 'Remove failed on at least one VLAN.')),
+      setError(extractMessage(err, 'Remove failed.')),
   });
 
   function resetAndClose() {
     setPickedIds(new Set());
     setSelectedDevices(new Set());
     setError(null);
-    setProgress(null);
     onClose();
   }
 
@@ -112,9 +98,7 @@ export function VlanRemoveModal({
           </ModalSecondary>
           <ModalDanger onClick={() => mutation.mutate()} disabled={!canSubmit}>
             {mutation.isPending
-              ? progress
-                ? `Removing ${progress.done}/${progress.total}…`
-                : 'Removing…'
+              ? 'Removing…'
               : `Remove ${pickedIds.size || ''}`.trim()}
           </ModalDanger>
         </>
