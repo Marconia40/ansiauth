@@ -57,9 +57,11 @@ export interface GlobalConfigRead {
 }
 
 // 1 device inside DashboardSummary.global_config (GET /dashboard/summary
-// with ?include_global_config=true). Same shape as GlobalConfigRead minus
-// `routes` (out of scope for the cross-device view), plus sync metadata —
-// mirrors backend/app/schemas/dashboard.py GlobalConfigScopeDeviceEntry.
+// with ?include_global_config=true). Same shape as GlobalConfigRead plus
+// sync metadata — mirrors backend/app/schemas/dashboard.py
+// GlobalConfigScopeDeviceEntry. `routes` was omitted from the first pass
+// of the cross-device view; the backend payload already includes it
+// (confirmed live), this is just catching the frontend type up.
 export interface GlobalConfigScopeDeviceEntry {
   device: string;
   vendor: string | null;
@@ -68,6 +70,7 @@ export interface GlobalConfigScopeDeviceEntry {
   ntp: GlobalConfigNtpInfo;
   dns: GlobalConfigDnsInfo;
   logging: GlobalConfigLoggingInfo;
+  routes: GlobalConfigRouteEntry[] | null;
   acls: GlobalConfigAclInfo[] | null;
   synced_at: string | null;
   sync_error: string | null;

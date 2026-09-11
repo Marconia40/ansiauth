@@ -91,7 +91,25 @@ function endpointOrNull(mode: EndpointMode, value: string): AclRuleEndpoint | nu
   if (mode === 'any') return { any: true };
   const v = value.trim();
   if (v === '') return null;
+  if (endpointFormatError(mode, v) !== null) return null;
   return mode === 'host' ? { host: v } : { network: v };
+}
+
+// Loose client-side check, same criterion as RouteAddModal.tsx's CIDR hint
+// -- the backend (GlobalConfigAclRuleEndpoint) is the real authority via
+// ipaddress.ip_address()/ip_network(). Catches the real bug that motivated
+// this: typing a /prefix into "host" (Cisco's `host X.X.X.X` rejects it --
+// "% Invalid input detected") or a bare IP into "network" (silently
+// ambiguous with "host").
+function endpointFormatError(mode: EndpointMode, value: string): string | null {
+  if (value === '') return null;
+  if (mode === 'host' && value.includes('/')) {
+    return 'A single host, no /prefix — use Network for a CIDR range.';
+  }
+  if (mode === 'network' && !value.includes('/')) {
+    return 'Needs a /prefix (e.g. /24) — use Host for a single IP.';
+  }
+  return null;
 }
 
 interface Props {
@@ -216,6 +234,7 @@ function RuleCard({
         onModeChange={(srcMode) => onChange({ srcMode })}
         onValueChange={(srcValue) => onChange({ srcValue })}
         disabled={disabled}
+        formatError={endpointFormatError(rule.srcMode, rule.srcValue.trim())}
       />
 
       <EndpointField
@@ -225,6 +244,7 @@ function RuleCard({
         onModeChange={(dstMode) => onChange({ dstMode })}
         onValueChange={(dstValue) => onChange({ dstValue })}
         disabled={disabled}
+        formatError={endpointFormatError(rule.dstMode, rule.dstValue.trim())}
       />
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -278,6 +298,7 @@ function EndpointField({
   onModeChange,
   onValueChange,
   disabled,
+  formatError,
 }: {
   label: string;
   mode: EndpointMode;
@@ -285,6 +306,7 @@ function EndpointField({
   onModeChange: (m: EndpointMode) => void;
   onValueChange: (v: string) => void;
   disabled?: boolean;
+  formatError?: string | null;
 }) {
   return (
     <FieldRow label={label}>
@@ -315,6 +337,7 @@ function EndpointField({
           className="flex-1 rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-40"
         />
       </div>
+      <FieldError message={formatError ?? undefined} />
     </FieldRow>
   );
 }

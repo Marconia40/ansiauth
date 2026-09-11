@@ -3,7 +3,10 @@
 import { useQuery } from '@tanstack/react-query';
 import { getDashboardSummary } from '@/services/api';
 import type { DashboardSummary } from '@/types/dashboard';
-import type { GlobalConfigScopeDeviceEntry } from '@/types/global-config';
+import type {
+  GlobalConfigRouteEntry,
+  GlobalConfigScopeDeviceEntry,
+} from '@/types/global-config';
 import { SYNC_POLL_INTERVAL_MS } from '@/lib/syncPolling';
 import { scopeToSummaryParams, type Scope } from './ScopeDashboard';
 
@@ -82,6 +85,24 @@ export function toLogRows(entries: GlobalConfigScopeDeviceEntry[]): ServerRow[] 
       device: e.device,
       server,
       level: e.logging.level,
+    })),
+  );
+}
+
+export interface RouteRow {
+  device: string;
+  destination: string | null;
+  nextHop: string | null;
+  interface: string | null;
+}
+
+export function toRouteRows(entries: GlobalConfigScopeDeviceEntry[]): RouteRow[] {
+  return entries.flatMap((e) =>
+    (e.routes ?? []).map((r: GlobalConfigRouteEntry) => ({
+      device: e.device,
+      destination: typeof r.destination === 'string' ? r.destination : null,
+      nextHop: typeof r.next_hop === 'string' ? r.next_hop : null,
+      interface: typeof r.interface === 'string' ? r.interface : null,
     })),
   );
 }

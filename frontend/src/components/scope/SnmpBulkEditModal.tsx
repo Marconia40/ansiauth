@@ -1,14 +1,13 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { setGlobalConfigSnmp, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
-import type {
-  GlobalConfigSnmpInfo,
-  SnmpUpdateRequest,
-} from '@/types/global-config';
+import type { SnmpUpdateRequest } from '@/types/global-config';
+import type { Scope } from './ScopeDashboard';
 import { Modal } from './Modal';
+import { DeviceSelector } from './DeviceSelector';
 import {
   FieldRow,
   FieldError,
@@ -17,26 +16,32 @@ import {
   extractMessage,
 } from './VlanCreateModal';
 
+// Same batch-error smuggling trick as SVICreateModal.tsx -- a synthetic
+// Error thrown from mutationFn has no `response` for parseFieldErrors() to
+// read, so the first failing device's parsed field errors ride along as a
+// property instead.
+class SnmpBulkEditError extends Error {
+  fieldErrors: Record<string, string> | null;
+  constructor(message: string, fieldErrors: Record<string, string> | null) {
+    super(message);
+    this.fieldErrors = fieldErrors;
+  }
+}
+
 interface Props {
   open: boolean;
   onClose: () => void;
-  deviceName: string;
-  /** Snapshot of the cached SNMP block — used only as initial values. */
-  currentSnmp: GlobalConfigSnmpInfo | null;
+  scope: Scope;
 }
 
-// PATCH /devices/{name}/global-config/snmp (RF-GLOBAL-07). Community is
-// always applied read-only server-side (there is no permission input any
-// more), trap_source has no confirmed effect on Huawei yet, and trap_host
-// must be sent together with trap_version -- mirror those constraints in
-// the form so the request never gets rejected 422 by the backend
-// validator.
-export function SnmpEditModal({
-  open,
-  onClose,
-  deviceName,
-  currentSnmp,
-}: Props) {
+// Bulk version of SnmpEditModal.tsx -- same PATCH-style whole-record fields
+// (version/community/trap_source/trap_host+trap_version), applied to every
+// selected device via N independent single-device calls (no bulk endpoint
+// exists, and none is added here -- see setGlobalConfigSnmp). Each call
+// already returns its own group_job_id (group_operation_runner.encolar()
+// with a 1-element device list server-side), so this is genuinely 1 job per
+// device, not 1 shared job.
+export function SnmpBulkEditModal({ open, onClose, scope }: Props) {
   const queryClient = useQueryClient();
   const { trackGroupJob } = useJobNotifications();
 
@@ -45,24 +50,10 @@ export function SnmpEditModal({
   const [trapSource, setTrapSource] = useState('');
   const [trapHost, setTrapHost] = useState('');
   const [trapVersion, setTrapVersion] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
-
-  /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    if (!open) return;
-    setVersion(currentSnmp?.version ?? '');
-    setCommunity(currentSnmp?.community ?? '');
-    setTrapSource('');
-    // trap_hosts is a list (there can be more than 1) and the write path
-    // targets a single host; pre-filling from a random index would just be
-    // confusing, so we always start blank.
-    setTrapHost('');
-    setTrapVersion('');
-    setError(null);
-    setFieldErrors(null);
-  }, [open, currentSnmp]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   const trimmedVersion = version.trim();
   const trimmedCommunity = community.trim();
@@ -70,13 +61,8 @@ export function SnmpEditModal({
   const trimmedTrapHost = trapHost.trim();
   const trimmedTrapVersion = trapVersion.trim();
 
-  // trap_host and trap_version must be provided together.
-  const trapPairMismatch =
-    (trimmedTrapHost === '') !== (trimmedTrapVersion === '');
-  const trapPairComplete =
-    trimmedTrapHost !== '' && trimmedTrapVersion !== '';
-
-  // At least one of the 4 knobs must be set for the request to be valid.
+  const trapPairMismatch = (trimmedTrapHost === '') !== (trimmedTrapVersion === '');
+  const trapPairComplete = trimmedTrapHost !== '' && trimmedTrapVersion !== '';
   const anySet =
     trimmedVersion !== '' ||
     trimmedCommunity !== '' ||
@@ -103,47 +89,88 @@ export function SnmpEditModal({
   ]);
 
   const mutation = useMutation({
-    mutationFn: () => setGlobalConfigSnmp(deviceName, body),
-    onSuccess: (result) => {
-      trackGroupJob(result.group_job_id, `Update SNMP on ${deviceName}`);
-      queryClient.invalidateQueries({
-        queryKey: ['global-config', 'synced', deviceName],
-      });
-      onClose();
+    mutationFn: async () => {
+      const devices = Array.from(selected);
+      setProgress({ done: 0, total: devices.length });
+      let done = 0;
+      const results = await Promise.allSettled(
+        devices.map(async (d) => {
+          try {
+            return await setGlobalConfigSnmp(d, body);
+          } finally {
+            done += 1;
+            setProgress({ done, total: devices.length });
+          }
+        }),
+      );
+
+      const label = `Update SNMP on ${devices.length} device(s)`;
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          trackGroupJob(r.value.group_job_id, label);
+        }
+      }
+
+      const failed = results.filter((r) => r.status === 'rejected');
+      if (failed.length > 0) {
+        const firstErr = (failed[0] as PromiseRejectedResult).reason;
+        throw new SnmpBulkEditError(
+          `${failed.length} of ${devices.length} device(s) failed: ${extractMessage(firstErr, 'Update failed.')}`,
+          parseFieldErrors(firstErr),
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard', 'summary'] });
+      resetAndClose();
     },
     onError: (err: unknown) => {
-      const fields = parseFieldErrors(err);
-      setFieldErrors(fields);
-      setError(fields ? null : extractMessage(err, 'Failed to queue the SNMP change.'));
+      setFieldErrors(err instanceof SnmpBulkEditError ? err.fieldErrors : null);
+      setError(extractMessage(err, 'Update failed.'));
     },
   });
 
+  function resetAndClose() {
+    setVersion('');
+    setCommunity('');
+    setTrapSource('');
+    setTrapHost('');
+    setTrapVersion('');
+    setSelected(new Set());
+    setError(null);
+    setFieldErrors(null);
+    setProgress(null);
+    onClose();
+  }
+
   const canSubmit =
-    anySet && !trapPairMismatch && !mutation.isPending;
+    anySet && !trapPairMismatch && selected.size > 0 && !mutation.isPending;
 
   return (
     <Modal
       open={open}
-      onClose={mutation.isPending ? () => undefined : onClose}
-      title={`Edit SNMP — ${deviceName}`}
+      onClose={mutation.isPending ? () => undefined : resetAndClose}
+      title="Bulk edit SNMP"
       footer={
         <>
-          <ModalSecondary onClick={onClose} disabled={mutation.isPending}>
+          <ModalSecondary onClick={resetAndClose} disabled={mutation.isPending}>
             Cancel
           </ModalSecondary>
-          <ModalPrimary
-            onClick={() => mutation.mutate()}
-            disabled={!canSubmit}
-          >
-            {mutation.isPending ? 'Applying…' : 'Apply'}
+          <ModalPrimary onClick={() => mutation.mutate()} disabled={!canSubmit}>
+            {mutation.isPending
+              ? progress
+                ? `Applying ${progress.done}/${progress.total}…`
+                : 'Applying…'
+              : 'Apply'}
           </ModalPrimary>
         </>
       }
     >
       <div className="flex flex-col gap-4">
         <p className="text-xs text-muted">
-          Community is applied as read-only. Leave a field blank to leave it
-          untouched — at least one knob must be filled.
+          Applies the same SNMP settings to every selected device — leave a
+          field blank to leave it untouched on each. Community is applied as
+          read-only. At least one knob must be filled.
         </p>
 
         <FieldRow label="Version">
@@ -158,8 +185,8 @@ export function SnmpEditModal({
             <option value="v3">v3</option>
           </select>
           <p className="text-xs text-muted mt-1">
-            Only takes effect on Huawei (VRP) — Cisco has no separate version
-            command, this is ignored there.
+            Only takes effect on Huawei (VRP) — selected Cisco devices have no
+            separate version command and will silently ignore this.
           </p>
           <FieldError message={fieldErrors?.version} />
         </FieldRow>
@@ -209,8 +236,8 @@ export function SnmpEditModal({
               <option value="3">3</option>
             </select>
             <p className="text-xs text-muted mt-1">
-              IOS format (no &apos;v&apos; prefix). Huawei&apos;s trap-host
-              always uses v2c regardless of this value.
+              IOS format (no &apos;v&apos; prefix). Selected Huawei devices
+              always use v2c on their trap-host regardless of this value.
             </p>
             <FieldError message={fieldErrors?.trap_version} />
           </FieldRow>
@@ -222,10 +249,12 @@ export function SnmpEditModal({
           </p>
         )}
         {!anySet && (
-          <p className="text-xs text-muted">
-            Fill at least one field to enable Apply.
-          </p>
+          <p className="text-xs text-muted">Fill at least one field to enable Apply.</p>
         )}
+
+        <FieldRow label="Target devices">
+          <DeviceSelector scope={scope} value={selected} onChange={setSelected} />
+        </FieldRow>
 
         {error && (
           <p className="text-sm text-danger border border-danger/40 bg-danger/10 rounded px-3 py-2">
