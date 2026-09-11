@@ -33,15 +33,25 @@ class GroupOperationRunner:
             job_entries.append({"device": device_name, "job_id": job.job_id, "status": job.status})
         return group_job_id, job_entries
 
-    def encolar_lote(self, recursos: "list[RecursoGestionable]", device_name: str, actor: str) -> tuple[str, dict]:
+    def encolar_lote(
+        self, recursos: "list[RecursoGestionable]", device_name: str, actor: str,
+        *, group_job_id: "str | None" = None,
+    ) -> tuple[str, dict]:
         """Dimensión opuesta a ``encolar()``: 1 *device*, N *recursos* (en
         vez de 1 recurso, N devices) -- ver ``Orquestador.ejecutar_lote()``.
         1 solo ``Job`` para todo el lote (no N) -- es 1 conexión real, se
         trackea como 1 unidad de trabajo. ``group_job_id`` se mantiene por
         consistencia de forma con ``encolar()`` (mismo contrato de
         respuesta que el resto de la API), aunque acá agrupe una lista de
-        1 solo job."""
-        group_job_id = str(uuid.uuid4())
+        1 solo job.
+
+        *group_job_id* opcional -- cuando el caller aplica el mismo lote a
+        varios devices (endpoint ``POST /vlans/batch``, N recursos × M
+        devices), inyecta el mismo id en cada llamada para que la UI
+        rastree todos los jobs como una única operación. En ``None`` se
+        genera uno nuevo, comportamiento sin cambios."""
+        if group_job_id is None:
+            group_job_id = str(uuid.uuid4())
         parametros = {"lote": [asdict(r) for r in recursos]}
         # Cada resumen ya incluye su propia identidad (vlan_id/interface +
         # device) -- concatenar es suficiente, no hace falta extraer un

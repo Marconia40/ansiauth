@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { createVlan, parseFieldErrors } from '@/services/api';
+import { batchVlans, parseFieldErrors } from '@/services/api';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import type { Scope } from './ScopeDashboard';
 import { Modal } from './Modal';
@@ -16,12 +16,33 @@ interface Props {
   deviceName?: string;
 }
 
+// One editable row in the create-VLAN form. Kept as string state for
+// `vlanId` so the user can partially type / clear an invalid value
+// without React re-rendering it as `NaN`, mirroring the single-VLAN
+// input this modal used to have.
+interface VlanDraft {
+  vlanId: string;
+  name: string;
+}
+
+function makeEmptyDraft(): VlanDraft {
+  return { vlanId: '', name: '' };
+}
+
+// A VLAN id has to be an integer in [1, 4094]. The reserved range (1,
+// 1002-1005) is still checked backend-side; we don't duplicate the list
+// here since the backend rejection message is already user-friendly.
+function isValidVlanId(raw: string): boolean {
+  if (raw === '') return false;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 && n <= 4094;
+}
+
 export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
   const queryClient = useQueryClient();
   const { trackGroupJob } = useJobNotifications();
 
-  const [vlanId, setVlanId] = useState('');
-  const [name, setName] = useState('');
+  const [drafts, setDrafts] = useState<VlanDraft[]>([makeEmptyDraft()]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
@@ -33,17 +54,31 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
     return selected;
   }, [scope, deviceName, selected]);
 
+  const readyChanges = useMemo(
+    () =>
+      drafts
+        .filter((d) => isValidVlanId(d.vlanId) && d.name.trim().length > 0)
+        .map((d) => ({ vlan_id: Number(d.vlanId), name: d.name.trim() })),
+    [drafts],
+  );
+
+  const allDraftsComplete = drafts.every(
+    (d) => isValidVlanId(d.vlanId) && d.name.trim().length > 0,
+  );
+  const noDuplicateIds =
+    new Set(readyChanges.map((c) => c.vlan_id)).size === readyChanges.length;
+
   const mutation = useMutation({
     mutationFn: async () => {
-      const parsedId = Number(vlanId);
       const devices = Array.from(effectiveSelected);
-      return createVlan({ vlan_id: parsedId, name: name.trim(), devices });
+      return batchVlans({ changes: readyChanges, devices });
     },
     onSuccess: (result) => {
-      trackGroupJob(
-        result.group_job_id,
-        `Create VLAN ${vlanId} on ${effectiveSelected.size} device(s)`,
-      );
+      const label =
+        readyChanges.length === 1
+          ? `Create VLAN ${readyChanges[0].vlan_id} on ${effectiveSelected.size} device(s)`
+          : `Create ${readyChanges.length} VLANs on ${effectiveSelected.size} device(s)`;
+      trackGroupJob(result.group_job_id, label);
       invalidateVlanQueries(queryClient);
       resetAndClose();
     },
@@ -55,64 +90,136 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
   });
 
   function resetAndClose() {
-    setVlanId('');
-    setName('');
+    setDrafts([makeEmptyDraft()]);
     setSelected(new Set());
     setError(null);
     setFieldErrors(null);
     onClose();
   }
 
-  const parsedId = Number(vlanId);
-  const idValid = Number.isInteger(parsedId) && parsedId >= 1 && parsedId <= 4094;
+  function patchDraft(idx: number, patch: Partial<VlanDraft>) {
+    setDrafts((prev) => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
+  }
+
+  function addDraft() {
+    setDrafts((prev) => [...prev, makeEmptyDraft()]);
+  }
+
+  function removeDraft(idx: number) {
+    setDrafts((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
+  }
+
   const canSubmit =
-    idValid && name.trim().length > 0 && effectiveSelected.size > 0 && !mutation.isPending;
+    readyChanges.length > 0 &&
+    allDraftsComplete &&
+    noDuplicateIds &&
+    effectiveSelected.size > 0 &&
+    !mutation.isPending;
 
   return (
     <Modal
       open={open}
       onClose={resetAndClose}
-      title="Create VLAN"
+      title="Create VLAN(s)"
+      widthClass="w-full max-w-2xl"
       footer={
         <>
           <ModalSecondary onClick={resetAndClose} disabled={mutation.isPending}>
             Cancel
           </ModalSecondary>
           <ModalPrimary onClick={() => mutation.mutate()} disabled={!canSubmit}>
-            {mutation.isPending ? 'Creating…' : 'Create'}
+            {mutation.isPending
+              ? 'Creating…'
+              : readyChanges.length > 1
+              ? `Create ${readyChanges.length}`
+              : 'Create'}
           </ModalPrimary>
         </>
       }
     >
       <div className="flex flex-col gap-4">
-        <FieldRow label="VLAN ID">
-          <input
-            type="number"
-            min={1}
-            max={4094}
-            value={vlanId}
-            onChange={(e) => setVlanId(e.target.value)}
-            placeholder="e.g. 10"
-            className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
-          />
-          {!idValid && vlanId !== '' && (
-            <p className="text-xs text-danger mt-1">
-              VLAN id must be an integer between 1 and 4094.
+        <p className="text-xs text-muted">
+          Add one or more VLANs. When applied to a device, all VLANs in the
+          list run in a single SSH session on that device.
+        </p>
+
+        <div className="flex flex-col gap-3">
+          {drafts.map((d, i) => {
+            const idOk = d.vlanId === '' || isValidVlanId(d.vlanId);
+            const rowErr = rowFieldError(fieldErrors, i);
+            return (
+              <div
+                key={i}
+                className="rounded-md border border-panel-border bg-panel-elev/40 p-3 flex flex-col gap-3"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    VLAN {i + 1}
+                  </span>
+                  {drafts.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeDraft(i)}
+                      disabled={mutation.isPending}
+                      aria-label={`Remove VLAN ${i + 1}`}
+                      className="text-danger hover:brightness-125 disabled:opacity-40 disabled:cursor-not-allowed text-lg leading-none"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <FieldRow label="VLAN ID">
+                    <input
+                      type="number"
+                      min={1}
+                      max={4094}
+                      value={d.vlanId}
+                      onChange={(e) => patchDraft(i, { vlanId: e.target.value })}
+                      disabled={mutation.isPending}
+                      placeholder="e.g. 10"
+                      className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
+                    />
+                    {!idOk && (
+                      <p className="text-xs text-danger mt-1">
+                        VLAN id must be an integer between 1 and 4094.
+                      </p>
+                    )}
+                  </FieldRow>
+                  <FieldRow label="Name">
+                    <input
+                      type="text"
+                      value={d.name}
+                      onChange={(e) => patchDraft(i, { name: e.target.value })}
+                      disabled={mutation.isPending}
+                      placeholder="e.g. MANAGEMENT"
+                      className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info md:col-span-2"
+                    />
+                  </FieldRow>
+                </div>
+                {rowErr && (
+                  <p className="text-xs text-danger">{rowErr}</p>
+                )}
+              </div>
+            );
+          })}
+          <div>
+            <button
+              type="button"
+              onClick={addDraft}
+              disabled={mutation.isPending}
+              className="rounded-md border border-dashed border-panel-border px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-info hover:bg-panel-elev disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              + Add VLAN
+            </button>
+          </div>
+          {!noDuplicateIds && (
+            <p className="text-xs text-danger">
+              Duplicate VLAN IDs are not allowed within the same batch.
             </p>
           )}
-          <FieldError message={fieldErrors?.vlan_id} />
-        </FieldRow>
-
-        <FieldRow label="Name">
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. MANAGEMENT"
-            className="w-full rounded-md bg-panel-elev border border-panel-border px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-info"
-          />
-          <FieldError message={fieldErrors?.name} />
-        </FieldRow>
+        </div>
 
         <FieldRow label="Target devices">
           <DeviceSelector
@@ -131,6 +238,20 @@ export function VlanCreateModal({ open, onClose, scope, deviceName }: Props) {
       </div>
     </Modal>
   );
+}
+
+// Backend validation errors on entry N of `changes` come back with a
+// `loc` like `["body","changes",2,"name"]`, keyed by parseFieldErrors()
+// as `"changes.2.name"`. Same idea as AclRuleEditor's rowError().
+function rowFieldError(
+  fieldErrors: Record<string, string> | null | undefined,
+  idx: number,
+): string | null {
+  if (!fieldErrors) return null;
+  const prefix = `changes.${idx}.`;
+  const hits = Object.entries(fieldErrors).filter(([k]) => k.startsWith(prefix));
+  if (hits.length === 0) return null;
+  return hits.map(([k, v]) => `${k.slice(prefix.length)}: ${v}`).join('; ');
 }
 
 // ── Reused primitives ────────────────────────────────────────────────────────

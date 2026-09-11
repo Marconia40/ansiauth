@@ -1,6 +1,13 @@
 import axios from 'axios';
 import type { AuthUser } from '@/types/auth';
-import type { VlanEntry, VlanCreate, VlanUpdate, VlanDelete, VlanOperationResult } from '@/types/vlan';
+import type {
+  VlanEntry,
+  VlanCreate,
+  VlanUpdate,
+  VlanDelete,
+  VlanOperationResult,
+  VlanBatchRequest,
+} from '@/types/vlan';
 import type { Device, DeviceCreate, DeviceUpdate } from '@/types/device';
 import type {
   RoleAssignment,
@@ -477,6 +484,18 @@ export async function updateVlan(vlanId: number, body: VlanUpdate): Promise<Vlan
 export async function deleteVlan(vlanId: number, body: VlanDelete): Promise<VlanOperationResult> {
   const result = await unwrap<VlanOperationResult>(
     client.delete<ApiResponse<VlanOperationResult>>(`/vlans/${vlanId}`, { data: body }),
+  );
+  return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
+}
+
+// POST /vlans/batch — one request applies N VLAN operations (create /
+// rename / delete, mixed) to M devices. Backend enqueues one job per
+// device that runs every operation in a single SSH session, replacing
+// the older per-VLAN endpoints where 5 deletions × 2 devices produced 10
+// jobs / 10 sessions.
+export async function batchVlans(body: VlanBatchRequest): Promise<VlanOperationResult> {
+  const result = await unwrap<VlanOperationResult>(
+    client.post<ApiResponse<VlanOperationResult>>('/vlans/batch', body),
   );
   return { group_job_id: result.group_job_id, jobs: result.jobs ?? [] };
 }
