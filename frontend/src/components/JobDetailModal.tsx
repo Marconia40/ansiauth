@@ -1,12 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { getJob, getGroupJob, retryJobRollback } from '@/services/api';
+import { useQuery } from '@tanstack/react-query';
+import { getDevice, getJob, getGroupJob, retryJobRollback } from '@/services/api';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ElapsedTimer } from '@/components/ElapsedTimer';
-import { useHasRole } from '@/components/RequireRole';
+import { useCanPerform } from '@/hooks/useAuthz';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import { useJobNotifications } from '@/context/JobNotificationContext';
+import type { Device } from '@/types/device';
 import type { Job, GroupJob, GroupJobDeviceResult } from '@/types/job';
 
 // Mirrors JobNotificationContext's JOB_POLL_INTERVAL_MS -- kept as its own
@@ -257,11 +259,22 @@ function RollbackFailureSection({
   // this too, but hiding the button avoids the user clicking and
   // getting a 400 for no reason.
   const canRetryOperation = job.operation === 'puerto' || job.operation === 'svi';
-  // Role gate (UX only -- the backend also enforces
-  // ``min_role="operator"`` on POST /jobs/{id}/retry-rollback via
-  // ``authorize_device()``, and device-scope filtering, so this is
-  // just about not showing an action the user can never succeed at).
-  const hasWriteRole = useHasRole('operator');
+  // Per-scope role gate: the backend enforces ``min_role="operator"`` on
+  // POST /jobs/{id}/retry-rollback via ``authorize_device()`` against
+  // the job's original device. Since Job doesn't carry site_id/
+  // device_group_id (would need N+1 batching on /jobs list), we resolve
+  // them on-demand by fetching the device row when the modal renders a
+  // job that has one. React Query caches by device name so reopening
+  // the same job doesn't refetch.
+  const { data: jobDevice } = useQuery<Device>({
+    queryKey: ['device', job.device],
+    queryFn: () => getDevice(job.device!),
+    enabled: !!job.device && canRetryOperation,
+  });
+  const scopeForGate = jobDevice
+    ? { siteId: jobDevice.site_id, deviceGroupId: jobDevice.device_group_id }
+    : null;
+  const { allowed: hasWriteRole } = useCanPerform('retry_rollback', scopeForGate);
   const canRetry = canRetryOperation && hasWriteRole;
 
   // Existing retry-rollback jobs -- the source of truth for "has this

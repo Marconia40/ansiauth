@@ -103,8 +103,13 @@ export interface CanPerformResult {
  * The backend re-checks every request; this is UX-only — hides
  * buttons the caller would 403 on. See
  * ``docs/USER_PERMISSIONS_UX_REDESIGN.md`` §3.2.
+ *
+ * Passing ``scope=null`` returns ``{loading:false, allowed:false}`` —
+ * useful for consumers whose scope resolves asynchronously (e.g. the
+ * JobDetailModal fetches the device row to learn its site_id/group_id
+ * and passes ``null`` until that lands).
  */
-export function useCanPerform(op: Op, scope: ScopeCoords): CanPerformResult {
+export function useCanPerform(op: Op, scope: ScopeCoords | null): CanPerformResult {
   const { user } = useAuth();
   const grantsQuery = useMyGrants();
   const def = OP_MIN_ROLE[op];
@@ -114,6 +119,11 @@ export function useCanPerform(op: Op, scope: ScopeCoords): CanPerformResult {
   }
   if (user.is_system_admin) {
     return { loading: false, allowed: true, effectiveRole: 'super-admin' };
+  }
+  if (scope == null) {
+    // Scope not resolved yet -- deny by default. Caller will re-render
+    // with the real scope once it lands.
+    return { loading: false, allowed: false, effectiveRole: null };
   }
   if (grantsQuery.isLoading) {
     return { loading: true, allowed: false, effectiveRole: null };

@@ -152,10 +152,9 @@ def list_groups_for_site(
     site = site_repository.get(site_id)
     if site is None:
         raise NotFoundError(f"Site {site_id} not found")
-    # No usamos require_scope("list_site_groups") -- pediría observer a
-    # nivel site, cosa que ``rol_para(site_id, None)`` no le da a un
-    # caller que sólo tiene grants group-scoped. Filtramos por
-    # visibilidad efectiva: sitewide-observer ve todos los grupos,
+    # No pedimos observer-a-nivel-site (rol_para(site_id, None) sólo mira
+    # grants site-wide, D11/D25) -- filtramos por visibilidad efectiva
+    # via visibles_para_usuario(): sitewide-observer ve todos los grupos,
     # group-observer sólo su(s) grupo(s), el resto 404.
     visible = [g for g in device_group_repository.visibles_para_usuario(scope) if g.site_id == site_id]
     if not visible and not scope.es_system_admin:

@@ -44,6 +44,10 @@ export const OP_MIN_ROLE = {
   // as the strictest guardrail when the target isn't known yet).
   move_device_same_site:      { scope_kind: 'device' as const,       min_role: 'operator' as const },
   move_device_cross_site:     { scope_kind: 'site' as const,         min_role: 'admin' as const },
+  // Retry-rollback on a job's original device. Backend enforces via
+  // authorize_device() inline; listed here so useCanPerform has a
+  // canonical name to gate the JobDetailModal button on.
+  retry_rollback:             { scope_kind: 'device' as const,       min_role: 'operator' as const },
   // ── Group ─────────────────────────────────────────────────────────
   read_group:                 { scope_kind: 'device_group' as const, min_role: 'observer' as const },
   list_group_devices:         { scope_kind: 'device_group' as const, min_role: 'observer' as const },
@@ -52,7 +56,6 @@ export const OP_MIN_ROLE = {
   delete_group:               { scope_kind: 'device_group' as const, min_role: 'admin' as const },
   // ── Site ──────────────────────────────────────────────────────────
   read_site:                  { scope_kind: 'site' as const,         min_role: 'observer' as const },
-  list_site_groups:           { scope_kind: 'site' as const,         min_role: 'observer' as const },
   edit_site:                  { scope_kind: 'site' as const,         min_role: 'admin' as const },
 } as const;
 

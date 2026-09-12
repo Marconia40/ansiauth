@@ -6,7 +6,9 @@ import type { Op } from '@/constants/opMinRole';
 
 interface Props {
   op: Op;
-  scope: ScopeCoords;
+  /** ``null`` means the scope hasn't been resolved yet (async lookup
+   * in flight) — treated as "not allowed" until it lands. */
+  scope: ScopeCoords | null;
   children: ReactNode;
   fallback?: ReactNode;
 }
