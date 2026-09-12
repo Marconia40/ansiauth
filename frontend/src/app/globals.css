@@ -75,8 +75,9 @@ body {
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
 
-/* Login screen keeps a lighter surface so the auth form stands out. */
-body.auth-surface {
-  background: #f4f5f7;
+/* Login backdrop: brand-blue diagonal gradient. */
+.login-shell {
+  background-color: #1a2438;
+  background-image: linear-gradient(135deg, #1a2438 0%, #2f4b7c 55%, #1e2934 100%);
   color: var(--color-text-inverse);
 }

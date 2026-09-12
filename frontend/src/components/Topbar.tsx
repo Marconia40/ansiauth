@@ -14,6 +14,7 @@ import {
   UserCircleIcon,
   UsersIcon,
 } from './Icon';
+import { Brand } from './Brand';
 
 const TOP_LINKS: {
   href: string;
@@ -33,10 +34,8 @@ export function Topbar() {
 
   return (
     <header className="h-14 bg-header text-header-fg flex items-center justify-between px-4 shrink-0 shadow">
-      <Link href="/" className="flex items-center gap-3">
-        <div className="h-9 w-24 rounded-md bg-white/95 text-inverse flex items-center justify-center text-sm font-bold tracking-widest">
-          LOGO
-        </div>
+      <Link href="/" className="flex items-center" aria-label="AnsiAuth home">
+        <Brand variant="wordmark" tone="white" tight className="h-7 w-auto" />
       </Link>
 
       <div className="flex items-center gap-1">
