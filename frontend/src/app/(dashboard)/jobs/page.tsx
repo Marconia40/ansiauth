@@ -10,6 +10,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { ElapsedTimer } from '@/components/ElapsedTimer';
 import { JobDetailModal } from '@/components/JobDetailModal';
 import { getJobs, getSites, extractMessage } from '@/services/api';
+import { useScope } from '@/context/ScopeContext';
 import { useJobNotifications } from '@/context/JobNotificationContext';
 import { ACTIVE_JOB_STATUSES } from '@/types/job';
 import type { Job } from '@/types/job';
@@ -109,6 +110,9 @@ interface FilterBarProps {
   devices: string[];
   playbooks: string[];
   sites: Site[];
+  /** Hide the in-page site select when the topbar scope is active — a
+   * single visible filter is clearer than two that can conflict. */
+  hideSiteSelect?: boolean;
   filterSite: string;
   setFilterSite: (v: string) => void;
   filterDevice: string;
@@ -131,6 +135,7 @@ function FilterBar({
   devices,
   playbooks,
   sites,
+  hideSiteSelect,
   filterSite,
   setFilterSite,
   filterDevice,
@@ -150,10 +155,12 @@ function FilterBar({
 }: FilterBarProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 mb-3">
-      <select value={filterSite} onChange={e => setFilterSite(e.target.value)} className={SELECT_CLS}>
-        <option value="">All Sites</option>
-        {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-      </select>
+      {!hideSiteSelect && (
+        <select value={filterSite} onChange={e => setFilterSite(e.target.value)} className={SELECT_CLS}>
+          <option value="">All Sites</option>
+          {sites.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+      )}
 
       <select value={filterDevice} onChange={e => setFilterDevice(e.target.value)} className={SELECT_CLS}>
         <option value="">All devices</option>
@@ -319,17 +326,26 @@ export default function JobsPage() {
   const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
   const siteList = sites ?? [];
 
+  // Topbar scope wins over the in-page site filter — the page switcher
+  // is more prominent so acting as if both were live would confuse
+  // users. When scoped, the in-page site select is hidden below.
+  const { selectedScope } = useScope();
+  const scopedSiteId =
+    selectedScope.kind === 'site' ? selectedScope.siteId : null;
+  const effectiveSiteId =
+    scopedSiteId ?? (filterSite ? Number(filterSite) : undefined);
+
   // reset to page 1 when server-side params change
-  useEffect(() => { setPage(1); }, [filterStatus, filterDevice, filterSite, pageSize]);
+  useEffect(() => { setPage(1); }, [filterStatus, filterDevice, effectiveSiteId, pageSize]);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ['jobs', page, pageSize, filterStatus, filterDevice, filterSite],
+    queryKey: ['jobs', page, pageSize, filterStatus, filterDevice, effectiveSiteId],
     queryFn: () => getJobs({
       page,
       page_size: pageSize,
       status: filterStatus || undefined,
       device: filterDevice || undefined,
-      site_id: filterSite ? Number(filterSite) : undefined,
+      site_id: effectiveSiteId,
     }),
     refetchInterval: (query) => {
       const items = (query.state.data as { items: Job[] } | undefined)?.items ?? [];
@@ -386,7 +402,12 @@ export default function JobsPage() {
   }, [pageItems]);
 
   const hasActiveFilters =
-    !!filterSite || !!filterDevice || !!filterStatus || !!filterPlaybook || filterDateRange !== 'all';
+    // filterSite is hidden and overridden when the topbar scope is
+    // active — don't count it as "an active filter" the user can clear
+    // from within the page (they'd clear the dropdown, but the topbar
+    // scope would keep filtering).
+    (scopedSiteId == null && !!filterSite) ||
+    !!filterDevice || !!filterStatus || !!filterPlaybook || filterDateRange !== 'all';
 
   function clearFilters() {
     setFilterSite('');
@@ -431,6 +452,7 @@ export default function JobsPage() {
             devices={uniqueDevices}
             playbooks={uniquePlaybooks}
             sites={siteList}
+            hideSiteSelect={scopedSiteId != null}
             filterSite={filterSite}
             setFilterSite={setFilterSite}
             filterDevice={filterDevice}

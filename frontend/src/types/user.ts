@@ -60,6 +60,11 @@ export interface User {
   created_at: string;
   updated_at: string;
   role?: Role;
+  /** Populated by POST /users when the create was actually a
+   * reactivation of a soft-deleted account with the same username.
+   * The frontend uses it to flash a "user reactivated" message so the
+   * operator knows this isn't a brand-new account. */
+  reactivated?: boolean;
 }
 
 /**

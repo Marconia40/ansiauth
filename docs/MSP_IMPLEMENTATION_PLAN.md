@@ -33,7 +33,7 @@ The repository already has the three MSP domain nouns — `Site`, `DeviceGroup`,
 - Authorization is enforced by **post-fetch Python filtering**, not by SQL predicates (`api/devices.py:33-38`, `api/device_groups.py:44-50`). A forgotten filter is a silent leak.
 - Every user has **one global `role`** (`db/models.py:16`) that applies wherever they have visibility. The system cannot express "admin here, observer there," nor grant a specific Group at a different role than the surrounding Site.
 
-The MSP prompt (`docs/prompts/new/MSP-Structure.md`) requires the opposite of most of the above: **Device → exactly one Group → exactly one Site**, with a **mandatory Default Group per Site**, a **mandatory Base-Infrastructure Site**. On top of that, the user has confirmed (design conversation, 2026-08-18/19) that authorization must be **per-scope**: a user like Juan holds `admin on Site A`, `observer on Site B` (with `operator on B/Group-2` overriding), and `admin on C/Group-1 + C/Group-2` (Groups 3 and 4 invisible). The most-specific grant wins per resource.
+The MSP prompt (`docs/prompts/new/MSP-Structure.md`) requires the opposite of most of the above: **Device → exactly one Group → exactly one Site**, with a **mandatory Default Group per Site**, a **mandatory Base-Infrastructure Site**. On top of that, the user has confirmed (design conversation, 2026-08-18/19) that authorization must be **per-scope**: a user like Juan holds `admin on Site A`, `observer on Site B` (with `operator on B/Group-2` elevating), and `admin on C/Group-1 + C/Group-2` (Groups 3 and 4 invisible). Grants are additive and resolve by max-role per scope (see D11).
 
 **Key strategic call-out.** There is a **prior, unimplemented** design in `docs/prompts/new/plan-migracion-modelo-dominio.md` §7 that proposes moving `Device ↔ Site` to **many-to-many** (a device can live in multiple sites, "most permissive wins"), and adding a direct `user_allowed_devices` grant. **That prior design is superseded** — the MSP prompt is stricter (one Site per Device, via one Group), and the confirmed per-scope role model provides a cleaner, more auditable answer to the "which user can operate on which resource" question. See **Decision D0** in Section 30 for the explicit resolution.
 
@@ -330,34 +330,37 @@ Users are **global rows** — one `users` row per person, unique username. What 
 - If `device_group_id` is NULL, the grant applies to the whole Site (every current and future Group in it).
 - If `device_group_id` is set, the grant applies to just that Group. The row also carries `site_id` (= the Group's Site) for query efficiency, but the Group is the authoritative scope.
 - Grants are **additive** — multiple grants coexist and the union of their scopes defines what the user can see.
-- When two grants overlap on the same resource (a Site grant and a Group grant within it, or a Group grant nested under a Site grant), **most-specific wins** for the resource being accessed (see `EffectiveRole` below).
+- When two grants overlap on the same resource (a Site grant and a Group grant within it, or a Group grant nested under a Site grant), the **maximum** role of the applicable grants wins for the resource being accessed. Grants only elevate; they cannot downgrade. See `EffectiveRole` below and D11 for the full rationale.
 
 ### `EffectiveRole` (pure function, no persistence)
-For a request from `user` targeting resource `R`, compute the role like this:
+Implemented as `VisibilityScope.rol_para(site_id, device_group_id)` in
+`backend/app/models/visibility_scope.py`. For a request from `user`
+targeting resource `R`, resolution runs like this:
 
 ```
-effective_role(user, resource) -> Role | None:
+effective_role(user, site, group_or_none) -> Role | None:
     if user.is_system_admin:
         return SUPER_ADMIN                              # bypasses everything
 
-    site = resolve_site(resource)                       # Device → Group → Site chain
-    group = resolve_group(resource) if resource is a Device or Group else None
+    site_wide = role_assignments.find(user, site, device_group_id=None)
 
-    # 1. Group-specific grant (most specific)
-    if group is not None:
-        r = role_assignments.find(user, site, device_group_id=group.id)
-        if r: return r.role
+    # Site-wide lookup: no group specified — return the site-wide grant
+    # only (a group-scoped admin does NOT count here; D25 depends on
+    # this to gate delegation).
+    if group_or_none is None:
+        return site_wide.role if site_wide else None
 
-    # 2. Site-wide grant
-    r = role_assignments.find(user, site, device_group_id=None)
-    if r: return r.role
-
-    return None                                         # no access at all
+    # Group scope: max-role between the site-wide grant and the
+    # group-specific grant. Grants only elevate.
+    group_specific = role_assignments.find(user, site, device_group_id=group_or_none)
+    candidates = [g.role for g in (site_wide, group_specific) if g is not None]
+    return max(candidates, key=role_level) if candidates else None
 ```
 
 Semantics fall out cleanly:
 - Juan with `(site, A, admin)` accessing any resource in A → admin.
-- Juan with `(site, B, observer) + (group, B/G2, operator)` accessing device in G2 → operator; accessing device in G3 → observer.
+- Juan with `(site, B, observer) + (group, B/G2, operator)` accessing device in G2 → operator (elevated); accessing device in G3 → observer (site-wide baseline).
+- Juan with `(site, D, admin) + (group, D/G1, observer)` accessing device in G1 → **admin** (the group-scoped observer cannot downgrade the site-wide admin; see D11).
 - Juan with only `(group, C/G1, admin) + (group, C/G2, admin)` accessing device in G3 → None (invisible). Site C itself appears in his site list *only as a container* of G1 and G2.
 
 ### Role semantics per scope
@@ -508,9 +511,9 @@ Everything else uses **`require_scope(...)`** (new dependency in `core/scope.py`
 | `GET /api/v1/sites`, `GET /api/v1/sites/{id}` | any grant on the Site (observer or higher), or `is_system_admin` |
 | `GET /api/v1/sites/{id}/groups` | observer on Site or on any Group within it, or `is_system_admin` |
 | `POST /api/v1/device-groups`, `DELETE /api/v1/device-groups/{id}` | `admin` at **Site** scope on the target Site, or `is_system_admin`. (Group-admin cannot create sibling groups.) |
-| `GET /api/v1/device-groups`, `GET /api/v1/device-groups/{id}` | observer on the Group or its Site (most-specific-wins), or `is_system_admin` |
+| `GET /api/v1/device-groups`, `GET /api/v1/device-groups/{id}` | observer on the Group or its Site (max-role resolution — a site-wide grant covers the group), or `is_system_admin` |
 | `POST /api/v1/devices` (register) | `admin` at Site scope on the target Site, OR `admin` at Group scope on the specific target Group, or `is_system_admin` |
-| `PUT /api/v1/devices/{name}` (edit connection details), `DELETE /api/v1/devices/{name}` | `admin` at the Device's Group scope (or Site scope, via most-specific wins), or `is_system_admin` |
+| `PUT /api/v1/devices/{name}` (edit connection details), `DELETE /api/v1/devices/{name}` | `admin` at the Device's Group scope (or Site scope; the site-wide grant covers all groups under max-role), or `is_system_admin` |
 | `POST /api/v1/devices/{name}/move` — **same-Site** move | `admin` on the source Group AND on the target Group (site-admin qualifies since it implies admin on all groups in that Site). Or `is_system_admin`. |
 | `POST /api/v1/devices/{name}/move` — **cross-Site** move | `admin` at **Site** scope on both source Site AND destination Site. Group-admin is **not** sufficient. Or `is_system_admin`. |
 | `POST /api/v1/vlans/...`, `PUT /api/v1/ports/{...}`, `POST /api/v1/devices/{name}/save` (any device config change) | `operator` or higher on the Device's scope, or `is_system_admin` |
@@ -1250,10 +1253,14 @@ Post-migration, the hot queries change from "SELECT * FROM devices; then Python 
 **Issue.** Diagram shows `name PK`. Today `name` is unique but there's also a surrogate `id`. **Recommendation.** Keep `name` as unique display alias, use `id` internally for FKs. Do **not** deprecate `name` — API URLs already use it.
 
 ## D10 — RESOLVED. Per-scope role model is required.
-**Confirmed by the user in the design conversation.** Both Group-level permissions AND per-scope roles are first-class requirements. See §10.5, §11.5, §12. Not optional; not additive-vs-subtractive — a single `role_assignments` table with most-specific-wins semantics. Do NOT ship without it.
+**Confirmed by the user in the design conversation.** Both Group-level permissions AND per-scope roles are first-class requirements. See §10.5, §11.5, §12. Not optional — a single `role_assignments` table with additive/max-role semantics (see D11 for the current rule). Do NOT ship without it.
 
-## D11 — RESOLVED. Grants are additive; most-specific wins per resource.
-Multiple grants coexist. When two grants overlap on the same resource (Site-scoped + Group-scoped within it), the Group grant applies for accesses to that Group and its Devices; the Site grant applies elsewhere in the Site. See §10.5 `effective_role`.
+## D11 — RESOLVED. Grants are additive; max-role wins per scope. (Updated 2026-09-12.)
+**Current rule (max-role, additive).** Multiple grants coexist. The effective role at a scope is the **maximum** of every grant that applies to it: a site-wide grant applies to the whole site and every group within it; a group-specific grant applies only when accessing that group. Grants only *elevate* — a lower group-scoped role on a group inside a site the user already admins has **no effect** on that group. Implemented by `VisibilityScope.rol_para()` in `backend/app/models/visibility_scope.py`.
+
+**Special case.** `rol_para(site_id, None)` (site-wide lookup, no group specified) returns the site-wide grant only. A group-scoped admin is deliberately NOT treated as a site-admin — D25 delegation authorization relies on this distinction.
+
+**Historical (superseded).** An earlier version of this rule read *"most-specific-wins"*: a group-scoped grant of any role shadowed the site-wide grant for accesses inside that group, even when it downgraded the effective role. That semantic was reversed on 2026-09-12 because it contradicted operator intuition ("admin on the site" should mean admin everywhere in the site) and could lead to silently-configured downgrades. See `docs/USER_PERMISSIONS_UX_REDESIGN.md` §2.1 for the full rationale and the tests in `backend/tests/test_visibility_scope_unit.py` for the current behavior.
 
 ## D12 — Postgres Row-Level Security as defense in depth?
 **Recommendation.** Not required by the MSP prompt. Ship without. Revisit if compliance asks demand it.

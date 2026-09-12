@@ -33,25 +33,33 @@ def _to_read(user: User) -> dict:
     "/",
     summary="Create user",
     description=(
-        "Create a new user account. Requires system-admin. "
-        "Passwords are hashed with PBKDF2-SHA256 and never returned in responses."
+        "Create a new user account. Requires system-admin. Passwords are "
+        "hashed with PBKDF2-SHA256 and never returned in responses. If the "
+        "username belongs to a soft-deleted account, it is reactivated in "
+        "place (grants purged, credentials/is_system_admin reset from this "
+        "call) — the audit trail keeps the original user id but a "
+        "``reactivate_user`` event is emitted instead of ``create_user`` so "
+        "the boundary is visible."
     ),
 )
 def create_user(data: UserCreate, current_user: dict = Depends(require_system_admin)):
     from app.composition import event_dispatcher, user_repository
 
     try:
-        user = user_repository.crear(
+        user, reactivated = user_repository.crear_o_reactivar(
             username=data.username, password=data.password,
             email=data.email, is_system_admin=data.is_system_admin,
         )
     except ValueError as e:
         raise ValidationError(str(e))
     event_dispatcher.despachar([DomainEvent(
-        "create_user", user, None, current_user["username"],
-        {"resource_id": user.id, "username": user.username},
+        "reactivate_user" if reactivated else "create_user",
+        user, None, current_user["username"],
+        {"resource_id": user.id, "username": user.username, "reactivated": reactivated},
     )])
-    return ok(_to_read(user))
+    body = _to_read(user)
+    body["reactivated"] = reactivated
+    return ok(body)
 
 
 @router.get(

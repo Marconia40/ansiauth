@@ -6,7 +6,8 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { RequireRole } from '@/components/RequireRole';
+import { RequireSystemAdmin } from '@/components/RequireSystemAdmin';
+import { RequireScopedRole } from '@/components/RequireScopedRole';
 import { getSites, createSite, updateSite, deleteSite, extractMessage } from '@/services/api';
 import type { Site, SiteUpdate } from '@/types/site';
 
@@ -150,7 +151,7 @@ export default function SitesPage() {
       />
       <p className="text-sm text-gray-500 mb-6">Organize infrastructure into physical or logical sites</p>
 
-      <RequireRole roles={['admin', 'super-admin']}>
+      <RequireSystemAdmin>
         <form onSubmit={handleCreate} className="flex flex-wrap gap-2 mb-6 items-center">
           <input
             type="text"
@@ -177,7 +178,7 @@ export default function SitesPage() {
             {isSubmitting && deletingSiteId === null && editingSiteId === null ? 'Creating...' : 'Create Site'}
           </button>
         </form>
-      </RequireRole>
+      </RequireSystemAdmin>
 
       {successMessage && (
         <div className="mb-4 text-sm text-green-700">&#10003; {successMessage}</div>
@@ -289,7 +290,7 @@ export default function SitesPage() {
                       </div>
                     ) : (
                       <div className="flex gap-2">
-                        <RequireRole roles={['admin', 'super-admin']}>
+                        <RequireScopedRole op="edit_site" scope={{ siteId: site.id }}>
                           <button
                             onClick={() => handleEditStart(site)}
                             disabled={isSubmitting || editingSiteId !== null}
@@ -297,8 +298,8 @@ export default function SitesPage() {
                           >
                             Edit
                           </button>
-                        </RequireRole>
-                        <RequireRole roles={['admin', 'super-admin']}>
+                        </RequireScopedRole>
+                        <RequireSystemAdmin>
                           {isBaseInfra ? (
                             <span
                               className="text-xs text-gray-400 italic"
@@ -315,7 +316,7 @@ export default function SitesPage() {
                               {deletingSiteId === site.id ? 'Deleting...' : 'Delete'}
                             </button>
                           )}
-                        </RequireRole>
+                        </RequireSystemAdmin>
                       </div>
                     )}
                   </td>

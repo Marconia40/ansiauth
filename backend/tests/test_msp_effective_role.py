@@ -1,7 +1,10 @@
-"""MSP: Phase 3 T3.1 — unit tests for services.effective_role.
+"""Effective-role resolution via ``VisibilityScope.rol_para()``.
 
-Covers the most-specific-wins semantics documented in
-MSP_IMPLEMENTATION_PLAN.md §10.5 and the phase-3 spec §5.
+Covers the max-role (additive) semantics documented in
+``docs/USER_PERMISSIONS_UX_REDESIGN.md`` §2.1: a grant may only elevate
+the effective role at a scope, never downgrade it. Replaces the earlier
+most-specific-wins tests that pointed at a removed ``effective_role``
+service module.
 """
 from __future__ import annotations
 
@@ -9,6 +12,7 @@ import uuid
 
 import pytest
 
+from app.composition import role_assignment_repository
 from app.db.models import (
     DeviceGroupModel,
     DeviceModel,
@@ -17,10 +21,10 @@ from app.db.models import (
     UserModel,
 )
 from app.db.session import get_session
-from app.services.effective_role import effective_role
 
 
-VALID_RESOURCE_TYPES = frozenset({"site", "device_group", "device"})
+def _scope_for(user_row: dict):
+    return role_assignment_repository.scope_de(user_row)
 
 
 @pytest.fixture()
@@ -109,35 +113,33 @@ def isolated_msp_scaffold():
         )
 
 
-def test_system_admin_returns_super_admin(isolated_msp_scaffold):
+def test_system_admin_bypasses_grants(isolated_msp_scaffold):
     scaffold = isolated_msp_scaffold
     admin_user = {"id": scaffold["user"]["id"], "is_system_admin": True}
-    with get_session() as session:
-        assert effective_role(session, admin_user, "site", scaffold["site_b_id"]) == "super-admin"
-        assert effective_role(session, admin_user, "device", scaffold["dev_b_name"]) == "super-admin"
+    scope = _scope_for(admin_user)
+    # System-admins are super-admin everywhere, including sites they hold
+    # no grants on.
+    assert scope.rol_para(scaffold["site_b_id"], None) == "super-admin"
+    assert scope.rol_para(scaffold["site_b_id"], scaffold["group_b_id"]) == "super-admin"
 
 
-def test_site_wide_grant_covers_group_and_device(isolated_msp_scaffold):
+def test_site_wide_grant_covers_site_and_its_groups(isolated_msp_scaffold):
     scaffold = isolated_msp_scaffold
-    user = scaffold["user"]
-    with get_session() as session:
-        assert effective_role(session, user, "site", scaffold["site_a_id"]) == "observer"
-        assert effective_role(session, user, "device_group", scaffold["group_a_id"]) == "observer"
-        assert effective_role(session, user, "device", scaffold["dev_a_name"]) == "observer"
+    scope = _scope_for(scaffold["user"])
+    assert scope.rol_para(scaffold["site_a_id"], None) == "observer"
+    assert scope.rol_para(scaffold["site_a_id"], scaffold["group_a_id"]) == "observer"
 
 
 def test_no_grant_on_other_site_returns_none(isolated_msp_scaffold):
     scaffold = isolated_msp_scaffold
-    user = scaffold["user"]
-    with get_session() as session:
-        assert effective_role(session, user, "site", scaffold["site_b_id"]) is None
-        assert effective_role(session, user, "device_group", scaffold["group_b_id"]) is None
-        assert effective_role(session, user, "device", scaffold["dev_b_name"]) is None
+    scope = _scope_for(scaffold["user"])
+    assert scope.rol_para(scaffold["site_b_id"], None) is None
+    assert scope.rol_para(scaffold["site_b_id"], scaffold["group_b_id"]) is None
 
 
-def test_group_scoped_grant_wins_over_site_wide(isolated_msp_scaffold):
-    """Most-specific-wins: a group-scoped operator grant beats the site-wide
-    observer grant when accessing that specific group / its devices."""
+def test_group_grant_can_elevate_above_site_wide(isolated_msp_scaffold):
+    """Additive: a group-scoped operator grant elevates the effective role
+    on that group above the site-wide observer grant."""
     scaffold = isolated_msp_scaffold
     user = scaffold["user"]
     with get_session() as session:
@@ -147,22 +149,62 @@ def test_group_scoped_grant_wins_over_site_wide(isolated_msp_scaffold):
             device_group_id=scaffold["group_a_id"],
             role="operator",
         ))
+    scope = _scope_for(user)
+    # Group-scoped operator elevates the group above the site-wide observer.
+    assert scope.rol_para(scaffold["site_a_id"], scaffold["group_a_id"]) == "operator"
+    # The site itself still resolves to the site-wide grant only.
+    assert scope.rol_para(scaffold["site_a_id"], None) == "observer"
+
+
+def test_group_grant_below_site_wide_does_not_downgrade(isolated_msp_scaffold):
+    """Max-role rule (the crux of the semantic change): if the user is
+    admin site-wide, a lower group-specific role has NO effect on that
+    group — the effective role stays admin."""
+    scaffold = isolated_msp_scaffold
+    user = scaffold["user"]
+    # Promote the site-wide grant from observer to admin, then add a
+    # lower-role group-scoped grant on the same site.
     with get_session() as session:
-        # Group-scoped operator wins on the group and its device …
-        assert effective_role(session, user, "device_group", scaffold["group_a_id"]) == "operator"
-        assert effective_role(session, user, "device", scaffold["dev_a_name"]) == "operator"
-        # … but the site-wide observer grant still applies to the site itself.
-        assert effective_role(session, user, "site", scaffold["site_a_id"]) == "observer"
+        session.query(RoleAssignmentModel).filter_by(
+            user_id=user["id"],
+            site_id=scaffold["site_a_id"],
+            device_group_id=None,
+        ).update({"role": "admin"})
+        session.add(RoleAssignmentModel(
+            user_id=user["id"],
+            site_id=scaffold["site_a_id"],
+            device_group_id=scaffold["group_a_id"],
+            role="observer",
+        ))
+    scope = _scope_for(user)
+    # The group-scoped observer grant cannot downgrade the site-wide admin.
+    assert scope.rol_para(scaffold["site_a_id"], scaffold["group_a_id"]) == "admin"
+    assert scope.rol_para(scaffold["site_a_id"], None) == "admin"
 
 
-def test_unknown_resource_returns_none(isolated_msp_scaffold):
-    user = isolated_msp_scaffold["user"]
+def test_group_only_admin_does_not_grant_site_wide(isolated_msp_scaffold):
+    """``rol_para(site_id, None)`` returns the site-wide grant only —
+    D25 relies on this: a group-scoped admin must NOT be treated as a
+    site-admin for delegation purposes."""
+    scaffold = isolated_msp_scaffold
+    user = scaffold["user"]
+    # Remove the site-wide observer grant, add a group-scoped admin.
     with get_session() as session:
-        assert effective_role(session, user, "site", 999_999) is None
-        assert effective_role(session, user, "device", "no-such-device") is None
-
-
-def test_invalid_resource_type_raises():
-    with get_session() as session:
-        with pytest.raises(ValueError):
-            effective_role(session, {"id": 1, "is_system_admin": False}, "bogus", 1)
+        session.query(RoleAssignmentModel).filter_by(
+            user_id=user["id"],
+            site_id=scaffold["site_a_id"],
+            device_group_id=None,
+        ).delete(synchronize_session=False)
+        session.add(RoleAssignmentModel(
+            user_id=user["id"],
+            site_id=scaffold["site_a_id"],
+            device_group_id=scaffold["group_a_id"],
+            role="admin",
+        ))
+    scope = _scope_for(user)
+    # Site-wide lookup returns None — the user is not a site-admin.
+    assert scope.rol_para(scaffold["site_a_id"], None) is None
+    # But the group lookup finds the group-scoped admin.
+    assert scope.rol_para(scaffold["site_a_id"], scaffold["group_a_id"]) == "admin"
+    # Other groups on the same site have no matching grant.
+    assert scope.rol_para(scaffold["site_a_id"], 999_999) is None

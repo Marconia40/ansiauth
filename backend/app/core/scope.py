@@ -49,6 +49,11 @@ OP_MIN_ROLE: dict[str, Tuple[str, str]] = {
     # runtime once the source and target sites are known.
     "move_device_same_site":          ("device",       "operator"),
     "move_device_cross_site":         ("site",         "admin"),      # both sides
+    # retry_rollback is enforced by ``api/jobs.py::_check_device_scope``
+    # via ``authorize_device(min_role="operator")`` on the original
+    # job's device — listed here so ``useCanPerform`` (frontend) has a
+    # canonical op name to gate the UI button on.
+    "retry_rollback":                 ("device",       "operator"),
     # VLAN/port ops don't fit require_scope() (VLAN targets N devices per
     # request; ports needs a distinct min_role per one of 10 endpoints) --
     # they call authorize_device() directly instead, see below.
@@ -60,7 +65,6 @@ OP_MIN_ROLE: dict[str, Tuple[str, str]] = {
     "delete_group":                   ("device_group", "admin"),
     # ── Site ──────────────────────────────────────────────────────────────
     "read_site":                      ("site",         "observer"),   # visible_or_404()
-    "list_site_groups":               ("site",         "observer"),
     "edit_site":                      ("site",         "admin"),
     # site create/delete + PUT /users/{id}/system-admin use require_system_admin
     # (they are not per-scope), so they intentionally have no entry here.

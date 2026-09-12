@@ -5,7 +5,9 @@ import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
-import { useHasRole } from '@/components/RequireRole';
+import { RequireScopedRole } from '@/components/RequireScopedRole';
+import { RequireSystemAdmin } from '@/components/RequireSystemAdmin';
+import { useHasAnyAdminSite } from '@/hooks/useAuthz';
 import {
   getDeviceGroups,
   getDevices,
@@ -21,7 +23,11 @@ import type { Device } from '@/types/device';
 import type { Site } from '@/types/site';
 
 export default function DeviceGroupsPage() {
-  const canMutate = useHasRole('operator');
+  // Per-scope gating post-§3.2: whether the caller can act on a
+  // given group depends on the group's site + group id, so the coarse
+  // page-wide ``canMutate`` is gone. See per-row RequireScopedRole
+  // wrappers below and useHasAnyAdminSite for the Create Group form.
+  const { allowed: canCreateAnyGroup } = useHasAnyAdminSite();
 
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
@@ -247,7 +253,7 @@ export default function DeviceGroupsPage() {
       />
       <p className="text-sm text-gray-500 mb-6">Manage logical device groupings</p>
 
-      {canMutate && (
+      {canCreateAnyGroup && (
         <div className="border border-gray-200 rounded-md p-4 mb-6">
           <h2 className="text-sm font-semibold text-gray-700 mb-3">Create Group</h2>
           <form onSubmit={handleCreate} className="flex flex-wrap gap-2 items-center">
@@ -351,14 +357,19 @@ export default function DeviceGroupsPage() {
                           return (
                             <div key={device} className="flex items-center gap-2">
                               <span className="font-mono text-xs text-gray-900">{device}</span>
-                              {canMutate && (
-                                <button
-                                  onClick={() => handleRemoveDevice(group, device)}
-                                  disabled={isRemoving || isDeletingThis || isAdding}
-                                  className="px-1.5 py-0.5 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                              {group.site_id !== null && (
+                                <RequireScopedRole
+                                  op="move_device_same_site"
+                                  scope={{ siteId: group.site_id, deviceGroupId: group.id }}
                                 >
-                                  {isRemoving ? 'Removing...' : 'Remove'}
-                                </button>
+                                  <button
+                                    onClick={() => handleRemoveDevice(group, device)}
+                                    disabled={isRemoving || isDeletingThis || isAdding}
+                                    className="px-1.5 py-0.5 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    {isRemoving ? 'Removing...' : 'Remove'}
+                                  </button>
+                                </RequireScopedRole>
                               )}
                             </div>
                           );
@@ -366,53 +377,75 @@ export default function DeviceGroupsPage() {
                       </div>
                     )}
 
-                    {canMutate && group.site_id !== null && (
-                      <div className="flex gap-1 items-center mt-1">
-                        <select
-                          value={groupSelectedDevice}
-                          onChange={(e) =>
-                            setSelectedDevice((prev) => ({ ...prev, [group.id]: e.target.value }))
-                          }
-                          disabled={isAdding || isDeletingThis || groupDevicePool.length === 0}
-                          className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
-                        >
-                          <option value="">
-                            {groupDevicePool.length === 0
-                              ? `No devices in ${group.site_name ?? 'this site'}`
-                              : 'Select device...'}
-                          </option>
-                          {groupDevicePool
-                            .filter((d) => !members.includes(d.name))
-                            .map((d) => (
-                              <option key={d.name} value={d.name}>
-                                {d.name}
-                              </option>
-                            ))}
-                        </select>
-                        <button
-                          onClick={() => handleAddDevice(group)}
-                          disabled={!groupSelectedDevice || isAdding || isDeletingThis}
-                          className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {isAdding ? 'Adding...' : 'Add'}
-                        </button>
-                      </div>
+                    {group.site_id !== null && (
+                      <RequireScopedRole
+                        op="move_device_same_site"
+                        scope={{ siteId: group.site_id, deviceGroupId: group.id }}
+                      >
+                        <div className="flex gap-1 items-center mt-1">
+                          <select
+                            value={groupSelectedDevice}
+                            onChange={(e) =>
+                              setSelectedDevice((prev) => ({ ...prev, [group.id]: e.target.value }))
+                            }
+                            disabled={isAdding || isDeletingThis || groupDevicePool.length === 0}
+                            className="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+                          >
+                            <option value="">
+                              {groupDevicePool.length === 0
+                                ? `No devices in ${group.site_name ?? 'this site'}`
+                                : 'Select device...'}
+                            </option>
+                            {groupDevicePool
+                              .filter((d) => !members.includes(d.name))
+                              .map((d) => (
+                                <option key={d.name} value={d.name}>
+                                  {d.name}
+                                </option>
+                              ))}
+                          </select>
+                          <button
+                            onClick={() => handleAddDevice(group)}
+                            disabled={!groupSelectedDevice || isAdding || isDeletingThis}
+                            className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {isAdding ? 'Adding...' : 'Add'}
+                          </button>
+                        </div>
+                      </RequireScopedRole>
                     )}
-                    {canMutate && group.site_id === null && (
-                      <p className="text-xs text-amber-600 mt-1">
-                        Set this group&apos;s site before adding members
-                      </p>
+                    {group.site_id === null && (
+                      <RequireSystemAdmin>
+                        <p className="text-xs text-amber-600 mt-1">
+                          Set this group&apos;s site before adding members
+                        </p>
+                      </RequireSystemAdmin>
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    {canMutate && (
-                      <button
-                        onClick={() => handleDeleteGroup(group)}
-                        disabled={isDeletingThis || isAdding}
-                        className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    {group.site_id !== null ? (
+                      <RequireScopedRole
+                        op="delete_group"
+                        scope={{ siteId: group.site_id, deviceGroupId: group.id }}
                       >
-                        {isDeletingThis ? 'Deleting...' : 'Delete'}
-                      </button>
+                        <button
+                          onClick={() => handleDeleteGroup(group)}
+                          disabled={isDeletingThis || isAdding}
+                          className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isDeletingThis ? 'Deleting...' : 'Delete'}
+                        </button>
+                      </RequireScopedRole>
+                    ) : (
+                      <RequireSystemAdmin>
+                        <button
+                          onClick={() => handleDeleteGroup(group)}
+                          disabled={isDeletingThis || isAdding}
+                          className="px-2 py-1 text-xs text-red-600 border border-red-300 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isDeletingThis ? 'Deleting...' : 'Delete'}
+                        </button>
+                      </RequireSystemAdmin>
                     )}
                   </td>
                 </tr>

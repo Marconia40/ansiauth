@@ -34,6 +34,7 @@ backend/ansible/env/
 # =========================
 .vscode/
 .idea/
+.claude
 
 # =========================
 # OS
@@ -86,3 +87,4 @@ docs/upgrades/old/
 backend/app/db/*.db
 snapshots/
 scripts/db-snapshot.sh
+**/*.db
