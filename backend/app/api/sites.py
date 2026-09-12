@@ -135,11 +135,16 @@ def get_site(
 @router.get(
     "/{site_id}/groups",
     summary="List groups in site",
-    description="Return every DeviceGroup that belongs to this site.",
+    description=(
+        "Return every DeviceGroup in this site the caller can see. Callers "
+        "with a site-wide grant see every group; callers with only "
+        "group-scoped grants see just those groups. A caller with no grant "
+        "on either the site or any of its groups gets 404."
+    ),
 )
 def list_groups_for_site(
     site_id: int,
-    current_user: dict = Depends(require_scope("list_site_groups")),
+    scope: VisibilityScope = Depends(obtener_scope),
 ):
     from app.api.device_groups import _to_read as _group_to_read
     from app.composition import device_group_repository, site_repository
@@ -147,16 +152,18 @@ def list_groups_for_site(
     site = site_repository.get(site_id)
     if site is None:
         raise NotFoundError(f"Site {site_id} not found")
-    groups = device_group_repository.en_site(site_id)
-    # site_name=site.name reusa el site ya buscado arriba en vez de que
-    # _to_read() lo vuelva a pedir por cada grupo (redundante -- el caller
-    # ya lo tiene, todos los grupos son del mismo site_id por construcción
-    # de en_site()); member_count batcheado igual que list_groups().
-    # N+1 real, encontrado en una revisión de código.
-    member_counts = device_group_repository.contar_miembros_batch([g.id for g in groups])
+    # No usamos require_scope("list_site_groups") -- pediría observer a
+    # nivel site, cosa que ``rol_para(site_id, None)`` no le da a un
+    # caller que sólo tiene grants group-scoped. Filtramos por
+    # visibilidad efectiva: sitewide-observer ve todos los grupos,
+    # group-observer sólo su(s) grupo(s), el resto 404.
+    visible = [g for g in device_group_repository.visibles_para_usuario(scope) if g.site_id == site_id]
+    if not visible and not scope.es_system_admin:
+        raise NotFoundError(f"Site {site_id} not found")
+    member_counts = device_group_repository.contar_miembros_batch([g.id for g in visible])
     return ok([
         _group_to_read(g, member_count=member_counts.get(g.id, 0), site_name=site.name)
-        for g in groups
+        for g in visible
     ])
 
 

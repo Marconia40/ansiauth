@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Optional
 
 from app.core.repository import Repository
-from app.db.models import UserModel
+from app.db.models import RoleAssignmentModel, UserModel
 from app.db.session import get_session
 from app.models.user import User
 
@@ -63,6 +63,62 @@ class UserRepository(Repository):
                 raise ValueError(f"Email '{email_norm}' is already registered")
         entidad = User.nuevo(username, password, email, is_system_admin)
         return self.add(entidad)
+
+    def crear_o_reactivar(
+        self, username: str, password: str, email: Optional[str] = None,
+        is_system_admin: bool = False,
+    ) -> tuple[User, bool]:
+        """Como :meth:`crear`, pero si el username pertenece a una cuenta
+        soft-deleted (``is_active=False``) la reactiva en vez de tirar
+        ``ValueError``. Reset total del row: password/email/is_system_admin
+        se rehacen desde cero y sus role_assignments viejos se purgan --
+        el operador que hace "Create user" con un username reciclado
+        espera un usuario limpio, no la resurrección de los permisos del
+        anterior. La row keeps its id/created_at, así que el trail de
+        auditoría del ID viejo sigue apuntando a este ``users.id``.
+
+        Devuelve ``(user, was_reactivated)``. Un colisión con un usuario
+        ACTIVO sigue tirando ``ValueError`` -- la reactivación es sólo
+        para cuentas soft-deleted, nunca para pisar credenciales de una
+        cuenta viva.
+        """
+        username_norm = username.lower()
+        email_norm = email.lower() if email else None
+        with get_session() as session:
+            existing = (
+                session.query(UserModel).filter_by(username=username_norm).first()
+            )
+            if existing is not None and existing.is_active:
+                raise ValueError(f"Username '{username_norm}' is already taken")
+            if email_norm:
+                email_owner = (
+                    session.query(UserModel).filter_by(email=email_norm).first()
+                )
+                # Un email igual pero atado a OTRO usuario (activo o
+                # inactivo) sigue colisionando -- reasignar el email
+                # de otra persona al reactivar sería sorpresa.
+                if email_owner is not None and (
+                    existing is None or email_owner.id != existing.id
+                ):
+                    raise ValueError(f"Email '{email_norm}' is already registered")
+        if existing is None:
+            return self.crear(username, password, email, is_system_admin), False
+        # Reactivación: pisamos hashed_password y flags, purgamos grants
+        # viejos, dejamos id/created_at.
+        entidad_nueva = User.nuevo(username, password, email, is_system_admin)
+        with get_session() as session:
+            session.query(RoleAssignmentModel).filter_by(user_id=existing.id).delete(
+                synchronize_session=False,
+            )
+        reactivated = User(
+            id=existing.id,
+            username=existing.username,
+            hashed_password=entidad_nueva.hashed_password,
+            email=email_norm,
+            is_active=True,
+            is_system_admin=bool(is_system_admin),
+        )
+        return self.add(reactivated), True
 
     def obtener_por_username(self, username: str) -> Optional[User]:
         with get_session() as session:

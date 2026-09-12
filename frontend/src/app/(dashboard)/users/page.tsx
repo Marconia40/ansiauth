@@ -146,7 +146,11 @@ export default function UsersPage() {
     await refetch();
     setJustCreatedUserId(u.id);
     setManageUserId(u.id);
-    setSuccessMessage(`User ${u.username} created — configure their access.`);
+    setSuccessMessage(
+      u.reactivated
+        ? `User ${u.username} reactivated (a soft-deleted account with this name existed). Old grants were cleared; configure their access below.`
+        : `User ${u.username} created — configure their access.`,
+    );
   }
 
   function handleManageClose() {
