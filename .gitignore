@@ -87,3 +87,4 @@ docs/upgrades/old/
 backend/app/db/*.db
 snapshots/
 scripts/db-snapshot.sh
+**/*.db
