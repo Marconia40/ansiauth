@@ -92,7 +92,7 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
 
     login_attempt_repository.registrar_intento(username, ip, exitoso=True)
     login_attempt_repository.resetear(username)
-    access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
+    access_token = create_access_token({"sub": user.username, "id": user.id, "is_system_admin": user.is_system_admin})
     refresh_token = refresh_token_service.create(user.username)
     audit_repository.append(AuditRecord(
         user=user.username,
@@ -131,7 +131,7 @@ def refresh(request: Request, response: Response):
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    access_token = create_access_token({"sub": user.username, "is_system_admin": user.is_system_admin})
+    access_token = create_access_token({"sub": user.username, "id": user.id, "is_system_admin": user.is_system_admin})
     from app.composition import audit_repository
     audit_repository.append(AuditRecord(
         user=user.username,

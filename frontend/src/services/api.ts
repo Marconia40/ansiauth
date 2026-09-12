@@ -391,7 +391,9 @@ function parseAuthUser(token: string): AuthUser {
   const payload = JSON.parse(atob(token.split('.')[1]));
   const isSystemAdmin = Boolean(payload.is_system_admin);
   const role = payload.role ?? (isSystemAdmin ? 'admin' : 'observer');
+  const id = typeof payload.id === 'number' ? payload.id : undefined;
   return {
+    id,
     username: payload.sub,
     role,
     is_system_admin: isSystemAdmin,
