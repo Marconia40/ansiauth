@@ -23,6 +23,8 @@ import { ErrorMessage } from '@/components/ErrorMessage';
 
 const ASSIGNMENT_ROLES: AssignmentRole[] = ['observer', 'operator', 'admin'];
 
+type Mode = 'edit' | 'configure-new';
+
 interface ManageUserModalProps {
   user: User;
   sites: Site[];
@@ -30,16 +32,14 @@ interface ManageUserModalProps {
   onClose: () => void;
   onUserChanged: () => void;
   /**
-   * Optional contextual banner shown above the sections — used by the
-   * two-step create flow (§3.4) to explain that closing without any
-   * grants leaves the user in a zero-access state.
+   * ``edit`` — normal per-row Edit action from the users list.
+   * ``configure-new`` — step 2 of the two-step create flow (§3.4):
+   * shows an intro banner and swaps the top-right Close for a bottom
+   * footer with an explicit Skip / Done pair. Done is enabled only
+   * once the user has at least one grant, so the operator gets clear
+   * feedback that their work is captured before dismissing.
    */
-  banner?: React.ReactNode;
-  /**
-   * Optional label for the close button — the create flow uses
-   * ``Skip — user has no access yet`` instead of ``Close``.
-   */
-  closeLabel?: string;
+  mode?: Mode;
 }
 
 /**
@@ -59,15 +59,21 @@ export function ManageUserModal({
   viewerIsSystemAdmin,
   onClose,
   onUserChanged,
-  banner,
-  closeLabel,
+  mode = 'edit',
 }: ManageUserModalProps) {
+  const isConfigureNew = mode === 'configure-new';
   const queryClient = useQueryClient();
 
   const [busy, setBusy] = useState(false);
   const [sectionMessage, setSectionMessage] = useState<
     { kind: 'success' | 'error'; text: string } | null
   >(null);
+  // Flipped true by any successful mutation performed in this session
+  // (creds/system-admin/grants). In ``edit`` mode this drives a bottom
+  // Done footer so the operator gets an explicit confirmation
+  // affordance after making changes, instead of having to reach for
+  // the top-right Close.
+  const [dirty, setDirty] = useState(false);
 
   // ── Credentials section ──────────────────────────────────────────────
   const [newEmail, setNewEmail] = useState(user.email ?? '');
@@ -128,6 +134,7 @@ export function ManageUserModal({
       await updateUser(user.id, body);
       setNewPassword('');
       onUserChanged();
+      setDirty(true);
       flash('success', 'Credentials updated');
     } catch (err) {
       flash('error', extractMessage(err, 'Update failed'));
@@ -147,6 +154,7 @@ export function ManageUserModal({
       await setSystemAdmin(user.id, next);
       onUserChanged();
       queryClient.invalidateQueries({ queryKey: ['grants-all'] });
+      setDirty(true);
       flash('success', `${user.username}: is_system_admin=${next}`);
     } catch (err) {
       flash('error', extractMessage(err, 'System-admin toggle failed'));
@@ -172,6 +180,7 @@ export function ManageUserModal({
       setNewGrantRole('observer');
       await refetchGrants();
       queryClient.invalidateQueries({ queryKey: ['grants-all'] });
+      setDirty(true);
       flash('success', 'Grant issued');
     } catch (err) {
       flash('error', extractMessage(err, 'Grant failed'));
@@ -190,6 +199,7 @@ export function ManageUserModal({
       await revokeApi(user.id, g.id);
       await refetchGrants();
       queryClient.invalidateQueries({ queryKey: ['grants-all'] });
+      setDirty(true);
       flash('success', 'Grant revoked');
     } catch (err) {
       flash('error', extractMessage(err, 'Revoke failed'));
@@ -198,31 +208,43 @@ export function ManageUserModal({
     }
   }
 
+  // In configure-new mode Done becomes enabled once the user has *any*
+  // form of access — a per-scope grant OR the system-wide admin bit.
+  // Both count: the operator has confirmed the new user won't be
+  // stranded with zero access.
+  const hasAnyAccess = user.is_system_admin || (grants ?? []).length > 0;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 overflow-y-auto py-8">
       <div className="w-full max-w-2xl bg-panel rounded-lg shadow-xl p-6">
         <div className="flex items-start justify-between mb-4">
           <div>
             <h2 className="text-lg font-semibold text-text">
-              Manage user: {user.username}
+              {isConfigureNew ? `Configure access: ${user.username}` : `Manage user: ${user.username}`}
             </h2>
             <p className="text-xs text-muted mt-1">
               Credentials, system-wide access, and per-scope grants all
               live here. Each section applies immediately.
             </p>
           </div>
-          <button
-            onClick={onClose}
-            disabled={busy}
-            className="text-sm text-muted hover:text-text disabled:opacity-50"
-          >
-            {closeLabel ?? 'Close'}
-          </button>
+          {!isConfigureNew && (
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="text-sm text-muted hover:text-text disabled:opacity-50"
+            >
+              Close
+            </button>
+          )}
         </div>
 
-        {banner && (
+        {isConfigureNew && (
           <div className="mb-4 px-3 py-2 rounded-md border border-info/30 bg-info/5 text-sm text-text">
-            {banner}
+            User created. Configure their access below — grants apply
+            immediately as you add them. Use{' '}
+            <strong>Done</strong> when finished, or <strong>Skip</strong>{' '}
+            to leave the user with no access for now (you can grant it
+            later from Edit).
           </div>
         )}
 
@@ -431,6 +453,44 @@ export function ManageUserModal({
             )}
           </div>
         </section>
+
+        {isConfigureNew ? (
+          <div className="mt-6 pt-4 border-t border-panel-border flex items-center justify-end gap-2">
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm text-muted border border-panel-border rounded-md hover:bg-panel-elev/60 disabled:opacity-50"
+            >
+              Skip — user has no access yet
+            </button>
+            <button
+              onClick={onClose}
+              disabled={busy || !hasAnyAccess}
+              title={
+                hasAnyAccess
+                  ? undefined
+                  : 'Grant access (a per-scope grant or the system-wide admin bit) to finish, or Skip to leave the user without any.'
+              }
+              className="px-3 py-1.5 text-sm text-white bg-info rounded-md hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Done
+            </button>
+          </div>
+        ) : dirty ? (
+          // Edit mode: the top-right Close is always available, but once
+          // any change has been applied we surface an explicit Done at
+          // the bottom so the operator gets clear feedback that their
+          // work is captured before dismissing.
+          <div className="mt-6 pt-4 border-t border-panel-border flex items-center justify-end">
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm text-white bg-info rounded-md hover:brightness-110 disabled:opacity-50"
+            >
+              Done
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

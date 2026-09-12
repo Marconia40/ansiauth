@@ -259,12 +259,7 @@ export default function UsersPage() {
           onUserChanged={() => {
             refetch();
           }}
-          banner={
-            isStep2OfCreate
-              ? 'User created. Configure their access below, or close to leave them with no access for now — you can grant access later from Edit.'
-              : undefined
-          }
-          closeLabel={isStep2OfCreate ? 'Skip — user has no access yet' : undefined}
+          mode={isStep2OfCreate ? 'configure-new' : 'edit'}
         />
       )}
     </div>
