@@ -3,31 +3,21 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
 import { AccessBadges } from '@/components/AccessBadges';
+import { ManageUserModal } from '@/components/ManageUserModal';
 import {
   getUsers,
   createUser,
-  updateUser,
   deleteUser,
   getSites,
-  listSiteGroups,
   listGrants,
-  grant as grantApi,
-  revoke as revokeApi,
-  setSystemAdmin,
   extractMessage,
 } from '@/services/api';
-import type { DeviceGroup } from '@/services/api';
-import type {
-  AssignmentRole,
-  RoleAssignment,
-  User,
-  UserUpdate,
-} from '@/types/user';
+import type { RoleAssignment, User } from '@/types/user';
 import type { Role } from '@/types/auth';
 import type { Site } from '@/types/site';
 
@@ -44,12 +34,9 @@ const ROLE_LABELS: Record<Role, string> = {
   'super-admin': 'Super Admin',
 };
 
-const ASSIGNMENT_ROLES: AssignmentRole[] = ['observer', 'operator', 'admin'];
-
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
   const router = useRouter();
-  const queryClient = useQueryClient();
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
@@ -61,18 +48,14 @@ export default function UsersPage() {
   const [newPassword, setNewPassword] = useState('');
   const [newRole, setNewRole] = useState<Role>('observer');
 
-  // ── Edit form (in-row) ───────────────────────────────────────────────────
-  // Post-Phase-5 the row-level ``role`` dropdown was dead UI (comment
-  // below on ``handleUpdate``). The Edit action now only resets the
-  // password; per-scope permissions live behind the ``Grants…`` button.
-  const [editingUserId, setEditingUserId] = useState<number | null>(null);
-  const [editingPassword, setEditingPassword] = useState('');
-
-  // ── Grants modal ─────────────────────────────────────────────────────────
-  const [grantsUser, setGrantsUser] = useState<User | null>(null);
-  const [newGrantSiteId, setNewGrantSiteId] = useState<string>('');
-  const [newGrantGroupId, setNewGrantGroupId] = useState<string>('');
-  const [newGrantRole, setNewGrantRole] = useState<AssignmentRole>('observer');
+  // ── Manage-user modal ────────────────────────────────────────────────────
+  // Single entry point for editing credentials, toggling system-admin, and
+  // managing per-scope grants — see docs/USER_PERMISSIONS_UX_REDESIGN.md §3.3.
+  //
+  // Stored as an id (not a snapshot object) so the modal always sees the
+  // freshest user row after a refetch — otherwise flipping system-admin
+  // inside the modal would leave its own copy stale until reopened.
+  const [manageUserId, setManageUserId] = useState<number | null>(null);
 
   const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -103,9 +86,12 @@ export default function UsersPage() {
   const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
   const siteList = sites ?? [];
 
+  const manageUser =
+    manageUserId != null ? users.find((u) => u.id === manageUserId) ?? null : null;
+
   // Aggregate every user's grants in a single query so the Access column
-  // can render inline chips without waiting for the Grants modal to open.
-  // Small user populations don't need a batch endpoint yet — parallelising
+  // can render inline chips without waiting for the modal to open. Small
+  // user populations don't need a batch endpoint yet — parallelising
   // per-user calls behind one React Query is enough. See
   // docs/USER_PERMISSIONS_UX_REDESIGN.md §3.5.
   const userIdsKey = users.map((u) => u.id).sort((a, b) => a - b).join(',');
@@ -118,19 +104,6 @@ export default function UsersPage() {
       return new Map(entries);
     },
     enabled: users.length > 0,
-  });
-
-  // ── Grants sub-queries for the currently-open user ───────────────────────
-  const { data: grants, refetch: refetchGrants } = useQuery<RoleAssignment[]>({
-    queryKey: ['grants', grantsUser?.id],
-    queryFn: () => listGrants(grantsUser!.id),
-    enabled: grantsUser != null,
-  });
-
-  const { data: grantGroups } = useQuery<DeviceGroup[]>({
-    queryKey: ['site-groups', newGrantSiteId],
-    queryFn: () => listSiteGroups(Number(newGrantSiteId)),
-    enabled: !!newGrantSiteId,
   });
 
   useEffect(() => {
@@ -162,42 +135,10 @@ export default function UsersPage() {
       setNewRole('observer');
       await refetch();
       setSuccessMessage(
-        `User ${username} created. Manage per-scope grants via the "Grants…" row action.`,
+        `User ${username} created. Use "Edit" on the row to configure access.`,
       );
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Create failed'));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  function handleEditStart(u: User) {
-    setEditingUserId(u.id);
-    setEditingPassword('');
-    setSuccessMessage(null);
-    setErrorMessage(null);
-  }
-
-  function handleEditCancel() {
-    setEditingUserId(null);
-    setEditingPassword('');
-  }
-
-  async function handleUpdate() {
-    setIsSubmitting(true);
-    setSuccessMessage(null);
-    setErrorMessage(null);
-    try {
-      const body: UserUpdate = {};
-      if (editingPassword.trim()) {
-        body.password = editingPassword.trim();
-      }
-      await updateUser(editingUserId!, body);
-      handleEditCancel();
-      await refetch();
-      setSuccessMessage('User updated successfully');
-    } catch (err) {
-      setErrorMessage(extractMessage(err, 'Operation failed'));
     } finally {
       setIsSubmitting(false);
     }
@@ -218,71 +159,6 @@ export default function UsersPage() {
     } finally {
       setIsSubmitting(false);
       setDeletingUserId(null);
-    }
-  }
-
-  async function handleToggleSystemAdmin(u: User) {
-    const next = !u.is_system_admin;
-    if (!window.confirm(
-      next
-        ? `Promote ${u.username} to system-admin? System-admins bypass every per-scope grant.`
-        : `Demote ${u.username} from system-admin?`,
-    )) return;
-    setIsSubmitting(true);
-    setSuccessMessage(null);
-    setErrorMessage(null);
-    try {
-      await setSystemAdmin(u.id, next);
-      await refetch();
-      queryClient.invalidateQueries({ queryKey: ['grants-all'] });
-      setSuccessMessage(`${u.username}: is_system_admin=${next}`);
-    } catch (err) {
-      setErrorMessage(extractMessage(err, 'System-admin toggle failed'));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  async function handleAddGrant() {
-    if (!grantsUser) return;
-    if (!newGrantSiteId) { setErrorMessage('Pick a site'); return; }
-    setIsSubmitting(true);
-    setSuccessMessage(null);
-    setErrorMessage(null);
-    try {
-      await grantApi(grantsUser.id, {
-        site_id: Number(newGrantSiteId),
-        device_group_id: newGrantGroupId ? Number(newGrantGroupId) : null,
-        role: newGrantRole,
-      });
-      setNewGrantSiteId('');
-      setNewGrantGroupId('');
-      setNewGrantRole('observer');
-      await refetchGrants();
-      queryClient.invalidateQueries({ queryKey: ['grants-all'] });
-      setSuccessMessage('Grant issued');
-    } catch (err) {
-      setErrorMessage(extractMessage(err, 'Grant failed'));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  async function handleRevoke(g: RoleAssignment) {
-    if (!grantsUser) return;
-    if (!window.confirm(`Revoke ${g.role} on ${g.site_name}${g.device_group_name ? ` / ${g.device_group_name}` : ''}?`)) return;
-    setIsSubmitting(true);
-    setSuccessMessage(null);
-    setErrorMessage(null);
-    try {
-      await revokeApi(grantsUser.id, g.id);
-      await refetchGrants();
-      queryClient.invalidateQueries({ queryKey: ['grants-all'] });
-      setSuccessMessage('Grant revoked');
-    } catch (err) {
-      setErrorMessage(extractMessage(err, 'Revoke failed'));
-    } finally {
-      setIsSubmitting(false);
     }
   }
 
@@ -307,8 +183,8 @@ export default function UsersPage() {
         }
       />
       <p className="text-sm text-muted mb-6">
-        Manage platform users. Per-scope permissions are granted per user via
-        the “Grants…” row action.
+        Manage platform users. Credentials, system-wide access, and
+        per-scope grants are all managed from the row Edit action.
       </p>
 
       <form onSubmit={handleCreate} className="mb-6 space-y-2">
@@ -346,15 +222,14 @@ export default function UsersPage() {
             disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
             className="px-3 py-1.5 text-sm bg-info text-white rounded-md hover:bg-info disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isSubmitting && deletingUserId === null && editingUserId === null && !grantsUser
+            {isSubmitting && deletingUserId === null && !manageUser
               ? 'Creating...'
               : 'Create User'}
           </button>
         </div>
         <p className="text-xs text-muted">
-          Legacy allowed-sites checkboxes are removed — after creating the
-          user, use the “Grants…” row action to grant observer/operator/admin
-          per site or per group.
+          Selecting admin/super-admin makes the new user system-wide admin.
+          For per-site grants, create the user first and then use Edit.
         </p>
       </form>
 
@@ -389,232 +264,55 @@ export default function UsersPage() {
             <tr className="border-b border-panel-border bg-panel-elev/60">
               <th className="text-left px-4 py-2 font-medium text-text">Username</th>
               <th className="text-left px-4 py-2 font-medium text-text">Access</th>
-              <th className="text-left px-4 py-2 font-medium text-text">System-admin</th>
               <th className="text-left px-4 py-2 font-medium text-text">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {users.map((u) => {
-              const isEditing = editingUserId === u.id;
-              return (
-                <tr key={u.id} className="border-b border-panel-border hover:bg-panel-elev/60">
-                  <td className="px-4 py-2 text-text font-mono text-xs">{u.username}</td>
-                  <td className="px-4 py-2 text-text">
-                    <AccessBadges
-                      user={u}
-                      grants={grantsByUser?.get(u.id)}
-                      isLoading={grantsLoading}
-                      onSeeMore={() => {
-                        setGrantsUser(u);
-                        setNewGrantSiteId('');
-                        setNewGrantGroupId('');
-                        setNewGrantRole('observer');
-                      }}
-                    />
-                  </td>
-                  <td className="px-4 py-2">
-                    {viewerIsSystemAdmin ? (
-                      <button
-                        onClick={() => handleToggleSystemAdmin(u)}
-                        disabled={isSubmitting}
-                        className={
-                          u.is_system_admin
-                            ? 'px-2 py-1 text-xs text-white bg-warning rounded hover:brightness-110 disabled:opacity-50'
-                            : 'px-2 py-1 text-xs text-text border border-panel-border rounded hover:bg-panel-elev/60 disabled:opacity-50'
-                        }
-                      >
-                        {u.is_system_admin ? 'Yes (revoke)' : 'No (promote)'}
-                      </button>
-                    ) : (
-                      <span className="text-xs text-muted">
-                        {u.is_system_admin ? 'Yes' : 'No'}
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2">
-                    {isEditing ? (
-                      <div className="flex flex-wrap gap-2 items-center">
-                        <input
-                          type="password"
-                          placeholder="New password"
-                          value={editingPassword}
-                          onChange={(e) => setEditingPassword(e.target.value)}
-                          disabled={isSubmitting}
-                          className="border border-panel-border rounded-md px-2 py-1 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-                        />
-                        <button
-                          onClick={handleUpdate}
-                          disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-white bg-info border border-blue-600 rounded hover:bg-info disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {isSubmitting && deletingUserId === null ? 'Saving...' : 'Save'}
-                        </button>
-                        <button
-                          onClick={handleEditCancel}
-                          disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-muted border border-panel-border rounded hover:bg-panel-elev/60 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => {
-                            setGrantsUser(u);
-                            setNewGrantSiteId('');
-                            setNewGrantGroupId('');
-                            setNewGrantRole('observer');
-                          }}
-                          disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-info border border-info/40 rounded hover:bg-info/10 disabled:opacity-50"
-                        >
-                          Grants…
-                        </button>
-                        <button
-                          onClick={() => handleEditStart(u)}
-                          disabled={isSubmitting || editingUserId !== null}
-                          className="px-2 py-1 text-xs text-info border border-info/40 rounded hover:bg-info/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => handleDelete(u)}
-                          disabled={isSubmitting}
-                          className="px-2 py-1 text-xs text-danger border border-danger/40 rounded hover:bg-danger/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {deletingUserId === u.id ? 'Deleting...' : 'Delete'}
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
+            {users.map((u) => (
+              <tr key={u.id} className="border-b border-panel-border hover:bg-panel-elev/60">
+                <td className="px-4 py-2 text-text font-mono text-xs">{u.username}</td>
+                <td className="px-4 py-2 text-text">
+                  <AccessBadges
+                    user={u}
+                    grants={grantsByUser?.get(u.id)}
+                    isLoading={grantsLoading}
+                    onSeeMore={() => setManageUserId(u.id)}
+                  />
+                </td>
+                <td className="px-4 py-2">
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setManageUserId(u.id)}
+                      disabled={isSubmitting}
+                      className="px-2 py-1 text-xs text-info border border-info/40 rounded hover:bg-info/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => handleDelete(u)}
+                      disabled={isSubmitting}
+                      className="px-2 py-1 text-xs text-danger border border-danger/40 rounded hover:bg-danger/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {deletingUserId === u.id ? 'Deleting...' : 'Delete'}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       )}
 
-      {/* ── Grants modal ───────────────────────────────────────────────── */}
-      {grantsUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 overflow-y-auto py-8">
-          <div className="w-full max-w-2xl bg-panel rounded-lg shadow-xl p-6">
-            <div className="flex items-start justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-semibold text-text">
-                  Grants for {grantsUser.username}
-                </h2>
-                <p className="text-xs text-muted mt-1">
-                  A grant is one role at one scope (site or site + group). The
-                  most-specific matching grant wins per resource.
-                </p>
-              </div>
-              <button
-                onClick={() => setGrantsUser(null)}
-                disabled={isSubmitting}
-                className="text-sm text-muted hover:text-text disabled:opacity-50"
-              >
-                Close
-              </button>
-            </div>
-
-            {/* Existing grants */}
-            <section className="mb-6">
-              <h3 className="text-xs font-semibold text-muted uppercase mb-2">
-                Current grants
-              </h3>
-              {grants && grants.length > 0 ? (
-                <table className="w-full border-collapse text-sm">
-                  <thead>
-                    <tr className="border-b border-panel-border bg-panel-elev/60">
-                      <th className="text-left px-3 py-1.5 font-medium text-text">Site</th>
-                      <th className="text-left px-3 py-1.5 font-medium text-text">Group</th>
-                      <th className="text-left px-3 py-1.5 font-medium text-text">Role</th>
-                      <th className="text-left px-3 py-1.5 font-medium text-text">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {grants.map((g) => (
-                      <tr key={g.id} className="border-b border-panel-border">
-                        <td className="px-3 py-1.5">{g.site_name ?? `#${g.site_id}`}</td>
-                        <td className="px-3 py-1.5">
-                          {g.device_group_name ?? (
-                            <span className="text-muted/70 italic">whole site</span>
-                          )}
-                        </td>
-                        <td className="px-3 py-1.5">{g.role}</td>
-                        <td className="px-3 py-1.5">
-                          <button
-                            onClick={() => handleRevoke(g)}
-                            disabled={isSubmitting}
-                            className="px-2 py-0.5 text-xs text-danger border border-danger/40 rounded hover:bg-danger/10 disabled:opacity-50"
-                          >
-                            Revoke
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <p className="text-sm text-muted/70">No grants yet.</p>
-              )}
-            </section>
-
-            {/* Add grant */}
-            <section>
-              <h3 className="text-xs font-semibold text-muted uppercase mb-2">
-                Add grant
-              </h3>
-              <div className="flex flex-wrap gap-2 items-center">
-                <select
-                  value={newGrantSiteId}
-                  onChange={(e) => {
-                    setNewGrantSiteId(e.target.value);
-                    setNewGrantGroupId('');
-                  }}
-                  disabled={isSubmitting}
-                  className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-                >
-                  <option value="">Select site…</option>
-                  {siteList
-                    .filter((s) => s.kind === 'REGULAR' || viewerIsSystemAdmin)
-                    .map((s) => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                </select>
-                <select
-                  value={newGrantGroupId}
-                  onChange={(e) => setNewGrantGroupId(e.target.value)}
-                  disabled={isSubmitting || !newGrantSiteId}
-                  className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-                >
-                  <option value="">Whole site (any group)</option>
-                  {(grantGroups ?? []).map((g) => (
-                    <option key={g.id} value={g.id}>{g.name}</option>
-                  ))}
-                </select>
-                <select
-                  value={newGrantRole}
-                  onChange={(e) => setNewGrantRole(e.target.value as AssignmentRole)}
-                  disabled={isSubmitting}
-                  className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-                >
-                  {ASSIGNMENT_ROLES.map((r) => (
-                    <option key={r} value={r}>{r}</option>
-                  ))}
-                </select>
-                <button
-                  onClick={handleAddGrant}
-                  disabled={isSubmitting || !newGrantSiteId}
-                  className="px-3 py-1.5 text-sm text-white bg-info rounded hover:bg-info disabled:opacity-50"
-                >
-                  Add
-                </button>
-              </div>
-            </section>
-          </div>
-        </div>
+      {manageUser && (
+        <ManageUserModal
+          user={manageUser}
+          sites={siteList}
+          viewerIsSystemAdmin={viewerIsSystemAdmin}
+          onClose={() => setManageUserId(null)}
+          onUserChanged={() => {
+            refetch();
+          }}
+        />
       )}
     </div>
   );
