@@ -2,13 +2,15 @@
 per request from RoleAssignmentRepository.scope_de() and reused for every
 in-memory rol_para() check downstream.
 
-Replaces the effective_role(session, user, ...) call that used to run a
-fresh query per authorization check — the same caller iterating over N
-devices no longer fires N queries.
+One query per request produces the grant tuple; every downstream
+authorization check runs in memory against that tuple.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+
+_ROLE_LEVEL = {"observer": 1, "operator": 2, "admin": 3}
 
 
 @dataclass(frozen=True)
@@ -17,21 +19,40 @@ class VisibilityScope:
     grants: tuple[tuple[int, "int | None", str], ...]  # (site_id, device_group_id|None, role)
 
     def rol_para(self, site_id: int, device_group_id: "int | None" = None) -> "str | None":
-        """Most-specific match wins: a (site, group)-scoped grant shadows a
-        (site, NULL) site-wide grant when the resource lies inside that
-        group. Grants do not stack. Mirrors the policy that
-        effective_role() implemented via SQL.
+        """Max-role (additive): the effective role at a scope is the maximum
+        of every grant that applies to it. Grants only elevate — a lower
+        role on a group inside a site the user already admins has no
+        effect on that group.
+
+        Applicability rules:
+          * A site-wide grant ``(site, NULL, role)`` applies to the whole
+            site (both the site itself and every group within it).
+          * A group-specific grant ``(site, group, role)`` applies only
+            when ``device_group_id`` matches.
+
+        Special case — ``device_group_id=None`` returns the site-wide
+        grant only (a group-scoped admin does NOT count). Delegation
+        authorization (D25) relies on this: a group-admin cannot delegate,
+        only a site-wide admin can. Callers that want the effective role
+        on a specific group must pass that group's id explicitly.
         """
         if self.es_system_admin:
             return "super-admin"
-        if device_group_id is not None:
-            for sid, gid, role in self.grants:
-                if sid == site_id and gid == device_group_id:
-                    return role
+        site_wide: "str | None" = None
+        group_specific: "str | None" = None
         for sid, gid, role in self.grants:
-            if sid == site_id and gid is None:
-                return role
-        return None
+            if sid != site_id:
+                continue
+            if gid is None:
+                site_wide = role
+            elif device_group_id is not None and gid == device_group_id:
+                group_specific = role
+        if device_group_id is None:
+            return site_wide
+        candidates = [r for r in (site_wide, group_specific) if r is not None]
+        if not candidates:
+            return None
+        return max(candidates, key=_ROLE_LEVEL.__getitem__)
 
     @property
     def site_ids(self) -> "set[int] | None":

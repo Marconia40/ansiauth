@@ -452,12 +452,15 @@ class RoleAssignmentModel(Base):
 
     Sole source of per-scope authorization — replaces the pre-MSP global
     user role and site-scoping M2M.
-    A user may hold multiple grants; ``effective_role(user, resource)`` picks
-    the most specific one at request time (see Phase 3 services/effective_role).
+    A user may hold multiple grants; ``VisibilityScope.rol_para(site, group)``
+    resolves the effective role at request time as the **max** of the
+    site-wide and group-specific grants (grants only elevate).
 
     ``device_group_id IS NULL`` → site-wide grant covering every current and
-    future group in the site. ``device_group_id`` set → group-specific grant;
-    most-specific wins per resource.
+    future group in the site. ``device_group_id`` set → group-specific grant
+    that can *raise* the role on that group above the site-wide baseline,
+    but never lower it. See docs/USER_PERMISSIONS_UX_REDESIGN.md §2.1 for
+    the semantic change from the earlier "most-specific-wins" rule.
     """
 
     __tablename__ = "role_assignments"
