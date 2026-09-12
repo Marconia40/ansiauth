@@ -55,6 +55,7 @@ diff.txt
 *.pem
 *.key
 *.crt
+backend/device_ssh_keys/
 
 # =========================
 # Build / cache
