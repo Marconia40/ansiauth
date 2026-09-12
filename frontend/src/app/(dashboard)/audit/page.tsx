@@ -8,6 +8,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
 import { getAuditLogs, getSites, extractMessage } from '@/services/api';
+import { useScope } from '@/context/ScopeContext';
 import type { AuditLog } from '@/types/audit';
 import type { Site } from '@/types/site';
 
@@ -210,6 +211,8 @@ interface FilterBarProps {
   site: string;
   setSite: (v: string) => void;
   sites: Site[];
+  /** Hide the in-page Site select when the topbar scope is active. */
+  hideSiteSelect?: boolean;
   dateRange: DateRange;
   setDateRange: (v: DateRange) => void;
   pageSize: number;
@@ -236,6 +239,7 @@ function FilterBar(props: FilterBarProps) {
     site,
     setSite,
     sites,
+    hideSiteSelect,
     dateRange,
     setDateRange,
     pageSize,
@@ -297,12 +301,14 @@ function FilterBar(props: FilterBarProps) {
         className={`${INPUT_CLS} w-32`}
       />
 
-      <select value={site} onChange={e => setSite(e.target.value)} className={SELECT_CLS}>
-        <option value="">All Sites</option>
-        {sites.map(s => (
-          <option key={s.id} value={s.id}>{s.name}</option>
-        ))}
-      </select>
+      {!hideSiteSelect && (
+        <select value={site} onChange={e => setSite(e.target.value)} className={SELECT_CLS}>
+          <option value="">All Sites</option>
+          {sites.map(s => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
+      )}
 
       <select value={dateRange} onChange={e => setDateRange(e.target.value as DateRange)} className={SELECT_CLS}>
         <option value="all">All time</option>
@@ -665,6 +671,14 @@ function AuditPageContent() {
     });
   }, [updateState]);
 
+  // Topbar scope wins over the in-page Site filter (same rationale as
+  // /jobs — a single visible filter beats two that could conflict).
+  const { selectedScope } = useScope();
+  const scopedSiteId =
+    selectedScope.kind === 'site' ? selectedScope.siteId : null;
+  const effectiveSiteId =
+    scopedSiteId ?? (state.site ? Number(state.site) : undefined);
+
   const queryParams = useMemo(() => ({
     page: state.page,
     page_size: state.pageSize,
@@ -673,9 +687,9 @@ function AuditPageContent() {
     resource: state.resource || undefined,
     status: state.status || undefined,
     device_id: state.device || undefined,
-    site_id: state.site ? Number(state.site) : undefined,
+    site_id: effectiveSiteId,
     from_date: dateRangeToFromDate(state.dateRange),
-  }), [state]);
+  }), [state, effectiveSiteId]);
 
   const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
   const siteList = sites ?? [];
@@ -716,7 +730,7 @@ function AuditPageContent() {
     !!state.resource ||
     !!state.status ||
     !!state.device ||
-    !!state.site ||
+    (scopedSiteId == null && !!state.site) ||
     state.dateRange !== 'all';
 
   const [exporting, setExporting] = useState(false);
@@ -835,6 +849,7 @@ function AuditPageContent() {
         site={state.site}
         setSite={s => updateState({ site: s })}
         sites={siteList}
+        hideSiteSelect={scopedSiteId != null}
         dateRange={state.dateRange}
         setDateRange={r => updateState({ dateRange: r })}
         pageSize={state.pageSize}

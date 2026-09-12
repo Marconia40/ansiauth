@@ -15,6 +15,7 @@ import {
   listSiteGroups,
   moveDevice,
 } from '@/services/api';
+import { useScope } from '@/context/ScopeContext';
 import type { DeviceGroup } from '@/services/api';
 import type { AuthMethod, Device, DeviceUpdate, Vendor } from '@/types/device';
 import type { Site } from '@/types/site';
@@ -80,7 +81,8 @@ export default function InventoryPage() {
 
   // ── Move dialog state ────────────────────────────────────────────────────
   const [movingDevice, setMovingDevice] = useState<Device | null>(null);
-  const [moveTargetGroupId, setMoveTargetGroupId] = useState<string>(''); // '' → send null (→ site default)
+  const [moveTargetSiteId, setMoveTargetSiteId] = useState<string>('');
+  const [moveTargetGroupId, setMoveTargetGroupId] = useState<string>('');
 
   const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -117,6 +119,22 @@ export default function InventoryPage() {
   });
   const siteList = sites ?? [];
 
+  // Client-side lens over the caller's visibility — when the topbar
+  // scope is a specific site, narrow the device list to that site.
+  // Backend still returns only devices the caller can see; this filter
+  // is UX-only. See docs/USER_PERMISSIONS_UX_REDESIGN.md §3.1/§3.7.
+  const { selectedScope } = useScope();
+  const scopedSiteId =
+    selectedScope.kind === 'site' ? selectedScope.siteId : null;
+  const visibleDevices =
+    scopedSiteId != null && devices
+      ? devices.filter((d) => d.site_id === scopedSiteId)
+      : devices;
+  const scopedSiteName =
+    scopedSiteId != null
+      ? siteList.find((s) => s.id === scopedSiteId)?.name
+      : null;
+
   // Cascading group list — refetches whenever the selected Site changes.
   const { data: newSiteGroups } = useQuery<DeviceGroup[]>({
     queryKey: ['site-groups', newSiteId],
@@ -133,12 +151,15 @@ export default function InventoryPage() {
     setNewGroupId(String(site.default_group_id));
   }, [newSiteGroups, newSiteId, siteList]);
 
-  // Move-dialog group list — same query for the current move target.
-  const moveSiteId = movingDevice?.site_id;
+  // Move-dialog group list — driven by the *target* site the operator
+  // picks, not the device's current site. Cross-site moves work as long
+  // as the caller has admin on both sides (backend gates via
+  // move_device_cross_site).
+  const moveTargetSiteIdNum = moveTargetSiteId ? Number(moveTargetSiteId) : null;
   const { data: moveTargetGroups } = useQuery<DeviceGroup[]>({
-    queryKey: ['site-groups', moveSiteId],
-    queryFn: () => listSiteGroups(moveSiteId!),
-    enabled: moveSiteId != null,
+    queryKey: ['site-groups', moveTargetSiteIdNum],
+    queryFn: () => listSiteGroups(moveTargetSiteIdNum!),
+    enabled: moveTargetSiteIdNum != null,
   });
 
   async function handleCreate(e: React.FormEvent) {
@@ -279,6 +300,7 @@ export default function InventoryPage() {
 
   function handleMoveStart(device: Device) {
     setMovingDevice(device);
+    setMoveTargetSiteId(String(device.site_id));
     setMoveTargetGroupId(String(device.device_group_id));
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -286,7 +308,17 @@ export default function InventoryPage() {
 
   function handleMoveCancel() {
     setMovingDevice(null);
+    setMoveTargetSiteId('');
     setMoveTargetGroupId('');
+  }
+
+  // Cross-site jumps: when the operator picks a new target site, jump
+  // the target group to that site's Default so the user isn't stuck with
+  // a stale groupId that belongs to the previous site.
+  function handleMoveTargetSiteChange(nextSiteIdStr: string) {
+    setMoveTargetSiteId(nextSiteIdStr);
+    const site = siteList.find((s) => String(s.id) === nextSiteIdStr);
+    setMoveTargetGroupId(site ? String(site.default_group_id) : '');
   }
 
   async function handleMoveConfirm() {
@@ -295,7 +327,8 @@ export default function InventoryPage() {
     setSuccessMessage(null);
     setErrorMessage(null);
     try {
-      // Empty string → send null → move to current site's Default group (D8).
+      // Empty string → send null → move to source site's Default group (D8
+      // shortcut). Any concrete groupId lands the device there directly.
       const targetId = moveTargetGroupId === '' ? null : Number(moveTargetGroupId);
       await moveDevice(movingDevice.name, targetId);
       const deviceName = movingDevice.name;
@@ -498,8 +531,8 @@ export default function InventoryPage() {
             </tr>
           </thead>
           <tbody>
-            {devices && devices.length > 0 ? (
-              devices.map((device) => {
+            {visibleDevices && visibleDevices.length > 0 ? (
+              visibleDevices.map((device) => {
                 const isEditing = editingDeviceName === device.name;
                 return (
                   <tr key={device.id} className="border-b border-panel-border hover:bg-panel-elev/60">
@@ -660,7 +693,16 @@ export default function InventoryPage() {
             ) : (
               <tr>
                 <td colSpan={9} className="px-4 py-8 text-center text-muted/70">
-                  No devices registered yet.
+                  {scopedSiteId != null
+                    ? (
+                        <>
+                          No devices in{' '}
+                          <strong>{scopedSiteName ?? 'this site'}</strong>.
+                          Switch the topbar scope to <em>All sites</em> to see
+                          the rest of the inventory.
+                        </>
+                      )
+                    : 'No devices registered yet.'}
                 </td>
               </tr>
             )}
@@ -679,9 +721,24 @@ export default function InventoryPage() {
               <span className="font-mono">{movingDevice.name}</span> is currently
               in <span className="font-medium">{movingDevice.site_name}</span> /{' '}
               <span className="font-medium">{movingDevice.device_group_name}</span>.
-              Pick a target group within the same site, or use “Reset to
-              Default” to send it back to this site's Default group.
+              Pick a target site and group. Cross-site moves require admin
+              on both sites (backend enforces).
             </p>
+            <label className="block text-xs font-medium text-text mb-1">
+              Target site
+            </label>
+            <select
+              value={moveTargetSiteId}
+              onChange={(e) => handleMoveTargetSiteChange(e.target.value)}
+              disabled={isSubmitting}
+              className="w-full border border-panel-border rounded-md px-3 py-1.5 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
+            >
+              {siteList.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}{s.id === movingDevice.site_id ? ' (current)' : ''}
+                </option>
+              ))}
+            </select>
             <label className="block text-xs font-medium text-text mb-1">
               Target group
             </label>
@@ -700,10 +757,11 @@ export default function InventoryPage() {
             <div className="flex justify-between items-center gap-3">
               <button
                 onClick={() => {
+                  setMoveTargetSiteId(String(movingDevice.site_id));
                   setMoveTargetGroupId('');
                 }}
                 disabled={isSubmitting}
-                title="Send device to this site's Default group (D8)"
+                title="Send device to its current site's Default group (D8 shortcut)"
                 className="px-3 py-1.5 text-xs text-info border border-info/40 rounded hover:bg-info/10 disabled:opacity-50"
               >
                 Reset to Default
