@@ -232,13 +232,23 @@ export default function UsersPage() {
             </tr>
           </thead>
           <tbody>
-            {visibleUsers.map((u) => (
+            {visibleUsers.map((u) => {
+              // Under a site scope, collapse the chips to just the
+              // grants on that site (site-wide + any groups within it).
+              // The +N more affordance still opens ManageUserModal,
+              // which always shows the full picture regardless of scope.
+              const rawGrants = grantsByUser?.get(u.id);
+              const chipGrants =
+                scopedSiteId != null && rawGrants
+                  ? rawGrants.filter((g) => g.site_id === scopedSiteId)
+                  : rawGrants;
+              return (
               <tr key={u.id} className="border-b border-panel-border hover:bg-panel-elev/60">
                 <td className="px-4 py-2 text-text font-mono text-xs">{u.username}</td>
                 <td className="px-4 py-2 text-text">
                   <AccessBadges
                     user={u}
-                    grants={grantsByUser?.get(u.id)}
+                    grants={chipGrants}
                     isLoading={grantsLoading}
                     onSeeMore={() => setManageUserId(u.id)}
                   />
@@ -262,7 +272,8 @@ export default function UsersPage() {
                   </div>
                 </td>
               </tr>
-            ))}
+            );
+            })}
           </tbody>
         </table>
       )}
@@ -284,6 +295,9 @@ export default function UsersPage() {
             refetch();
           }}
           mode={isStep2OfCreate ? 'configure-new' : 'edit'}
+          initialGrantSiteId={
+            isStep2OfCreate && scopedSiteId != null ? scopedSiteId : undefined
+          }
         />
       )}
     </div>

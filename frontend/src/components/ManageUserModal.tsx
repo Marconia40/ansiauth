@@ -40,6 +40,14 @@ interface ManageUserModalProps {
    * feedback that their work is captured before dismissing.
    */
   mode?: Mode;
+  /**
+   * Pre-select this site id in the Add-grant form. Used by the
+   * create-in-scope flow (§3.6): when the topbar scope is a specific
+   * site and the operator hits Create user, the new user's Step 2
+   * modal opens with that site already selected so the flow is one
+   * click closer to done.
+   */
+  initialGrantSiteId?: number;
 }
 
 /**
@@ -60,6 +68,7 @@ export function ManageUserModal({
   onClose,
   onUserChanged,
   mode = 'edit',
+  initialGrantSiteId,
 }: ManageUserModalProps) {
   const isConfigureNew = mode === 'configure-new';
   const queryClient = useQueryClient();
@@ -80,7 +89,9 @@ export function ManageUserModal({
   const [newPassword, setNewPassword] = useState('');
 
   // ── Grants section ───────────────────────────────────────────────────
-  const [newGrantSiteId, setNewGrantSiteId] = useState('');
+  const [newGrantSiteId, setNewGrantSiteId] = useState(
+    initialGrantSiteId != null ? String(initialGrantSiteId) : '',
+  );
   const [newGrantGroupId, setNewGrantGroupId] = useState('');
   const [newGrantRole, setNewGrantRole] = useState<AssignmentRole>('observer');
 
