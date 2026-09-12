@@ -198,9 +198,18 @@ class Puerto:
 
     @property
     def mutation_fields(self) -> set[str]:
+        # Bug real encontrado corriendo test_port_storm_control_action.py:
+        # storm_control_action/storm_control_trap (agregados por la
+        # parametrización de storm-control) nunca se sumaron acá -- mismo
+        # tipo de desync ya documentado más abajo para poe_enabled. Un
+        # Puerto(storm_control_trap=True) solo, sin ningún otro campo,
+        # pasaba por "sin campo de mutación" antes de llegar a la regla
+        # cruzada real (storm_control_action/trap exigen
+        # storm_control_enabled=True) en validar().
         campos = ("description", "admin_up", "mode", "access_vlan",
                   "allowed_vlans", "poe_enabled", "storm_control_enabled",
-                  "storm_control_threshold")
+                  "storm_control_threshold", "storm_control_action",
+                  "storm_control_trap")
         return {c for c in campos if getattr(self, c) is not None}
 
     def validar(self) -> None:

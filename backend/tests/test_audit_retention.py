@@ -3,18 +3,28 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.composition import audit_repository
 from app.db.models import AuditLogModel
 from app.db.session import get_session
-from app.services import audit_service
+
+
+def _clear_audit_log() -> None:
+    """audit_service.clear_audit_log() had no direct successor -- it was a
+    test-only helper, not a real API. AuditRepository is append-only by
+    design (no delete-all method), so tests that need a clean slate reach
+    into the table directly, same as the old free function did under the
+    hood."""
+    with get_session() as session:
+        session.query(AuditLogModel).delete(synchronize_session=False)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
 def clean_audit():
-    audit_service.clear_audit_log()
+    _clear_audit_log()
     yield
-    audit_service.clear_audit_log()
+    _clear_audit_log()
 
 
 def _insert_record(days_ago: int, action: str = "test_action") -> int:
@@ -40,7 +50,7 @@ def test_purge_deletes_records_older_than_retention():
     _insert_record(days_ago=100)
     _insert_record(days_ago=95)
 
-    deleted = audit_service.purge_old_records(retention_days=90, triggered_by="test")
+    deleted = audit_repository.purge_old(90, triggered_by="test")
     assert deleted == 2
 
     with get_session() as session:
@@ -52,7 +62,7 @@ def test_purge_preserves_records_within_window():
     _insert_record(days_ago=5)
     _insert_record(days_ago=89)
 
-    deleted = audit_service.purge_old_records(retention_days=90, triggered_by="test")
+    deleted = audit_repository.purge_old(90, triggered_by="test")
     assert deleted == 0
 
     with get_session() as session:
@@ -65,7 +75,7 @@ def test_purge_mixed_old_and_new():
     _insert_record(days_ago=10)
     _insert_record(days_ago=91)
 
-    deleted = audit_service.purge_old_records(retention_days=90, triggered_by="test")
+    deleted = audit_repository.purge_old(90, triggered_by="test")
     assert deleted == 2
 
     with get_session() as session:
@@ -74,13 +84,13 @@ def test_purge_mixed_old_and_new():
 
 
 def test_purge_empty_table_returns_zero():
-    deleted = audit_service.purge_old_records(retention_days=90, triggered_by="test")
+    deleted = audit_repository.purge_old(90, triggered_by="test")
     assert deleted == 0
 
 
 def test_purge_logs_system_audit_event():
     _insert_record(days_ago=100)
-    audit_service.purge_old_records(retention_days=90, triggered_by="admin_user")
+    audit_repository.purge_old(90, triggered_by="admin_user")
 
     with get_session() as session:
         entry = session.query(AuditLogModel).filter_by(action="audit_purge").first()
@@ -94,7 +104,7 @@ def test_purge_logs_system_audit_event():
 
 def test_purge_logs_even_when_nothing_deleted(monkeypatch):
     """Manually triggered purge is always logged even if 0 rows deleted."""
-    deleted = audit_service.purge_old_records(retention_days=90, triggered_by="admin")
+    deleted = audit_repository.purge_old(90, triggered_by="admin")
 
     with get_session() as session:
         entry = session.query(AuditLogModel).filter_by(action="audit_purge").first()
@@ -104,7 +114,7 @@ def test_purge_logs_even_when_nothing_deleted(monkeypatch):
 
 def test_purge_does_not_log_when_scheduler_deletes_nothing():
     """Scheduler-triggered purge with 0 deletions must not write a log entry (noise reduction)."""
-    audit_service.purge_old_records(retention_days=90, triggered_by="scheduler")
+    audit_repository.purge_old(90, triggered_by="scheduler")
 
     with get_session() as session:
         entry = session.query(AuditLogModel).filter_by(action="audit_purge").first()
@@ -128,7 +138,7 @@ def test_purge_preserves_parent_records_referenced_by_child():
         )
         session.add(child)
 
-    deleted = audit_service.purge_old_records(retention_days=90, triggered_by="test")
+    deleted = audit_repository.purge_old(90, triggered_by="test")
     assert deleted == 0
 
     with get_session() as session:
@@ -139,7 +149,7 @@ def test_purge_respects_custom_retention_days():
     _insert_record(days_ago=10)
     _insert_record(days_ago=3)
 
-    deleted = audit_service.purge_old_records(retention_days=7, triggered_by="test")
+    deleted = audit_repository.purge_old(7, triggered_by="test")
     assert deleted == 1
 
 

@@ -1,10 +1,9 @@
 """Tests for USR-003 — /api/v1/users CRUD endpoints."""
 import pytest
 
+from app.composition import user_repository
 from app.db.models import AuditLogModel, UserModel
 from app.db.session import get_session
-from app.schemas.user import UserCreate
-from app.services import user_service
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -21,9 +20,12 @@ def clean_users():
 
 
 def _seed(username, is_system_admin=False, password="password123"):
-    return user_service.create_user(
-        UserCreate(username=username, password=password, is_system_admin=is_system_admin)
-    )
+    return user_repository.crear(username, password, is_system_admin=is_system_admin)
+
+
+def _deactivate(user):
+    user.desactivar()
+    return user_repository.add(user)
 
 
 # ── POST /api/v1/users ────────────────────────────────────────────────────────
@@ -73,12 +75,14 @@ def test_operator_cannot_create_user(operator_client):
     assert resp.status_code == 403
 
 
-def test_create_duplicate_username_returns_400(super_admin_client):
+def test_create_duplicate_username_returns_422(super_admin_client):
+    """ValidationError now maps to 422 (app.main:validation_error_handler),
+    not the old 400."""
     _seed("existing")
     resp = super_admin_client.post("/api/v1/users/", json={
         "username": "existing", "password": "password123"
     })
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_create_user_writes_audit_log(super_admin_client, admin_client):
@@ -107,8 +111,10 @@ def test_admin_can_list_users(admin_client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is True
-    assert isinstance(body["data"], list)
-    assert body["total"] >= 2
+    # list_users() now nests items/total/page/page_size under data (same
+    # envelope shape GET /audit/ and GET /vlans/ use), not top-level.
+    assert isinstance(body["data"]["items"], list)
+    assert body["data"]["total"] >= 2
 
 
 def test_super_admin_can_list_users(super_admin_client):
@@ -123,17 +129,17 @@ def test_operator_cannot_list_users(operator_client):
 
 def test_list_excludes_inactive_by_default(admin_client):
     user = _seed("inactive_user")
-    user_service.deactivate_user(user.id)
+    _deactivate(user)
     resp = admin_client.get("/api/v1/users/")
-    names = [u["username"] for u in resp.json()["data"]]
+    names = [u["username"] for u in resp.json()["data"]["items"]]
     assert "inactive_user" not in names
 
 
 def test_list_includes_inactive_when_flagged(admin_client):
     user = _seed("inactive_user")
-    user_service.deactivate_user(user.id)
+    _deactivate(user)
     resp = admin_client.get("/api/v1/users/?include_inactive=true")
-    names = [u["username"] for u in resp.json()["data"]]
+    names = [u["username"] for u in resp.json()["data"]["items"]]
     assert "inactive_user" in names
 
 
@@ -141,8 +147,8 @@ def test_list_pagination(admin_client):
     for i in range(5):
         _seed(f"pageuser{i}")
     resp = admin_client.get("/api/v1/users/?page=1&page_size=2")
-    body = resp.json()
-    assert len(body["data"]) == 2
+    body = resp.json()["data"]
+    assert len(body["items"]) == 2
     assert body["page"] == 1
     assert body["page_size"] == 2
     assert body["total"] >= 5
@@ -153,8 +159,8 @@ def test_list_page_two(admin_client):
         _seed(f"p2user{i}")
     resp1 = admin_client.get("/api/v1/users/?page=1&page_size=2")
     resp2 = admin_client.get("/api/v1/users/?page=2&page_size=2")
-    ids_p1 = {u["id"] for u in resp1.json()["data"]}
-    ids_p2 = {u["id"] for u in resp2.json()["data"]}
+    ids_p1 = {u["id"] for u in resp1.json()["data"]["items"]}
+    ids_p2 = {u["id"] for u in resp2.json()["data"]["items"]}
     assert ids_p1.isdisjoint(ids_p2)
 
 
@@ -214,9 +220,11 @@ def test_update_user_writes_audit_log(super_admin_client):
         assert entry.details["updated_fields"]["email"] == "grace@x.com"
 
 
-def test_update_nonexistent_user_returns_400(super_admin_client):
+def test_update_nonexistent_user_returns_404(super_admin_client):
+    """update_user() raises NotFoundError (-> 404) for a missing id, not a
+    ValidationError -- the old 400 assumed a different exception type."""
     resp = super_admin_client.put("/api/v1/users/99999", json={"email": "x@y.com"})
-    assert resp.status_code == 400
+    assert resp.status_code == 404
 
 
 def test_update_no_hashed_password_in_response(super_admin_client):
@@ -252,10 +260,11 @@ def test_deactivate_writes_audit_log(super_admin_client):
         assert entry.resource_id == str(user.id)
 
 
-def test_deactivate_last_system_admin_returns_400(super_admin_client):
+def test_deactivate_last_system_admin_returns_422(super_admin_client):
+    """ValidationError now maps to 422, not the old 400."""
     user = _seed("lastadmin", is_system_admin=True)
     resp = super_admin_client.delete(f"/api/v1/users/{user.id}")
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_operator_cannot_deactivate_user(operator_client):

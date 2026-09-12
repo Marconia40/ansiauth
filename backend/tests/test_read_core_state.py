@@ -57,8 +57,10 @@ def _stub_ports_cisco_status() -> str:
 def test_cisco_read_core_state_uses_a_single_leer_call():
     """CiscoVendor.read_core_state must call _leer exactly ONCE.
 
-    That single call must carry every command from list_vlans (1 cmd) +
-    list_ports (4 cmds) + get_svis (2 cmds) = 7 commands in order.
+    That single call must carry every command from list_vlans + list_ports
+    + get_svis, in order -- counts read from commands.yaml directly rather
+    than hardcoded, so this stays in sync when a command is added (as
+    list_ports was, +1, by the storm-control parametrization).
     """
     v = CiscoVendor()
     cmds = v._cargar_comandos()
@@ -68,10 +70,10 @@ def test_cisco_read_core_state_uses_a_single_leer_call():
     expected_total = n_vlan + n_port + n_svi
 
     # Stub stdouts in the same order the driver appends them:
-    # [vlan brief, port_1..port_4, svi_running, svi_brief]
+    # [vlan brief, port_1..port_N, svi_running, svi_brief]
     stub_stdouts = (
         [_stub_vlan_brief_cisco()]
-        + [_stub_ports_cisco_status(), "", "", ""]
+        + [_stub_ports_cisco_status()] + [""] * (n_port - 1)
         + ["", ""]
     )
     assert len(stub_stdouts) == expected_total, (

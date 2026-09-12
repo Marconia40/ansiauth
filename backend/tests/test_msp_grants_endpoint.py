@@ -5,16 +5,15 @@ import uuid
 
 import pytest
 
+from app.composition import user_repository
 from app.db.models import RoleAssignmentModel, SiteModel, UserModel
 from app.db.session import get_session
-from app.services import user_service
-from app.schemas.user import UserCreate
 
 
 @pytest.fixture()
 def target_user_and_site():
     username = f"grant-target-{uuid.uuid4().hex[:6]}"
-    user_service.create_user(UserCreate(username=username, password="p" * 12))
+    user_repository.crear(username, "p" * 12)
     with get_session() as session:
         uid = session.query(UserModel.id).filter_by(username=username).scalar()
         site = SiteModel(name=f"grants-site-{uuid.uuid4().hex[:6]}", kind="REGULAR")

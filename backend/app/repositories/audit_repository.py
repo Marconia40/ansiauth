@@ -80,6 +80,7 @@ class AuditRepository(Repository):
                 job_id=record.job_id,
                 device=record.device,
                 request_id=record.request_id,
+                parent_audit_id=int(record.parent_audit_id) if record.parent_audit_id is not None else None,
             )
             session.add(row)
             session.flush()

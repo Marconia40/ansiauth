@@ -10,9 +10,20 @@ import pytest
 from app.core.security import create_access_token
 from app.db.models import RoleAssignmentModel, SiteModel, UserModel
 from app.db.session import get_session
-from app.services import site_service
-from app.services.site_service import BASE_INFRA_SITE_KIND
+from app.repositories.site_repository import BASE_INFRA_SITE_KIND
 from fastapi.testclient import TestClient
+
+# site_service.py was deleted by the migration to FINAL_ARCHITECTURE.md --
+# SiteRepository.crear_con_grupo_default(kind=BASE_INFRA_SITE_KIND) is the
+# idempotent bootstrap replacement (see app/main.py's own bootstrap call).
+
+
+def _ensure_base_infrastructure():
+    from app.composition import site_repository
+    return site_repository.crear_con_grupo_default(
+        "Base Infrastructure", "System-managed base infrastructure site.",
+        kind=BASE_INFRA_SITE_KIND,
+    )
 
 
 @pytest.fixture()
@@ -26,7 +37,7 @@ def flag_on():
 def observer_scoped_client():
     """Observer with a grant only on the Base-Infra site — should still not
     see it (D14). Bootstrap ensures Base-Infra exists."""
-    site_service.ensure_base_infrastructure()
+    _ensure_base_infrastructure()
     username = f"d14-obs-{uuid.uuid4().hex[:6]}"
     with get_session() as session:
         user = UserModel(username=username, hashed_password="x", is_system_admin=False)
@@ -66,7 +77,7 @@ def test_base_infra_get_returns_404_to_non_system_admin(flag_on, observer_scoped
 
 
 def test_base_infra_cannot_be_deleted(admin_client):
-    site_service.ensure_base_infrastructure()
+    _ensure_base_infrastructure()
     with get_session() as session:
         base_site_id = session.query(SiteModel.id).filter_by(kind=BASE_INFRA_SITE_KIND).scalar()
     r = admin_client.delete(f"/api/v1/sites/{base_site_id}")

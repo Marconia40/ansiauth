@@ -1,180 +1,78 @@
-"""Step 3,4 — Port Management Write API tests.
+"""Port Management Write API tests -- RBAC, site scope, 501, response
+shape, across the granular endpoints that replace the old unified
+`POST /api/v1/ports/configure`.
 
-Validates the full API contract for the three new port write endpoints:
-
-  POST /api/v1/ports/configure
-  POST /api/v1/ports/shutdown
-  POST /api/v1/ports/enable
-
-Coverage:
-* RBAC — unauthenticated (401), observer role (403), operator allowed
-* Auth — missing / invalid JWT rejected
-* Site scope — operator denied 403 when device is outside allowed sites;
-               operator allowed 200 when device is in allowed site;
-               admin bypasses site restrictions
-* Invalid request — 400/422 for bad inputs (missing fields, bad VLAN IDs,
-                    invalid mode combinations)
-* Happy path — 200 with correct response shape (success, group_job_id, jobs)
-* Mock mode — job created and reaches completed status
-* 409 lock conflict — endpoint returns 409 when device is currently locked
-* 404 device not found
-* 501 unsupported vendor
+Modernized against the current architecture:
+* Routes moved to `/api/v1/devices/{name}/ports/...` (device is a path
+  segment, not a body field).
+* The old unified `/configure` endpoint (arbitrary multi-field combos)
+  is gone. `shutdown`/`enable` map 1:1 to
+  `POST .../ports/shutdown`/`POST .../ports/enable`. Multi-field combos
+  (e.g. description + admin_up together) map to
+  `POST .../ports/batch` (one job, one SSH connection, N `Puerto`
+  entries). Atomic mode+VLAN combos map to the dedicated
+  `POST .../ports/access-mode` / `POST .../ports/trunk-mode` endpoints.
+* `device_locks`/409-lock-conflict tests have NO modern equivalent --
+  confirmed by reading `app/api/ports.py` end to end: there is no
+  API-layer lock precheck any more. Locking now happens INSIDE
+  `Orquestador.ejecutar()` via `RedisCoordinator.bloquear()`, which
+  BLOCKS AND WAITS for the lock instead of rejecting up front, and
+  `CELERY_TASK_ALWAYS_EAGER=True` makes the whole job run synchronously
+  inside the request anyway -- there is no window in which a 2nd request
+  could observe "device busy". Dropped entirely, not ported.
+* `user_service` -> `app.composition.user_repository`.
+* `MockVendor` cannot be used for Puerto writes (missing
+  `resolver_*`/`aplicar_paso`) -- see
+  `tests/_puerto_fakes.py::FakePuertoDriver`.
+* Write responses are `202` with body `{"success": true, "data":
+  {"group_job_id", "jobs"}}`; `ValidationError` -> `422`, not `400`.
 """
 
 from __future__ import annotations
 
-import threading
-import time
-
 import pytest
-from fastapi.testclient import TestClient
 
-from app.core.security import create_access_token
-from app.db.models import (
-    DeviceModel,
-    SiteModel,
-    UserModel,
-)
+from app.composition import device_repository, job_repository, plugin_registry, user_repository
+from app.db.models import DeviceGroupModel, DeviceModel, RoleAssignmentModel, SiteModel, UserModel
 from app.db.session import get_session
-from app.main import app
 from app.models.device import Device
-from app.schemas.user import UserCreate
-from app.services import device_locks, job_service, port_service, user_service
 
+from tests._puerto_fakes import FakePuertoDriver, StubUnimplementedDriver, get_or_create_device, get_or_create_site
 
-# ── Fixtures & helpers ────────────────────────────────────────────────────────
-
-_DEVICE = "mock_device"
-_INTERFACE = "GigabitEthernet0/0/1"
-
-
-def _client(role: str, username: str | None = None) -> TestClient:
-    sub = username or role
-    is_system_admin = role in {"admin", "super-admin"}
-    token = create_access_token({"sub": sub, "is_system_admin": is_system_admin})
-    c = TestClient(app)
-    c.headers.update({"Authorization": f"Bearer {token}"})
-    return c
-
-
-@pytest.fixture(autouse=True)
-def _clean_sites():
-    """Reset site assignments before every test to prevent cross-test pollution."""
-    from app.db.models import DeviceGroupModel, RoleAssignmentModel
-    from app.services import device_service, site_service
-    with get_session() as session:
-        session.query(DeviceModel).delete(synchronize_session=False)
-        session.query(RoleAssignmentModel).delete(synchronize_session=False)
-        session.query(SiteModel).update(
-            {SiteModel.default_group_id: None}, synchronize_session=False,
-        )
-        session.query(DeviceGroupModel).delete(synchronize_session=False)
-        session.query(SiteModel).delete(synchronize_session=False)
-    site_service.ensure_base_infrastructure()
-    device_service.seed_defaults()
-    _reseed_test_grants()
-    yield
-
-
-def _reseed_test_grants():
-    from app.db.models import (
-        RoleAssignmentModel, SiteModel, UserModel,
-    )
-    with get_session() as session:
-        regular_site_ids = [
-            r[0] for r in session.query(SiteModel.id).filter(
-                SiteModel.kind == "REGULAR"
-            ).all()
-        ]
-        for role in ("observer", "operator"):
-            user_row = session.query(UserModel).filter_by(username=role).first()
-            if user_row is None:
-                continue
-            for sid in regular_site_ids:
-                session.add(RoleAssignmentModel(
-                    user_id=user_row.id, site_id=sid,
-                    device_group_id=None, role=role,
-                ))
+_DEVICE = "wr_dev"
+_IFACE = "GigabitEthernet0/0/1"
 
 
 @pytest.fixture
-def mock_mode(monkeypatch):
-    monkeypatch.setattr(port_service, "EXECUTION_MODE", "mock")
+def fake_driver(monkeypatch):
+    drv = FakePuertoDriver()
+    monkeypatch.setitem(plugin_registry._vendors, "cisco_ios", drv)
+    monkeypatch.setitem(plugin_registry._vendors, "huawei_vrp", drv)
+    return drv
 
 
 @pytest.fixture
-def mock_device(monkeypatch):
-    dev = Device(
-        name=_DEVICE,
-        host="192.0.2.1",
-        vendor="huawei_vrp",
-        username="admin",
-        encrypted_password="encrypted",
-        platform="vrp",
-    )
-    monkeypatch.setattr(
-        "app.services.device_service.get_device",
-        lambda name: dev if name == _DEVICE else None,
-    )
-    return dev
+def device(fake_driver):
+    return get_or_create_device(_DEVICE, site_name="Port Write API Test Site")
 
 
-@pytest.fixture
-def stub_pre_state_configure(monkeypatch):
-    monkeypatch.setattr(
-        "app.api.ports._capture_pre_state_port_configure",
-        lambda i, d: {
-            "existed": True, "description": "old",
-            "admin_up": True, "mode": "access",
-            "access_vlan": 10, "allowed_vlans": None,
-        },
-    )
+def _u(path: str, name: str = _DEVICE) -> str:
+    return f"/api/v1/devices/{name}/ports/{path}"
 
 
-@pytest.fixture
-def stub_pre_state_admin(monkeypatch):
-    monkeypatch.setattr(
-        "app.api.ports._capture_pre_state_port_shutdown",
-        lambda i, d: {"existed": True, "admin_up": True},
-    )
-    monkeypatch.setattr(
-        "app.api.ports._capture_pre_state_port_enable",
-        lambda i, d: {"existed": True, "admin_up": False},
-    )
+# -- Site-scope helpers (same pattern as tests/test_group_job.py) ------------
 
-
-def _seed_site(admin_client: TestClient, name: str) -> int:
-    r = admin_client.post("/api/v1/sites/", json={"name": name})
-    assert r.status_code == 200, r.text
-    return r.json()["data"]["id"]
-
-
-def _attach_device_to_site(device_name: str, site_id: int | None) -> None:
-    """Move a device into the target site's Default group (or Base-Infra's
-    Default when ``site_id is None``)."""
-    with get_session() as session:
-        dev = session.query(DeviceModel).filter_by(name=device_name).first()
-        assert dev is not None, f"Device '{device_name}' not in DB"
-        if site_id is None:
-            base = session.query(
-                SiteModel.default_group_id,
-            ).filter(SiteModel.kind == "BASE_INFRASTRUCTURE").first()
-            dev.device_group_id = base[0]
-        else:
-            row = session.query(SiteModel).filter_by(id=site_id).first()
-            assert row is not None and row.default_group_id is not None
-            dev.device_group_id = row.default_group_id
-
-
-# The per-test role granted to _ensure_user()-created users, so _grant_site can
-# use the correct role in RoleAssignmentModel without re-reading the user.
 _TEST_USER_ROLES: dict[str, str] = {}
 
 
+def _ensure_user(username: str, role: str = "operator") -> None:
+    _TEST_USER_ROLES[username] = role
+    if user_repository.obtener_por_username(username) is None:
+        is_sys = role in {"admin", "super-admin"}
+        user_repository.crear(username, "p@ssword_99", is_system_admin=is_sys)
+
+
 def _grant_site(username: str, site_ids: list[int]) -> None:
-    """Wipe existing site-wide grants for the user and re-seed one per
-    ``site_ids`` at the role captured by ``_ensure_user``."""
-    from app.db.models import RoleAssignmentModel
     role = _TEST_USER_ROLES.get(username, "operator")
     with get_session() as session:
         row = session.query(UserModel).filter_by(username=username).first()
@@ -184,628 +82,253 @@ def _grant_site(username: str, site_ids: list[int]) -> None:
             RoleAssignmentModel.device_group_id.is_(None),
         ).delete(synchronize_session=False)
         for sid in site_ids:
-            session.add(RoleAssignmentModel(
-                user_id=row.id, site_id=sid, device_group_id=None, role=role,
-            ))
+            session.add(RoleAssignmentModel(user_id=row.id, site_id=sid, device_group_id=None, role=role))
 
 
-def _ensure_user(username: str, role: str = "operator") -> None:
-    _TEST_USER_ROLES[username] = role
-    if user_service.get_by_username(username) is None:
-        is_sys = role in {"admin", "super-admin"}
-        user_service.create_user(
-            UserCreate(username=username, password="p@ssword_99", is_system_admin=is_sys)
-        )
+def _attach_device_to_site(device_name: str, site_id: int) -> None:
+    with get_session() as session:
+        dev = session.query(DeviceModel).filter_by(name=device_name).first()
+        assert dev is not None, f"Device '{device_name}' not in DB"
+        row = session.query(SiteModel).filter_by(id=site_id).first()
+        assert row is not None and row.default_group_id is not None
+        dev.device_group_id = row.default_group_id
 
 
-# ── 401 — Authentication required ────────────────────────────────────────────
+def _client(role: str, username: str | None = None):
+    from app.core.security import create_access_token
+    from fastapi.testclient import TestClient
+    from app.main import app
 
-def test_configure_requires_auth():
-    res = TestClient(app).post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
-    )
-    assert res.status_code == 401
-
-
-def test_shutdown_requires_auth():
-    res = TestClient(app).post(
-        "/api/v1/ports/shutdown",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 401
-
-
-def test_enable_requires_auth():
-    res = TestClient(app).post(
-        "/api/v1/ports/enable",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 401
-
-
-def test_configure_invalid_token_rejected():
+    sub = username or role
+    is_system_admin = role in {"admin", "super-admin"}
+    token = create_access_token({"sub": sub, "is_system_admin": is_system_admin})
     c = TestClient(app)
-    c.headers.update({"Authorization": "Bearer not.a.valid.token"})
-    res = c.post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
-    )
+    c.headers.update({"Authorization": f"Bearer {token}"})
+    return c
+
+
+# -- 401 -- authentication required -------------------------------------------
+
+def test_shutdown_requires_auth(unauth_client, device):
+    res = unauth_client.post(_u("shutdown"), json={"interface": _IFACE})
     assert res.status_code == 401
 
 
-# ── 403 — Observer cannot write ───────────────────────────────────────────────
+def test_enable_requires_auth(unauth_client, device):
+    res = unauth_client.post(_u("enable"), json={"interface": _IFACE})
+    assert res.status_code == 401
 
-def test_configure_observer_forbidden(mock_mode, mock_device):
-    res = _client("observer").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
-    )
+
+def test_batch_requires_auth(unauth_client, device):
+    res = unauth_client.post(_u("batch"), json={"changes": [{"interface": _IFACE, "description": "x"}]})
+    assert res.status_code == 401
+
+
+def test_invalid_token_rejected(device):
+    c = _client("operator")
+    c.headers.update({"Authorization": "Bearer not.a.valid.token"})
+    res = c.post(_u("shutdown"), json={"interface": _IFACE})
+    assert res.status_code == 401
+
+
+# -- 403 -- observer cannot write ---------------------------------------------
+
+def test_shutdown_observer_forbidden(observer_client, device):
+    res = observer_client.post(_u("shutdown"), json={"interface": _IFACE})
     assert res.status_code == 403
 
 
-def test_shutdown_observer_forbidden(mock_mode, mock_device):
-    res = _client("observer").post(
-        "/api/v1/ports/shutdown",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
+def test_enable_observer_forbidden(observer_client, device):
+    res = observer_client.post(_u("enable"), json={"interface": _IFACE})
     assert res.status_code == 403
 
 
-def test_enable_observer_forbidden(mock_mode, mock_device):
-    res = _client("observer").post(
-        "/api/v1/ports/enable",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
+def test_batch_observer_forbidden(observer_client, device):
+    res = observer_client.post(_u("batch"), json={"changes": [{"interface": _IFACE, "description": "x"}]})
     assert res.status_code == 403
 
 
-# ── 403 — Site-scope enforcement ──────────────────────────────────────────────
+# -- 403 -- site-scope enforcement --------------------------------------------
 
-def test_configure_403_device_outside_allowed_sites(mock_mode):
-    _ensure_user("site_op_cfg")
-    admin_c = _client("admin")
-    site_a = _seed_site(admin_c, "Site-A-cfg")
-    site_b = _seed_site(admin_c, "Site-B-cfg")
-    _attach_device_to_site(_DEVICE, site_b)
-    _grant_site("site_op_cfg", [site_a])
-
-    res = _client("operator", "site_op_cfg").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
-    )
-    assert res.status_code == 403
-
-
-def test_shutdown_403_device_outside_allowed_sites(mock_mode):
+def test_shutdown_403_device_outside_allowed_sites(fake_driver):
     _ensure_user("site_op_sht")
-    admin_c = _client("admin")
-    site_a = _seed_site(admin_c, "Site-A-sht")
-    site_b = _seed_site(admin_c, "Site-B-sht")
-    _attach_device_to_site(_DEVICE, site_b)
-    _grant_site("site_op_sht", [site_a])
+    site_a = get_or_create_site("Site-A-sht")
+    site_b = get_or_create_site("Site-B-sht")
+    dev = get_or_create_device("wr_dev_sht", site_name="Site-B-sht")
+    _attach_device_to_site(dev.name, site_b.id)
+    _grant_site("site_op_sht", [site_a.id])
 
-    res = _client("operator", "site_op_sht").post(
-        "/api/v1/ports/shutdown",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
+    res = _client("operator", "site_op_sht").post(_u("shutdown", dev.name), json={"interface": _IFACE})
     assert res.status_code == 403
 
 
-def test_enable_403_device_outside_allowed_sites(mock_mode):
-    _ensure_user("site_op_enb")
-    admin_c = _client("admin")
-    site_a = _seed_site(admin_c, "Site-A-enb")
-    site_b = _seed_site(admin_c, "Site-B-enb")
-    _attach_device_to_site(_DEVICE, site_b)
-    _grant_site("site_op_enb", [site_a])
-
-    res = _client("operator", "site_op_enb").post(
-        "/api/v1/ports/enable",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 403
-
-
-def test_configure_200_device_in_allowed_site(
-    mock_mode, stub_pre_state_configure, monkeypatch
-):
-    """Operator succeeds when the device is within their allowed site."""
+def test_shutdown_200_device_in_allowed_site(fake_driver):
     _ensure_user("site_op_ok")
-    admin_c = _client("admin")
-    site = _seed_site(admin_c, "Site-OK-cfg")
-    _attach_device_to_site(_DEVICE, site)
-    _grant_site("site_op_ok", [site])
+    site = get_or_create_site("Site-OK-sht")
+    dev = get_or_create_device("wr_dev_ok", site_name="Site-OK-sht")
+    _attach_device_to_site(dev.name, site.id)
+    _grant_site("site_op_ok", [site.id])
 
-    dev = Device(
-        name=_DEVICE, host="192.0.2.1", vendor="huawei_vrp",
-        username="admin", encrypted_password="enc", platform="vrp",
-    )
-    monkeypatch.setattr(
-        "app.services.device_service.get_device",
-        lambda name: dev if name == _DEVICE else None,
-    )
-
-    res = _client("operator", "site_op_ok").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "allowed"},
-    )
-    assert res.status_code == 200, res.text
+    res = _client("operator", "site_op_ok").post(_u("shutdown", dev.name), json={"interface": _IFACE})
+    assert res.status_code == 202, res.text
 
 
-def test_admin_bypasses_site_scope_configure(mock_mode, mock_device, monkeypatch):
-    """Admin can configure a device even when it belongs to a different site."""
-    admin_c = _client("admin")
-    site = _seed_site(admin_c, "Site-Admin-bypass")
-    _attach_device_to_site(_DEVICE, site)
-
-    monkeypatch.setattr(
-        "app.api.ports._capture_pre_state_port_configure",
-        lambda i, d: {
-            "existed": True, "description": None, "admin_up": True,
-            "mode": "access", "access_vlan": 1, "allowed_vlans": None,
-        },
-    )
-    res = admin_c.post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "admin ok"},
-    )
-    assert res.status_code == 200, res.text
+def test_admin_bypasses_site_scope(fake_driver):
+    site = get_or_create_site("Site-Admin-bypass-wr")
+    dev = get_or_create_device("wr_dev_admin_bypass", site_name="Site-Admin-bypass-wr")
+    _attach_device_to_site(dev.name, site.id)
+    # No grant given to the admin caller -- is_system_admin bypasses scope.
+    res = _client("admin").post(_u("shutdown", dev.name), json={"interface": _IFACE})
+    assert res.status_code == 202, res.text
 
 
-# ── 404 — Device not found ────────────────────────────────────────────────────
+# -- 404 -- device not found --------------------------------------------------
 
-def test_configure_404_unknown_device(mock_mode, monkeypatch):
-    monkeypatch.setattr("app.services.device_service.get_device", lambda name: None)
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": "ghost", "interface": _INTERFACE, "description": "x"},
-    )
+def test_shutdown_404_unknown_device(operator_client, fake_driver):
+    res = operator_client.post(_u("shutdown", "ghost-device"), json={"interface": _IFACE})
     assert res.status_code == 404
 
 
-def test_shutdown_404_unknown_device(mock_mode, monkeypatch):
-    monkeypatch.setattr("app.services.device_service.get_device", lambda name: None)
-    res = _client("operator").post(
-        "/api/v1/ports/shutdown",
-        json={"device": "ghost", "interface": _INTERFACE},
-    )
+def test_enable_404_unknown_device(operator_client, fake_driver):
+    res = operator_client.post(_u("enable", "ghost-device"), json={"interface": _IFACE})
     assert res.status_code == 404
 
 
-def test_enable_404_unknown_device(mock_mode, monkeypatch):
-    monkeypatch.setattr("app.services.device_service.get_device", lambda name: None)
-    res = _client("operator").post(
-        "/api/v1/ports/enable",
-        json={"device": "ghost", "interface": _INTERFACE},
-    )
-    assert res.status_code == 404
+# -- 422 -- validation errors -------------------------------------------------
 
-
-# ── 400/422 — Validation errors ───────────────────────────────────────────────
-
-def test_configure_422_no_mutation_fields(mock_mode, mock_device):
-    """Schema validator rejects requests with no mutation fields."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
+def test_shutdown_422_missing_interface(operator_client, device):
+    res = operator_client.post(_u("shutdown"), json={})
     assert res.status_code == 422
 
 
-def test_configure_422_access_vlan_without_mode(mock_mode, mock_device):
-    """access_vlan requires mode='access'."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "access_vlan": 10},
-    )
+def test_batch_422_no_changes(operator_client, device):
+    res = operator_client.post(_u("batch"), json={"changes": []})
     assert res.status_code == 422
 
 
-def test_configure_422_allowed_vlans_without_mode(mock_mode, mock_device):
-    """allowed_vlans requires mode='trunk'."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "allowed_vlans": [10, 20]},
-    )
+def test_batch_422_entry_with_no_fields(operator_client, device):
+    """A batch entry with only `interface` and no mutation field is
+    rejected -- `expandir_a_puertos()` raises ValueError, mapped to 422."""
+    res = operator_client.post(_u("batch"), json={"changes": [{"interface": _IFACE}]})
     assert res.status_code == 422
 
 
-def test_configure_access_vlan_with_trunk_mode_sets_pvid(mock_mode, mock_device):
-    """access_vlan with mode='trunk' is valid — it sets the trunk PVID."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={
-            "device": _DEVICE, "interface": _INTERFACE,
-            "mode": "trunk", "access_vlan": 10,
-        },
-    )
-    assert res.status_code == 200
-
-
-def test_configure_400_invalid_interface_name(mock_mode, mock_device):
-    """Malformed interface name returns 400."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": "", "description": "x"},
-    )
-    # Pydantic rejects empty interface (min_length=2) → 422
-    assert res.status_code in (400, 422)
-
-
-def test_configure_400_reserved_vlan_id(mock_mode, mock_device):
-    """VLAN 1003 is in the reserved range and must be rejected."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={
-            "device": _DEVICE, "interface": _INTERFACE,
-            "mode": "access", "access_vlan": 1003,
-        },
-    )
-    assert res.status_code in (400, 422)
-
-
-def test_shutdown_422_missing_interface(mock_mode, mock_device):
-    res = _client("operator").post(
-        "/api/v1/ports/shutdown",
-        json={"device": _DEVICE},
-    )
+def test_access_mode_400_reserved_vlan(operator_client, device):
+    res = operator_client.post(_u("access-mode"), json={"interface": _IFACE, "access_vlan": 1003})
     assert res.status_code == 422
 
 
-def test_enable_422_missing_device(mock_mode, mock_device):
-    res = _client("operator").post(
-        "/api/v1/ports/enable",
-        json={"interface": _INTERFACE},
+# -- 501 -- unsupported vendor -------------------------------------------------
+
+def test_shutdown_501_unsupported_vendor(admin_client, monkeypatch):
+    monkeypatch.setitem(plugin_registry._vendors, "juniper", StubUnimplementedDriver())
+    fake_dev = Device(
+        name="juniper-wr", host="192.0.2.99", vendor="juniper",
+        username="admin", encrypted_password="enc", platform="junos",
     )
-    assert res.status_code == 422
+    monkeypatch.setattr(device_repository, "get", lambda name: fake_dev if name == "juniper-wr" else None)
 
-
-# ── 409 — Lock conflict ───────────────────────────────────────────────────────
-
-def test_configure_409_device_locked(mock_mode, mock_device, monkeypatch):
-    """Returns 409 immediately when the device lock is already held."""
-    monkeypatch.setattr(device_locks, "is_device_busy", lambda d: True)
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
-    )
-    assert res.status_code == 409
-    body = res.json()
-    assert body["error_code"] == "DEVICE_LOCKED"
-
-
-def test_shutdown_409_device_locked(mock_mode, mock_device, monkeypatch):
-    """Returns 409 immediately when the device lock is already held."""
-    monkeypatch.setattr(device_locks, "is_device_busy", lambda d: True)
-    res = _client("operator").post(
-        "/api/v1/ports/shutdown",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 409
-
-
-def test_enable_409_device_locked(mock_mode, mock_device, monkeypatch):
-    """Returns 409 immediately when the device lock is already held."""
-    monkeypatch.setattr(device_locks, "is_device_busy", lambda d: True)
-    res = _client("operator").post(
-        "/api/v1/ports/enable",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 409
-
-
-def test_configure_409_real_lock_held(mock_mode, mock_device, monkeypatch):
-    """409 fires when another thread actually holds the device lock."""
-    monkeypatch.setattr(
-        "app.api.ports._capture_pre_state_port_configure",
-        lambda i, d: {
-            "existed": True, "description": "x", "admin_up": True,
-            "mode": "access", "access_vlan": 1, "allowed_vlans": None,
-        },
-    )
-    lock_released = threading.Event()
-
-    def _hold_lock():
-        with device_locks.acquire(_DEVICE):
-            lock_released.wait(timeout=3)
-
-    holder = threading.Thread(target=_hold_lock, daemon=True)
-    holder.start()
-    time.sleep(0.02)  # let holder acquire the lock
-
-    try:
-        res = _client("operator").post(
-            "/api/v1/ports/configure",
-            json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
-        )
-        assert res.status_code == 409
-    finally:
-        lock_released.set()
-        holder.join(timeout=2)
-
-
-# ── 501 — Unsupported vendor ──────────────────────────────────────────────────
-
-def test_configure_501_unsupported_vendor(mock_mode, monkeypatch):
-    """Returns 501 when the vendor driver has not implemented configure_port."""
-    from app.services.vendors.port_driver_base import BasePortDriver
-
-    dev = Device(
-        name=_DEVICE, host="192.0.2.1", vendor="stub_vendor",
-        username="admin", encrypted_password="enc", platform="stub",
-    )
-    monkeypatch.setattr(
-        "app.services.device_service.get_device",
-        lambda name: dev if name == _DEVICE else None,
-    )
-
-    class _StubDriver(BasePortDriver):
-        def list_ports(self, device, password):
-            return []
-        # configure_port, shutdown_port, enable_port inherit the NotImplementedError stub
-
-    monkeypatch.setattr(
-        "app.services.vendors.dispatcher.get_port_driver",
-        lambda device: _StubDriver(),
-    )
-
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "x"},
-    )
+    res = admin_client.post(_u("shutdown", "juniper-wr"), json={"interface": _IFACE})
     assert res.status_code == 501
     assert res.json()["error_code"] == "VENDOR_NOT_SUPPORTED"
 
 
-def test_shutdown_501_unsupported_vendor(mock_mode, monkeypatch):
-    from app.services.vendors.port_driver_base import BasePortDriver
-
-    dev = Device(
-        name=_DEVICE, host="192.0.2.1", vendor="stub_vendor",
-        username="admin", encrypted_password="enc", platform="stub",
+def test_enable_501_unsupported_vendor(admin_client, monkeypatch):
+    monkeypatch.setitem(plugin_registry._vendors, "juniper2", StubUnimplementedDriver())
+    fake_dev = Device(
+        name="juniper-wr2", host="192.0.2.99", vendor="juniper2",
+        username="admin", encrypted_password="enc", platform="junos",
     )
-    monkeypatch.setattr(
-        "app.services.device_service.get_device",
-        lambda name: dev if name == _DEVICE else None,
-    )
+    monkeypatch.setattr(device_repository, "get", lambda name: fake_dev if name == "juniper-wr2" else None)
 
-    class _StubDriver(BasePortDriver):
-        def list_ports(self, device, password):
-            return []
-
-    monkeypatch.setattr(
-        "app.services.vendors.dispatcher.get_port_driver",
-        lambda device: _StubDriver(),
-    )
-
-    res = _client("operator").post(
-        "/api/v1/ports/shutdown",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
+    res = admin_client.post(_u("enable", "juniper-wr2"), json={"interface": _IFACE})
     assert res.status_code == 501
 
 
-def test_enable_501_unsupported_vendor(mock_mode, monkeypatch):
-    from app.services.vendors.port_driver_base import BasePortDriver
+# -- 200/202 -- happy path & response shape -----------------------------------
 
-    dev = Device(
-        name=_DEVICE, host="192.0.2.1", vendor="stub_vendor",
-        username="admin", encrypted_password="enc", platform="stub",
-    )
-    monkeypatch.setattr(
-        "app.services.device_service.get_device",
-        lambda name: dev if name == _DEVICE else None,
-    )
-
-    class _StubDriver(BasePortDriver):
-        def list_ports(self, device, password):
-            return []
-
-    monkeypatch.setattr(
-        "app.services.vendors.dispatcher.get_port_driver",
-        lambda device: _StubDriver(),
-    )
-
-    res = _client("operator").post(
-        "/api/v1/ports/enable",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 501
-
-
-# ── 200 — Happy path & response shape ────────────────────────────────────────
-
-def test_configure_200_response_shape(mock_mode, mock_device, stub_pre_state_configure):
-    """POST /configure returns the canonical async-job response envelope."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "happy"},
-    )
-    assert res.status_code == 200, res.text
+def test_shutdown_response_shape(operator_client, device):
+    res = operator_client.post(_u("shutdown"), json={"interface": _IFACE})
+    assert res.status_code == 202, res.text
     body = res.json()
     assert body["success"] is True
-    assert "group_job_id" in body
-    assert isinstance(body["jobs"], list)
-    assert len(body["jobs"]) == 1
-    job_entry = body["jobs"][0]
-    assert job_entry["device"] == _DEVICE
-    assert "job_id" in job_entry
-    assert job_entry["status"] == "pending"
+    assert "group_job_id" in body["data"]
+    assert len(body["data"]["jobs"]) == 1
+    assert body["data"]["jobs"][0]["device"] == _DEVICE
 
 
-def test_shutdown_200_response_shape(mock_mode, mock_device, stub_pre_state_admin):
-    res = _client("operator").post(
-        "/api/v1/ports/shutdown",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 200, res.text
+def test_enable_response_shape(operator_client, device):
+    res = operator_client.post(_u("enable"), json={"interface": _IFACE})
+    assert res.status_code == 202, res.text
     body = res.json()
     assert body["success"] is True
-    assert "group_job_id" in body
-    assert len(body["jobs"]) == 1
-    assert body["jobs"][0]["device"] == _DEVICE
+    assert "group_job_id" in body["data"]
+    assert len(body["data"]["jobs"]) == 1
 
 
-def test_enable_200_response_shape(mock_mode, mock_device, stub_pre_state_admin):
-    res = _client("operator").post(
-        "/api/v1/ports/enable",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["success"] is True
-    assert "group_job_id" in body
-    assert len(body["jobs"]) == 1
+def test_admin_allowed(admin_client, device):
+    res = admin_client.post(_u("shutdown"), json={"interface": _IFACE})
+    assert res.status_code == 202, res.text
 
 
-def test_configure_operator_allowed(mock_mode, mock_device, stub_pre_state_configure):
-    """Operator role is allowed to call /configure."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "admin_enabled": True},
-    )
-    assert res.status_code == 200, res.text
+# -- Mock mode -- job reaches completed ---------------------------------------
 
-
-def test_configure_admin_allowed(mock_mode, mock_device, stub_pre_state_configure):
-    """Admin role is allowed to call /configure."""
-    res = _client("admin").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "by admin"},
-    )
-    assert res.status_code == 200, res.text
-
-
-# ── Mock mode — job reaches completed ────────────────────────────────────────
-
-def test_configure_mock_job_reaches_completed(
-    mock_mode, mock_device, stub_pre_state_configure
-):
-    """In mock mode the background job completes within a short timeout."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "mock complete"},
-    )
-    assert res.status_code == 200
-    job_id = res.json()["jobs"][0]["job_id"]
-
-    time.sleep(0.1)
-    job = job_service.get_job(job_id)
-    assert job is not None
+def test_shutdown_job_reaches_completed(operator_client, device):
+    res = operator_client.post(_u("shutdown"), json={"interface": _IFACE})
+    assert res.status_code == 202
+    job_id = res.json()["data"]["jobs"][0]["job_id"]
+    job = job_repository.get(job_id)
     assert job.status == "completed"
 
 
-def test_shutdown_mock_job_reaches_completed(
-    mock_mode, mock_device, stub_pre_state_admin
-):
-    res = _client("operator").post(
-        "/api/v1/ports/shutdown",
-        json={"device": _DEVICE, "interface": _INTERFACE},
-    )
-    assert res.status_code == 200
-    job_id = res.json()["jobs"][0]["job_id"]
-
-    time.sleep(0.1)
-    job = job_service.get_job(job_id)
+def test_enable_job_reaches_completed(operator_client, device, fake_driver):
+    """GigabitEthernet0/0/1 is admin_up=True by default -- enabling it is a no-op."""
+    res = operator_client.post(_u("enable"), json={"interface": _IFACE})
+    assert res.status_code == 202
+    job_id = res.json()["data"]["jobs"][0]["job_id"]
+    job = job_repository.get(job_id)
     assert job.status == "completed"
+    assert job.result.get("noop") is True
 
 
-def test_enable_mock_job_reaches_completed(
-    mock_mode, mock_device, stub_pre_state_admin
-):
-    res = _client("operator").post(
-        "/api/v1/ports/enable",
-        json={"device": _DEVICE, "interface": _INTERFACE},
+# -- Multi-field combos -- /batch and the atomic mode endpoints ---------------
+
+def test_batch_multiple_fields_one_interface(operator_client, device, fake_driver):
+    """The modern equivalent of the old composite `/configure` request:
+    one `/batch` call carrying several fields for the same interface, in
+    a single job/connection."""
+    res = operator_client.post(
+        _u("batch"),
+        json={"changes": [{"interface": _IFACE, "description": "multi", "admin_up": False}]},
     )
-    assert res.status_code == 200
-    job_id = res.json()["jobs"][0]["job_id"]
-
-    time.sleep(0.1)
-    job = job_service.get_job(job_id)
+    assert res.status_code == 202, res.text
+    job_id = res.json()["data"]["jobs"][0]["job_id"]
+    assert len(res.json()["data"]["jobs"]) == 1
+    job = job_repository.get(job_id)
     assert job.status == "completed"
+    ops = [op for op, _v, _vars in fake_driver.calls]
+    assert "update_port_description" in ops
+    assert "set_port_admin_state" in ops
 
 
-def test_configure_group_job_created(mock_mode, mock_device, stub_pre_state_configure):
-    """Each configure request creates a distinct group job."""
-    from app.services import group_job_service
+def test_access_mode_with_vlan(operator_client, device, fake_driver):
+    """mode='access' + access_vlan, atomically -- the modern successor of
+    the old `/configure` mode+vlan combo."""
+    res = operator_client.post(_u("access-mode"), json={"interface": _IFACE, "access_vlan": 20})
+    assert res.status_code == 202, res.text
+    job_id = res.json()["data"]["jobs"][0]["job_id"]
+    job = job_repository.get(job_id)
+    assert job.status == "completed"
+    assert any(op == "set_access_mode" for op, _v, _vars in fake_driver.calls)
 
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "gj-test"},
+
+def test_trunk_mode_with_vlans(operator_client, device, fake_driver):
+    """mode='trunk' + native_vlan + allowed_vlans, atomically."""
+    res = operator_client.post(
+        _u("trunk-mode"), json={"interface": _IFACE, "native_vlan": 1, "allowed_vlans": [10, 20, 30]},
     )
-    assert res.status_code == 200
-    gj_id = res.json()["group_job_id"]
-    gj = group_job_service.get_group_job(gj_id)
-    assert gj is not None
-    assert gj.operation == "configure_port"
-
-
-# ── Multiple configure fields ─────────────────────────────────────────────────
-
-def test_configure_multiple_fields_accepted(
-    mock_mode, mock_device, stub_pre_state_configure
-):
-    """Configure accepts multiple fields in one request."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={
-            "device": _DEVICE,
-            "interface": _INTERFACE,
-            "description": "multi",
-            "admin_enabled": True,
-        },
-    )
-    assert res.status_code == 200, res.text
-
-
-def test_configure_trunk_mode_with_vlans(mock_mode, mock_device, monkeypatch):
-    """mode='trunk' with allowed_vlans is accepted and enqueued."""
-    monkeypatch.setattr(
-        "app.api.ports._capture_pre_state_port_configure",
-        lambda i, d: {
-            "existed": True, "description": None, "admin_up": True,
-            "mode": "trunk", "access_vlan": 1,
-            "allowed_vlans": [10, 20],
-        },
-    )
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={
-            "device": _DEVICE,
-            "interface": _INTERFACE,
-            "mode": "trunk",
-            "allowed_vlans": [10, 20, 30],
-        },
-    )
-    assert res.status_code == 200, res.text
-
-
-def test_configure_access_mode_with_vlan(
-    mock_mode, mock_device, stub_pre_state_configure
-):
-    """mode='access' with access_vlan is accepted."""
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={
-            "device": _DEVICE,
-            "interface": _INTERFACE,
-            "mode": "access",
-            "access_vlan": 20,
-        },
-    )
-    assert res.status_code == 200, res.text
-
-
-# ── Lock not held — succeeds ──────────────────────────────────────────────────
-
-def test_configure_succeeds_when_device_free(
-    mock_mode, mock_device, stub_pre_state_configure
-):
-    """Endpoint succeeds (200) when the device is not currently locked."""
-    assert not device_locks.is_device_busy(_DEVICE)
-    res = _client("operator").post(
-        "/api/v1/ports/configure",
-        json={"device": _DEVICE, "interface": _INTERFACE, "description": "free"},
-    )
-    assert res.status_code == 200
+    assert res.status_code == 202, res.text
+    job_id = res.json()["data"]["jobs"][0]["job_id"]
+    job = job_repository.get(job_id)
+    assert job.status == "completed"
+    assert any(op == "set_trunk_mode" for op, _v, _vars in fake_driver.calls)

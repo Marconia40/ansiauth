@@ -1,25 +1,24 @@
 """Building many Device objects (as Inventory.list() would for a table view)
 must never trigger driver resolution or password decryption — the whole
 point of laziness (DG2). See docs/DEVICE_IMPLEMENTATION_PLAN.md §11.1.
-"""
+
+Ported from the pre-FINAL_ARCHITECTURE.md version: Device now caches a
+single driver (`._driver`, via app.composition.plugin_registry) and a
+single decrypted password (`._password`, via
+app.composition.secret_vault) — there's no separate vlan/port driver
+split or dispatcher module anymore."""
 from app.models.device import Device
 
 
 def test_building_many_devices_never_resolves_drivers(monkeypatch):
-    monkeypatch.setattr("app.core.config.EXECUTION_MODE", "real")
-
     def _boom_driver(*_a, **_kw):
-        raise AssertionError("get_driver must not be called for plain construction")
-
-    def _boom_port_driver(*_a, **_kw):
-        raise AssertionError("get_port_driver must not be called for plain construction")
+        raise AssertionError("plugin_registry.obtener must not be called for plain construction")
 
     def _boom_decrypt(*_a, **_kw):
-        raise AssertionError("decrypt_password must not be called for plain construction")
+        raise AssertionError("secret_vault.decrypt must not be called for plain construction")
 
-    monkeypatch.setattr("app.services.vendors.dispatcher.get_driver", _boom_driver)
-    monkeypatch.setattr("app.services.vendors.dispatcher.get_port_driver", _boom_port_driver)
-    monkeypatch.setattr("app.services.secret_service.vault.decrypt", _boom_decrypt)
+    monkeypatch.setattr("app.composition.plugin_registry.obtener", _boom_driver)
+    monkeypatch.setattr("app.composition.secret_vault.decrypt", _boom_decrypt)
 
     devices = [
         Device(
@@ -37,4 +36,4 @@ def test_building_many_devices_never_resolves_drivers(monkeypatch):
 
     assert len(names) == 500
     assert len(hosts) == 500
-    assert all(d._vlan_driver is None and d._port_driver is None for d in devices)
+    assert all(d._driver is None and d._password is None for d in devices)

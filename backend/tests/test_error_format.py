@@ -1,11 +1,41 @@
 """Tests for SEC-004 — Standardized error response format."""
 import pytest
 
-from app.schemas.user import UserCreate
-from app.services import user_service
-
-
 _REQUIRED_KEYS = {"error_code", "message", "details", "timestamp"}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _seed_mock_devices():
+    """Register "mock_device" once for this file's session.
+
+    device_service.py's seed_defaults()/"mock_device" special-casing was
+    deleted by the migration to FINAL_ARCHITECTURE.md -- api/vlans.py's
+    create_vlan() calls require_device() (a real DB lookup) BEFORE its own
+    authorization check, so the 403 test below would 404 first without a
+    real registered device. Mirrors seed_defaults()'s old behavior: the
+    device lives in a REGULAR "Mock Site" (not Base-Infrastructure, hidden
+    from non-system-admins per D14).
+
+    Session-scoped so it runs before conftest's per-test
+    ``_seed_test_role_users_with_full_visibility`` fixture computes which
+    REGULAR sites to grant observer/operator roles on.
+    """
+    from app.composition import device_repository, inventory, site_repository
+    from app.core.exceptions import ValidationError
+
+    existing = site_repository.list(name="Mock Site")
+    site = existing[0] if existing else site_repository.crear_con_grupo_default("Mock Site", kind="REGULAR")
+    if device_repository.get("mock_device") is None:
+        try:
+            inventory.register(
+                name="mock_device", host="192.168.1.1", vendor="cisco_ios", platform="ios",
+                username="admin", password="admin",
+                site_id=site.id, device_group_id=site.default_group_id,
+                actor={"username": "admin"},
+            )
+        except ValidationError:
+            pass
+    yield
 
 
 def _assert_error_shape(response, expected_status: int, expected_code: str | None = None):
@@ -73,10 +103,17 @@ def test_422_contains_field_error_type(client):
 
 
 def test_400_app_validation_error_has_standard_format(client, monkeypatch):
-    from app.services import vlan_service
-    monkeypatch.setattr(vlan_service, "EXECUTION_MODE", "real")
+    """Historical name kept for continuity, but app.main's ValidationError
+    handler now maps to 422 everywhere (not 400) -- verified against
+    app/main.py:validation_error_handler, not something specific to this
+    endpoint. EXECUTION_MODE also moved: api/vlans.py reads it via a local
+    ``from app.core.config import EXECUTION_MODE`` inside get_vlans(), so
+    patching the attribute on app.core.config (not the deleted
+    vlan_service module) is what actually takes effect."""
+    from app.core import config as config_module
+    monkeypatch.setattr(config_module, "EXECUTION_MODE", "real")
     r = client.get("/api/v1/vlans/")
-    body = _assert_error_shape(r, 400, "VALIDATION_ERROR")
+    body = _assert_error_shape(r, 422, "VALIDATION_ERROR")
     assert "device" in body["message"].lower()
 
 
@@ -98,12 +135,14 @@ def test_500_does_not_leak_stack_trace(monkeypatch):
     from fastapi.testclient import TestClient
     from app.core.security import create_access_token
     from app.main import app
-    from app.services import device_service
+    from app.composition import inventory
 
-    def _boom():
+    def _boom(*args, **kwargs):
         raise RuntimeError("internal detail that must not leak")
 
-    monkeypatch.setattr(device_service, "get_devices", _boom)
+    # device_service.get_devices() is gone -- api/devices.py:list_devices()
+    # reads through Inventory.list() now (app/composition.py's singleton).
+    monkeypatch.setattr(inventory, "list", _boom)
 
     # raise_server_exceptions=False lets the 500 handler respond instead of re-raising
     safe_client = TestClient(app, raise_server_exceptions=False)

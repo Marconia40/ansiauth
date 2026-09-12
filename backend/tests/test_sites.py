@@ -24,12 +24,14 @@ def _clean_sites():
         DeviceGroupModel,
         RoleAssignmentModel,
     )
-    from app.services import device_service, site_service
+    from app.composition import inventory, site_repository
+    from app.core.exceptions import ValidationError
+    from app.repositories.site_repository import BASE_INFRA_SITE_KIND
 
     def _wipe_and_reseed():
         with get_session() as session:
             # devices.device_group_id is NOT NULL — delete devices outright
-            # so seed_defaults can re-create them inside Base-Infra's Default.
+            # so the reseed below can re-create them inside Mock Site's Default.
             session.query(DeviceModel).delete(synchronize_session=False)
             session.query(RoleAssignmentModel).delete(synchronize_session=False)
             # Null sites.default_group_id first so RESTRICT doesn't block the
@@ -39,8 +41,28 @@ def _clean_sites():
             )
             session.query(DeviceGroupModel).delete(synchronize_session=False)
             session.query(SiteModel).delete(synchronize_session=False)
-        site_service.ensure_base_infrastructure()
-        device_service.seed_defaults()
+        # site_service.ensure_base_infrastructure()/device_service.seed_defaults()
+        # were deleted by the migration to FINAL_ARCHITECTURE.md --
+        # SiteRepository.crear_con_grupo_default() + Inventory.register() are
+        # the modern replacements. Mirrors device_service.seed_defaults()'s
+        # exact behavior: "mock_device"/"fail_device" live in a REGULAR
+        # "Mock Site" (not Base-Infra, which is hidden from non-system-admins
+        # per D14) so _attach_device() below has a real seed device to move.
+        site_repository.crear_con_grupo_default(
+            "Base Infrastructure", "System-managed base infrastructure site.",
+            kind=BASE_INFRA_SITE_KIND,
+        )
+        mock_site = site_repository.crear_con_grupo_default("Mock Site", kind="REGULAR")
+        for name, host in (("mock_device", "192.168.1.1"), ("fail_device", "192.168.1.2")):
+            try:
+                inventory.register(
+                    name=name, host=host, vendor="cisco_ios", platform="ios",
+                    username="admin", password="admin",
+                    site_id=mock_site.id, device_group_id=mock_site.default_group_id,
+                    actor={"username": "admin"},
+                )
+            except ValidationError:
+                pass
 
     _wipe_and_reseed()
     yield
@@ -92,7 +114,9 @@ def test_create_duplicate_name_rejected(admin_client):
     r = admin_client.post("/api/v1/sites/", json={"name": "Datacenter"})
     assert r.status_code == 200
     r = admin_client.post("/api/v1/sites/", json={"name": "Datacenter"})
-    assert r.status_code == 400, r.text
+    # api/main.py's ValidationError handler now maps to 422, not 400 --
+    # verified across the whole app (app/main.py:validation_error_handler).
+    assert r.status_code == 422, r.text
 
 
 def test_list_returns_sites_sorted_by_name(admin_client):
@@ -128,14 +152,15 @@ def test_update_site_name_and_description(admin_client):
 def test_update_no_fields_returns_400(admin_client):
     created = admin_client.post("/api/v1/sites/", json={"name": "A"}).json()["data"]
     r = admin_client.put(f"/api/v1/sites/{created['id']}", json={})
-    assert r.status_code == 400
+    # ValidationError -> 422 now (see test_create_duplicate_name_rejected).
+    assert r.status_code == 422
 
 
 def test_update_site_duplicate_name_rejected(admin_client):
     a = admin_client.post("/api/v1/sites/", json={"name": "A"}).json()["data"]
     admin_client.post("/api/v1/sites/", json={"name": "B"})
     r = admin_client.put(f"/api/v1/sites/{a['id']}", json={"name": "B"})
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 def test_update_missing_site_returns_404(admin_client):

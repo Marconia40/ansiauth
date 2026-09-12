@@ -6,12 +6,23 @@ function runs the Base-Infra site + its Default group already exist.
 """
 from app.db.models import DeviceGroupModel, SiteModel
 from app.db.session import get_session
-from app.services.site_service import (
-    BASE_INFRA_SITE_KIND,
-    BASE_INFRA_SITE_NAME,
-    DEFAULT_GROUP_NAME,
-    ensure_base_infrastructure,
-)
+from app.repositories.site_repository import BASE_INFRA_SITE_KIND, DEFAULT_GROUP_NAME
+
+# site_service.py (ensure_base_infrastructure/BASE_INFRA_SITE_NAME) was
+# deleted by the migration to FINAL_ARCHITECTURE.md.
+# SiteRepository.crear_con_grupo_default(name, kind=BASE_INFRA_SITE_KIND) is
+# the idempotent replacement (see app/main.py's own bootstrap call) -- there
+# is no BASE_INFRA_SITE_NAME constant anymore, "Base Infrastructure" is the
+# literal used in practice.
+BASE_INFRA_SITE_NAME = "Base Infrastructure"
+
+
+def ensure_base_infrastructure():
+    from app.composition import site_repository
+    return site_repository.crear_con_grupo_default(
+        BASE_INFRA_SITE_NAME, "System-managed base infrastructure site.",
+        kind=BASE_INFRA_SITE_KIND,
+    )
 
 
 # ── After conftest / app import: Base Infra is populated ─────────────────────

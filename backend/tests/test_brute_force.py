@@ -4,9 +4,7 @@ import pytest
 
 from app.db.models import LoginAttemptModel
 from app.db.session import get_session
-from app.schemas.user import UserCreate
-from app.composition import login_attempt_repository
-from app.services import user_service
+from app.composition import login_attempt_repository, user_repository
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -34,8 +32,8 @@ def _do_failed_login(client, username: str = "brute_user", password: str = "wron
 
 @pytest.fixture(autouse=True)
 def seed_brute_user():
-    if user_service.get_by_username("brute_user") is None:
-        user_service.create_user(UserCreate(username="brute_user", password="correct_password_123"))
+    if user_repository.obtener_por_username("brute_user") is None:
+        user_repository.crear("brute_user", "correct_password_123")
     yield
     from app.db.session import get_session
     from app.db.models import UserModel
