@@ -3,10 +3,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/PageHeader';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
+import { AccessBadges } from '@/components/AccessBadges';
 import {
   getUsers,
   createUser,
@@ -48,6 +49,7 @@ const ASSIGNMENT_ROLES: AssignmentRole[] = ['observer', 'operator', 'admin'];
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
@@ -60,8 +62,10 @@ export default function UsersPage() {
   const [newRole, setNewRole] = useState<Role>('observer');
 
   // ── Edit form (in-row) ───────────────────────────────────────────────────
+  // Post-Phase-5 the row-level ``role`` dropdown was dead UI (comment
+  // below on ``handleUpdate``). The Edit action now only resets the
+  // password; per-scope permissions live behind the ``Grants…`` button.
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
-  const [editingRole, setEditingRole] = useState<Role>('observer');
   const [editingPassword, setEditingPassword] = useState('');
 
   // ── Grants modal ─────────────────────────────────────────────────────────
@@ -98,6 +102,23 @@ export default function UsersPage() {
 
   const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
   const siteList = sites ?? [];
+
+  // Aggregate every user's grants in a single query so the Access column
+  // can render inline chips without waiting for the Grants modal to open.
+  // Small user populations don't need a batch endpoint yet — parallelising
+  // per-user calls behind one React Query is enough. See
+  // docs/USER_PERMISSIONS_UX_REDESIGN.md §3.5.
+  const userIdsKey = users.map((u) => u.id).sort((a, b) => a - b).join(',');
+  const { data: grantsByUser, isLoading: grantsLoading } = useQuery<Map<number, RoleAssignment[]>>({
+    queryKey: ['grants-all', userIdsKey],
+    queryFn: async () => {
+      const entries = await Promise.all(
+        users.map(async (u) => [u.id, await listGrants(u.id)] as const),
+      );
+      return new Map(entries);
+    },
+    enabled: users.length > 0,
+  });
 
   // ── Grants sub-queries for the currently-open user ───────────────────────
   const { data: grants, refetch: refetchGrants } = useQuery<RoleAssignment[]>({
@@ -152,7 +173,6 @@ export default function UsersPage() {
 
   function handleEditStart(u: User) {
     setEditingUserId(u.id);
-    setEditingRole(u.role as Role);
     setEditingPassword('');
     setSuccessMessage(null);
     setErrorMessage(null);
@@ -160,7 +180,6 @@ export default function UsersPage() {
 
   function handleEditCancel() {
     setEditingUserId(null);
-    setEditingRole('observer');
     setEditingPassword('');
   }
 
@@ -169,10 +188,6 @@ export default function UsersPage() {
     setSuccessMessage(null);
     setErrorMessage(null);
     try {
-      // ``role`` is no longer editable on the user row post-Phase-5 — the
-      // system-admin toggle has its own action, and per-scope permissions
-      // live in role_assignments. The dropdown stays for UI parity but
-      // updates here only apply the password change.
       const body: UserUpdate = {};
       if (editingPassword.trim()) {
         body.password = editingPassword.trim();
@@ -219,6 +234,7 @@ export default function UsersPage() {
     try {
       await setSystemAdmin(u.id, next);
       await refetch();
+      queryClient.invalidateQueries({ queryKey: ['grants-all'] });
       setSuccessMessage(`${u.username}: is_system_admin=${next}`);
     } catch (err) {
       setErrorMessage(extractMessage(err, 'System-admin toggle failed'));
@@ -243,6 +259,7 @@ export default function UsersPage() {
       setNewGrantGroupId('');
       setNewGrantRole('observer');
       await refetchGrants();
+      queryClient.invalidateQueries({ queryKey: ['grants-all'] });
       setSuccessMessage('Grant issued');
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Grant failed'));
@@ -260,6 +277,7 @@ export default function UsersPage() {
     try {
       await revokeApi(grantsUser.id, g.id);
       await refetchGrants();
+      queryClient.invalidateQueries({ queryKey: ['grants-all'] });
       setSuccessMessage('Grant revoked');
     } catch (err) {
       setErrorMessage(extractMessage(err, 'Revoke failed'));
@@ -370,7 +388,7 @@ export default function UsersPage() {
           <thead>
             <tr className="border-b border-panel-border bg-panel-elev/60">
               <th className="text-left px-4 py-2 font-medium text-text">Username</th>
-              <th className="text-left px-4 py-2 font-medium text-text">Role</th>
+              <th className="text-left px-4 py-2 font-medium text-text">Access</th>
               <th className="text-left px-4 py-2 font-medium text-text">System-admin</th>
               <th className="text-left px-4 py-2 font-medium text-text">Actions</th>
             </tr>
@@ -382,20 +400,17 @@ export default function UsersPage() {
                 <tr key={u.id} className="border-b border-panel-border hover:bg-panel-elev/60">
                   <td className="px-4 py-2 text-text font-mono text-xs">{u.username}</td>
                   <td className="px-4 py-2 text-text">
-                    {isEditing ? (
-                      <select
-                        value={editingRole}
-                        onChange={(e) => setEditingRole(e.target.value as Role)}
-                        disabled={isSubmitting}
-                        className="border border-panel-border rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-                      >
-                        {ROLES.map((r) => (
-                          <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      ROLE_LABELS[u.role as Role] ?? u.role
-                    )}
+                    <AccessBadges
+                      user={u}
+                      grants={grantsByUser?.get(u.id)}
+                      isLoading={grantsLoading}
+                      onSeeMore={() => {
+                        setGrantsUser(u);
+                        setNewGrantSiteId('');
+                        setNewGrantGroupId('');
+                        setNewGrantRole('observer');
+                      }}
+                    />
                   </td>
                   <td className="px-4 py-2">
                     {viewerIsSystemAdmin ? (

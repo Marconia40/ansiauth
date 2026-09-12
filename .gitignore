@@ -34,6 +34,7 @@ backend/ansible/env/
 # =========================
 .vscode/
 .idea/
+.claude
 
 # =========================
 # OS
