@@ -15,6 +15,7 @@ import {
   UsersIcon,
 } from './Icon';
 import { Brand } from './Brand';
+import { ScopeSwitcher } from './ScopeSwitcher';
 
 const TOP_LINKS: {
   href: string;
@@ -33,12 +34,16 @@ export function Topbar() {
   const pathname = usePathname();
 
   return (
-    <header className="h-14 bg-header text-header-fg flex items-center justify-between px-4 shrink-0 shadow">
-      <Link href="/" className="flex items-center" aria-label="AnsiAuth home">
+    <header className="h-14 bg-header text-header-fg flex items-center justify-between px-4 shrink-0 shadow gap-4">
+      <Link href="/" className="flex items-center shrink-0" aria-label="AnsiAuth home">
         <Brand variant="wordmark" tone="white" tight className="h-7 w-auto" />
       </Link>
 
-      <div className="flex items-center gap-1">
+      <div className="flex-1 flex justify-center min-w-0">
+        <ScopeSwitcher />
+      </div>
+
+      <div className="flex items-center gap-1 shrink-0">
         {TOP_LINKS.map((link) => {
           if (link.adminOnly && !user?.is_system_admin) return null;
           const active = pathname === link.href || pathname.startsWith(`${link.href}/`);

@@ -10,6 +10,7 @@ import { ErrorMessage } from '@/components/ErrorMessage';
 import { AccessBadges } from '@/components/AccessBadges';
 import { ManageUserModal } from '@/components/ManageUserModal';
 import { CreateUserModal } from '@/components/CreateUserModal';
+import { useScope } from '@/context/ScopeContext';
 import {
   getUsers,
   deleteUser,
@@ -74,6 +75,7 @@ export default function UsersPage() {
 
   const { data: sites } = useQuery<Site[]>({ queryKey: ['sites'], queryFn: getSites });
   const siteList = sites ?? [];
+  const { selectedScope } = useScope();
 
   const manageUser =
     manageUserId != null ? users.find((u) => u.id === manageUserId) ?? null : null;
@@ -94,6 +96,22 @@ export default function UsersPage() {
     },
     enabled: users.length > 0,
   });
+
+  // Filter the user list to the active scope. System-admins bypass every
+  // per-site check on the backend, so functionally they can access any
+  // site — but they don't appear in scoped lists because they hold no
+  // explicit grant on it, and rendering "every system-admin plus the
+  // Site-A users" would muddle what the operator asked for. Switching
+  // to "All sites" is the way to manage system-admins.
+  const scopedSiteId = selectedScope.kind === 'site' ? selectedScope.siteId : null;
+  const visibleUsers =
+    scopedSiteId == null || !grantsByUser
+      ? users
+      : users.filter((u) =>
+          grantsByUser.get(u.id)?.some((g) => g.site_id === scopedSiteId),
+        );
+  const scopedSiteName =
+    scopedSiteId != null ? siteList.find((s) => s.id === scopedSiteId)?.name : null;
 
   useEffect(() => {
     if (currentUser && currentUser.role !== 'admin' && currentUser.role !== 'super-admin') {
@@ -198,6 +216,12 @@ export default function UsersPage() {
         </div>
       ) : users.length === 0 ? (
         <p className="py-12 text-center text-muted/70 text-sm">No users available.</p>
+      ) : visibleUsers.length === 0 ? (
+        <p className="py-12 text-center text-muted/70 text-sm">
+          No users have grants on{' '}
+          <strong>{scopedSiteName ?? 'this site'}</strong>. Switch the topbar
+          scope to <em>All sites</em> to see the full list.
+        </p>
       ) : (
         <table className="w-full border-collapse text-sm">
           <thead>
@@ -208,7 +232,7 @@ export default function UsersPage() {
             </tr>
           </thead>
           <tbody>
-            {users.map((u) => (
+            {visibleUsers.map((u) => (
               <tr key={u.id} className="border-b border-panel-border hover:bg-panel-elev/60">
                 <td className="px-4 py-2 text-text font-mono text-xs">{u.username}</td>
                 <td className="px-4 py-2 text-text">
