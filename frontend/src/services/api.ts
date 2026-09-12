@@ -985,8 +985,8 @@ export async function getUsers(): Promise<User[]> {
   return data.items ?? [];
 }
 
-export async function createUser(body: UserCreate) {
-  return unwrap(client.post('/users/', body));
+export async function createUser(body: UserCreate): Promise<User> {
+  return unwrap(client.post<ApiResponse<User>>('/users/', body));
 }
 
 export async function updateUser(userId: number, body: UserUpdate) {

@@ -29,6 +29,17 @@ interface ManageUserModalProps {
   viewerIsSystemAdmin: boolean;
   onClose: () => void;
   onUserChanged: () => void;
+  /**
+   * Optional contextual banner shown above the sections — used by the
+   * two-step create flow (§3.4) to explain that closing without any
+   * grants leaves the user in a zero-access state.
+   */
+  banner?: React.ReactNode;
+  /**
+   * Optional label for the close button — the create flow uses
+   * ``Skip — user has no access yet`` instead of ``Close``.
+   */
+  closeLabel?: string;
 }
 
 /**
@@ -48,6 +59,8 @@ export function ManageUserModal({
   viewerIsSystemAdmin,
   onClose,
   onUserChanged,
+  banner,
+  closeLabel,
 }: ManageUserModalProps) {
   const queryClient = useQueryClient();
 
@@ -203,9 +216,15 @@ export function ManageUserModal({
             disabled={busy}
             className="text-sm text-muted hover:text-text disabled:opacity-50"
           >
-            Close
+            {closeLabel ?? 'Close'}
           </button>
         </div>
+
+        {banner && (
+          <div className="mb-4 px-3 py-2 rounded-md border border-info/30 bg-info/5 text-sm text-text">
+            {banner}
+          </div>
+        )}
 
         {sectionMessage && (
           <div className="mb-4">

@@ -9,30 +9,21 @@ import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { ErrorMessage } from '@/components/ErrorMessage';
 import { AccessBadges } from '@/components/AccessBadges';
 import { ManageUserModal } from '@/components/ManageUserModal';
+import { CreateUserModal } from '@/components/CreateUserModal';
 import {
   getUsers,
-  createUser,
   deleteUser,
   getSites,
   listGrants,
   extractMessage,
 } from '@/services/api';
 import type { RoleAssignment, User } from '@/types/user';
-import type { Role } from '@/types/auth';
 import type { Site } from '@/types/site';
 
 function normalizeUsers(data: unknown): User[] {
   if (Array.isArray(data)) return data as User[];
   return [];
 }
-
-const ROLES: Role[] = ['observer', 'operator', 'admin', 'super-admin'];
-const ROLE_LABELS: Record<Role, string> = {
-  observer: 'Observer (read-only)',
-  operator: 'Operator',
-  admin: 'Admin',
-  'super-admin': 'Super Admin',
-};
 
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
@@ -43,15 +34,13 @@ export default function UsersPage() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // ── Create form ──────────────────────────────────────────────────────────
-  const [newUsername, setNewUsername] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [newRole, setNewRole] = useState<Role>('observer');
+  // ── Create flow (§3.4) ───────────────────────────────────────────────────
+  // Two-step: CreateUserModal collects credentials, then ManageUserModal
+  // opens automatically on the just-created user with a contextual banner.
+  const [createOpen, setCreateOpen] = useState(false);
+  const [justCreatedUserId, setJustCreatedUserId] = useState<number | null>(null);
 
   // ── Manage-user modal ────────────────────────────────────────────────────
-  // Single entry point for editing credentials, toggling system-admin, and
-  // managing per-scope grants — see docs/USER_PERMISSIONS_UX_REDESIGN.md §3.3.
-  //
   // Stored as an id (not a snapshot object) so the modal always sees the
   // freshest user row after a refetch — otherwise flipping system-admin
   // inside the modal would leave its own copy stale until reopened.
@@ -116,34 +105,6 @@ export default function UsersPage() {
     return null;
   }
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newUsername.trim()) { setErrorMessage('Username is required'); return; }
-    if (!newPassword.trim()) { setErrorMessage('Password is required'); return; }
-    setIsSubmitting(true);
-    setSuccessMessage(null);
-    setErrorMessage(null);
-    const username = newUsername.trim();
-    try {
-      await createUser({
-        username,
-        password: newPassword.trim(),
-        is_system_admin: newRole === 'admin' || newRole === 'super-admin',
-      });
-      setNewUsername('');
-      setNewPassword('');
-      setNewRole('observer');
-      await refetch();
-      setSuccessMessage(
-        `User ${username} created. Use "Edit" on the row to configure access.`,
-      );
-    } catch (err) {
-      setErrorMessage(extractMessage(err, 'Create failed'));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
   async function handleDelete(u: User) {
     if (!window.confirm(`Delete user ${u.username}?`)) return;
     setDeletingUserId(u.id);
@@ -162,76 +123,55 @@ export default function UsersPage() {
     }
   }
 
+  async function handleUserCreated(u: User) {
+    setCreateOpen(false);
+    await refetch();
+    setJustCreatedUserId(u.id);
+    setManageUserId(u.id);
+    setSuccessMessage(`User ${u.username} created — configure their access.`);
+  }
+
+  function handleManageClose() {
+    setManageUserId(null);
+    setJustCreatedUserId(null);
+  }
+
   // The JWT payload only carries `role`; every admin/super-admin becomes
   // is_system_admin=True via Phase 3's create_user hook, so role is a safe
   // proxy for UI-level "should the system-admin toggle appear" checks.
   const viewerIsSystemAdmin =
     currentUser.role === 'admin' || currentUser.role === 'super-admin';
 
+  const isStep2OfCreate =
+    manageUser != null && justCreatedUserId === manageUser.id;
+
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
         title="User Management"
         actions={
-          <button
-            onClick={() => refetch()}
-            disabled={isLoading || isFetching || isSubmitting}
-            className="px-3 py-1.5 text-sm bg-panel border border-panel-border rounded-md hover:bg-panel-elev/60 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isFetching ? 'Refreshing...' : 'Refresh'}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setCreateOpen(true)}
+              disabled={isLoading || isFetching || isSubmitting}
+              className="px-3 py-1.5 text-sm bg-info text-white rounded-md hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Create user
+            </button>
+            <button
+              onClick={() => refetch()}
+              disabled={isLoading || isFetching || isSubmitting}
+              className="px-3 py-1.5 text-sm bg-panel border border-panel-border rounded-md hover:bg-panel-elev/60 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isFetching ? 'Refreshing...' : 'Refresh'}
+            </button>
+          </div>
         }
       />
       <p className="text-sm text-muted mb-6">
         Manage platform users. Credentials, system-wide access, and
         per-scope grants are all managed from the row Edit action.
       </p>
-
-      <form onSubmit={handleCreate} className="mb-6 space-y-2">
-        <div className="flex flex-wrap gap-2 items-center">
-          <input
-            type="text"
-            placeholder="Username"
-            value={newUsername}
-            onChange={(e) => setNewUsername(e.target.value)}
-            disabled={isSubmitting}
-            required
-            className="border border-panel-border rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            disabled={isSubmitting}
-            required
-            className="border border-panel-border rounded-md px-3 py-1.5 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-          />
-          <select
-            value={newRole}
-            onChange={(e) => setNewRole(e.target.value as Role)}
-            disabled={isSubmitting}
-            className="border border-panel-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-info disabled:opacity-50"
-          >
-            {ROLES.map((r) => (
-              <option key={r} value={r}>{ROLE_LABELS[r]}</option>
-            ))}
-          </select>
-          <button
-            type="submit"
-            disabled={isSubmitting || !newUsername.trim() || !newPassword.trim()}
-            className="px-3 py-1.5 text-sm bg-info text-white rounded-md hover:bg-info disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isSubmitting && deletingUserId === null && !manageUser
-              ? 'Creating...'
-              : 'Create User'}
-          </button>
-        </div>
-        <p className="text-xs text-muted">
-          Selecting admin/super-admin makes the new user system-wide admin.
-          For per-site grants, create the user first and then use Edit.
-        </p>
-      </form>
 
       {successMessage && (
         <div className="mb-4 text-sm text-success">✓ {successMessage}</div>
@@ -303,15 +243,28 @@ export default function UsersPage() {
         </table>
       )}
 
+      {createOpen && (
+        <CreateUserModal
+          onClose={() => setCreateOpen(false)}
+          onCreated={handleUserCreated}
+        />
+      )}
+
       {manageUser && (
         <ManageUserModal
           user={manageUser}
           sites={siteList}
           viewerIsSystemAdmin={viewerIsSystemAdmin}
-          onClose={() => setManageUserId(null)}
+          onClose={handleManageClose}
           onUserChanged={() => {
             refetch();
           }}
+          banner={
+            isStep2OfCreate
+              ? 'User created. Configure their access below, or close to leave them with no access for now — you can grant access later from Edit.'
+              : undefined
+          }
+          closeLabel={isStep2OfCreate ? 'Skip — user has no access yet' : undefined}
         />
       )}
     </div>
