@@ -132,7 +132,11 @@ class DeviceVlanModel(Base):
     __tablename__ = "device_vlans"
 
     vlan_id = Column(Integer, primary_key=True)
-    device = Column(String, primary_key=True)
+    device = Column(
+        String,
+        ForeignKey("devices.name", ondelete="CASCADE"),
+        primary_key=True,
+    )
     name = Column(String, nullable=False)
 
 
@@ -151,7 +155,11 @@ class DevicePortModel(Base):
     __tablename__ = "device_ports"
 
     interface = Column(String, primary_key=True)
-    device = Column(String, primary_key=True)
+    device = Column(
+        String,
+        ForeignKey("devices.name", ondelete="CASCADE"),
+        primary_key=True,
+    )
     description = Column(String, nullable=True)
     admin_up = Column(Boolean, nullable=True)
     mode = Column(String, nullable=True)
@@ -183,7 +191,11 @@ class DeviceSVIModel(Base):
     __tablename__ = "device_svis"
 
     vlan_id = Column(Integer, primary_key=True)
-    device = Column(String, primary_key=True)
+    device = Column(
+        String,
+        ForeignKey("devices.name", ondelete="CASCADE"),
+        primary_key=True,
+    )
     description = Column(String, nullable=True)
     admin_up = Column(Boolean, nullable=True)
     ipv4_address = Column(String, nullable=True)
@@ -208,7 +220,11 @@ class DeviceGlobalConfigModel(Base):
 
     __tablename__ = "device_global_config"
 
-    device = Column(String, primary_key=True)
+    device = Column(
+        String,
+        ForeignKey("devices.name", ondelete="CASCADE"),
+        primary_key=True,
+    )
     hostname = Column(String, nullable=True)
     running_config = Column(Text, nullable=True)  # RF-GLOBAL-01, dump completo de show running-config/display current-configuration
     device_version = Column(String, nullable=True)
@@ -240,7 +256,11 @@ class DeviceArpMacModel(Base):
 
     __tablename__ = "device_arp_mac"
 
-    device = Column(String, primary_key=True)
+    device = Column(
+        String,
+        ForeignKey("devices.name", ondelete="CASCADE"),
+        primary_key=True,
+    )
     arp_table = Column(JSON, nullable=True)  # lista de dict (ip/mac/interface/vlan/type/age), tabla completa sin filtrar
     mac_table = Column(JSON, nullable=True)  # lista de dict (mac/vlan/interface/type), tabla completa sin filtrar
 
@@ -255,7 +275,11 @@ class DeviceLogsModel(Base):
 
     __tablename__ = "device_logs"
 
-    device = Column(String, primary_key=True)
+    device = Column(
+        String,
+        ForeignKey("devices.name", ondelete="CASCADE"),
+        primary_key=True,
+    )
     log_output = Column(Text, nullable=True)
 
 
