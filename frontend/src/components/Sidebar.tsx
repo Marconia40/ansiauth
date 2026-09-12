@@ -12,6 +12,7 @@ import {
 } from '@/services/api';
 import type { Site } from '@/types/site';
 import type { Device } from '@/types/device';
+import { useScope } from '@/context/ScopeContext';
 import { ChevronDownIcon, ChevronRightIcon } from './Icon';
 
 const EXPAND_STORAGE_KEY = 'ansiauth.sidebar.expanded';
@@ -88,15 +89,33 @@ function SitesLevel({
     queryKey: ['sidebar', 'sites'],
     queryFn: getSites,
   });
+  const { selectedScope } = useScope();
 
   if (isLoading) return <Placeholder level={1} text="Loading sites…" />;
   if (isError) return <Placeholder level={1} text="Failed to load sites" tone="danger" />;
   if (!data || data.length === 0) return <Placeholder level={1} text="No sites available" />;
 
+  // When the topbar switcher has picked a specific site, narrow the tree
+  // to just that site (its groups and devices remain rendered under it).
+  // If the scoped site isn't in the visible set — e.g. the URL points at
+  // a site the caller can no longer see — fall back silently to the
+  // full list, matching ScopeSwitcher's graceful behaviour.
+  const scopedSiteId =
+    selectedScope.kind === 'site' ? selectedScope.siteId : null;
+  const visibleSites =
+    scopedSiteId != null && data.some((s) => s.id === scopedSiteId)
+      ? data.filter((s) => s.id === scopedSiteId)
+      : data;
+
   return (
     <>
-      {data.map((site) => {
+      {visibleSites.map((site) => {
         const id = `site:${site.id}`;
+        // Auto-expand the scoped site so groups are visible without an
+        // extra click. Manual expansion state (sessionStorage) still
+        // wins for every other site.
+        const forceOpen = scopedSiteId === site.id;
+        const open = forceOpen || isOpen(id);
         return (
           <div key={site.id}>
             <TreeRow
@@ -105,10 +124,10 @@ function SitesLevel({
               href={`/sites/${site.id}`}
               level={1}
               hasChildren
-              open={isOpen(id)}
-              onToggle={() => toggle(id)}
+              open={open}
+              onToggle={forceOpen ? undefined : () => toggle(id)}
             />
-            {isOpen(id) && (
+            {open && (
               <GroupsLevel siteId={site.id} isOpen={isOpen} toggle={toggle} />
             )}
           </div>
@@ -217,7 +236,7 @@ function TreeRow({
         active ? 'bg-sidebar-active text-white' : 'hover:bg-sidebar-hover'
       }`}
     >
-      {hasChildren ? (
+      {hasChildren && onToggle ? (
         <button
           type="button"
           onClick={onToggle}
@@ -227,6 +246,18 @@ function TreeRow({
         >
           {open ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
         </button>
+      ) : hasChildren ? (
+        // Non-interactive chevron — the node is force-open (e.g. this is
+        // the focused site under a topbar scope) so collapsing it here
+        // would fight the scope selection. Users switch back to
+        // ``All sites`` in the topbar to regain manual control.
+        <span
+          className="h-7 w-6 flex items-center justify-center text-muted/60 shrink-0"
+          style={{ marginLeft: padding }}
+          aria-hidden
+        >
+          <ChevronDownIcon size={14} />
+        </span>
       ) : (
         <span
           className="h-7 w-6 shrink-0"
