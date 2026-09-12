@@ -256,15 +256,37 @@ class HuaweiVendor(VendorDriver):
 
     # ── Mode-change operations ────────────────────────────────────────────────
 
-    def resolver_set_access_mode(self, interface: str, vlan_id: int) -> tuple[str, "str | None", dict]:
+    def resolver_set_access_mode(
+        self, interface: str, vlan_id: int, *, viene_de_trunk_con_vlans: bool = True,
+    ) -> tuple[str, "str | None", dict]:
         vars = {"interface": interface, "interface_full": expandir_nombre_interfaz(interface), "vlan_id": vlan_id}
-        return "set_access_mode", None, vars
+        variant = "con_confirmacion" if viene_de_trunk_con_vlans else "sin_confirmacion"
+        return "set_access_mode", variant, vars
 
-    def set_access_mode(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
+    def set_access_mode(
+        self, interface: str, vlan_id: int, device: Device, password: str,
+        *, viene_de_trunk_con_vlans: bool = True,
+    ) -> dict:
         """Set *interface* to access mode with *vlan_id*, atomically —
         ``port link-type access`` + ``port default vlan``, same single
-        candidate-config session as every other mutation on this driver."""
-        op_key, variant, vars = self.resolver_set_access_mode(interface, vlan_id)
+        candidate-config session as every other mutation on this driver.
+
+        ``viene_de_trunk_con_vlans`` selecciona la variant de
+        ``commands.yaml`` con o sin la línea ``"y"`` que contesta el
+        prompt ``[Y/N]`` de ``port link-type access`` -- ese prompt SOLO
+        aparece cuando el puerto venía de trunk con VLANs asignadas. Bug
+        real encontrado en vivo contra ``huawei01`` (password/Ansible):
+        mandarla siempre, aunque el propio comentario de
+        ``commands.yaml`` decía que rechazarla era "inofensivo", hacía
+        que ``ansible.netcommon.network_cli`` abortara la tarea entera
+        apenas veía el rechazo -- aunque el resto del bloque (``port
+        default vlan``/``commit``) ya se había mandado en el mismo
+        ``write()`` y el device lo aplicaba igual. El job quedaba
+        "failed" + disparaba un rollback que además fallaba (conexión ya
+        rota), mintiendo sobre el estado real del device."""
+        op_key, variant, vars = self.resolver_set_access_mode(
+            interface, vlan_id, viene_de_trunk_con_vlans=viene_de_trunk_con_vlans,
+        )
         return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def resolver_set_trunk_mode(

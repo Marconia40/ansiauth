@@ -164,7 +164,7 @@ def test_description_control_chars_rejected():
 # (moved here from validar() -- see module docstring)
 
 class _FakeDriver:
-    def resolver_set_access_mode(self, interface, vlan_id):
+    def resolver_set_access_mode(self, interface, vlan_id, *, viene_de_trunk_con_vlans=True):
         return ("set_access_mode", None, {"interface": interface, "vlan_id": vlan_id})
 
     def aplicar_paso(self, op_key, variant, vars, device, password):

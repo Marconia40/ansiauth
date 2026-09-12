@@ -145,7 +145,7 @@ class FakePuertoDriver(VendorDriver):
     def resolver_reset_port(self, interface):
         return ("reset_port", None, {"interface": interface})
 
-    def resolver_set_access_mode(self, interface, vlan_id):
+    def resolver_set_access_mode(self, interface, vlan_id, *, viene_de_trunk_con_vlans=True):
         return ("set_access_mode", None, {"interface": interface, "vlan_id": vlan_id})
 
     def resolver_set_trunk_mode(self, interface, native_vlan, vlan_list):
@@ -205,7 +205,7 @@ class FakePuertoDriver(VendorDriver):
         self.calls.append(("rollback:reset_port", None, {"interface": interface}))
         return {"rc": 0, "stdout": "", "stderr": "", "success": True}
 
-    def set_access_mode(self, interface, vlan_id, device, password):
+    def set_access_mode(self, interface, vlan_id, device, password, *, viene_de_trunk_con_vlans=True):
         self.calls.append(("rollback:set_access_mode", None, {"interface": interface, "vlan_id": vlan_id}))
         return {"rc": 0, "stdout": "", "stderr": "", "success": True}
 

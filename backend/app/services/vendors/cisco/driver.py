@@ -242,11 +242,22 @@ class CiscoVendor(VendorDriver):
         op_key, variant, vars = self.resolver_reset_port(interface)
         return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
-    def resolver_set_access_mode(self, interface: str, vlan_id: int) -> tuple[str, "str | None", dict]:
+    def resolver_set_access_mode(
+        self, interface: str, vlan_id: int, *, viene_de_trunk_con_vlans: bool = True,
+    ) -> tuple[str, "str | None", dict]:
+        # viene_de_trunk_con_vlans: ignorado -- Cisco (ios_config) no tiene
+        # prompts interactivos [Y/N], solo Huawei VRP los usa. Parámetro
+        # presente únicamente para que la firma compartida (VendorDriver)
+        # coincida entre los 2 vendors.
         return "set_access_mode", None, {"interface": interface, "vlan_id": vlan_id}
 
-    def set_access_mode(self, interface: str, vlan_id: int, device: Device, password: str) -> dict:
-        op_key, variant, vars = self.resolver_set_access_mode(interface, vlan_id)
+    def set_access_mode(
+        self, interface: str, vlan_id: int, device: Device, password: str,
+        *, viene_de_trunk_con_vlans: bool = True,
+    ) -> dict:
+        op_key, variant, vars = self.resolver_set_access_mode(
+            interface, vlan_id, viene_de_trunk_con_vlans=viene_de_trunk_con_vlans,
+        )
         return self._aplicar_desde_template(op_key, vars, device, password, variant=variant)
 
     def resolver_set_trunk_mode(

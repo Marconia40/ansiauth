@@ -225,7 +225,8 @@ class MockVendor(VendorDriver):
         return {"rc": 0, "stdout": "Simulated port reset applied", "stderr": "", "success": True}
 
     def set_access_mode(
-        self, interface: str, vlan_id: int, device: "Device", password: str
+        self, interface: str, vlan_id: int, device: "Device", password: str,
+        *, viene_de_trunk_con_vlans: bool = True,
     ) -> dict:
         if device.name == "fail_device":
             return {"rc": 1, "stdout": "", "stderr": "Simulated Ansible failure", "success": False}
