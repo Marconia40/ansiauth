@@ -3,10 +3,17 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.db.models import RefreshTokenModel
+from app.composition import (
+    device_repository, plugin_registry, role_assignment_repository,
+    site_repository, user_repository,
+)
+from app.db.models import RefreshTokenModel, SiteModel
 from app.db.session import get_session
-from app.schemas.user import UserCreate
-from app.services import refresh_token_service, user_service
+from app.repositories.role_assignment_repository import RoleAssignment
+from app.services import refresh_token_service
+from app.services.vendors.mock import MockVendor
+
+_TEST_SITE_NAME = "TokenLifecycleSite"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -29,35 +36,52 @@ def _logout(client, refresh_token):
 # ── Fixture ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def seed_lifecycle_user():
-    """MSP: Phase 4 — a fresh observer user has no grants and therefore
-    cannot see mock_device (now in the REGULAR "Mock Site" per
-    ``seed_defaults``). Attach a site-wide observer grant on Mock Site so
-    the lifecycle flow tests (which end with a
-    ``GET /vlans/?device=mock_device``) still pass under strict-hierarchy.
+def seed_lifecycle_user(admin_client):
+    """A fresh observer user has no grants and therefore cannot see
+    mock_device. Register a dedicated site + mock_device (neither is
+    seeded by default anymore -- there's no "Mock Site" bootstrap left)
+    and attach a site-wide observer grant so the lifecycle flow tests
+    (which end with a ``GET /vlans/?device=mock_device``) still pass under
+    strict-hierarchy. Also forces cisco_ios onto MockVendor: this repo's
+    .env pins EXECUTION_MODE=real for local dev, baked into plugin_registry
+    at import time, before any fixture here runs.
     """
-    from app.db.models import RoleAssignmentModel, SiteModel, UserModel
-    if user_service.get_by_username("lifecycle_user") is None:
-        user_service.create_user(UserCreate(
-            username="lifecycle_user", password="lifecycle_pass_99", role="observer",
-        ))
+    from app.db.models import RoleAssignmentModel, UserModel
+
+    plugin_registry.registrar("cisco_ios", MockVendor())
+    plugin_registry.registrar("huawei_vrp", MockVendor())
+
+    if user_repository.obtener_por_username("lifecycle_user") is None:
+        user_repository.crear("lifecycle_user", "lifecycle_pass_99")
+
     with get_session() as session:
-        uid = session.query(UserModel.id).filter_by(username="lifecycle_user").scalar()
-        mock_site_id = session.query(SiteModel.id).filter_by(name="Mock Site").scalar()
-        if uid and mock_site_id:
-            existing = (
-                session.query(RoleAssignmentModel)
-                .filter_by(user_id=uid, site_id=mock_site_id, device_group_id=None)
-                .first()
-            )
-            if existing is None:
-                session.add(RoleAssignmentModel(
-                    user_id=uid, site_id=mock_site_id, device_group_id=None,
-                    role="observer",
-                ))
+        row = session.query(SiteModel).filter_by(name=_TEST_SITE_NAME).first()
+        site_id = row.id if row else None
+    if site_id is None:
+        site_id = site_repository.crear_con_grupo_default(_TEST_SITE_NAME).id
+
+    # Grant on whichever site actually owns "mock_device" -- if another
+    # test file's fixture already registered it under ITS OWN site (device
+    # names are global across the shared test DB), granting only on
+    # `site_id` here would leave the observer unable to see a device that
+    # landed elsewhere.
+    existing = device_repository.get("mock_device")
+    if existing is None:
+        resp = admin_client.post("/api/v1/devices/", json={
+            "name": "mock_device", "host": "10.0.0.1", "vendor": "cisco_ios",
+            "username": "admin", "password": "admin", "site_id": site_id,
+        })
+        assert resp.status_code == 200, resp.text
+        device_site_id = site_id
+    else:
+        device_site_id = existing.site_id
+
+    user = user_repository.obtener_por_username("lifecycle_user")
+    scope = role_assignment_repository.scope_de({"id": user.id, "is_system_admin": False})
+    if scope.rol_para(device_site_id) != "observer":
+        role_assignment_repository.add(RoleAssignment(user_id=user.id, site_id=device_site_id, role="observer"))
     yield
     with get_session() as session:
-        from app.db.models import UserModel
         uid = session.query(UserModel.id).filter_by(username="lifecycle_user").scalar()
         if uid is not None:
             session.query(RoleAssignmentModel).filter_by(user_id=uid).delete(

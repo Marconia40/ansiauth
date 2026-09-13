@@ -104,16 +104,19 @@ interface DeviceResultShape {
   stdout?: string;
   success?: boolean;
   noop?: boolean;
+  commands?: string[];
 }
 
 // Same idea as DeviceErrorDetails, mirrored for the success case: the raw
-// stdout is a full SSH session transcript (VTY banners, every command
-// echoed back, and -- as of tonight -- sometimes a benign rejection like
-// the "y" placeholder for Huawei's Y/N confirmation, see
-// vendors/base.py::RUIDO_BENIGNO) that looks alarming even though the job
-// succeeded. Surface a plain confirmation by default; keep the full
-// transcript one click away for anyone who wants to verify exactly what
-// was sent, instead of dumping it unprompted like before.
+// stdout is either the full ansible-playbook console dump (Cisco's
+// ios_config exposes no stdout at all, see ansible_service.py) or the
+// device's own full session echo (Huawei's cli_command does return
+// stdout, but it's VTY banners + every prompt/command echoed back) --
+// equally unreadable for different reasons. `commands` (see
+// vendors/base.py::_comandos_desde_extravars()) sidesteps both by
+// surfacing exactly what was sent, known before either transport ever
+// ran. The raw transcript stays one click away for anyone who wants to
+// verify the literal bytes.
 function DeviceResultDetails({ result }: { result: unknown }) {
   if (result == null || typeof result !== 'object') {
     return <JsonBlock data={result} />;
@@ -130,6 +133,14 @@ function DeviceResultDetails({ result }: { result: unknown }) {
           ? 'No changes needed — device already matched the requested state.'
           : '✓ Applied successfully.'}
       </p>
+      {r.commands && r.commands.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-muted">Commands applied:</span>
+          <pre className="text-xs font-mono text-text bg-panel-elev/60 border border-panel-border rounded p-2 whitespace-pre-wrap break-all">
+            {r.commands.join('\n')}
+          </pre>
+        </div>
+      )}
       {cleaned.trim() !== '' && (
         <details className="text-xs">
           <summary className="cursor-pointer text-muted hover:text-text select-none">

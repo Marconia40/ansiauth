@@ -114,6 +114,21 @@ def _validate_description(description: "str | None") -> None:
         raise ValueError("Description must not contain control characters or newlines")
 
 
+def _viene_de_trunk_con_vlans(anterior: "Puerto | None") -> bool:
+    """``True`` si *anterior* (el estado del puerto ANTES del cambio que se
+    está por aplicar) estaba en trunk con VLANs asignadas -- la única
+    condición bajo la que Huawei VRP muestra el prompt ``[Y/N]`` que
+    ``HuaweiVendor.set_access_mode()`` necesita saber si contestar. Sin
+    dato (``None`` -- pre-state no disponible, ej. un reintento real que
+    no lo recibió) devuelve ``True``, el mismo comportamiento
+    conservador que existía antes de que esto fuera condicional: más
+    vale contestar una "y" que el device rechaza como inofensiva a
+    ignorar un prompt real que trunca el resto del bloque."""
+    if anterior is None:
+        return True
+    return anterior.mode == "trunk" and bool(anterior.allowed_vlans)
+
+
 @dataclass
 class Puerto:
     """Domain representation of a switch interface — unifica lo que antes
@@ -198,9 +213,18 @@ class Puerto:
 
     @property
     def mutation_fields(self) -> set[str]:
+        # Bug real encontrado corriendo test_port_storm_control_action.py:
+        # storm_control_action/storm_control_trap (agregados por la
+        # parametrización de storm-control) nunca se sumaron acá -- mismo
+        # tipo de desync ya documentado más abajo para poe_enabled. Un
+        # Puerto(storm_control_trap=True) solo, sin ningún otro campo,
+        # pasaba por "sin campo de mutación" antes de llegar a la regla
+        # cruzada real (storm_control_action/trap exigen
+        # storm_control_enabled=True) en validar().
         campos = ("description", "admin_up", "mode", "access_vlan",
                   "allowed_vlans", "poe_enabled", "storm_control_enabled",
-                  "storm_control_threshold")
+                  "storm_control_threshold", "storm_control_action",
+                  "storm_control_trap")
         return {c for c in campos if getattr(self, c) is not None}
 
     def validar(self) -> None:
@@ -325,7 +349,7 @@ class Puerto:
         if self.reset:
             return self._aplicar_reset(device)
         if self.mode == "access":
-            return self._aplicar_modo_access(device)
+            return self._aplicar_modo_access(device, pre_state)
         if self.mode == "trunk":
             return self._aplicar_modo_trunk(device)
         campos = self.mutation_fields
@@ -361,7 +385,10 @@ class Puerto:
         if self.reset:
             return device.driver.resolver_reset_port(self.interface)
         if self.mode == "access":
-            return device.driver.resolver_set_access_mode(self.interface, self.access_vlan)
+            return device.driver.resolver_set_access_mode(
+                self.interface, self.access_vlan,
+                viene_de_trunk_con_vlans=_viene_de_trunk_con_vlans(actual),
+            )
         if self.mode == "trunk":
             return device.driver.resolver_set_trunk_mode(self.interface, self.access_vlan, list(self.allowed_vlans))
         campos = self.mutation_fields
@@ -422,6 +449,15 @@ class Puerto:
             if anterior.mode == "access":
                 if anterior.access_vlan is None:
                     return [], None
+                # viene_de_trunk_con_vlans no se calcula acá a propósito:
+                # `anterior` es el pre-state ORIGINAL (antes del cambio
+                # que se está revirtiendo), no el estado real del puerto
+                # AHORA MISMO -- si el apply fallido dejó el puerto a
+                # medio camino en trunk, `anterior` no lo refleja.
+                # Confiar en el default conservador (True) es más seguro
+                # que arriesgar el bug inverso (un prompt real sin
+                # contestar trunca el resto del bloque de rollback) sin
+                # releer el device antes de cada rollback.
                 paso = device.driver.resolver_set_access_mode(self.interface, int(anterior.access_vlan))
             elif anterior.mode == "trunk":
                 if anterior.access_vlan is None or not anterior.allowed_vlans:
@@ -479,6 +515,9 @@ class Puerto:
         tocar el device. PoE queda fuera por el reader gap conocido."""
         pasos = []
         if anterior.mode == "access" and anterior.access_vlan is not None:
+            # Mismo motivo que en resolver_rollback(): `anterior` es
+            # pre-state viejo, no el estado real ahora -- default
+            # conservador (True), no se calcula acá a propósito.
             pasos.append(device.driver.resolver_set_access_mode(
                 self.interface, int(anterior.access_vlan),
             ))
@@ -843,6 +882,7 @@ class Puerto:
             ):
                 pasos.append(device.driver.resolver_set_access_mode(
                     self.interface, int(self.access_vlan),
+                    viene_de_trunk_con_vlans=_viene_de_trunk_con_vlans(actual_ahora),
                 ))
         elif self.mode == "trunk" and self.access_vlan is not None and self.allowed_vlans:
             if actual_ahora is None or (
@@ -901,14 +941,26 @@ class Puerto:
 
         return pasos, verificar
 
-    def _aplicar_modo_access(self, device: "Device") -> dict:
+    def _aplicar_modo_access(self, device: "Device", pre_state: "dict | None" = None) -> dict:
         """Cambia el puerto a modo access con ``self.access_vlan``,
         atómico -- reemplaza la rama ``_es_composite`` vieja para este caso
         puntual. Sin ``_noop_resultado()`` a propósito, mismo criterio que
         el camino que reemplaza: comparar "ya está en access con esta
         VLAN" es una pregunta legítima pero separada, documentada como
-        alcance no resuelto, no un caso olvidado."""
-        op_key, variant, vars = device.driver.resolver_set_access_mode(self.interface, self.access_vlan)
+        alcance no resuelto, no un caso olvidado.
+
+        ``pre_state`` (cuando viene seteado -- ``Orquestador.ejecutar()``
+        lo pasa siempre en el primer intento) decide si el puerto venía
+        de trunk-con-vlans, la única condición bajo la que Huawei
+        necesita contestar el prompt ``[Y/N]`` de ``port link-type
+        access`` -- ver ``_viene_de_trunk_con_vlans()`` y el docstring de
+        ``HuaweiVendor.set_access_mode()`` para el bug real que esto
+        arregla."""
+        anterior = pre_state.get("actual") if pre_state else None
+        op_key, variant, vars = device.driver.resolver_set_access_mode(
+            self.interface, self.access_vlan,
+            viene_de_trunk_con_vlans=_viene_de_trunk_con_vlans(anterior),
+        )
         resultado = device.driver.aplicar_paso(op_key, variant, vars, device, device.password)
         return {**resultado, "accion": "configurar_modo_access"}
 

@@ -71,6 +71,42 @@ def limpiar_ruido_benigno(texto: str) -> str:
     return texto
 
 
+def _comandos_desde_extravars(extravars: dict) -> "list[str]":
+    """Aplana cualquier shape de *extravars* a la lista de líneas de config
+    efectivamente mandadas al device -- ya conocidas acá (las arma
+    ``VendorDriver._renderizar_paso()``/``_combinar_pasos_renderizados()``
+    antes de tocar Ansible o el device), sin necesitar parsear el dump de
+    consola de ``ansible-playbook`` (Cisco, cuyo módulo ``ios_config`` no
+    expone ``stdout``) ni el eco crudo de la sesión del device (Huawei,
+    cuyo ``cli_command`` sí expone ``stdout`` pero es la transcripción
+    completa con banners y prompts) -- confirmado en vivo que ambos
+    vuelven ilegible el resultado exitoso en la UI por igual, aunque por
+    causas distintas. Cubre las 3 formas de un paso simple
+    (``lines``[+``parents``]/``command_block``/``commands``) y las 2 de
+    un lote (``command_blocks``/``config_steps``, ver
+    ``_combinar_pasos_renderizados()``)."""
+    if "lines" in extravars:
+        parents = extravars.get("parents")
+        return ([parents] if parents else []) + list(extravars["lines"])
+    if "command_block" in extravars:
+        return extravars["command_block"].split("\n")
+    if "commands" in extravars:
+        return list(extravars["commands"])
+    if "command_blocks" in extravars:
+        out: "list[str]" = []
+        for block in extravars["command_blocks"]:
+            out.extend(block.split("\n"))
+        return out
+    if "config_steps" in extravars:
+        out: "list[str]" = []
+        for step in extravars["config_steps"]:
+            if step.get("parents"):
+                out.append(step["parents"])
+            out.extend(step.get("lines", []))
+        return out
+    return []
+
+
 class VendorDriver(ABC):
     """Abstract base class every vendor driver must implement — VLAN and
     port operations fused into one contract (FINAL_ARCHITECTURE.md §1.6:
@@ -156,7 +192,7 @@ class VendorDriver(ABC):
 
     def _aplicar(self, extravars: dict, device: Device, password: str, *, op_label: str) -> dict:
         """Run this driver's single playbook with *extravars* and normalize
-        the result to ``{"rc", "stdout", "stderr", "success"}``.
+        the result to ``{"rc", "stdout", "stderr", "success", "commands"}``.
 
         Shared by every mutation method (and ``save_config()``) across both
         concrete drivers -- what varies per call is only the shape of
@@ -164,6 +200,13 @@ class VendorDriver(ABC):
         ``{"command_block":...}`` for Huawei, or ``{"commands":[...]}`` for
         either vendor's "run a bare exec command" case, e.g. Cisco's
         ``write``).
+
+        ``commands`` (via ``_comandos_desde_extravars()``) es lo que
+        realmente se mandó, tomado de *extravars* directo -- no de
+        parsear el resultado -- así que sale igual de limpio pase lo que
+        pase del lado del device/Ansible. Omitido del dict cuando queda
+        vacío (ej. un ``extravars`` shape que no se reconoce) en vez de
+        mandar una lista vacía sin sentido.
         """
         import traceback
 
@@ -171,6 +214,9 @@ class VendorDriver(ABC):
         try:
             result = self._ejecutar(extravars, device, password)
             normalized = {**result, "success": result.get("rc", 1) == 0}
+            comandos = _comandos_desde_extravars(extravars)
+            if comandos:
+                normalized["commands"] = comandos
             if normalized["success"]:
                 logger.info("%s: %s OK on device=%s", type(self).__name__, op_label, device.name)
             else:
@@ -1113,6 +1159,8 @@ class VendorDriver(ABC):
         vlan_id: int,
         device: Device,
         password: str,
+        *,
+        viene_de_trunk_con_vlans: bool = True,
     ) -> dict:
         """Set *interface* to access mode with *vlan_id* as its access VLAN,
         atomically (mode + VLAN in the same device interaction).
@@ -1137,6 +1185,14 @@ class VendorDriver(ABC):
             Domain device object exposing ``.name``, ``.host``, ``.username``.
         password:
             Plaintext device password (decrypted by the caller).
+        viene_de_trunk_con_vlans:
+            Whether the port's PREVIOUS state (before this call) was trunk
+            mode with VLANs assigned -- Huawei VRP only shows a `[Y/N]`
+            confirmation prompt for `port link-type access` in that case;
+            other vendors ignore this. Default ``True`` (the historical,
+            always-confirm behavior) for callers that don't know the prior
+            state -- see ``HuaweiVendor.set_access_mode()`` for why getting
+            this wrong on Huawei used to break the write silently.
 
         Returns
         -------

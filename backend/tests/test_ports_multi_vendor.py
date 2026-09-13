@@ -1,29 +1,51 @@
-"""End-to-end multi-vendor validation for Step 1.4.
+"""Cross-vendor validation for the port read path (Step 1.4).
 
-These tests assert that the *exact same* request flow (port_service →
-dispatcher → driver → parser → PortInfo) produces an identical envelope
-shape for Huawei and Cisco, and that an unknown vendor surfaces the
-operator-friendly 501 response instead of a raw backend error.
+Two layers, modernized against the current architecture:
+
+1. Driver-level parser parity -- ``CiscoVendor().list_ports()`` and
+   ``HuaweiVendor().list_ports()`` fed realistic multi-command stdouts
+   (via a monkeypatched ``ansible_service.run_playbook``), proving both
+   vendors' real parser stacks normalize to the same ``Puerto`` shape.
+   ``app.services.vendors.dispatcher``/``port_service`` are gone -- the
+   old test drove this through ``port_service.list_ports()``; the direct
+   driver call is the closest modern equivalent (no free-function layer
+   left in between).
+
+   Cisco's ``list_ports()`` now issues 5 commands (status, description,
+   switchport, storm-control, running-config -- see
+   ``app/services/vendors/cisco/commands.yaml``), not 3; Huawei issues 4
+   (brief, description, port-vlan, current-configuration -- see
+   ``app/services/vendors/huawei/commands.yaml``). Both routed through a
+   single shared playbook per vendor (``vendors/cisco/run.yml`` /
+   ``vendors/huawei/run.yml``), not the old per-operation
+   ``get_ports.yml`` files.
+
+2. API-level envelope parity -- ``GET /api/v1/devices/{name}/ports/`` is
+   cache-first now (reads ``puerto_repository``, no live driver call at
+   request time -- see test_ports_api.py); parity is proven by seeding
+   equivalent ``Puerto`` rows for a cisco-vendor and a huawei-vendor
+   device and asserting the two envelopes carry identical key sets. This
+   is really testing that ``PortRead`` (the wire schema) is
+   vendor-agnostic, which is still a real and worthwhile guarantee.
+
+The old "unsupported vendor -> 501" tests here targeted the live-read
+dispatcher path (``get_port_driver``/``UnsupportedVendorError`` raised
+from a GET). That path is gone entirely for GET -- the endpoint never
+resolves a vendor driver any more (pure cache read, confirmed by reading
+``app/api/ports.py::list_ports()``). Dropped, not ported -- there is
+nothing left to resolve a vendor driver from on this endpoint.
 """
 
-import pytest
-from fastapi.testclient import TestClient
+from __future__ import annotations
 
-from app.core.exceptions import UnsupportedVendorError
-from app.core.security import create_access_token
-from app.main import app
+from app.composition import puerto_repository
 from app.models.device import Device
-from app.models.port import PortInfo
-from app.services import ansible_service, port_service
-from app.services.vendors.dispatcher import get_port_driver
+from app.models.port import Puerto
+from app.services import ansible_service
+from app.services.vendors.cisco.driver import CiscoVendor
+from app.services.vendors.huawei.driver import HuaweiVendor
 
-
-def _admin_client() -> TestClient:
-    token = create_access_token({"sub": "admin", "role": "admin"})
-    c = TestClient(app)
-    c.headers.update({"Authorization": f"Bearer {token}"})
-    return c
-
+from tests._puerto_fakes import get_or_create_device
 
 # Minimal-but-realistic stdouts so each driver actually returns a populated
 # inventory, exercising the full parser stack of each vendor.
@@ -40,6 +62,7 @@ Port                    Link Type    PVID  Trunk VLAN List
 -------------------------------------------------------------------
 GigabitEthernet0/0/1    access       10    -
 """
+_HUAWEI_STORM = ""
 
 _CISCO_STATUS = """\
 Port      Name               Status       Vlan       Duplex  Speed Type
@@ -58,139 +81,85 @@ Access Mode VLAN: 10 (TEST)
 Trunking Native Mode VLAN: 1 (default)
 Trunking VLANs Enabled: ALL
 """
+_CISCO_STORM = ""
+_CISCO_RUNNING_CONFIG = ""
 
 
-# ── Service-level cross-vendor parity ─────────────────────────────────────────
-
-def test_service_layer_returns_same_shape_for_both_vendors(monkeypatch):
-    """``port_service.list_ports`` returns the same PortListResponse shape
-    regardless of whether the underlying driver is Huawei or Cisco —
-    callers should never need vendor branching."""
-
-    huawei_device = Device(
-        name="huawei-x",
-        host="192.0.2.1",
-        vendor="huawei_vrp",
-        username="admin",
-        encrypted_password="encrypted",
-        platform="vrp",
+def _fake_device(vendor: str) -> Device:
+    dev = Device(
+        name=f"{vendor}-driver-x", host="192.0.2.1", vendor=vendor,
+        username="admin", encrypted_password="enc",
+        platform="ios" if vendor == "cisco_ios" else "vrp",
     )
-    cisco_device = Device(
-        name="cisco-x",
-        host="192.0.2.2",
-        vendor="cisco_ios",
-        username="admin",
-        encrypted_password="encrypted",
-        platform="ios",
-    )
+    dev._driver = CiscoVendor() if vendor == "cisco_ios" else HuaweiVendor()
+    dev._password = "fake-password"
+    return dev
 
-    def _fake_get_device(device_id):
-        return {"huawei-x": huawei_device, "cisco-x": cisco_device}.get(device_id)
 
-    monkeypatch.setattr("app.services.device_service.get_device", _fake_get_device)
-    monkeypatch.setattr(port_service, "EXECUTION_MODE", "real")
-    monkeypatch.setattr(
-        "app.services.secret_service.decrypt_password",
-        lambda enc: "fake-password",
-    )
+# -- Driver-level parser parity -----------------------------------------------
 
-    huawei_stdouts = [_HUAWEI_BRIEF, _HUAWEI_DESC, _HUAWEI_PORTVLAN]
-    cisco_stdouts = [_CISCO_STATUS, _CISCO_DESC, _CISCO_SW]
+def test_driver_level_parser_parity_across_vendors(monkeypatch):
+    """``CiscoVendor().list_ports()`` and ``HuaweiVendor().list_ports()``
+    normalize to the same ``Puerto`` shape for equivalent device state."""
 
     def _fake_run_playbook(playbook, extravars, inventory=None, device=None):
-        if "huawei" in playbook:
-            return {"rc": 0, "stdout": "", "stderr": "", "stdouts": huawei_stdouts}
-        if "cisco" in playbook:
-            return {"rc": 0, "stdout": "", "stderr": "", "stdouts": cisco_stdouts}
+        if playbook == "vendors/huawei/run.yml":
+            return {
+                "rc": 0, "stdout": "", "stderr": "",
+                "stdouts": [_HUAWEI_BRIEF, _HUAWEI_DESC, _HUAWEI_PORTVLAN, _HUAWEI_STORM],
+            }
+        if playbook == "vendors/cisco/run.yml":
+            return {
+                "rc": 0, "stdout": "", "stderr": "",
+                "stdouts": [_CISCO_STATUS, _CISCO_DESC, _CISCO_SW, _CISCO_STORM, _CISCO_RUNNING_CONFIG],
+            }
         raise AssertionError(f"unexpected playbook: {playbook}")
 
     monkeypatch.setattr(ansible_service, "run_playbook", _fake_run_playbook)
 
-    h = port_service.list_ports("huawei-x")
-    c = port_service.list_ports("cisco-x")
+    huawei_dev = _fake_device("huawei_vrp")
+    cisco_dev = _fake_device("cisco_ios")
 
-    # Envelope structure parity
-    assert set(h.to_dict().keys()) == set(c.to_dict().keys())
-    assert h.device == "huawei-x"
-    assert c.device == "cisco-x"
-    assert h.vendor == "huawei_vrp"
-    assert c.vendor == "cisco_ios"
-    assert len(h.ports) == 1
-    assert len(c.ports) == 1
+    huawei_ports = huawei_dev.driver.list_ports(huawei_dev, huawei_dev.password)
+    cisco_ports = cisco_dev.driver.list_ports(cisco_dev, cisco_dev.password)
 
-    # Per-port field parity
-    hp, cp = h.ports[0], c.ports[0]
-    assert isinstance(hp, PortInfo)
-    assert isinstance(cp, PortInfo)
-    assert set(hp.to_dict().keys()) == set(cp.to_dict().keys())
+    assert len(huawei_ports) == 1
+    assert len(cisco_ports) == 1
+    hp, cp = huawei_ports[0], cisco_ports[0]
+    assert isinstance(hp, Puerto)
+    assert isinstance(cp, Puerto)
 
-    # Both descriptions populated identically — proves the normalized model
-    # surfaces the same operator-facing info regardless of vendor CLI dialect.
+    # Same normalized field set (both are Puerto instances -- structural
+    # parity is automatic), and the same real values parsed out of each
+    # vendor's distinct CLI dialect.
     assert hp.description == "cross-vendor-test"
     assert cp.description == "cross-vendor-test"
     assert hp.mode == "access"
     assert cp.mode == "access"
     assert hp.access_vlan == 10
     assert cp.access_vlan == 10
-
-    # PoE / speed / duplex must be None across both vendors per the Step 1.x spec
-    for p in (hp, cp):
-        assert p.poe_enabled is None
-        assert p.speed is None
-        assert p.duplex is None
+    assert hp.admin_up is True
+    assert cp.admin_up is True
 
 
-# ── API-level cross-vendor parity ─────────────────────────────────────────────
+# -- API-level envelope parity (cache-first) ----------------------------------
 
-def test_api_envelope_identical_for_both_vendors(monkeypatch):
-    """``GET /api/v1/ports/?device=...`` returns the same envelope keys
-    regardless of vendor — the frontend can use a single rendering path."""
+def test_api_envelope_identical_for_both_vendors(client):
+    """``GET /api/v1/devices/{name}/ports/`` returns the same envelope keys
+    regardless of the device's vendor -- the frontend can use a single
+    rendering path. Cache-first: no live driver call, rows are seeded
+    directly."""
+    huawei_dev = get_or_create_device("huawei-api-x", site_name="Multi Vendor Test Site", vendor="huawei_vrp")
+    cisco_dev = get_or_create_device("cisco-api-x", site_name="Multi Vendor Test Site", vendor="cisco_ios")
 
-    huawei_device = Device(
-        name="huawei-api",
-        host="192.0.2.10",
-        vendor="huawei_vrp",
-        username="admin",
-        encrypted_password="encrypted",
-        platform="vrp",
-    )
-    cisco_device = Device(
-        name="cisco-api",
-        host="192.0.2.11",
-        vendor="cisco_ios",
-        username="admin",
-        encrypted_password="encrypted",
-        platform="ios",
-    )
+    for dev in (huawei_dev, cisco_dev):
+        puerto_repository.add(Puerto(
+            interface="GigabitEthernet0/0/1", device=dev.name, description="cross-vendor-test",
+            admin_up=True, operational_up=True, mode="access", access_vlan=10,
+        ))
 
-    def _fake_get_device(device_id):
-        return {"huawei-api": huawei_device, "cisco-api": cisco_device}.get(device_id)
-
-    monkeypatch.setattr("app.services.device_service.get_device", _fake_get_device)
-    monkeypatch.setattr(port_service, "EXECUTION_MODE", "real")
-    monkeypatch.setattr(
-        "app.services.secret_service.decrypt_password",
-        lambda enc: "fake-password",
-    )
-
-    def _fake_run_playbook(playbook, extravars, inventory=None, device=None):
-        if "huawei" in playbook:
-            return {
-                "rc": 0, "stdout": "", "stderr": "",
-                "stdouts": [_HUAWEI_BRIEF, _HUAWEI_DESC, _HUAWEI_PORTVLAN],
-            }
-        if "cisco" in playbook:
-            return {
-                "rc": 0, "stdout": "", "stderr": "",
-                "stdouts": [_CISCO_STATUS, _CISCO_DESC, _CISCO_SW],
-            }
-        raise AssertionError(f"unexpected playbook: {playbook}")
-
-    monkeypatch.setattr(ansible_service, "run_playbook", _fake_run_playbook)
-
-    client = _admin_client()
-    huawei_resp = client.get("/api/v1/ports/?device=huawei-api")
-    cisco_resp = client.get("/api/v1/ports/?device=cisco-api")
+    huawei_resp = client.get(f"/api/v1/devices/{huawei_dev.name}/ports/")
+    cisco_resp = client.get(f"/api/v1/devices/{cisco_dev.name}/ports/")
 
     assert huawei_resp.status_code == 200
     assert cisco_resp.status_code == 200
@@ -201,92 +170,10 @@ def test_api_envelope_identical_for_both_vendors(monkeypatch):
     assert huawei_body["success"] is True
     assert cisco_body["success"] is True
 
-    huawei_data = huawei_body["data"]
-    cisco_data = cisco_body["data"]
-    assert set(huawei_data.keys()) == set(cisco_data.keys())
+    huawei_payload = huawei_body["data"]["data"]
+    cisco_payload = cisco_body["data"]["data"]
+    assert set(huawei_payload.keys()) == set(cisco_payload.keys())
 
-    # Per-row schema parity (same key set, same field presence)
-    assert set(huawei_data["ports"][0].keys()) == set(cisco_data["ports"][0].keys())
-
-
-# ── Unsupported-vendor UX ─────────────────────────────────────────────────────
-
-def test_dispatcher_carries_vendor_and_platform_on_unsupported():
-    fake_device = Device(
-        name="juniper-x",
-        host="192.0.2.20",
-        vendor="juniper",
-        username="admin",
-        encrypted_password="encrypted",
-        platform="junos",
-    )
-    with pytest.raises(UnsupportedVendorError) as exc:
-        get_port_driver(fake_device)
-    assert exc.value.vendor == "juniper"
-    assert exc.value.platform == "junos"
-
-
-def test_api_returns_501_friendly_message_for_unsupported_vendor(monkeypatch):
-    """The raw 'No port driver registered...' string MUST NOT reach the client.
-
-    The dispatcher's WARNING log keeps the diagnostic detail; the HTTP body
-    only carries the operator-friendly notice and a stable error_code.
-    """
-    fake_device = Device(
-        name="juniper-x",
-        host="192.0.2.20",
-        vendor="juniper",
-        username="admin",
-        encrypted_password="encrypted",
-        platform="junos",
-    )
-
-    monkeypatch.setattr(port_service, "EXECUTION_MODE", "real")
-    monkeypatch.setattr(
-        "app.services.device_service.get_device",
-        lambda name: fake_device if name == "juniper-x" else None,
-    )
-    monkeypatch.setattr(
-        "app.services.secret_service.decrypt_password",
-        lambda enc: "fake-password",
-    )
-
-    res = _admin_client().get("/api/v1/ports/?device=juniper-x")
-    assert res.status_code == 501
-
-    body = res.json()
-    assert body["error_code"] == "VENDOR_NOT_SUPPORTED"
-    assert body["message"] == "Port management is not yet supported for this vendor."
-
-    # Defence: vendor and platform identifiers must NOT leak to the client body.
-    blob = res.text.lower()
-    assert "juniper" not in blob
-    assert "junos" not in blob
-    assert "no port driver registered" not in blob
-
-
-def test_api_unsupported_vendor_message_is_stable_across_aliases(monkeypatch):
-    """The same operator-friendly message is returned for any unsupported
-    vendor / platform tuple — the message must not vary per input."""
-    for vendor, platform in [("juniper", "junos"), ("arista", "eos"), ("foo", "bar")]:
-        fake_device = Device(
-            name=f"{vendor}-x",
-            host="192.0.2.30",
-            vendor=vendor,
-            username="admin",
-            encrypted_password="encrypted",
-            platform=platform,
-        )
-        monkeypatch.setattr(port_service, "EXECUTION_MODE", "real")
-        monkeypatch.setattr(
-            "app.services.device_service.get_device",
-            lambda name, d=fake_device: d if name == d.name else None,
-        )
-        monkeypatch.setattr(
-            "app.services.secret_service.decrypt_password",
-            lambda enc: "fake-password",
-        )
-
-        res = _admin_client().get(f"/api/v1/ports/?device={vendor}-x")
-        assert res.status_code == 501
-        assert res.json()["message"] == "Port management is not yet supported for this vendor."
+    # Per-row schema parity (same key set) -- PortRead is vendor-agnostic.
+    assert set(huawei_payload["ports"][0].keys()) == set(cisco_payload["ports"][0].keys())
+    assert huawei_payload["ports"][0]["description"] == cisco_payload["ports"][0]["description"]

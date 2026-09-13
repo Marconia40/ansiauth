@@ -66,30 +66,53 @@ _SSH_LEGACY_OPTS = [
     "-o", "KexAlgorithms=^diffie-hellman-group14-sha256,diffie-hellman-group14-sha1",
 ]
 
-# Huawei VRP: "Error: ...". Cisco IOS: "% ..." al principio de línea (ej.
-# "% Invalid input detected..."). Mismos marcadores que ya usan los
-# `triggered_by_error` de huawei/commands.yaml -- no se inventa nada nuevo,
-# solo se aplica el mismo criterio acá donde no hay un módulo de Ansible
-# que ya lo detecte por nosotros.
+# Tablas de error por vendor -- reemplaza el regex único genérico que había
+# acá antes (r"^\s*(Error:|%\s)"), portado de los patrones `terminal_stderr_re`
+# de los plugins terminal de Ansible ya instalados en este entorno como
+# dependencia del fleet en password (cisco.ios/plugins/terminal/ios.py,
+# community.network/plugins/terminal/ce.py) -- confirmados contra hardware
+# real por la comunidad, no inventados. El regex viejo solo miraba el
+# principio de línea ("Error:"/"%") y se perdía rechazos reales de texto
+# libre como "invalid input"/"unknown command"/"syntax error"/"connection
+# timed out" -- un rechazo real del device podía clasificarse como éxito.
 #
 # Limitación conocida, aceptada por ahora: esto escanea TODO el stdout
 # combinado de un bloque multi-comando, sin saber a qué comando pertenece
-# cada línea -- 2 bugs reales de esta sesión salieron de acá (un aviso
+# cada línea. Los 2 bugs reales encontrados antes de este cambio (un aviso
 # benigno de Cisco, y un placeholder "y" propio rechazado por VRP en
-# devices que no lo necesitaban, ver ``vendors/base.py::RUIDO_BENIGNO``).
-# Un parser que trackee resultado por-comando (no por-blob) cerraría esta
-# clase de bug de raíz, pero es una reescritura real de
-# ``_run_ssh_interactive()``/``_extraer_salida_comando()`` con riesgo alto
-# (2 vendors, prompts interactivos que rompen el matching de eco, submodos
-# de config que cambian el prompt a mitad de bloque) -- evaluado y
-# diferido a propósito, no un descuido. Mientras tanto, el ruido benigno
-# conocido se filtra acá (ver ``vendors/base.py``, compartido con
-# ``orquestador.py``).
-_ERROR_RE = re.compile(r"^\s*(Error:|%\s)", re.MULTILINE)
+# devices que no lo necesitaban) eran colisiones CROSS-VENDOR contra una
+# única tabla compartida -- separar por vendor ya cierra esa clase de bug
+# de raíz. Ya no hay evidencia de que haga falta además un tracking
+# por-comando dentro del mismo vendor (ver vendors/base.py::RUIDO_BENIGNO,
+# que sigue filtrando el ruido benigno conocido ANTES de este chequeo,
+# sin cambios). Un parser que trackee resultado por-comando seguiría siendo
+# una reescritura real de ``_run_ssh_interactive()``/``_extraer_salida_comando()``
+# con riesgo alto (2 vendors, prompts interactivos que rompen el matching
+# de eco, submodos de config que cambian el prompt a mitad de bloque) --
+# evaluado y diferido a propósito, no un descuido.
+_ERROR_RE = re.compile(r"^\s*(Error:|%\s)", re.MULTILINE)  # fallback para vendor desconocido
+
+_ERROR_PATTERNS: "dict[str, re.Pattern]" = {
+    "cisco_ios": re.compile(
+        r"%\s*Error|invalid input|(?:incomplete|ambiguous) command|"
+        r"connection timed out|[^\r\n]+ not found|bad mask|"
+        r"bad secret|command authorization failed|"
+        r"overlaps with|informational:|command rejected",
+        re.IGNORECASE,
+    ),
+    "huawei_vrp": re.compile(
+        r"%\s*Error:|^%\s*\w+|%\s*Bad secret|invalid input|"
+        r"(?:incomplete|ambiguous) command|connection timed out|"
+        r"[^\r\n]+ not found|syntax error|unknown command|"
+        r"Error\[\d+\]:|Error:",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+}
 
 
-def _tiene_error(texto: str) -> bool:
-    return bool(_ERROR_RE.search(_limpiar_ruido_benigno(texto)))
+def _tiene_error(texto: str, vendor: "str | None" = None) -> bool:
+    patron = _ERROR_PATTERNS.get(vendor, _ERROR_RE)
+    return bool(patron.search(_limpiar_ruido_benigno(texto)))
 
 
 _AGENT_LINE_RE = re.compile(r"(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);")
@@ -212,8 +235,8 @@ def _sesion_completa(raw: str) -> bool:
     return any(line.rstrip().endswith("quit") for line in lines[-5:])
 
 
-def _exito(rc: int, stdout: str, raw: str) -> bool:
-    if _tiene_error(stdout):
+def _exito(rc: int, stdout: str, raw: str, vendor: "str | None" = None) -> bool:
+    if _tiene_error(stdout, vendor):
         return False
     if rc == 0:
         return True
@@ -223,7 +246,7 @@ def _exito(rc: int, stdout: str, raw: str) -> bool:
 def _run_write(device, block: str, *, op_label: str) -> dict:
     logger.info("ssh_direct_service: %s on device=%s", op_label, device.name)
     rc, stdout, stderr = _run_ssh_interactive(device, block.split("\n"))
-    rc = 0 if _exito(rc, stdout, stdout) else 1
+    rc = 0 if _exito(rc, stdout, stdout, vendor=device.vendor) else 1
     if rc == 0:
         logger.info("ssh_direct_service: %s OK on device=%s", op_label, device.name)
     else:
@@ -286,7 +309,7 @@ def _run_reads(device, commands: list[str], *, op_label: str) -> dict:
         stdouts.append(out)
         if err:
             stderrs.append(err)
-        if not _exito(r, out, raw_out):
+        if not _exito(r, out, raw_out, vendor=device.vendor):
             rc = 1
     if rc != 0:
         logger.error("ssh_direct_service: %s FAILED on device=%s", op_label, device.name)

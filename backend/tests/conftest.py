@@ -2,11 +2,18 @@ import os
 
 os.environ.setdefault("CELERY_TASK_ALWAYS_EAGER", "True")
 
-# DATABASE_URL is left to the caller if it's already set (Step 6 lets the
-# whole suite run against a real Postgres container — see
-# docs/refactor-steps/step-6-postgres-portable.md). The default keeps the
-# historical behaviour: a throwaway SQLite file in the cwd.
-os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
+# DATABASE_URL is left to the caller if it's already set. The default used
+# to be a throwaway SQLite file, but a real migration
+# (n8msp13_ntp_dns_log_lists.py) uses Postgres-only raw SQL (ALTER COLUMN
+# ... TYPE json USING to_jsonb(...)) that SQLite can't run -- `alembic
+# upgrade head` always failed past that point. Point at the dedicated
+# Postgres test DB instead (already exists, reachable on the port
+# docker-compose already exposes) -- the "test" name guard below still
+# protects it.
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql+psycopg://ansiauth:ansiauth_dev_password@localhost:5432/ansiauth_test",
+)
 os.environ["JWT_SECRET_KEY"] = "test_jwt_secret_key_not_for_production"
 # Tests run over http://testserver, so the Secure cookie attribute would cause
 # Starlette's TestClient (and any real browser) to refuse the refresh-token
@@ -63,7 +70,17 @@ from fastapi.testclient import TestClient
 
 from app.core.security import create_access_token
 from app.main import app  # DB session is initialized inside main on import
-from app.services import device_service
+
+
+def elevated_headers(role: str) -> dict:
+    """``X-Elevated-Auth`` header for a role's synthetic test client --
+    required by ``require_elevated()``-guarded destructive endpoints
+    (delete site, delete grant, deactivate user, set_system_admin) since
+    the step-up re-auth feature merged. Matches ``_make_client()``'s own
+    convention of using *role* itself as the token's ``sub``, so
+    ``elevated_headers("admin")`` pairs with ``admin_client``."""
+    from app.core.security import create_elevated_token
+    return {"X-Elevated-Auth": create_elevated_token(role)}
 
 
 def _make_client(role: str) -> TestClient:
@@ -84,8 +101,11 @@ def _make_client(role: str) -> TestClient:
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_db():
-    """Create tables and seed defaults once for the whole test session."""
-    device_service.seed_defaults()
+    """Create tables once for the whole test session. Defaults (system-admin
+    bootstrap + the Base Infrastructure Site/Default group) are no longer
+    seeded here -- app.main already does that at module-import time (see
+    ``with system_context(): _bootstrap_admin() ...`` in app/main.py), and
+    the ``from app.main import app`` above already triggered it."""
     yield
     if os.path.exists("./test.db"):
         os.remove("./test.db")
@@ -123,18 +143,18 @@ def unauth_client():
 
 @pytest.fixture(autouse=True)
 def reset_vlan_mock():
-    from app.services import vlan_service
-    vlan_service.reset_mock_vlans()
+    from app.services.vendors.mock import reset_mock_vlans
+    reset_mock_vlans()
     yield
-    vlan_service.reset_mock_vlans()
+    reset_mock_vlans()
 
 
 @pytest.fixture(autouse=True)
 def reset_rate_limiter():
-    from app.services import rate_limiter
-    rate_limiter.reset()
+    from app.composition import redis_coordinator
+    redis_coordinator.resetear()
     yield
-    rate_limiter.reset()
+    redis_coordinator.resetear()
 
 
 @pytest.fixture(autouse=True)
@@ -178,8 +198,7 @@ def _seed_test_role_users_with_full_visibility():
         UserModel,
     )
     from app.db.session import get_session
-    from app.services import user_service
-    from app.schemas.user import UserCreate
+    from app.composition import user_repository
 
     # Match passwords other test modules already expect, so seed_users-style
     # fixtures (test_audit.py, test_auth.py) that only create-if-missing find
@@ -191,12 +210,8 @@ def _seed_test_role_users_with_full_visibility():
         ("super-admin", "superadmin123", True),
     ]
     for username, password, is_sys_admin in _accounts:
-        if user_service.get_by_username(username) is None:
-            user_service.create_user(UserCreate(
-                username=username,
-                password=password,
-                is_system_admin=is_sys_admin,
-            ))
+        if user_repository.obtener_por_username(username) is None:
+            user_repository.crear(username, password, is_system_admin=is_sys_admin)
 
     with get_session() as session:
         # Per D14, Base Infra is only visible to system-admins — grant
@@ -228,8 +243,12 @@ def _seed_test_role_users_with_full_visibility():
 
 @pytest.fixture(autouse=True)
 def mock_ansible_service(monkeypatch):
-    """Prevent real Ansible playbook execution in unit tests."""
-    from app.services import ansible_service, vlan_service
+    """Prevent real Ansible playbook execution in unit tests. The VLAN-mock
+    patching this fixture used to also do (get_vlans/vlan_exists/delete_vlan
+    on the deleted vlan_service module) is gone -- that in-memory mock state
+    now lives on app.services.vendors.mock (MockVendor), reset per-test by
+    the reset_vlan_mock fixture above; nothing here needs to touch it."""
+    from app.services import ansible_service
 
     def _fake_run_playbook(playbook: str, extravars: dict, inventory: str | None = None, device: str | None = None) -> dict:
         dev = device or extravars.get("device", "")
@@ -238,23 +257,3 @@ def mock_ansible_service(monkeypatch):
         return {"rc": 0, "stdout": "Simulated playbook output", "stderr": ""}
 
     monkeypatch.setattr(ansible_service, "run_playbook", _fake_run_playbook)
-    # Patch get_vlans to return current in-memory mock state — prevents any get_vlans.yml
-    # Ansible call in tests that patch EXECUTION_MODE="real". Override per-test as needed.
-    monkeypatch.setattr(vlan_service, "get_vlans", lambda device_id=None: vlan_service._mock_vlans[:])
-    # Keep vlan_exists patched as well for tests that still reference it directly.
-    monkeypatch.setattr(vlan_service, "vlan_exists", lambda device_id, vlan_id: False)
-
-    # Patch delete_vlan so post-deletion verification in run_delete_job sees the updated
-    # _mock_vlans state. Delegates to the current run_playbook (which may be overridden
-    # per-test) so that retry/rollback tests that patch run_playbook still get rc=1.
-    def _fake_delete_vlan(vlan_id: int, device_id: str) -> dict:
-        result = ansible_service.run_playbook(
-            "delete_vlan.yml",
-            extravars={"vlan_id": vlan_id, "device": device_id},
-            device=device_id,
-        )
-        if result["rc"] == 0:
-            vlan_service._mock_vlans[:] = [v for v in vlan_service._mock_vlans if v.vlan_id != vlan_id]
-        return result
-
-    monkeypatch.setattr(vlan_service, "delete_vlan", _fake_delete_vlan)

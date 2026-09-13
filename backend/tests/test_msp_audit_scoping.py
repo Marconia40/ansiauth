@@ -106,7 +106,7 @@ def test_system_admin_sees_all_audit_rows(admin_client, audit_scaffold):
     s = audit_scaffold
     r = admin_client.get("/api/v1/audit/")
     assert r.status_code == 200, r.text
-    rows = r.json()
+    rows = r.json()["data"]["items"]
     ids_seen = {row["resource_id"] for row in rows if row["resource"] == "site"}
     assert str(s["site_a_id"]) in ids_seen
     assert str(s["site_b_id"]) in ids_seen
@@ -117,7 +117,7 @@ def test_observer_sees_only_scoped_rows(audit_scaffold):
     s = audit_scaffold
     r = s["observer_client"].get("/api/v1/audit/")
     assert r.status_code == 200, r.text
-    rows = r.json()
+    rows = r.json()["data"]["items"]
     site_ids_seen = {row["resource_id"] for row in rows if row["resource"] == "site"}
     assert str(s["site_a_id"]) in site_ids_seen, (
         f"Expected site A's audit row; got {site_ids_seen}"
@@ -133,7 +133,7 @@ def test_observer_still_sees_own_auth_events(audit_scaffold):
     s = audit_scaffold
     r = s["observer_client"].get("/api/v1/audit/")
     assert r.status_code == 200, r.text
-    rows = r.json()
+    rows = r.json()["data"]["items"]
     assert any(
         row["resource"] == "auth" and row["user"] == s["user_name"]
         for row in rows

@@ -365,11 +365,11 @@ class TestRuidoBenigno:
             "                               ^\n"
             "Error: Unrecognized command found at '^' position."
         )
-        assert ssh_direct_service._tiene_error(raw) is False
+        assert ssh_direct_service._tiene_error(raw, vendor="huawei_vrp") is False
 
     def test_rechazo_real_de_sintaxis_si_cuenta_como_error(self):
         raw = "[f3r9s2]vlanx 99\n         ^\nError: Unrecognized command found at '^' position."
-        assert ssh_direct_service._tiene_error(raw) is True
+        assert ssh_direct_service._tiene_error(raw, vendor="huawei_vrp") is True
 
     def test_error_real_mezclado_con_ruido_benigno_si_cuenta(self):
         raw = (
@@ -378,7 +378,46 @@ class TestRuidoBenigno:
             "Error: Unrecognized command found at '^' position.\n"
             "% Invalid input detected"
         )
-        assert ssh_direct_service._tiene_error(raw) is True
+        assert ssh_direct_service._tiene_error(raw, vendor="huawei_vrp") is True
+
+
+# ── Tabla de error por-vendor (Opción B) ─────────────────────────────────────
+
+class TestErrorPatternsPorVendor:
+    """Portados de terminal_stderr_re de cisco.ios/community.network.ce
+    (Ansible) -- el regex único viejo (r"^\\s*(Error:|%\\s)") no detectaba
+    ninguno de estos rechazos reales de texto libre."""
+
+    def test_cisco_invalid_input_detectado(self):
+        raw = "% Invalid input detected at '^' marker."
+        assert ssh_direct_service._tiene_error(raw, vendor="cisco_ios") is True
+
+    def test_cisco_incomplete_command_detectado(self):
+        raw = "switch(config)#interface\n% Incomplete command."
+        assert ssh_direct_service._tiene_error(raw, vendor="cisco_ios") is True
+
+    def test_cisco_ambiguous_command_detectado(self):
+        raw = "% Ambiguous command:  \"sh ver\""
+        assert ssh_direct_service._tiene_error(raw, vendor="cisco_ios") is True
+
+    def test_huawei_unknown_command_sin_anchor_detectado(self):
+        # A propósito sin "Error:"/"%" al inicio de línea -- el regex viejo
+        # (anchor ^\s* sobre esos 2 tokens) se lo perdía.
+        raw = "[f3r9s2]displaay clock\nUnknown command"
+        assert ssh_direct_service._tiene_error(raw, vendor="huawei_vrp") is True
+
+    def test_huawei_syntax_error_sin_anchor_detectado(self):
+        raw = "[f3r9s2]vla 10\nSyntax error"
+        assert ssh_direct_service._tiene_error(raw, vendor="huawei_vrp") is True
+
+    def test_vendor_none_usa_regex_generico_de_siempre(self):
+        # Guard de no-regresión: sin vendor (o uno desconocido), sigue el
+        # comportamiento viejo -- ni "invalid input" ni "unknown command"
+        # sin el anchor de "%"/"Error:" al inicio de línea cuentan como error.
+        raw = "algo unknown command sin anchor de linea"
+        assert ssh_direct_service._tiene_error(raw) is False
+        assert ssh_direct_service._tiene_error(raw, vendor="algun_vendor_no_existente") is False
+        assert ssh_direct_service._tiene_error("% Invalid input detected") is True
 
     def test_aviso_cisco_autocreate_no_gana_señal_transitoria_real(self):
         from app.services.orquestador import Orquestador

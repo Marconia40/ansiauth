@@ -5,22 +5,30 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import app.services.cleanup_scheduler as cleanup_scheduler_module
+from app.composition import cleanup_scheduler
 from app.db.models import LoginAttemptModel, RefreshTokenModel
 from app.db.session import get_session
-from app.services import cleanup_service
+
+# NOTE: app.services.cleanup_service (4 free functions) was deleted by the
+# migration to FINAL_ARCHITECTURE.md -- CleanupScheduler (app/composition.py's
+# `cleanup_scheduler` singleton) replaces it 1:1: purge_old_artifacts ->
+# purgar_artefactos, sweep_expired_refresh_tokens -> limpiar_refresh_tokens,
+# sweep_old_login_attempts -> limpiar_intentos_login, run_all -> ejecutar_todo.
 
 
 # ── purge_old_artifacts ──────────────────────────────────────────────────────
 
 @pytest.fixture
 def fake_artifact_root(tmp_path, monkeypatch):
-    """Point cleanup_service at a temporary artifacts directory.
+    """Point cleanup_scheduler at a temporary artifacts directory.
 
-    Patches ANSIBLE_BASE_PATH on the cleanup_service module (the module
-    captured a reference at import time) so the function operates on a
-    disposable tree rather than the real one under backend/ansible/.
+    Patches ANSIBLE_BASE_PATH on the app.services.cleanup_scheduler module
+    (it captured a reference at import time -- lives on the module, not the
+    CleanupScheduler instance) so the function operates on a disposable tree
+    rather than the real one under backend/ansible/.
     """
-    monkeypatch.setattr(cleanup_service, "ANSIBLE_BASE_PATH", str(tmp_path))
+    monkeypatch.setattr(cleanup_scheduler_module, "ANSIBLE_BASE_PATH", str(tmp_path))
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     return artifacts
@@ -41,7 +49,7 @@ def test_purge_old_artifacts_removes_only_aged_dirs(fake_artifact_root):
     old = _make_artifact_dir(fake_artifact_root, "old-aaa", age_days=45)
     recent = _make_artifact_dir(fake_artifact_root, "recent-bbb", age_days=2)
 
-    removed = cleanup_service.purge_old_artifacts(retention_days=30)
+    removed = cleanup_scheduler.purgar_artefactos(dias=30)
 
     assert removed == 1
     assert not os.path.exists(old)
@@ -52,7 +60,7 @@ def test_purge_old_artifacts_nothing_to_delete(fake_artifact_root):
     _make_artifact_dir(fake_artifact_root, "fresh-aaa", age_days=1)
     _make_artifact_dir(fake_artifact_root, "fresh-bbb", age_days=10)
 
-    removed = cleanup_service.purge_old_artifacts(retention_days=30)
+    removed = cleanup_scheduler.purgar_artefactos(dias=30)
 
     assert removed == 0
     assert len(list(fake_artifact_root.iterdir())) == 2
@@ -61,8 +69,8 @@ def test_purge_old_artifacts_nothing_to_delete(fake_artifact_root):
 def test_purge_old_artifacts_missing_directory_is_noop(tmp_path, monkeypatch):
     # Point at a path with no artifacts/ subdirectory — common on fresh
     # deployments before the first playbook has ever run.
-    monkeypatch.setattr(cleanup_service, "ANSIBLE_BASE_PATH", str(tmp_path))
-    assert cleanup_service.purge_old_artifacts(retention_days=30) == 0
+    monkeypatch.setattr(cleanup_scheduler_module, "ANSIBLE_BASE_PATH", str(tmp_path))
+    assert cleanup_scheduler.purgar_artefactos(dias=30) == 0
 
 
 # ── sweep_expired_refresh_tokens ─────────────────────────────────────────────
@@ -79,6 +87,7 @@ def _clean_tokens_and_attempts():
 
 
 def _seed_refresh_token(username: str, expires_at: datetime) -> None:
+    now = datetime.now(timezone.utc)
     with get_session() as session:
         session.add(
             RefreshTokenModel(
@@ -86,7 +95,14 @@ def _seed_refresh_token(username: str, expires_at: datetime) -> None:
                 username=username,
                 expires_at=expires_at,
                 revoked=False,
-                created_at=datetime.now(timezone.utc),
+                created_at=now,
+                # NOT NULL since y19msp24_refresh_token_session (session
+                # hardening merge) -- last_used_at powers the server-side
+                # idle timeout, session_id/session_started_at link every
+                # rotation in the same login chain.
+                last_used_at=now,
+                session_id=f"session-{username}-{expires_at.isoformat()}",
+                session_started_at=now,
             )
         )
 
@@ -97,7 +113,7 @@ def test_sweep_expired_refresh_tokens_deletes_past_expiry():
     _seed_refresh_token("bob", now - timedelta(days=2))
     _seed_refresh_token("carol", now + timedelta(hours=1))  # still valid
 
-    deleted = cleanup_service.sweep_expired_refresh_tokens()
+    deleted = cleanup_scheduler.limpiar_refresh_tokens()
 
     assert deleted == 2
     with get_session() as session:
@@ -110,7 +126,7 @@ def test_sweep_expired_refresh_tokens_nothing_to_delete():
     _seed_refresh_token("dan", now + timedelta(hours=4))
     _seed_refresh_token("erin", now + timedelta(days=10))
 
-    deleted = cleanup_service.sweep_expired_refresh_tokens()
+    deleted = cleanup_scheduler.limpiar_refresh_tokens()
 
     assert deleted == 0
     with get_session() as session:
@@ -137,7 +153,7 @@ def test_sweep_old_login_attempts_deletes_aged_rows():
     _seed_login_attempt("ghost", now - timedelta(days=8))
     _seed_login_attempt("recent", now - timedelta(days=2))
 
-    deleted = cleanup_service.sweep_old_login_attempts(retention_days=7)
+    deleted = cleanup_scheduler.limpiar_intentos_login(dias=7)
 
     assert deleted == 2
     with get_session() as session:
@@ -150,7 +166,7 @@ def test_sweep_old_login_attempts_nothing_to_delete():
     _seed_login_attempt("a", now - timedelta(hours=1))
     _seed_login_attempt("b", now - timedelta(days=3))
 
-    deleted = cleanup_service.sweep_old_login_attempts(retention_days=7)
+    deleted = cleanup_scheduler.limpiar_intentos_login(dias=7)
 
     assert deleted == 0
     with get_session() as session:
@@ -165,7 +181,7 @@ def test_run_all_summarises_each_routine(fake_artifact_root):
     _seed_refresh_token("expired", now - timedelta(hours=1))
     _seed_login_attempt("oldlogin", now - timedelta(days=10))
 
-    summary = cleanup_service.run_all(
+    summary = cleanup_scheduler.ejecutar_todo(
         artifact_retention_days=30,
         login_attempt_retention_days=7,
     )

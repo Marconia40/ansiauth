@@ -5,16 +5,17 @@ import uuid
 
 import pytest
 
+from app.composition import user_repository
 from app.db.models import RoleAssignmentModel, SiteModel, UserModel
 from app.db.session import get_session
-from app.services import user_service
-from app.schemas.user import UserCreate
+
+from tests.conftest import elevated_headers
 
 
 @pytest.fixture()
 def target_user_and_site():
     username = f"grant-target-{uuid.uuid4().hex[:6]}"
-    user_service.create_user(UserCreate(username=username, password="p" * 12))
+    user_repository.crear(username, "p" * 12)
     with get_session() as session:
         uid = session.query(UserModel.id).filter_by(username=username).scalar()
         site = SiteModel(name=f"grants-site-{uuid.uuid4().hex[:6]}", kind="REGULAR")
@@ -47,7 +48,7 @@ def test_admin_can_grant_and_list_and_revoke(admin_client, target_user_and_site)
     listing = r.json()["data"]
     assert any(g["id"] == grant_id and g["role"] == "operator" for g in listing)
     # Revoke
-    r = admin_client.delete(f"/api/v1/users/{uid}/grants/{grant_id}")
+    r = admin_client.delete(f"/api/v1/users/{uid}/grants/{grant_id}", headers=elevated_headers("admin"))
     assert r.status_code == 204
     r = admin_client.get(f"/api/v1/users/{uid}/grants")
     assert all(g["id"] != grant_id for g in r.json()["data"])

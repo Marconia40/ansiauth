@@ -508,55 +508,135 @@ reset_port:
         - "quit"
 
 set_access_mode:
-  primary:
-    # "port link-type access" pide confirmación interactiva ("Warning:
-    # This command will delete VLANs on this port. Continue?[Y/N]:") SOLO
-    # cuando el puerto venía de trunk con VLANs asignadas -- bug real
-    # encontrado en vivo contra f3r9s2: sin la "y" de acá, ese prompt se
-    # quedaba sin respuesta, el resto del bloque (`port default vlan`,
-    # `commit`) nunca se mandaba, y la sesión cortaba con un "n" -- el job
-    # terminaba "completed" (rc=0 a nivel transporte) sin haber cambiado
-    # nada en el device. Mismo patrón ya confirmado en vivo para
-    # `reset_port` (ver comentario ahí). Cuando el puerto YA está en
-    # access (o nunca tuvo VLANs que borrar) el prompt no aparece -- la
-    # "y" se manda como comando suelto en el próximo prompt normal, que
-    # VRP rechaza con "Unrecognized command" (texto inofensivo dentro del
-    # mismo bloque, no aborta lo que sigue).
-    block:
-      - "system-view"
-      - "interface {interface}"
-      - "port link-type access"
-      - "y"
-      - "port default vlan {vlan_id}"
-      - "commit"
-      - "quit"
-      - "quit"
-  alternatives:
-    - triggered_by_error: *interface_wrong_param
-      block:
-        - "system-view"
-        - "interface {interface_full}"
-        - "port link-type access"
-        - "y"
-        - "port default vlan {vlan_id}"
-        - "quit"
-        - "quit"
-    - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+  # "port link-type access" pide confirmación interactiva ("Warning: This
+  # command will delete VLANs on this port. Continue?[Y/N]:") SOLO cuando
+  # el puerto venía de trunk con VLANs asignadas -- bug real encontrado
+  # en vivo contra f3r9s2: sin la "y" de acá, ese prompt se quedaba sin
+  # respuesta, el resto del bloque (`port default vlan`, `commit`) nunca
+  # se mandaba, y la sesión cortaba con un "n" -- el job terminaba
+  # "completed" (rc=0 a nivel transporte) sin haber cambiado nada en el
+  # device. Mismo patrón ya confirmado en vivo para `reset_port` (ver
+  # comentario ahí).
+  #
+  # Segundo bug real, encontrado después en vivo contra `huawei01`
+  # (password/Ansible, no `f3r9s2`/key): la nota de acá decía que mandar
+  # la "y" cuando el prompt NO aparece era "inofensivo" porque VRP la
+  # rechaza como comando suelto sin abortar el resto del bloque -- cierto
+  # para el transporte SSH directo (`ssh_direct_service.py`, manda todo
+  # el bloque de una y recién después mira el resultado completo), FALSO
+  # para Ansible: `ansible.netcommon.network_cli` corta la tarea entera
+  # apenas ve el patrón de error, aunque el resto del bloque ya se había
+  # mandado en el mismo `write()` y el device lo aplicaba igual -- el job
+  # quedaba "failed", disparaba un rollback que además fallaba (conexión
+  # ya rota), mintiendo sobre el estado real del device (que había
+  # aplicado bien). Por eso ahora son 2 variants -- `HuaweiVendor.set_access_mode()`
+  # elige según si el puerto realmente venía de trunk-con-vlans
+  # (`viene_de_trunk_con_vlans`, calculado por el caller a partir del
+  # pre-state real del puerto, no una suposición ciega).
+  con_confirmacion:
+    primary:
       block:
         - "system-view"
         - "interface {interface}"
         - "port link-type access"
         - "y"
         - "port default vlan {vlan_id}"
+        - "commit"
         - "quit"
         - "quit"
+    alternatives:
+      # Bug real encontrado en vivo contra huawei01 (un CE12800 simulado,
+      # firmware distinto al de f3r9s2): "port link-type access" SÍ
+      # muestra el warning ("...VLANs allowed to pass through this
+      # interface will be deleted.") pero sin pedir "Continue?[Y/N]:" --
+      # el device vuelve directo al prompt normal, y la "y" que mandamos
+      # le llega como comando suelto, que rechaza. Mismo patrón exacto
+      # que ``RUIDO_BENIGNO`` (vendors/base.py) ya conoce del lado del
+      # transporte SSH directo -- acá, del lado Ansible, en vez de
+      # filtrar el ruido después, se reintenta SIN la "y" (a esta altura
+      # "port link-type access" ya se aplicó -- reenviarlo es un no-op
+      # seguro, no hay VLANs para perder de nuevo). Esta alternativa va
+      # primero porque es la más común de las 3 en la práctica.
+      - triggered_by_error: '\]y\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "port link-type access"
+          - "port default vlan {vlan_id}"
+          - "commit"
+          - "quit"
+          - "quit"
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "port link-type access"
+          - "y"
+          - "port default vlan {vlan_id}"
+          - "quit"
+          - "quit"
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "port link-type access"
+          - "y"
+          - "port default vlan {vlan_id}"
+          - "quit"
+          - "quit"
+  sin_confirmacion:
+    primary:
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "port link-type access"
+        - "port default vlan {vlan_id}"
+        - "commit"
+        - "quit"
+        - "quit"
+    alternatives:
+      - triggered_by_error: *interface_wrong_param
+        block:
+          - "system-view"
+          - "interface {interface_full}"
+          - "port link-type access"
+          - "port default vlan {vlan_id}"
+          - "quit"
+          - "quit"
+      - triggered_by_error: '\]commit\r?\n\s*\^\r?\nError: Unrecognized command'
+        block:
+          - "system-view"
+          - "interface {interface}"
+          - "port link-type access"
+          - "port default vlan {vlan_id}"
+          - "quit"
+          - "quit"
 
 set_trunk_mode:
+  # "port link-type trunk" pide la MISMA confirmación interactiva que
+  # "port link-type access" ("Warning: This command will delete VLANs on
+  # this port. Continue?[Y/N]:") -- bug real encontrado en vivo contra
+  # f3r9s2 (access -> trunk real, con tráfico real de por medio): sin la
+  # "y" acá, VRP contestó el prompt como "N" (rechazado) sola sin que
+  # nadie la mandara, "port link-type trunk" nunca se aplicó, y el resto
+  # del bloque (`port trunk pvid vlan`/`undo port trunk allow-pass`/
+  # `port trunk allow-pass vlan`) falló en cascada con "Unrecognized
+  # command" -- el puerto quedó a medio camino en access en vez de trunk.
+  #
+  # A diferencia de `set_access_mode` (donde la "y" solo hacía falta
+  # viniendo de trunk-con-vlans y sobraba si no), acá se manda SIEMPRE
+  # en el primary -- no hay evidencia todavía de que este prompt sea
+  # condicional al pre-state para trunk (podría aparecer también
+  # yendo de trunk a trunk, actualizando VLANs). Si en algún device la
+  # "y" sobra (mismo caso ya confirmado en vivo contra huawei01/CE12800
+  # para `set_access_mode`), la primera alternativa de abajo reintenta
+  # sin ella -- mismo patrón, mismo regex, ya probado.
   primary:
     block:
       - "system-view"
       - "interface {interface}"
       - "port link-type trunk"
+      - "y"
       - "port trunk pvid vlan {native_vlan}"
       - "undo port trunk allow-pass vlan all"
       - "port trunk allow-pass vlan {allowed_vlans}"
@@ -564,11 +644,23 @@ set_trunk_mode:
       - "quit"
       - "quit"
   alternatives:
+    - triggered_by_error: '\]y\r?\n\s*\^\r?\nError: Unrecognized command'
+      block:
+        - "system-view"
+        - "interface {interface}"
+        - "port link-type trunk"
+        - "port trunk pvid vlan {native_vlan}"
+        - "undo port trunk allow-pass vlan all"
+        - "port trunk allow-pass vlan {allowed_vlans}"
+        - "commit"
+        - "quit"
+        - "quit"
     - triggered_by_error: *interface_wrong_param
       block:
         - "system-view"
         - "interface {interface_full}"
         - "port link-type trunk"
+        - "y"
         - "port trunk pvid vlan {native_vlan}"
         - "undo port trunk allow-pass vlan all"
         - "port trunk allow-pass vlan {allowed_vlans}"
@@ -579,6 +671,7 @@ set_trunk_mode:
         - "system-view"
         - "interface {interface}"
         - "port link-type trunk"
+        - "y"
         - "port trunk pvid vlan {native_vlan}"
         - "undo port trunk allow-pass vlan all"
         - "port trunk allow-pass vlan {allowed_vlans}"

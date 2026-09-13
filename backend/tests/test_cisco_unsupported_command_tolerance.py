@@ -125,10 +125,13 @@ def test_read_core_state_tolerates_unsupported_storm_control(monkeypatch):
         "---- -------------------------------- --------- ------\n"
         "10   MGMT                             active    Gi0/1\n"
     )
-    # 1 vlan + 4 port + 2 svi = 7 stdouts, last of the port slice is invalid
+    # vlan + port commands + svi commands -- the storm-control command is
+    # the invalid one; the trailing running-config-per-interface command
+    # (added by the storm-control action/trap parametrization, after the
+    # storm command in commands.yaml) is stubbed empty, parser tolerates.
     stub_stdouts = (
         [vlan_brief]
-        + [_STATUS, _DESC, _SW, _STORM_INVALID]
+        + [_STATUS, _DESC, _SW, _STORM_INVALID] + [""] * (n_port - 4)
         + ["", ""]  # svi running-config + brief -- empty is OK, parser tolerates
     )
     assert len(stub_stdouts) == n_vlan + n_port + n_svi
