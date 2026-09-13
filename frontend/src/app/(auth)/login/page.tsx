@@ -3,8 +3,26 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { consumeSessionExpiredFlag, login } from '@/services/api';
+import {
+  consumeSessionExpiredFlag,
+  consumeSessionExpiredReason,
+  login,
+  type SessionExpiredReason,
+} from '@/services/api';
 import { Brand } from '@/components/Brand';
+
+// Copy for each stable detail code returned by /auth/refresh — see
+// backend/app/api/auth.py:_REFRESH_ERROR_DETAIL. Unknown codes fall back to
+// the generic "session expired" banner.
+const REASON_MESSAGES: Record<SessionExpiredReason, string> = {
+  idle_timeout: 'Your session ended due to inactivity. Please sign in again.',
+  session_absolute_limit:
+    'Your session reached its maximum lifetime. Please sign in again for security.',
+  replay_detected:
+    'Your session was closed after a security check. Please sign in again.',
+  expired: 'Your session expired. Please sign in again.',
+  invalid: 'Session expired. Please sign in again.',
+};
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -16,9 +34,14 @@ export default function LoginPage() {
   const router = useRouter();
 
   useEffect(() => {
-    if (consumeSessionExpiredFlag()) {
+    const expired = consumeSessionExpiredFlag();
+    const reason = consumeSessionExpiredReason();
+    if (expired || reason) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setNotice('Session expired. Please sign in again.');
+      setNotice(
+        (reason && REASON_MESSAGES[reason]) ||
+          'Session expired. Please sign in again.',
+      );
     }
   }, []);
 

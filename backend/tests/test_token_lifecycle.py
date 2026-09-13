@@ -212,9 +212,71 @@ def test_service_create_returns_raw_token():
 
 def test_service_validate_and_rotate_returns_new_token_and_username():
     raw = refresh_token_service.create("lifecycle_user")
-    new_raw, username = refresh_token_service.validate_and_rotate(raw)
+    new_raw, username, _session_id = refresh_token_service.validate_and_rotate(raw)
     assert new_raw != raw
     assert username == "lifecycle_user"
+
+
+# ── Session hardening — 401 detail codes ─────────────────────────────────────
+
+def test_refresh_after_idle_returns_401_with_idle_timeout_detail(unauth_client):
+    """Server-side idle timeout must both reject the refresh AND surface the
+    reason as detail="idle_timeout" so the frontend can show the right
+    banner ("your session ended due to inactivity")."""
+    from app.core.config import REFRESH_TOKEN_IDLE_MINUTES
+    tokens = _login(unauth_client)
+    raw = tokens["refresh_token"]
+
+    with get_session() as session:
+        from app.services.refresh_token_service import _hash
+        row = session.query(RefreshTokenModel).filter_by(token_hash=_hash(raw)).one()
+        row.last_used_at = datetime.now(timezone.utc) - timedelta(
+            minutes=REFRESH_TOKEN_IDLE_MINUTES + 1
+        )
+
+    r = _refresh(unauth_client, raw)
+    assert r.status_code == 401
+    body = r.json()
+    # The FastAPI standard shape is {"detail": ...}; this app wraps it as
+    # {"message": ...} via its global handler — accept whichever.
+    payload = body.get("detail") or body.get("message")
+    assert "idle_timeout" in str(payload)
+
+
+def test_refresh_after_absolute_limit_returns_401_with_absolute_detail(unauth_client):
+    from app.core.config import SESSION_ABSOLUTE_MAX_HOURS
+    tokens = _login(unauth_client)
+    raw = tokens["refresh_token"]
+
+    with get_session() as session:
+        from app.services.refresh_token_service import _hash
+        row = session.query(RefreshTokenModel).filter_by(token_hash=_hash(raw)).one()
+        row.session_started_at = datetime.now(timezone.utc) - timedelta(
+            hours=SESSION_ABSOLUTE_MAX_HOURS + 1
+        )
+
+    r = _refresh(unauth_client, raw)
+    assert r.status_code == 401
+    payload = r.json().get("detail") or r.json().get("message")
+    assert "session_absolute_limit" in str(payload)
+
+
+def test_login_records_ip_and_user_agent(unauth_client):
+    unauth_client.post(
+        "/api/v1/auth/login",
+        data={"username": "lifecycle_user", "password": "lifecycle_pass_99"},
+        headers={"User-Agent": "TestBrowser/1.0"},
+    )
+    with get_session() as session:
+        row = (
+            session.query(RefreshTokenModel)
+            .filter_by(username="lifecycle_user")
+            .order_by(RefreshTokenModel.id.desc())
+            .first()
+        )
+        assert row.user_agent == "TestBrowser/1.0"
+        # TestClient reports 'testclient' as host; just check it's populated
+        assert row.ip_address is not None
 
 
 def test_service_revoke_returns_true_for_valid_token():

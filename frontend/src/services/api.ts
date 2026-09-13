@@ -1,5 +1,6 @@
 import axios from 'axios';
 import type { AuthUser } from '@/types/auth';
+import { getLastActivity } from '@/lib/sessionActivity';
 import type {
   VlanEntry,
   VlanCreate,
@@ -113,6 +114,17 @@ function parseAccessTokenExpiryMs(token: string): number | null {
 // ── Session expiration notification ───────────────────────────────────────────
 
 const SESSION_EXPIRED_FLAG = 'ansiauth.sessionExpired';
+const SESSION_EXPIRED_REASON = 'ansiauth.sessionExpiredReason';
+
+// Backend detail codes returned by /auth/refresh on 401 — see
+// backend/app/api/auth.py:_REFRESH_ERROR_DETAIL. The login page maps these
+// to user-facing copy; anything else falls back to a generic message.
+export type SessionExpiredReason =
+  | 'idle_timeout'
+  | 'session_absolute_limit'
+  | 'replay_detected'
+  | 'expired'
+  | 'invalid';
 
 let _sessionExpiredHandler: (() => void) | null = null;
 
@@ -123,17 +135,37 @@ export function onSessionExpired(handler: () => void): () => void {
   };
 }
 
-function notifySessionExpired(): void {
+function notifySessionExpired(reason?: SessionExpiredReason | null): void {
   cancelProactiveRefresh();
   _accessToken = null;
+  _elevatedToken = null;
   if (typeof window !== 'undefined') {
     try {
       window.sessionStorage.setItem(SESSION_EXPIRED_FLAG, '1');
+      if (reason) {
+        window.sessionStorage.setItem(SESSION_EXPIRED_REASON, reason);
+      } else {
+        window.sessionStorage.removeItem(SESSION_EXPIRED_REASON);
+      }
     } catch {
       /* ignore quota / disabled storage */
     }
   }
   _sessionExpiredHandler?.();
+}
+
+function extractRefreshErrorReason(error: unknown): SessionExpiredReason | null {
+  const detail = (error as { response?: { data?: { detail?: unknown; message?: unknown } } })
+    ?.response?.data;
+  const raw = String(detail?.detail ?? detail?.message ?? '');
+  const known: SessionExpiredReason[] = [
+    'idle_timeout',
+    'session_absolute_limit',
+    'replay_detected',
+    'expired',
+    'invalid',
+  ];
+  return known.find((code) => raw.includes(code)) ?? null;
 }
 
 export function consumeSessionExpiredFlag(): boolean {
@@ -150,6 +182,20 @@ export function consumeSessionExpiredFlag(): boolean {
   return false;
 }
 
+export function consumeSessionExpiredReason(): SessionExpiredReason | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const value = window.sessionStorage.getItem(SESSION_EXPIRED_REASON);
+    if (value) {
+      window.sessionStorage.removeItem(SESSION_EXPIRED_REASON);
+      return value as SessionExpiredReason;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 // ── Axios instance ────────────────────────────────────────────────────────────
 
 const client = axios.create({
@@ -161,6 +207,12 @@ const client = axios.create({
 client.interceptors.request.use((config) => {
   if (_accessToken) {
     config.headers.Authorization = `Bearer ${_accessToken}`;
+  }
+  // Attach the elevated token automatically when we have one — sensitive
+  // endpoints require it and this saves every call site from remembering
+  // to set the header manually.
+  if (isElevatedTokenValid() && _elevatedToken) {
+    config.headers['X-Elevated-Auth'] = _elevatedToken.token;
   }
   return config;
 });
@@ -192,12 +244,18 @@ async function refreshAccessToken(): Promise<string> {
 
 // ── Proactive refresh scheduler ───────────────────────────────────────────────
 //
-// Schedules a refresh shortly before the access token's `exp`. This ensures the
-// session terminates predictably even when the user is idle: when the refresh
-// token also expires, the proactive refresh fails and we trigger a clean logout
-// rather than waiting for the next API call.
+// Schedules a refresh shortly before the access token's `exp`. Only fires
+// when the user was recently active — otherwise renewing a token while the
+// user is away just extends the attack window for someone sitting down at
+// the machine. The idle-timeout hook handles the "user is gone" case
+// separately (14 min → force logout); this scheduler stays out of its way.
 
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+// If the last activity is older than this, skip the proactive refresh.
+// The idle hook will fire well before this in normal use; keeping the check
+// here anyway protects against timers that survive a component unmount.
+const ACTIVITY_STALE_MS = 2 * 60 * 1000;
 
 function scheduleProactiveRefresh(): void {
   cancelProactiveRefresh();
@@ -212,8 +270,14 @@ function scheduleProactiveRefresh(): void {
   const delay = Math.max(minDelay, Math.min(expiryMs - Date.now() - leadMs, maxDelay));
 
   _refreshTimer = setTimeout(() => {
-    refreshAccessToken().catch(() => {
-      notifySessionExpired();
+    // Skip renewal if the user has not touched anything recently — a
+    // silent refresh under an unattended tab is exactly the "make my
+    // stolen session last longer" behaviour we're closing.
+    if (Date.now() - getLastActivity() > ACTIVITY_STALE_MS) {
+      return;
+    }
+    refreshAccessToken().catch((err) => {
+      notifySessionExpired(extractRefreshErrorReason(err));
     });
   }, delay);
 }
@@ -245,8 +309,8 @@ function revalidateOnResume(): void {
   // Access token still comfortably valid → nothing to do.
   if (expiryMs - Date.now() > REVALIDATE_MARGIN_MS) return;
 
-  refreshAccessToken().catch(() => {
-    notifySessionExpired();
+  refreshAccessToken().catch((err) => {
+    notifySessionExpired(extractRefreshErrorReason(err));
   });
 }
 
@@ -269,7 +333,28 @@ client.interceptors.response.use(
   async (error) => {
     const original = error.config;
 
-    if (!original || error.response?.status !== 401 || original._retry) {
+    if (!original || error.response?.status !== 401) {
+      return Promise.reject(error);
+    }
+
+    // Step-up re-auth: sensitive endpoints return 401 detail="reauth_required".
+    // Open the password modal via the registered provider, cache the elevated
+    // token, and retry — separate ``_reauthed`` flag so a genuine refresh
+    // retry doesn't collide with a step-up retry.
+    const detail = String(error.response?.data?.detail ?? error.response?.data?.message ?? '');
+    if (detail.includes('reauth_required') && !original._reauthed) {
+      original._reauthed = true;
+      try {
+        const elevated = await obtainElevatedToken();
+        original.headers = original.headers ?? {};
+        original.headers['X-Elevated-Auth'] = elevated;
+        return client(original);
+      } catch {
+        return Promise.reject(error);
+      }
+    }
+
+    if (original._retry) {
       return Promise.reject(error);
     }
 
@@ -285,8 +370,8 @@ client.interceptors.response.use(
       original.headers = original.headers ?? {};
       original.headers.Authorization = `Bearer ${newToken}`;
       return client(original);
-    } catch {
-      notifySessionExpired();
+    } catch (refreshErr) {
+      notifySessionExpired(extractRefreshErrorReason(refreshErr));
       return Promise.reject(error);
     }
   },
@@ -413,13 +498,120 @@ export async function restoreSession(): Promise<AuthUser | null> {
 export async function logout(): Promise<void> {
   await client.post('/auth/logout').catch(() => {});
   clearAccessToken();
+  clearElevatedToken();
   if (typeof window !== 'undefined') {
     try {
       window.sessionStorage.removeItem(SESSION_EXPIRED_FLAG);
+      window.sessionStorage.removeItem(SESSION_EXPIRED_REASON);
     } catch {
       /* ignore */
     }
   }
+}
+
+/**
+ * Client-side idle logout. Revokes the refresh cookie server-side (best
+ * effort — a network hiccup shouldn't strand the user), then flags the
+ * login page to show the "signed out for inactivity" banner via the same
+ * mechanism a server-side idle 401 uses.
+ */
+export async function signOutClientIdle(): Promise<void> {
+  await client.post('/auth/logout').catch(() => {});
+  notifySessionExpired('idle_timeout');
+}
+
+// ── Active sessions ──────────────────────────────────────────────────────────
+
+export interface ActiveSession {
+  session_id: string;
+  current: boolean;
+  created_at: string;
+  last_used_at: string;
+  expires_at: string;
+  ip_address: string | null;
+  user_agent: string | null;
+}
+
+export async function listActiveSessions(): Promise<ActiveSession[]> {
+  const { data } = await client.get<{ sessions: ActiveSession[] }>('/auth/sessions');
+  return data.sessions;
+}
+
+export async function revokeOtherSessions(): Promise<number> {
+  const { data } = await client.post<{ success: boolean; data: { revoked: number } }>(
+    '/auth/sessions/revoke-others',
+  );
+  return data.data.revoked;
+}
+
+// ── Step-up re-authentication ────────────────────────────────────────────────
+//
+// Sensitive endpoints (delete user, promote/demote system-admin, revoke
+// grant, delete site) require an X-Elevated-Auth header proving the user
+// re-entered their password in the last few minutes. The elevated token
+// is cached in memory only — never persisted — and expires on:
+//   - explicit ``logout`` / ``signOutClientIdle``,
+//   - the ``expires_in`` returned by /auth/reauth,
+//   - a 30-second safety margin before expiry, so an in-flight request
+//     doesn't race the clock.
+//
+// The StepUpContext wires ``registerElevatedTokenProvider`` on mount so
+// the 401 interceptor knows how to prompt for a password when it sees
+// ``detail="reauth_required"``. Non-UI callers (tests) can call
+// ``reauth`` directly and stash the token via ``setElevatedToken``.
+
+interface CachedElevatedToken {
+  token: string;
+  expiresAtMs: number;
+}
+let _elevatedToken: CachedElevatedToken | null = null;
+
+const ELEVATED_SAFETY_MS = 30_000;
+
+type ElevatedTokenProvider = () => Promise<string>;
+let _elevatedProvider: ElevatedTokenProvider | null = null;
+
+export function registerElevatedTokenProvider(provider: ElevatedTokenProvider): () => void {
+  _elevatedProvider = provider;
+  return () => {
+    if (_elevatedProvider === provider) _elevatedProvider = null;
+  };
+}
+
+export function clearElevatedToken(): void {
+  _elevatedToken = null;
+}
+
+function isElevatedTokenValid(): boolean {
+  if (_elevatedToken === null) return false;
+  return _elevatedToken.expiresAtMs - Date.now() > ELEVATED_SAFETY_MS;
+}
+
+function setElevatedToken(token: string, expiresInSeconds: number): void {
+  _elevatedToken = {
+    token,
+    expiresAtMs: Date.now() + expiresInSeconds * 1000,
+  };
+}
+
+export async function reauth(password: string): Promise<void> {
+  const { data } = await client.post<{ elevated_token: string; expires_in: number }>(
+    '/auth/reauth',
+    { password },
+  );
+  setElevatedToken(data.elevated_token, data.expires_in);
+}
+
+async function obtainElevatedToken(): Promise<string> {
+  if (isElevatedTokenValid()) return _elevatedToken!.token;
+  if (_elevatedProvider === null) {
+    throw new Error('Step-up re-authentication required but no provider registered');
+  }
+  // Provider is expected to call ``reauth`` (which populates the cache)
+  // and then resolve — returning the token is convenient but optional.
+  const token = await _elevatedProvider();
+  if (isElevatedTokenValid()) return _elevatedToken!.token;
+  return token;
 }
 
 // ── VLANs ─────────────────────────────────────────────────────────────────────
