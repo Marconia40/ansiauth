@@ -188,3 +188,88 @@ def test_expired_ttl_raises_expired():
 
     with pytest.raises(ValueError, match="expired"):
         refresh_token_service.validate_and_rotate(raw)
+
+
+# ── Active sessions listing ──────────────────────────────────────────────────
+
+def test_list_active_sessions_groups_by_session_id():
+    refresh_token_service.create("alice", ip_address="10.0.0.1", user_agent="A")
+    raw2 = refresh_token_service.create("alice", ip_address="10.0.0.2", user_agent="B")
+    # Rotate the second chain — the rotation row inherits the session_id
+    # so both chains still collapse into two entries, not three.
+    refresh_token_service.validate_and_rotate(
+        raw2, ip_address="10.0.0.2", user_agent="B"
+    )
+
+    sessions = refresh_token_service.list_active_sessions("alice")
+    assert len(sessions) == 2
+    ips = sorted(s["ip_address"] for s in sessions)
+    assert ips == ["10.0.0.1", "10.0.0.2"]
+    # ``current`` unset → all False.
+    assert all(s["current"] is False for s in sessions)
+
+
+def test_list_active_sessions_flags_current():
+    my_raw = refresh_token_service.create("alice")
+    refresh_token_service.create("alice")
+
+    my_sid = refresh_token_service.get_session_id_for_raw(my_raw)
+    sessions = refresh_token_service.list_active_sessions(
+        "alice", current_session_id=my_sid
+    )
+    current = [s for s in sessions if s["current"]]
+    assert len(current) == 1
+    assert current[0]["session_id"] == my_sid
+
+
+def test_list_active_sessions_ignores_other_users():
+    refresh_token_service.create("alice")
+    refresh_token_service.create("bob")
+    assert len(refresh_token_service.list_active_sessions("alice")) == 1
+
+
+def test_list_active_sessions_hides_revoked_and_expired():
+    raw_kept = refresh_token_service.create("alice")
+    raw_expired = refresh_token_service.create("alice")
+    raw_revoked = refresh_token_service.create("alice")
+
+    with get_session() as session:
+        row = session.query(RefreshTokenModel).filter_by(token_hash=_hash(raw_expired)).one()
+        row.expires_at = datetime.utcnow() - timedelta(hours=1)
+        row2 = session.query(RefreshTokenModel).filter_by(token_hash=_hash(raw_revoked)).one()
+        row2.revoked = True
+
+    sessions = refresh_token_service.list_active_sessions("alice")
+    kept_sid = refresh_token_service.get_session_id_for_raw(raw_kept)
+    assert [s["session_id"] for s in sessions] == [kept_sid]
+
+
+def test_revoke_other_sessions_leaves_only_current():
+    my_raw = refresh_token_service.create("alice")
+    other_raw_1 = refresh_token_service.create("alice")
+    other_raw_2 = refresh_token_service.create("alice")
+
+    my_sid = refresh_token_service.get_session_id_for_raw(my_raw)
+    revoked = refresh_token_service.revoke_other_sessions("alice", my_sid)
+    assert revoked == 2
+
+    # Current session still rotates.
+    new_my_raw, _, _ = refresh_token_service.validate_and_rotate(my_raw)
+    assert new_my_raw != my_raw
+
+    # Other sessions cannot rotate anymore.
+    for dead in (other_raw_1, other_raw_2):
+        with pytest.raises(ValueError):
+            refresh_token_service.validate_and_rotate(dead)
+
+
+def test_revoke_other_sessions_ignores_other_users():
+    my_raw = refresh_token_service.create("alice")
+    bob_raw = refresh_token_service.create("bob")
+
+    my_sid = refresh_token_service.get_session_id_for_raw(my_raw)
+    refresh_token_service.revoke_other_sessions("alice", my_sid)
+
+    # Bob's session is untouched.
+    new_bob, _, _ = refresh_token_service.validate_and_rotate(bob_raw)
+    assert new_bob != bob_raw

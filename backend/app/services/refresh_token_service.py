@@ -167,3 +167,87 @@ def revoke(raw: str) -> bool:
             return False
         record.revoked = True
     return True
+
+
+def get_session_id_for_raw(raw: str) -> str | None:
+    """Look up the ``session_id`` for the (possibly revoked) row that
+    ``raw`` hashes to. Used by ``/auth/sessions`` to flag which row in the
+    list belongs to the caller — never raises, returns None on miss."""
+    token_hash = _hash(raw)
+    with get_session() as session:
+        record = session.query(RefreshTokenModel).filter_by(token_hash=token_hash).first()
+        return record.session_id if record else None
+
+
+def list_active_sessions(
+    username: str, *, current_session_id: str | None = None
+) -> list[dict]:
+    """Return one entry per active session (grouped by ``session_id``) for
+    ``username``, using the most recently used row of each chain as the
+    representative. A session is "active" when it has at least one row
+    that is not revoked and not past ``expires_at``.
+
+    ``current_session_id`` — if provided, the row matching it is flagged
+    with ``current=True`` so the UI can render the "this device" pill.
+    """
+    username = (username or "").lower()
+    now = datetime.now(timezone.utc)
+    # Materialise rows as plain dicts inside the session so callers can
+    # freely read them after the connection closes (Detached* errors).
+    with get_session() as session:
+        rows = (
+            session.query(
+                RefreshTokenModel.session_id,
+                RefreshTokenModel.session_started_at,
+                RefreshTokenModel.last_used_at,
+                RefreshTokenModel.expires_at,
+                RefreshTokenModel.ip_address,
+                RefreshTokenModel.user_agent,
+            )
+            .filter(RefreshTokenModel.username == username)
+            .filter(RefreshTokenModel.revoked.is_(False))
+            .filter(RefreshTokenModel.expires_at > now)
+            .order_by(
+                RefreshTokenModel.session_id,
+                RefreshTokenModel.last_used_at.desc(),
+            )
+            .all()
+        )
+
+    # Take the first (highest last_used_at) row per session_id.
+    seen: set[str] = set()
+    out: list[dict] = []
+    for sid, started_at, last_used, expires, ip, ua in rows:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append({
+            "session_id": sid,
+            "current": sid == current_session_id,
+            "created_at": _aware(started_at),
+            "last_used_at": _aware(last_used),
+            "expires_at": _aware(expires),
+            "ip_address": ip,
+            "user_agent": ua,
+        })
+    # Newest activity first so the current tab tends to sort near the top.
+    out.sort(key=lambda s: s["last_used_at"], reverse=True)
+    return out
+
+
+def revoke_other_sessions(username: str, keep_session_id: str) -> int:
+    """Revoke every non-revoked row for ``username`` whose ``session_id``
+    is not ``keep_session_id``. Returns the number of rows revoked (across
+    all rotations of every other chain) so the caller can audit-log the
+    magnitude of the action.
+    """
+    username = (username or "").lower()
+    with get_session() as session:
+        revoked = (
+            session.query(RefreshTokenModel)
+            .filter(RefreshTokenModel.username == username)
+            .filter(RefreshTokenModel.revoked.is_(False))
+            .filter(RefreshTokenModel.session_id != keep_session_id)
+            .update({"revoked": True}, synchronize_session=False)
+        )
+    return int(revoked)

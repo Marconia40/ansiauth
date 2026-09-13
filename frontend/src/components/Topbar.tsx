@@ -7,6 +7,7 @@ import { useAuth } from '@/context/AuthContext';
 import { logout } from '@/services/api';
 import {
   AuditIcon,
+  DeviceIcon,
   InventoryIcon,
   JobsIcon,
   KeyIcon,
@@ -147,6 +148,17 @@ function SessionMenu() {
           >
             <KeyIcon size={16} />
             Change password
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false);
+              router.push('/session/sessions');
+            }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-panel-elev"
+          >
+            <DeviceIcon size={16} />
+            Active sessions
           </button>
           <button
             type="button"

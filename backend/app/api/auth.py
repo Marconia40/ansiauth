@@ -3,10 +3,10 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from app.core.config import COOKIE_SAMESITE, COOKIE_SECURE, REFRESH_TOKEN_EXPIRE_MINUTES
 from app.core.response import ok
-from app.core.scope import require_system_admin
+from app.core.scope import require_authenticated, require_system_admin
 from app.core.security import create_access_token
 from app.models.audit import AuditRecord
-from app.schemas.auth import TokenResponse
+from app.schemas.auth import ActiveSessionsResponse, TokenResponse
 from app.services import refresh_token_service
 from app.services.auth_service import authenticate_user
 
@@ -192,6 +192,73 @@ def logout(request: Request, response: Response):
     raw = request.cookies.get("refresh_token")
     revoked = refresh_token_service.revoke(raw) if raw else False
     _clear_refresh_cookie(response)
+    return ok({"revoked": revoked})
+
+
+@router.get(
+    "/sessions",
+    response_model=ActiveSessionsResponse,
+    summary="List active sessions",
+    description=(
+        "Return one entry per active session for the current user, grouped "
+        "by session_id (rotations of the same login collapse into a single "
+        "row). The session that owns the caller's refresh cookie is "
+        "flagged with ``current=true`` so the UI can render 'this device' "
+        "and skip it when offering to revoke the rest."
+    ),
+)
+def list_sessions(
+    request: Request,
+    current_user: dict = Depends(require_authenticated),
+):
+    raw = request.cookies.get("refresh_token")
+    current_session_id = (
+        refresh_token_service.get_session_id_for_raw(raw) if raw else None
+    )
+    sessions = refresh_token_service.list_active_sessions(
+        current_user["username"],
+        current_session_id=current_session_id,
+    )
+    return {"sessions": sessions}
+
+
+@router.post(
+    "/sessions/revoke-others",
+    status_code=200,
+    summary="Revoke every session except the current one",
+    description=(
+        "Revoke every active refresh-token row that does not belong to the "
+        "session the caller is currently using. Useful when a user "
+        "suspects an old device still has a live session and wants to "
+        "force it out without changing the password."
+    ),
+)
+def revoke_other_sessions(
+    request: Request,
+    current_user: dict = Depends(require_authenticated),
+):
+    raw = request.cookies.get("refresh_token")
+    current_session_id = (
+        refresh_token_service.get_session_id_for_raw(raw) if raw else None
+    )
+    if current_session_id is None:
+        # Without a session_id we would revoke every session including the
+        # caller's own — which is just /logout with extra steps. Force the
+        # caller to have a valid refresh cookie so the "keep this one"
+        # decision is unambiguous.
+        raise HTTPException(status_code=400, detail="Missing current session")
+
+    revoked = refresh_token_service.revoke_other_sessions(
+        current_user["username"], current_session_id
+    )
+    from app.composition import audit_repository
+    audit_repository.append(AuditRecord(
+        user=current_user["username"],
+        action="revoke_other_sessions",
+        resource="auth",
+        details={"revoked_rows": revoked, "kept_session_id": current_session_id},
+        status="success",
+    ))
     return ok({"revoked": revoked})
 
 

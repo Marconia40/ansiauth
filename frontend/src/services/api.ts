@@ -491,6 +491,30 @@ export async function signOutClientIdle(): Promise<void> {
   notifySessionExpired('idle_timeout');
 }
 
+// ── Active sessions ──────────────────────────────────────────────────────────
+
+export interface ActiveSession {
+  session_id: string;
+  current: boolean;
+  created_at: string;
+  last_used_at: string;
+  expires_at: string;
+  ip_address: string | null;
+  user_agent: string | null;
+}
+
+export async function listActiveSessions(): Promise<ActiveSession[]> {
+  const { data } = await client.get<{ sessions: ActiveSession[] }>('/auth/sessions');
+  return data.sessions;
+}
+
+export async function revokeOtherSessions(): Promise<number> {
+  const { data } = await client.post<{ success: boolean; data: { revoked: number } }>(
+    '/auth/sessions/revoke-others',
+  );
+  return data.data.revoked;
+}
+
 // ── VLANs ─────────────────────────────────────────────────────────────────────
 
 /**
