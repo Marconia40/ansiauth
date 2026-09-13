@@ -5,6 +5,8 @@ from app.composition import user_repository
 from app.db.models import AuditLogModel, UserModel
 from app.db.session import get_session
 
+from tests.conftest import elevated_headers
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -237,7 +239,7 @@ def test_update_no_hashed_password_in_response(super_admin_client):
 
 def test_super_admin_can_deactivate_user(super_admin_client):
     user = _seed("ivan")
-    resp = super_admin_client.delete(f"/api/v1/users/{user.id}")
+    resp = super_admin_client.delete(f"/api/v1/users/{user.id}", headers=elevated_headers("super-admin"))
     assert resp.status_code == 200
     assert resp.json()["data"]["is_active"] is False
 
@@ -247,13 +249,13 @@ def test_admin_can_deactivate_user_under_msp(admin_client):
     permitted at this privilege level. See
     test_admin_can_create_super_admin_under_msp for the full rationale."""
     user = _seed("judy")
-    resp = admin_client.delete(f"/api/v1/users/{user.id}")
+    resp = admin_client.delete(f"/api/v1/users/{user.id}", headers=elevated_headers("admin"))
     assert resp.status_code == 200, resp.text
 
 
 def test_deactivate_writes_audit_log(super_admin_client):
     user = _seed("karen")
-    super_admin_client.delete(f"/api/v1/users/{user.id}")
+    super_admin_client.delete(f"/api/v1/users/{user.id}", headers=elevated_headers("super-admin"))
     with get_session() as session:
         entry = session.query(AuditLogModel).filter_by(action="deactivate_user").first()
         assert entry is not None
@@ -263,7 +265,7 @@ def test_deactivate_writes_audit_log(super_admin_client):
 def test_deactivate_last_system_admin_returns_422(super_admin_client):
     """ValidationError now maps to 422, not the old 400."""
     user = _seed("lastadmin", is_system_admin=True)
-    resp = super_admin_client.delete(f"/api/v1/users/{user.id}")
+    resp = super_admin_client.delete(f"/api/v1/users/{user.id}", headers=elevated_headers("super-admin"))
     assert resp.status_code == 422
 
 

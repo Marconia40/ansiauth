@@ -13,6 +13,8 @@ from app.db.session import get_session
 from app.repositories.site_repository import BASE_INFRA_SITE_KIND
 from fastapi.testclient import TestClient
 
+from tests.conftest import elevated_headers
+
 # site_service.py was deleted by the migration to FINAL_ARCHITECTURE.md --
 # SiteRepository.crear_con_grupo_default(kind=BASE_INFRA_SITE_KIND) is the
 # idempotent bootstrap replacement (see app/main.py's own bootstrap call).
@@ -80,7 +82,7 @@ def test_base_infra_cannot_be_deleted(admin_client):
     _ensure_base_infrastructure()
     with get_session() as session:
         base_site_id = session.query(SiteModel.id).filter_by(kind=BASE_INFRA_SITE_KIND).scalar()
-    r = admin_client.delete(f"/api/v1/sites/{base_site_id}")
+    r = admin_client.delete(f"/api/v1/sites/{base_site_id}", headers=elevated_headers("admin"))
     # 400 (rejected as a system-managed site), 403 under MSP flag if admin
     # isn't system-admin, or 422 depending on ValidationError shape.
     assert r.status_code in (400, 403, 422), r.text

@@ -12,6 +12,8 @@ from app.db.models import AuditLogModel, UserModel
 from app.db.session import get_session
 from app.composition import user_repository
 
+from tests.conftest import elevated_headers
+
 
 @pytest.fixture(autouse=True)
 def clean_users():
@@ -48,7 +50,7 @@ def test_api_blocks_deactivating_last_system_admin(super_admin_client):
     ValidationError now maps to 422 (app.main:validation_error_handler),
     not 400 -- ValueError-in-service->400 was the old shape."""
     user = _seed("only_sa", is_system_admin=True)
-    resp = super_admin_client.delete(f"/api/v1/users/{user.id}")
+    resp = super_admin_client.delete(f"/api/v1/users/{user.id}", headers=elevated_headers("super-admin"))
     assert resp.status_code == 422
 
 

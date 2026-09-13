@@ -87,6 +87,7 @@ def _clean_tokens_and_attempts():
 
 
 def _seed_refresh_token(username: str, expires_at: datetime) -> None:
+    now = datetime.now(timezone.utc)
     with get_session() as session:
         session.add(
             RefreshTokenModel(
@@ -94,7 +95,14 @@ def _seed_refresh_token(username: str, expires_at: datetime) -> None:
                 username=username,
                 expires_at=expires_at,
                 revoked=False,
-                created_at=datetime.now(timezone.utc),
+                created_at=now,
+                # NOT NULL since y19msp24_refresh_token_session (session
+                # hardening merge) -- last_used_at powers the server-side
+                # idle timeout, session_id/session_started_at link every
+                # rotation in the same login chain.
+                last_used_at=now,
+                session_id=f"session-{username}-{expires_at.isoformat()}",
+                session_started_at=now,
             )
         )
 

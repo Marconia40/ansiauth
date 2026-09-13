@@ -4,6 +4,8 @@ import pytest
 from app.db.models import DeviceModel, SiteModel
 from app.db.session import get_session
 
+from tests.conftest import elevated_headers
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -170,20 +172,20 @@ def test_update_missing_site_returns_404(admin_client):
 
 def test_delete_empty_site(admin_client):
     created = admin_client.post("/api/v1/sites/", json={"name": "ToDelete"}).json()["data"]
-    r = admin_client.delete(f"/api/v1/sites/{created['id']}")
+    r = admin_client.delete(f"/api/v1/sites/{created['id']}", headers=elevated_headers("admin"))
     assert r.status_code == 200
     assert r.json()["data"]["site_id"] == created["id"]
 
 
 def test_delete_missing_site_returns_404(admin_client):
-    r = admin_client.delete("/api/v1/sites/999999")
+    r = admin_client.delete("/api/v1/sites/999999", headers=elevated_headers("admin"))
     assert r.status_code == 404
 
 
 def test_delete_site_with_devices_returns_409(admin_client):
     site = admin_client.post("/api/v1/sites/", json={"name": "Occupied"}).json()["data"]
     _attach_device(site["id"])
-    r = admin_client.delete(f"/api/v1/sites/{site['id']}")
+    r = admin_client.delete(f"/api/v1/sites/{site['id']}", headers=elevated_headers("admin"))
     assert r.status_code == 409, r.text
     body = r.json()
     assert body.get("error_code") == "CONFLICT"

@@ -72,6 +72,17 @@ from app.core.security import create_access_token
 from app.main import app  # DB session is initialized inside main on import
 
 
+def elevated_headers(role: str) -> dict:
+    """``X-Elevated-Auth`` header for a role's synthetic test client --
+    required by ``require_elevated()``-guarded destructive endpoints
+    (delete site, delete grant, deactivate user, set_system_admin) since
+    the step-up re-auth feature merged. Matches ``_make_client()``'s own
+    convention of using *role* itself as the token's ``sub``, so
+    ``elevated_headers("admin")`` pairs with ``admin_client``."""
+    from app.core.security import create_elevated_token
+    return {"X-Elevated-Auth": create_elevated_token(role)}
+
+
 def _make_client(role: str) -> TestClient:
     """Create a TestClient whose bearer token asserts the given role.
 
