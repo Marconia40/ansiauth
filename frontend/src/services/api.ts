@@ -113,6 +113,17 @@ function parseAccessTokenExpiryMs(token: string): number | null {
 // ── Session expiration notification ───────────────────────────────────────────
 
 const SESSION_EXPIRED_FLAG = 'ansiauth.sessionExpired';
+const SESSION_EXPIRED_REASON = 'ansiauth.sessionExpiredReason';
+
+// Backend detail codes returned by /auth/refresh on 401 — see
+// backend/app/api/auth.py:_REFRESH_ERROR_DETAIL. The login page maps these
+// to user-facing copy; anything else falls back to a generic message.
+export type SessionExpiredReason =
+  | 'idle_timeout'
+  | 'session_absolute_limit'
+  | 'replay_detected'
+  | 'expired'
+  | 'invalid';
 
 let _sessionExpiredHandler: (() => void) | null = null;
 
@@ -123,17 +134,36 @@ export function onSessionExpired(handler: () => void): () => void {
   };
 }
 
-function notifySessionExpired(): void {
+function notifySessionExpired(reason?: SessionExpiredReason | null): void {
   cancelProactiveRefresh();
   _accessToken = null;
   if (typeof window !== 'undefined') {
     try {
       window.sessionStorage.setItem(SESSION_EXPIRED_FLAG, '1');
+      if (reason) {
+        window.sessionStorage.setItem(SESSION_EXPIRED_REASON, reason);
+      } else {
+        window.sessionStorage.removeItem(SESSION_EXPIRED_REASON);
+      }
     } catch {
       /* ignore quota / disabled storage */
     }
   }
   _sessionExpiredHandler?.();
+}
+
+function extractRefreshErrorReason(error: unknown): SessionExpiredReason | null {
+  const detail = (error as { response?: { data?: { detail?: unknown; message?: unknown } } })
+    ?.response?.data;
+  const raw = String(detail?.detail ?? detail?.message ?? '');
+  const known: SessionExpiredReason[] = [
+    'idle_timeout',
+    'session_absolute_limit',
+    'replay_detected',
+    'expired',
+    'invalid',
+  ];
+  return known.find((code) => raw.includes(code)) ?? null;
 }
 
 export function consumeSessionExpiredFlag(): boolean {
@@ -148,6 +178,20 @@ export function consumeSessionExpiredFlag(): boolean {
     /* ignore */
   }
   return false;
+}
+
+export function consumeSessionExpiredReason(): SessionExpiredReason | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const value = window.sessionStorage.getItem(SESSION_EXPIRED_REASON);
+    if (value) {
+      window.sessionStorage.removeItem(SESSION_EXPIRED_REASON);
+      return value as SessionExpiredReason;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 // ── Axios instance ────────────────────────────────────────────────────────────
@@ -212,8 +256,8 @@ function scheduleProactiveRefresh(): void {
   const delay = Math.max(minDelay, Math.min(expiryMs - Date.now() - leadMs, maxDelay));
 
   _refreshTimer = setTimeout(() => {
-    refreshAccessToken().catch(() => {
-      notifySessionExpired();
+    refreshAccessToken().catch((err) => {
+      notifySessionExpired(extractRefreshErrorReason(err));
     });
   }, delay);
 }
@@ -245,8 +289,8 @@ function revalidateOnResume(): void {
   // Access token still comfortably valid → nothing to do.
   if (expiryMs - Date.now() > REVALIDATE_MARGIN_MS) return;
 
-  refreshAccessToken().catch(() => {
-    notifySessionExpired();
+  refreshAccessToken().catch((err) => {
+    notifySessionExpired(extractRefreshErrorReason(err));
   });
 }
 
@@ -285,8 +329,8 @@ client.interceptors.response.use(
       original.headers = original.headers ?? {};
       original.headers.Authorization = `Bearer ${newToken}`;
       return client(original);
-    } catch {
-      notifySessionExpired();
+    } catch (refreshErr) {
+      notifySessionExpired(extractRefreshErrorReason(refreshErr));
       return Promise.reject(error);
     }
   },
@@ -416,6 +460,7 @@ export async function logout(): Promise<void> {
   if (typeof window !== 'undefined') {
     try {
       window.sessionStorage.removeItem(SESSION_EXPIRED_FLAG);
+      window.sessionStorage.removeItem(SESSION_EXPIRED_REASON);
     } catch {
       /* ignore */
     }

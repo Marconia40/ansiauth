@@ -347,6 +347,18 @@ class RefreshTokenModel(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     revoked = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
+    # Session hardening (y19msp24_refresh_token_session):
+    # ``last_used_at`` powers the server-side idle timeout; ``session_id`` /
+    # ``session_started_at`` / ``parent_id`` link every rotation in the same
+    # login chain so absolute-lifetime and "revoke this session only" cuts
+    # know where the chain begins and ends. ``ip_address`` / ``user_agent``
+    # are captured at each rotation for the "active sessions" UI.
+    last_used_at = Column(DateTime(timezone=True), nullable=False)
+    session_id = Column(String, nullable=False, index=True)
+    session_started_at = Column(DateTime(timezone=True), nullable=False)
+    parent_id = Column(Integer, ForeignKey("refresh_tokens.id"), nullable=True, index=True)
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
 
 
 class LoginAttemptModel(Base):

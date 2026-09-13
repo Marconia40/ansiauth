@@ -50,6 +50,23 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=20, ge=1)
     REFRESH_TOKEN_EXPIRE_MINUTES: int = Field(default=240, ge=1)
 
+    # ── Session hardening ─────────────────────────────────────────────────────
+    # Idle timeout enforced server-side on every /auth/refresh call. If a
+    # refresh token is not rotated within this window, the endpoint returns
+    # 401 with detail="idle_timeout" and revokes the token chain (but not
+    # the user's other sessions). Complements the fixed TTL above with a
+    # true "no activity → logout" signal that does not rely on the client.
+    REFRESH_TOKEN_IDLE_MINUTES: int = Field(default=15, ge=1)
+    # Absolute session lifetime: hard ceiling from the original login
+    # regardless of refresh activity. When exceeded, /auth/refresh returns
+    # 401 with detail="session_absolute_limit" and revokes the whole
+    # session chain (all rotations that share the same session_id).
+    SESSION_ABSOLUTE_MAX_HOURS: int = Field(default=2, ge=1)
+    # Step-up re-authentication token TTL (PR #5). Kept in the same
+    # Settings block so PR #1 lands the field once and later PRs don't
+    # touch config.py again.
+    ELEVATED_TOKEN_EXPIRE_MINUTES: int = Field(default=5, ge=1, le=15)
+
     # ── Execution mode ────────────────────────────────────────────────────────
     EXECUTION_MODE: str = "mock"  # "mock" | "real"
 
@@ -161,6 +178,9 @@ FERNET_KEY = settings.FERNET_KEY
 JWT_SECRET_KEY = settings.JWT_SECRET_KEY
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 REFRESH_TOKEN_EXPIRE_MINUTES = settings.REFRESH_TOKEN_EXPIRE_MINUTES
+REFRESH_TOKEN_IDLE_MINUTES = settings.REFRESH_TOKEN_IDLE_MINUTES
+SESSION_ABSOLUTE_MAX_HOURS = settings.SESSION_ABSOLUTE_MAX_HOURS
+ELEVATED_TOKEN_EXPIRE_MINUTES = settings.ELEVATED_TOKEN_EXPIRE_MINUTES
 EXECUTION_MODE = settings.EXECUTION_MODE
 DATABASE_URL = settings.DATABASE_URL
 BOOTSTRAP_ADMIN_USER = settings.BOOTSTRAP_ADMIN_USER

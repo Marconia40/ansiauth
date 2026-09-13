@@ -14,6 +14,25 @@ router = APIRouter()
 
 _COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_MINUTES * 60
 
+# Map service-level ``ValueError`` sentinels to stable ``detail`` codes the
+# frontend switches on (idle vs replay vs absolute → distinct banners). Any
+# unmapped string collapses to "invalid" so we never leak internals.
+_REFRESH_ERROR_DETAIL = {
+    refresh_token_service.ERR_IDLE: "idle_timeout",
+    refresh_token_service.ERR_ABSOLUTE: "session_absolute_limit",
+    refresh_token_service.ERR_REPLAY: "replay_detected",
+    refresh_token_service.ERR_EXPIRED: "expired",
+    refresh_token_service.ERR_INVALID: "invalid",
+}
+
+
+def _client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
+
+def _user_agent(request: Request) -> str | None:
+    return request.headers.get("user-agent") or None
+
 
 def _set_refresh_cookie(response: Response, token: str) -> None:
     response.set_cookie(
@@ -93,7 +112,11 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
     login_attempt_repository.registrar_intento(username, ip, exitoso=True)
     login_attempt_repository.resetear(username)
     access_token = create_access_token({"sub": user.username, "id": user.id, "is_system_admin": user.is_system_admin})
-    refresh_token = refresh_token_service.create(user.username)
+    refresh_token = refresh_token_service.create(
+        user.username,
+        ip_address=_client_ip(request),
+        user_agent=_user_agent(request),
+    )
     audit_repository.append(AuditRecord(
         user=user.username,
         action="login",
@@ -120,10 +143,25 @@ def refresh(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Missing refresh token")
 
     try:
-        new_refresh_token, username = refresh_token_service.validate_and_rotate(raw)
+        new_refresh_token, username, _session_id = refresh_token_service.validate_and_rotate(
+            raw,
+            ip_address=_client_ip(request),
+            user_agent=_user_agent(request),
+        )
     except ValueError as exc:
         _clear_refresh_cookie(response)
-        raise HTTPException(status_code=401, detail=str(exc))
+        detail = _REFRESH_ERROR_DETAIL.get(str(exc), "invalid")
+        # Audit the failure with the reason so operators can see idle/replay
+        # cuts in the log without decoding the response.
+        from app.composition import audit_repository
+        audit_repository.append(AuditRecord(
+            user="unknown",
+            action="token_refresh",
+            resource="auth",
+            details={"reason": detail},
+            status="failed",
+        ))
+        raise HTTPException(status_code=401, detail=detail)
 
     from app.composition import user_repository
     user = user_repository.obtener_por_username(username)

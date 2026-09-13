@@ -15,7 +15,13 @@ import os
 import shutil
 from datetime import datetime, timedelta, timezone
 
-from app.core.config import ANSIBLE_BASE_PATH
+from sqlalchemy import or_
+
+from app.core.config import (
+    ANSIBLE_BASE_PATH,
+    REFRESH_TOKEN_IDLE_MINUTES,
+    SESSION_ABSOLUTE_MAX_HOURS,
+)
 from app.db.models import RefreshTokenModel
 from app.db.session import get_session
 
@@ -53,16 +59,26 @@ class CleanupScheduler:
         return removed
 
     def limpiar_refresh_tokens(self) -> int:
-        """Copia cleanup_service.py: sweep_expired_refresh_tokens() tal
-        cual -- no existe Repository[RefreshToken] en este plan
-        (AutenticacionService está fuera de alcance), excepción puntual y
-        documentada a "el Repository es el único dueño del acceso a la DB"
-        (FASE_5.md B1)."""
+        """Barrer tokens que ya no pueden validarse aunque ``revoked=False``:
+        (a) TTL vencido, (b) idle window superado desde el último uso,
+        (c) absolute lifetime superado desde el inicio de la sesión.
+
+        No existe ``Repository[RefreshToken]`` en el plan (excepción puntual
+        y documentada a "el Repository es el único dueño del acceso a la
+        DB" -- FASE_5.md B1)."""
         now = datetime.now(timezone.utc)
+        idle_cutoff = now - timedelta(minutes=REFRESH_TOKEN_IDLE_MINUTES)
+        absolute_cutoff = now - timedelta(hours=SESSION_ABSOLUTE_MAX_HOURS)
         with get_session() as session:
             deleted = (
                 session.query(RefreshTokenModel)
-                .filter(RefreshTokenModel.expires_at < now)
+                .filter(
+                    or_(
+                        RefreshTokenModel.expires_at < now,
+                        RefreshTokenModel.last_used_at < idle_cutoff,
+                        RefreshTokenModel.session_started_at < absolute_cutoff,
+                    )
+                )
                 .delete(synchronize_session=False)
             )
         logger.info("Refresh-token sweep complete: deleted=%d", deleted)
