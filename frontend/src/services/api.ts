@@ -1,5 +1,6 @@
 import axios from 'axios';
 import type { AuthUser } from '@/types/auth';
+import { getLastActivity } from '@/lib/sessionActivity';
 import type {
   VlanEntry,
   VlanCreate,
@@ -236,12 +237,18 @@ async function refreshAccessToken(): Promise<string> {
 
 // ── Proactive refresh scheduler ───────────────────────────────────────────────
 //
-// Schedules a refresh shortly before the access token's `exp`. This ensures the
-// session terminates predictably even when the user is idle: when the refresh
-// token also expires, the proactive refresh fails and we trigger a clean logout
-// rather than waiting for the next API call.
+// Schedules a refresh shortly before the access token's `exp`. Only fires
+// when the user was recently active — otherwise renewing a token while the
+// user is away just extends the attack window for someone sitting down at
+// the machine. The idle-timeout hook handles the "user is gone" case
+// separately (14 min → force logout); this scheduler stays out of its way.
 
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+// If the last activity is older than this, skip the proactive refresh.
+// The idle hook will fire well before this in normal use; keeping the check
+// here anyway protects against timers that survive a component unmount.
+const ACTIVITY_STALE_MS = 2 * 60 * 1000;
 
 function scheduleProactiveRefresh(): void {
   cancelProactiveRefresh();
@@ -256,6 +263,12 @@ function scheduleProactiveRefresh(): void {
   const delay = Math.max(minDelay, Math.min(expiryMs - Date.now() - leadMs, maxDelay));
 
   _refreshTimer = setTimeout(() => {
+    // Skip renewal if the user has not touched anything recently — a
+    // silent refresh under an unattended tab is exactly the "make my
+    // stolen session last longer" behaviour we're closing.
+    if (Date.now() - getLastActivity() > ACTIVITY_STALE_MS) {
+      return;
+    }
     refreshAccessToken().catch((err) => {
       notifySessionExpired(extractRefreshErrorReason(err));
     });
@@ -465,6 +478,17 @@ export async function logout(): Promise<void> {
       /* ignore */
     }
   }
+}
+
+/**
+ * Client-side idle logout. Revokes the refresh cookie server-side (best
+ * effort — a network hiccup shouldn't strand the user), then flags the
+ * login page to show the "signed out for inactivity" banner via the same
+ * mechanism a server-side idle 401 uses.
+ */
+export async function signOutClientIdle(): Promise<void> {
+  await client.post('/auth/logout').catch(() => {});
+  notifySessionExpired('idle_timeout');
 }
 
 // ── VLANs ─────────────────────────────────────────────────────────────────────
