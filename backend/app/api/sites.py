@@ -7,6 +7,7 @@ from app.core.response import ok
 from app.core.scope import (
     obtener_scope,
     require_authenticated,
+    require_elevated,
     require_scope,
     require_system_admin,
     visible_or_404,
@@ -207,7 +208,11 @@ def update_site(
         "Returns 409 if the site still owns devices. Requires system-admin."
     ),
 )
-def delete_site(site_id: int, current_user: dict = Depends(require_system_admin)):
+def delete_site(
+    site_id: int,
+    current_user: dict = Depends(require_system_admin),
+    _elevated: dict = Depends(require_elevated),
+):
     from app.composition import event_dispatcher, site_repository
 
     site = site_repository.get(site_id)

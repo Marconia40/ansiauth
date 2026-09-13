@@ -6,6 +6,7 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.core.response import ok
 from app.core.scope import (
     require_authenticated,
+    require_elevated,
     require_system_admin,
 )
 from app.schemas.role_assignment import (
@@ -163,7 +164,11 @@ def update_user(
         "system-admin."
     ),
 )
-def deactivate_user(user_id: int, current_user: dict = Depends(require_system_admin)):
+def deactivate_user(
+    user_id: int,
+    current_user: dict = Depends(require_system_admin),
+    _elevated: dict = Depends(require_elevated),
+):
     from app.composition import event_dispatcher, user_repository
 
     user = user_repository.get(user_id)
@@ -234,6 +239,7 @@ def delete_grant(
     user_id: int,
     grant_id: int,
     current_user: dict = Depends(require_authenticated),
+    _elevated: dict = Depends(require_elevated),
 ):
     RoleAssignmentService().revoke(grant_id, actor=current_user)
     return Response(status_code=204)
@@ -251,6 +257,7 @@ def set_system_admin(
     user_id: int,
     body: SystemAdminUpdate,
     current_user: dict = Depends(require_system_admin),
+    _elevated: dict = Depends(require_elevated),
 ):
     RoleAssignmentService().set_system_admin(
         target_user_id=user_id,

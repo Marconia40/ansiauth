@@ -138,6 +138,7 @@ export function onSessionExpired(handler: () => void): () => void {
 function notifySessionExpired(reason?: SessionExpiredReason | null): void {
   cancelProactiveRefresh();
   _accessToken = null;
+  _elevatedToken = null;
   if (typeof window !== 'undefined') {
     try {
       window.sessionStorage.setItem(SESSION_EXPIRED_FLAG, '1');
@@ -206,6 +207,12 @@ const client = axios.create({
 client.interceptors.request.use((config) => {
   if (_accessToken) {
     config.headers.Authorization = `Bearer ${_accessToken}`;
+  }
+  // Attach the elevated token automatically when we have one — sensitive
+  // endpoints require it and this saves every call site from remembering
+  // to set the header manually.
+  if (isElevatedTokenValid() && _elevatedToken) {
+    config.headers['X-Elevated-Auth'] = _elevatedToken.token;
   }
   return config;
 });
@@ -326,7 +333,28 @@ client.interceptors.response.use(
   async (error) => {
     const original = error.config;
 
-    if (!original || error.response?.status !== 401 || original._retry) {
+    if (!original || error.response?.status !== 401) {
+      return Promise.reject(error);
+    }
+
+    // Step-up re-auth: sensitive endpoints return 401 detail="reauth_required".
+    // Open the password modal via the registered provider, cache the elevated
+    // token, and retry — separate ``_reauthed`` flag so a genuine refresh
+    // retry doesn't collide with a step-up retry.
+    const detail = String(error.response?.data?.detail ?? error.response?.data?.message ?? '');
+    if (detail.includes('reauth_required') && !original._reauthed) {
+      original._reauthed = true;
+      try {
+        const elevated = await obtainElevatedToken();
+        original.headers = original.headers ?? {};
+        original.headers['X-Elevated-Auth'] = elevated;
+        return client(original);
+      } catch {
+        return Promise.reject(error);
+      }
+    }
+
+    if (original._retry) {
       return Promise.reject(error);
     }
 
@@ -470,6 +498,7 @@ export async function restoreSession(): Promise<AuthUser | null> {
 export async function logout(): Promise<void> {
   await client.post('/auth/logout').catch(() => {});
   clearAccessToken();
+  clearElevatedToken();
   if (typeof window !== 'undefined') {
     try {
       window.sessionStorage.removeItem(SESSION_EXPIRED_FLAG);
@@ -513,6 +542,76 @@ export async function revokeOtherSessions(): Promise<number> {
     '/auth/sessions/revoke-others',
   );
   return data.data.revoked;
+}
+
+// ── Step-up re-authentication ────────────────────────────────────────────────
+//
+// Sensitive endpoints (delete user, promote/demote system-admin, revoke
+// grant, delete site) require an X-Elevated-Auth header proving the user
+// re-entered their password in the last few minutes. The elevated token
+// is cached in memory only — never persisted — and expires on:
+//   - explicit ``logout`` / ``signOutClientIdle``,
+//   - the ``expires_in`` returned by /auth/reauth,
+//   - a 30-second safety margin before expiry, so an in-flight request
+//     doesn't race the clock.
+//
+// The StepUpContext wires ``registerElevatedTokenProvider`` on mount so
+// the 401 interceptor knows how to prompt for a password when it sees
+// ``detail="reauth_required"``. Non-UI callers (tests) can call
+// ``reauth`` directly and stash the token via ``setElevatedToken``.
+
+interface CachedElevatedToken {
+  token: string;
+  expiresAtMs: number;
+}
+let _elevatedToken: CachedElevatedToken | null = null;
+
+const ELEVATED_SAFETY_MS = 30_000;
+
+type ElevatedTokenProvider = () => Promise<string>;
+let _elevatedProvider: ElevatedTokenProvider | null = null;
+
+export function registerElevatedTokenProvider(provider: ElevatedTokenProvider): () => void {
+  _elevatedProvider = provider;
+  return () => {
+    if (_elevatedProvider === provider) _elevatedProvider = null;
+  };
+}
+
+export function clearElevatedToken(): void {
+  _elevatedToken = null;
+}
+
+function isElevatedTokenValid(): boolean {
+  if (_elevatedToken === null) return false;
+  return _elevatedToken.expiresAtMs - Date.now() > ELEVATED_SAFETY_MS;
+}
+
+function setElevatedToken(token: string, expiresInSeconds: number): void {
+  _elevatedToken = {
+    token,
+    expiresAtMs: Date.now() + expiresInSeconds * 1000,
+  };
+}
+
+export async function reauth(password: string): Promise<void> {
+  const { data } = await client.post<{ elevated_token: string; expires_in: number }>(
+    '/auth/reauth',
+    { password },
+  );
+  setElevatedToken(data.elevated_token, data.expires_in);
+}
+
+async function obtainElevatedToken(): Promise<string> {
+  if (isElevatedTokenValid()) return _elevatedToken!.token;
+  if (_elevatedProvider === null) {
+    throw new Error('Step-up re-authentication required but no provider registered');
+  }
+  // Provider is expected to call ``reauth`` (which populates the cache)
+  // and then resolve — returning the token is convenient but optional.
+  const token = await _elevatedProvider();
+  if (isElevatedTokenValid()) return _elevatedToken!.token;
+  return token;
 }
 
 // ── VLANs ─────────────────────────────────────────────────────────────────────

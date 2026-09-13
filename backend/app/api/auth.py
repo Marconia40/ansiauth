@@ -1,12 +1,22 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 
-from app.core.config import COOKIE_SAMESITE, COOKIE_SECURE, REFRESH_TOKEN_EXPIRE_MINUTES
+from app.core.config import (
+    COOKIE_SAMESITE,
+    COOKIE_SECURE,
+    ELEVATED_TOKEN_EXPIRE_MINUTES,
+    REFRESH_TOKEN_EXPIRE_MINUTES,
+)
 from app.core.response import ok
 from app.core.scope import require_authenticated, require_system_admin
-from app.core.security import create_access_token
+from app.core.security import create_access_token, create_elevated_token
 from app.models.audit import AuditRecord
-from app.schemas.auth import ActiveSessionsResponse, TokenResponse
+from app.schemas.auth import (
+    ActiveSessionsResponse,
+    ReauthRequest,
+    ReauthResponse,
+    TokenResponse,
+)
 from app.services import refresh_token_service
 from app.services.auth_service import authenticate_user
 
@@ -193,6 +203,51 @@ def logout(request: Request, response: Response):
     revoked = refresh_token_service.revoke(raw) if raw else False
     _clear_refresh_cookie(response)
     return ok({"revoked": revoked})
+
+
+@router.post(
+    "/reauth",
+    response_model=ReauthResponse,
+    summary="Step-up re-authentication",
+    description=(
+        "Verify the caller's password and return a short-lived elevated "
+        "token. Required by irreversible endpoints (delete user, promote/"
+        "demote system-admin, revoke grant, delete site) so an unattended "
+        "browser cannot chain destructive actions without a fresh password "
+        "check. Attach the returned token as the ``X-Elevated-Auth`` header."
+    ),
+)
+def reauth(
+    request: Request,
+    body: ReauthRequest,
+    current_user: dict = Depends(require_authenticated),
+):
+    from app.composition import audit_repository
+
+    username = current_user["username"]
+    user = authenticate_user(username, body.password)
+    if not user:
+        audit_repository.append(AuditRecord(
+            user=username,
+            action="reauth",
+            resource="auth",
+            details={"username": username},
+            status="failed",
+        ))
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_elevated_token(user.username)
+    audit_repository.append(AuditRecord(
+        user=user.username,
+        action="reauth",
+        resource="auth",
+        details={"username": user.username},
+        status="success",
+    ))
+    return {
+        "elevated_token": token,
+        "expires_in": ELEVATED_TOKEN_EXPIRE_MINUTES * 60,
+    }
 
 
 @router.get(

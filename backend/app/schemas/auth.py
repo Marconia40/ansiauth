@@ -33,3 +33,12 @@ class ActiveSession(BaseModel):
 
 class ActiveSessionsResponse(BaseModel):
     sessions: list[ActiveSession]
+
+
+class ReauthRequest(BaseModel):
+    password: str
+
+
+class ReauthResponse(BaseModel):
+    elevated_token: str
+    expires_in: int

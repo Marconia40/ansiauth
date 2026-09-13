@@ -151,6 +151,31 @@ def require_system_admin(current: dict = Depends(require_authenticated)) -> dict
     return current
 
 
+def require_elevated(
+    request: Request,
+    current: dict = Depends(require_authenticated),
+) -> dict:
+    """Enforce step-up re-authentication for irreversible operations.
+
+    The caller must send a fresh elevated token in the ``X-Elevated-Auth``
+    header (obtained from ``POST /auth/reauth`` with the account password).
+    Missing/expired/mismatched tokens return 401 with a stable
+    ``detail="reauth_required"`` so the frontend interceptor knows to open
+    the step-up modal and retry the request with the header populated."""
+    from app.core.security import verify_elevated_token
+
+    token = request.headers.get("x-elevated-auth")
+    if not token:
+        raise HTTPException(status_code=401, detail="reauth_required")
+    try:
+        verify_elevated_token(token, current["username"])
+    except ValueError:
+        # Any decode/typ/sub failure looks the same to the client — they
+        # just need to re-enter the password and try again.
+        raise HTTPException(status_code=401, detail="reauth_required")
+    return current
+
+
 # ─── Scope dependency ───────────────────────────────────────────────────────
 
 def obtener_scope(
