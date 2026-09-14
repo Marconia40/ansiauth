@@ -62,6 +62,37 @@ _STORM_INVALID = (
     "% Invalid input detected at '^' marker.\r\n\r\n"
     "cisco-01#"
 )
+# Read exitoso (sin marker de "no soportado") pero sin fila para Gi0/1 --
+# el device SÍ soporta storm-control (otro puerto aparece en la tabla),
+# este puerto en particular nunca lo tuvo configurado.
+_STORM_TABLE_WITHOUT_TARGET_PORT = (
+    "Interface  Filter State     Trap State     Upper        Lower        Current\n"
+    "--------- ---------------  -------------  -----------  -----------  ----------\n"
+    "Gi0/2      inactive         inactive        100.00%      100.00%      0.00%\n"
+)
+# Puerto shutdown -- la tabla operacional real (formato observado en vivo
+# contra f3r9s1, sin columna "Trap State") reporta "Link Down" para
+# Gi0/1, que parse_ios_storm_control() a propósito deja como enabled=None
+# (no se puede saber Forwarding/Blocking sin link).
+_STORM_TABLE_LINK_DOWN = (
+    "Key: U - Unicast, B - Broadcast, M - Multicast\n"
+    "Interface  Filter State   Upper        Lower        Current     Action     Type\n"
+    "---------  -------------  -----------  -----------  ----------  ---------  ----\n"
+    "Gi0/1      Link Down           10.00%       10.00%       0.00%  Shut-Trap  B   \n"
+)
+# Running-config real capturado en vivo contra f3r9s1 (Gi1/0/6, shutdown,
+# storm-control SÍ configurado) -- sigue teniendo la config real
+# independientemente de que el puerto esté caído.
+_RUNNING_CONFIG_WITH_STORM = (
+    "interface GigabitEthernet0/1\n"
+    " switchport access vlan 258\n"
+    " switchport mode access\n"
+    " shutdown\n"
+    " storm-control broadcast level 10.00\n"
+    " storm-control multicast level 10.00\n"
+    " storm-control action shutdown\n"
+    " storm-control action trap\n"
+)
 
 
 def _make_run_result(rc: int, stdouts: list[str]) -> dict:
@@ -89,6 +120,65 @@ def test_list_ports_tolerates_unsupported_storm_control(monkeypatch):
     assert p.access_vlan == 10
     assert p.storm_control_enabled is None
     assert p.storm_control_threshold is None
+
+
+# ── Case 1b: storm-control supported, port just never configured ──────────
+
+def test_list_ports_storm_control_supported_but_not_configured_is_false(monkeypatch):
+    """Bug real encontrado en un job contra f3r9s1: cuando el read de
+    storm-control funciona (no rechazado como no-soportado) pero el puerto
+    no tiene fila en la tabla, el estado real es "deshabilitado" (Cisco no
+    lo habilita por default) -- no "desconocido" como storm_control=None
+    hacía creer. Ese None causaba que Puerto.resolver_rollback() tratara un
+    rollback legítimo como no-op. Distingue de
+    test_list_ports_tolerates_unsupported_storm_control (arriba): ahí
+    storm_output queda vacío porque _filter_unsupported() lo pisó; acá
+    storm_output SÍ tiene contenido real (otro puerto aparece en la tabla),
+    solo que Gi0/1 no está en ella."""
+
+    def _fake_run(playbook, extravars, inventory=None, device=None):
+        return _make_run_result(
+            rc=0, stdouts=[_STATUS, _DESC, _SW, _STORM_TABLE_WITHOUT_TARGET_PORT],
+        )
+
+    monkeypatch.setattr(ansible_service, "run_playbook", _fake_run)
+
+    ports = CiscoVendor().list_ports(_FakeDevice(), "pw")
+
+    assert len(ports) == 1
+    p = ports[0]
+    assert p.interface == "Gi0/1"
+    assert p.storm_control_enabled is False
+    assert p.storm_control_threshold is None
+
+
+# ── Case 1c: puerto shutdown -- running-config es autoritativo ────────────
+
+def test_list_ports_storm_control_shutdown_port_uses_running_config(monkeypatch):
+    """Bug real reportado por el usuario contra f3r9s1: un puerto shutdown
+    con storm-control configurado (threshold real) mostraba
+    storm_control_enabled=None en la UI ("—") porque la tabla operacional
+    reporta "Link Down" en vez de Forwarding/Blocking cuando no hay link.
+    El running-config (ya se lee para action/trap) tiene la config real
+    independientemente del link -- debe usarse como fallback."""
+
+    def _fake_run(playbook, extravars, inventory=None, device=None):
+        return _make_run_result(
+            rc=0,
+            stdouts=[_STATUS, _DESC, _SW, _STORM_TABLE_LINK_DOWN, _RUNNING_CONFIG_WITH_STORM],
+        )
+
+    monkeypatch.setattr(ansible_service, "run_playbook", _fake_run)
+
+    ports = CiscoVendor().list_ports(_FakeDevice(), "pw")
+
+    assert len(ports) == 1
+    p = ports[0]
+    assert p.interface == "Gi0/1"
+    assert p.storm_control_enabled is True
+    assert p.storm_control_threshold == 10.0
+    assert p.storm_control_action == "shutdown"
+    assert p.storm_control_trap is True
 
 
 # ── Case 2: device truly unreachable -- must still raise ──────────────────

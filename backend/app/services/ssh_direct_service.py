@@ -32,7 +32,9 @@ import os
 import re
 import signal
 import subprocess
+import tempfile
 
+from app.core.config import ANSIBLE_BASE_PATH
 from app.services.vendors.base import limpiar_ruido_benigno as _limpiar_ruido_benigno
 
 logger = logging.getLogger(__name__)
@@ -117,6 +119,34 @@ def _tiene_error(texto: str, vendor: "str | None" = None) -> bool:
 
 _AGENT_LINE_RE = re.compile(r"(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);")
 
+# Directorio dedicado para las claves privadas materializadas en disco --
+# separado de ANSIBLE_BASE_PATH (que ansible-runner trata como su propio
+# private_data_dir y podría barrer/reescribir) para que nada de ansible-runner
+# lo toque por error.
+_DEVICE_KEYS_DIR = os.path.join(os.path.dirname(ANSIBLE_BASE_PATH), "device_ssh_keys")
+
+
+def write_private_key_file(device_name: str, private_key: str) -> str:
+    """Materializa la clave privada de *device_name* en un archivo temporal
+    único (0600, directorio 0700) y devuelve su path absoluto.
+
+    Un archivo por llamada, no un path fijo por-device -- mismo criterio que
+    ``ansible_password`` en el inventory inline de ``ansible_service.py``
+    (temp file + ``os.unlink()`` apenas se usa). El caller (``_start_agent()``
+    acá mismo) es responsable de borrar el archivo una vez cargado en el
+    ssh-agent efímero."""
+    os.makedirs(_DEVICE_KEYS_DIR, mode=0o700, exist_ok=True)
+    os.chmod(_DEVICE_KEYS_DIR, 0o700)
+    fd, path = tempfile.mkstemp(prefix=f"{device_name}-", dir=_DEVICE_KEYS_DIR)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(private_key)
+            if not private_key.endswith("\n"):
+                f.write("\n")
+    finally:
+        os.chmod(path, 0o600)
+    return path
+
 
 def _start_agent(keyfile: str) -> dict:
     """Arranca un ssh-agent efímero (1 por llamada) y le carga *keyfile*.
@@ -129,12 +159,21 @@ def _start_agent(keyfile: str) -> dict:
     manda la firma de una sola vez sin preguntar antes (optimización válida
     por RFC, ahorra 1 round-trip) y este device nunca contesta ese paquete
     -- cuelga hasta el timeout. Pasar por un agent, aunque sea efímero,
-    fuerza el flujo de 2 fases que el device sí entiende."""
+    fuerza el flujo de 2 fases que el device sí entiende.
+
+    *keyfile* es un temp file de un solo uso (``write_private_key_file()``
+    acá mismo) -- se borra acá apenas ``ssh-add`` lo carga a memoria del
+    agent, mismo criterio que ``ansible_password`` en el inventory inline de
+    ``ansible_service.py`` (nunca queda un archivo con la clave en texto
+    plano dando vueltas en disco más de lo estrictamente necesario)."""
     proc = subprocess.run(["ssh-agent", "-s"], capture_output=True, text=True, timeout=5)
     env = dict(os.environ)
     for match in _AGENT_LINE_RE.finditer(proc.stdout):
         env[match.group(1)] = match.group(2)
-    subprocess.run(["ssh-add", keyfile], env=env, capture_output=True, timeout=5)
+    try:
+        subprocess.run(["ssh-add", keyfile], env=env, capture_output=True, timeout=5)
+    finally:
+        os.unlink(keyfile)
     return env
 
 
@@ -150,9 +189,7 @@ def _stop_agent(env: dict) -> None:
 
 @contextlib.contextmanager
 def _agent_for(device):
-    from app.services import ansible_service
-
-    keyfile = ansible_service.write_private_key_file(device.name, device.private_key)
+    keyfile = write_private_key_file(device.name, device.private_key)
     agent_env = _start_agent(keyfile)
     try:
         yield agent_env

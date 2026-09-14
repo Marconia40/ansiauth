@@ -104,16 +104,20 @@ set_port_poe:
       parents: "interface {interface}"
       lines: ["power inline never"]
 
-# Sintaxis confirmada contra un Cisco real (no el IOSv de lab, que no
-# implementa storm-control en absoluto -- "% Invalid input detected").
 # "include multicast" hace que el umbral de broadcast también cuente
-# tráfico multicast -- Cisco no tiene un "storm-control multicast level"
-# separado como podría esperarse. "action" admite 2 líneas simultáneas
-# (shutdown + trap), no son mutuamente excluyentes acá -- `action_lines`
-# (Puerto.storm_control_action/storm_control_trap, cisco/driver.py's
-# resolver_set_storm_control()) ya viene resuelta a 0-2 líneas: ninguna
-# cuando action="filter" y trap=False (default implícito del device, sin
-# esas 2 líneas no hay shutdown ni trap).
+# tráfico multicast -- confirmado que funciona contra un Cisco real, pero
+# confirmado en vivo (job real contra f3r9s1) que otro Cisco real rechaza
+# esa sintaxis ("% Invalid input detected at '^' marker") -- varía por
+# plataforma/tren de IOS, no es universal como asumía el comentario
+# original acá. La alternativa (misma técnica que las ~10 operaciones
+# Huawei con "alternatives"/"triggered_by_error", motor genérico en
+# VendorDriver._aplicar_desde_template()) manda el multicast como línea
+# separada, sintaxis IOS estándar equivalente. "action" admite 2 líneas
+# simultáneas (shutdown + trap), no son mutuamente excluyentes acá --
+# `action_lines` (Puerto.storm_control_action/storm_control_trap,
+# cisco/driver.py's resolver_set_storm_control()) ya viene resuelta a 0-2
+# líneas: ninguna cuando action="filter" y trap=False (default implícito
+# del device, sin esas 2 líneas no hay shutdown ni trap).
 set_storm_control:
   enabled:
     primary:
@@ -124,6 +128,15 @@ set_storm_control:
       repeat:
         over: "action_lines"
         line: "{item}"
+    alternatives:
+      - triggered_by_error: 'storm-control broadcast include multicast\r?\n\s*\^\r?\n%\s*Invalid input'
+        parents: "interface {interface}"
+        lines:
+        - "storm-control multicast level {threshold}"
+        - "storm-control broadcast level {threshold}"
+        repeat:
+          over: "action_lines"
+          line: "{item}"
 
   disabled:
     # Mismo criterio "no X" de siempre en IOS, invierte las 4 líneas del
@@ -137,6 +150,14 @@ set_storm_control:
       - "no storm-control broadcast include multicast"
       - "no storm-control action shutdown"
       - "no storm-control action trap"
+    alternatives:
+      - triggered_by_error: 'no storm-control broadcast include multicast\r?\n\s*\^\r?\n%\s*Invalid input'
+        parents: "interface {interface}"
+        lines:
+        - "no storm-control broadcast level"
+        - "no storm-control multicast level"
+        - "no storm-control action shutdown"
+        - "no storm-control action trap"
 
 reset_port:
   primary:

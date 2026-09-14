@@ -712,6 +712,51 @@ def parse_ios_storm_control_actions(running_config_output: str) -> dict[str, tup
     return result
 
 
+def parse_ios_storm_control_from_config(running_config_output: str) -> dict[str, _StormRow]:
+    """Parse ``show running-config | section ^interface`` para el estado de
+    storm-control POR CONFIGURACIÓN -- a diferencia de
+    ``parse_ios_storm_control()`` (``show storm-control broadcast``, estado
+    OPERACIONAL), esto sigue siendo válido en un puerto ``shutdown``/sin
+    link. Bug real reportado contra ``f3r9s1``: puertos shutdown con
+    ``storm-control broadcast level 10.00`` configurado mostraban
+    ``storm_control_enabled=None`` (la tabla operacional reporta
+    ``Link Down`` en vez de Forwarding/Blocking cuando no hay link, y el
+    caller no tenía otra fuente a la que recurrir) aunque el running-config
+    tuviera la config real, visible independientemente del estado del
+    link -- el caller (``CiscoPortParser.parse_ports()``) usa esto como
+    fallback cuando la tabla operacional da ``Link Down``.
+
+    Solo la forma "broadcast level N"/"multicast level N" (percent, la
+    única que este driver escribe) se parsea a un threshold real -- misma
+    limitación ya documentada en ``parse_ios_storm_control()``.
+
+    Returns
+    -------
+    dict[str, _StormRow]
+        Solo interfaces con al menos 1 línea storm-control en su sección.
+    """
+    rows: dict[str, _StormRow] = {}
+    current: str | None = None
+    for raw in running_config_output.splitlines():
+        line = strip_ansi(raw).rstrip()
+        header = _IOS_PORT_IFACE_HEADER.match(line.strip())
+        if header:
+            name = _abreviar_nombre_interfaz_ios(header.group(1))
+            current = name if CiscoPortParser.is_physical_port(name) else None
+            continue
+        if current is None:
+            continue
+        stripped = line.strip()
+        if not stripped.startswith("storm-control"):
+            continue
+        existing = rows.get(current, _StormRow(enabled=True, threshold=None))
+        m = _STORM_LEVEL_PERCENT.search(stripped)
+        if m and existing.threshold is None:
+            existing = _StormRow(enabled=True, threshold=float(m.group(1) or m.group(2)))
+        rows[current] = existing
+    return rows
+
+
 class CiscoPortParser(PortParser):
     # IOS reports interface names in their short form in every read command
     # (`Gi0/1`, `Te1/0/1`, ...).  These are the prefixes we treat as physical
@@ -799,6 +844,9 @@ class CiscoPortParser(PortParser):
         storm_actions = (
             parse_ios_storm_control_actions(running_config_output) if running_config_output else {}
         )
+        storm_config_rows = (
+            parse_ios_storm_control_from_config(running_config_output) if running_config_output else {}
+        )
 
         ports: list[Puerto] = []
         # Source of truth for the port set: switchport_output (real L2 ports).
@@ -822,7 +870,38 @@ class CiscoPortParser(PortParser):
                 description = None
 
             action, trap = storm_actions.get(name, (None, None))
-            if storm and storm.enabled and action is None:
+
+            storm_cfg = storm_config_rows.get(name)
+            if storm is not None and storm.enabled is not None:
+                # Tabla operacional dio una lectura real (Forwarding/
+                # Blocking/inactive) -- fuente más autoritativa cuando está
+                # disponible.
+                storm_enabled, storm_threshold = storm.enabled, storm.threshold
+            elif storm_cfg is not None:
+                # Operacional ambiguo (fila ausente, o "Link Down" -- puerto
+                # shutdown/sin link, Cisco no puede reportar
+                # forwarding/blocking sin link) pero el running-config SÍ
+                # tiene líneas storm-control para este puerto -- autoritativo
+                # independientemente del estado del link. Bug real reportado
+                # contra f3r9s1: puertos shutdown con threshold configurado
+                # mostraban "—" en la UI en vez del valor real.
+                storm_enabled, storm_threshold = storm_cfg.enabled, storm_cfg.threshold
+            elif storm_output:
+                # Read exitoso (storm_output no vacío -- si el comando
+                # hubiera sido no-soportado, _filter_unsupported() lo habría
+                # pisado con "") pero este puerto no tiene fila en la tabla
+                # ni config -- Cisco no habilita storm-control por default,
+                # así que es confiablemente False, no "desconocido" -- mismo
+                # criterio que parse_vrp_storm_control() (Huawei) ya sigue
+                # sembrando enabled=False por default. Bug real encontrado
+                # en un job contra f3r9s1: storm_control_enabled=None acá
+                # hacía que Puerto.resolver_rollback() tratara un rollback
+                # legítimo como no-op ("no sé el estado anterior").
+                storm_enabled, storm_threshold = False, None
+            else:
+                storm_enabled, storm_threshold = None, None
+
+            if storm_enabled and action is None:
                 action = "filter"
                 trap = False
 
@@ -835,8 +914,8 @@ class CiscoPortParser(PortParser):
                     mode=sw.mode,
                     access_vlan=sw.access_vlan,
                     allowed_vlans=sw.allowed_vlans,
-                    storm_control_enabled=storm.enabled if storm else None,
-                    storm_control_threshold=storm.threshold if storm else None,
+                    storm_control_enabled=storm_enabled,
+                    storm_control_threshold=storm_threshold,
                     storm_control_action=action,
                     storm_control_trap=trap,
                     # Step 1.3 explicitly leaves these as None.

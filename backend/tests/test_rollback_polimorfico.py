@@ -217,6 +217,39 @@ class TestRevertRealAplicado:
 
         assert (performed, success) == (True, True)
 
+    def test_puerto_resolver_rollback_storm_control_previamente_deshabilitado_revierte(self):
+        """Bug real encontrado en un job contra f3r9s1 (job #165): el
+        parser Cisco devolvía storm_control_enabled=None para un puerto
+        que en realidad nunca tuvo storm-control configurado (lectura
+        exitosa, sin fila en la tabla -- fix en port_parser.py), y
+        resolver_rollback() trataba ese None como "no sé, mejor no toco
+        nada" -- dejando el estado parcial aplicado sin revertir. Con el
+        parser corregido, anterior.storm_control_enabled=False (no None) y
+        acá debe generar el paso de rollback real, no un no-op."""
+        llamadas = []
+
+        class FakeDriver:
+            def resolver_set_storm_control(self, interface, enabled, threshold, action="shutdown", trap=True):
+                llamadas.append((interface, enabled, threshold))
+                return ("set_storm_control", "disabled", {"interface": interface})
+
+        device = _device()
+        device._driver = FakeDriver()
+        snap = Puerto(
+            interface="Gi1/0/1", device="f3r9s1",
+            storm_control_enabled=True, storm_control_threshold=10,
+        )
+        anterior = Puerto(
+            interface="Gi1/0/1", device="f3r9s1",
+            storm_control_enabled=False, storm_control_threshold=None,
+        )
+        pre_state = {"existed": True, "actual": anterior}
+
+        pasos, verificar = snap.resolver_rollback(pre_state, device)
+
+        assert len(pasos) == 1
+        assert llamadas == [("Gi1/0/1", False, 0)]
+
 
 # ── Bug #4: criterio de 2 fases en el rollback batcheado ─────────────────────
 

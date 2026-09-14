@@ -257,38 +257,6 @@ def build_inventory(
     return inv
 
 
-# Directorio dedicado para las claves privadas materializadas en disco --
-# separado de ANSIBLE_BASE_PATH (que ansible-runner trata como su propio
-# private_data_dir y podría barrer/reescribir) para que nada de ansible-runner
-# lo toque por error.
-_DEVICE_KEYS_DIR = os.path.join(os.path.dirname(ANSIBLE_BASE_PATH), "device_ssh_keys")
-
-
-def write_private_key_file(device_name: str, private_key: str) -> str:
-    """Materializa la clave privada de *device_name* en un archivo estable
-    (0600, directorio 0700) y devuelve su path absoluto.
-
-    Path fijo por-device (no un temp file por conexión) a propósito: evita
-    tener que enhebrar un path efímero a través de ``_build_inventory()``
-    -> ``run_playbook()`` -> cleanup -- la clave se sobreescribe cada vez
-    que se llama (barato, un archivo chico) así que siempre queda al día
-    si el device rota su clave vía ``Device.actualizar()``. El contenido
-    nunca se loguea (a diferencia de ``ansible_password`` en el inventory,
-    acá ni siquiera aparece en la línea del inventory -- solo el path)."""
-    os.makedirs(_DEVICE_KEYS_DIR, mode=0o700, exist_ok=True)
-    os.chmod(_DEVICE_KEYS_DIR, 0o700)
-    path = os.path.join(_DEVICE_KEYS_DIR, device_name)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(private_key)
-            if not private_key.endswith("\n"):
-                f.write("\n")
-    finally:
-        os.chmod(path, 0o600)
-    return path
-
-
 def _extract_ios_command_output(r) -> str:
     """Return the first command stdout string from ansible-runner events.
 
