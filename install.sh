@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # install.sh — AnsiAuth VM installer
 #
-# Instala Docker, Node.js, clona el repo, genera secretos, levanta el stack
-# con Docker Compose y registra servicios systemd. Pensado para VMs Ubuntu
-# 22.04+/24.04 y RHEL/Fedora recientes.
+# Instala Docker, Node.js, Caddy, clona el repo, genera secretos, levanta el
+# stack con Docker Compose y registra servicios systemd. Pensado para VMs
+# Ubuntu 22.04+/24.04 y RHEL/Fedora recientes.
+#
+# El stack queda expuesto SOLO por HTTPS en el puerto 8443, terminando TLS en
+# Caddy con un cert self-signed emitido por su CA interna (tls internal).
+# Backend (8000) y frontend (3000) bindean a 127.0.0.1 — no se acceden desde
+# afuera de la VM. La primera vez que un browser entre a https://<vm-ip>:8443
+# va a mostrar un warning de cert no confiable (esperable con tls internal);
+# para eliminarlo, importar la root CA de Caddy en el trust store del cliente
+# (path indicado al final del script).
 #
 # Uso:
 #   curl -sSL https://raw.githubusercontent.com/Marconia40/ansiauth/main/install.sh | sudo bash
@@ -15,6 +23,7 @@
 #   NODE_MAJOR    — mayor de Node.js a instalar  (default: 20)
 #   RUN_USER      — usuario que correrá node     (default: ansiauth)
 #   SKIP_UFW      — 1 para no tocar el firewall  (default: 0)
+#   HTTPS_PORT    — puerto público HTTPS         (default: 8443)
 
 set -euo pipefail
 
@@ -24,10 +33,12 @@ BRANCH="${BRANCH:-main}"
 NODE_MAJOR="${NODE_MAJOR:-20}"
 RUN_USER="${RUN_USER:-ansiauth}"
 SKIP_UFW="${SKIP_UFW:-0}"
+HTTPS_PORT="${HTTPS_PORT:-8443}"
 
 CREDS_FILE="/root/ansiauth-credentials.txt"
 COMPOSE_FILE="$INSTALL_DIR/docker-compose.prod.yml"
 ENV_FILE="$INSTALL_DIR/.env"
+CADDYFILE="/etc/caddy/Caddyfile"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 c_blue=$'\033[1;34m'; c_yellow=$'\033[1;33m'; c_red=$'\033[1;31m'
@@ -128,6 +139,33 @@ else
     fi
 fi
 
+# ─── Caddy (reverse proxy + TLS interno) ──────────────────────────────────────
+# Termina TLS en :$HTTPS_PORT con cert self-signed emitido por la CA interna
+# de Caddy (tls internal). Rutea /api/* al backend y el resto al frontend, así
+# el navegador ve un único origen (evita CORS y simplifica cookies).
+if command -v caddy >/dev/null 2>&1; then
+    ok "Caddy ya presente ($(caddy version | awk '{print $1}'))"
+else
+    log "Instalando Caddy..."
+    if [[ "$PKG" == apt ]]; then
+        # Repo oficial de Caddy en Cloudsmith.
+        pkg_install debian-keyring debian-archive-keyring apt-transport-https gnupg
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+            | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+            > /etc/apt/sources.list.d/caddy-stable.list
+        apt-get update -qq
+        pkg_install caddy
+    else
+        # Fedora trae caddy en repos base; RHEL/Rocky/Alma requieren copr.
+        if ! dnf install -y caddy 2>/dev/null; then
+            dnf install -y 'dnf-command(copr)'
+            dnf copr enable -y @caddy/caddy
+            dnf install -y caddy
+        fi
+    fi
+fi
+
 # ─── Usuario del servicio ────────────────────────────────────────────────────
 if ! id -u "$RUN_USER" >/dev/null 2>&1; then
     log "Creando usuario del sistema '$RUN_USER'..."
@@ -193,16 +231,16 @@ EXECUTION_MODE=mock
 LOG_FORMAT=json
 
 # ── Cookies ──
-# COOKIE_SECURE=false porque el stack corre en HTTP puro; poné 'true' si
-# terminás TLS en un reverse proxy.
-COOKIE_SECURE=false
-# 'lax' porque frontend (:3000) y backend (:8000) están en el mismo host —
-# same-site se decide por el registrable domain, no por el puerto, así que
-# 'strict' funcionaría, pero 'lax' es más resistente a cambios de topología
-# (ej. mover el frontend a otro subdominio).
-COOKIE_SAMESITE=lax
+# El stack se sirve por HTTPS en :$HTTPS_PORT (Caddy termina TLS), así que
+# las cookies deben ir con Secure. samesite=strict es viable porque frontend
+# y backend comparten origen a través del reverse proxy (misma URL).
+COOKIE_SECURE=true
+COOKIE_SAMESITE=strict
 
-CORS_ORIGINS=http://$HOST_IP:3000,http://localhost:3000
+# Con Caddy sirviendo /api/* y / bajo el mismo host:puerto, las llamadas del
+# frontend al backend son same-origin y no disparan CORS. Igual dejamos el
+# origen listado para peticiones directas o herramientas externas.
+CORS_ORIGINS=https://$HOST_IP:$HTTPS_PORT
 
 # ── Lifetimes de tokens y sesión ──
 # Cambiar acá si querés sesiones más largas/cortas sin recompilar la imagen.
@@ -300,7 +338,8 @@ services:
       DATABASE_URL: postgresql+psycopg://ansiauth:${POSTGRES_PASSWORD}@db:5432/ansiauth
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "8000:8000"
+      # Solo accesible desde el host — el tráfico público entra por Caddy (:8443).
+      - "127.0.0.1:8000:8000"
 
   worker:
     build:
@@ -340,13 +379,14 @@ chown "$RUN_USER:$RUN_USER" "$COMPOSE_FILE"
 
 # ─── Frontend: env + build ────────────────────────────────────────────────────
 FRONTEND_ENV="$INSTALL_DIR/frontend/.env.local"
-if [[ ! -f "$FRONTEND_ENV" ]]; then
-    log "Escribiendo $FRONTEND_ENV..."
-    cat > "$FRONTEND_ENV" <<EOF
-NEXT_PUBLIC_API_URL=http://$HOST_IP:8000
+# NEXT_PUBLIC_API_URL se inlinea en el bundle en tiempo de build, así que
+# regeneramos el archivo en cada corrida para que el frontend siempre apunte
+# al Caddy actual (útil si cambió HTTPS_PORT o HOST_IP entre corridas).
+log "Escribiendo $FRONTEND_ENV..."
+cat > "$FRONTEND_ENV" <<EOF
+NEXT_PUBLIC_API_URL=https://$HOST_IP:$HTTPS_PORT
 EOF
-    chown "$RUN_USER:$RUN_USER" "$FRONTEND_ENV"
-fi
+chown "$RUN_USER:$RUN_USER" "$FRONTEND_ENV"
 
 log "Instalando dependencias y compilando frontend (esto tarda unos minutos)..."
 sudo -u "$RUN_USER" bash -lc "cd '$INSTALL_DIR/frontend' && npm ci --no-audit --no-fund && npm run build"
@@ -388,7 +428,9 @@ Group=$RUN_USER
 WorkingDirectory=$INSTALL_DIR/frontend
 Environment=NODE_ENV=production
 Environment=PORT=3000
-Environment=HOSTNAME=0.0.0.0
+# Bindea a loopback: el tráfico público entra por Caddy (:$HTTPS_PORT) y
+# proxya a 127.0.0.1:3000.
+Environment=HOSTNAME=127.0.0.1
 ExecStart=/usr/bin/npm run start
 Restart=always
 RestartSec=5
@@ -404,20 +446,83 @@ EOF
 systemctl daemon-reload
 systemctl enable ansiauth-stack.service ansiauth-frontend.service >/dev/null
 
+# ─── Caddyfile + service ─────────────────────────────────────────────────────
+# El Caddyfile se regenera en cada corrida (backup en .bak). Si querés cert
+# emitido por la CA de tu organización, reemplazá 'tls internal' por
+# 'tls /ruta/cert.pem /ruta/key.pem' y recargá con: systemctl reload caddy.
+if [[ -f "$CADDYFILE" ]]; then
+    cp -f "$CADDYFILE" "$CADDYFILE.bak"
+fi
+log "Escribiendo $CADDYFILE (HTTPS :$HTTPS_PORT con tls internal)..."
+cat > "$CADDYFILE" <<EOF
+# Caddyfile — generado por install.sh
+#
+# Un único puerto público (:$HTTPS_PORT) que rutea por path:
+#   /api/*  → backend  (FastAPI en 127.0.0.1:8000)
+#   resto   → frontend (Next.js en 127.0.0.1:3000)
+#
+# 'tls internal' hace que Caddy emita el cert desde su CA local. La root CA
+# vive en /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+# — importala en el trust store del cliente para eliminar el warning del
+# browser.
+
+{
+	# Redirecciones auto de HTTP→HTTPS deshabilitadas: no exponemos :80.
+	auto_https disable_redirects
+}
+
+:$HTTPS_PORT {
+	tls internal
+
+	# Compresión estándar.
+	encode gzip
+
+	# El backend expone /api/v1/* y /health; ambos van al mismo upstream.
+	@backend path /api/* /health /metrics
+	handle @backend {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# Todo lo demás (assets, SSR, HMR/WS en dev) al frontend.
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	# Logs → journald (systemd-cat) via el propio caddy.service.
+	log {
+		output stderr
+		format console
+	}
+}
+EOF
+
+# Validación temprana: si el Caddyfile es inválido, mejor abortar antes de
+# tocar systemd que dejar el service en failed loop.
+if ! caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1; then
+    err "Caddyfile inválido — revisar $CADDYFILE"
+fi
+
+log "Habilitando caddy.service..."
+systemctl enable caddy >/dev/null
+# reload es idempotente (arranca si estaba down, recarga config si estaba up).
+systemctl restart caddy
+ok "Caddy activo en :$HTTPS_PORT"
+
 # ─── Firewall (UFW en Debian/Ubuntu) ─────────────────────────────────────────
+# Solo abrimos SSH + el puerto público de Caddy. Backend/frontend bindean a
+# loopback, así que no hace falta abrir 3000/8000.
 if [[ "$SKIP_UFW" != "1" && "$PKG" == "apt" ]]; then
-    log "Configurando UFW (SSH + 3000 frontend + 8000 backend)..."
+    log "Configurando UFW (SSH + $HTTPS_PORT/tcp)..."
     pkg_install ufw
     ufw --force reset >/dev/null
     ufw default deny incoming
     ufw default allow outgoing
     ufw allow OpenSSH
-    ufw allow 3000/tcp comment 'AnsiAuth frontend'
-    ufw allow 8000/tcp comment 'AnsiAuth backend API'
+    ufw allow "$HTTPS_PORT/tcp" comment 'AnsiAuth HTTPS (Caddy)'
     ufw --force enable
     ok "UFW activo"
 elif [[ "$SKIP_UFW" != "1" ]]; then
-    warn "Saltando UFW: no está en apt-land. Abrí manualmente 3000/tcp y 8000/tcp."
+    warn "Saltando UFW: no está en apt-land. Abrí manualmente $HTTPS_PORT/tcp."
 fi
 
 # ─── Build de imágenes ───────────────────────────────────────────────────────
@@ -461,6 +566,18 @@ else
     warn "Frontend no arrancó. Revisá: journalctl -u ansiauth-frontend -e"
 fi
 
+# ─── Verificación final por HTTPS ────────────────────────────────────────────
+# -k porque el cert es self-signed (tls internal). Si esto falla, el problema
+# está en Caddy o en el bind loopback de backend/frontend.
+log "Verificando que la app responde por HTTPS..."
+if curl -kfsS "https://127.0.0.1:$HTTPS_PORT/health" >/dev/null 2>&1; then
+    ok "Caddy → backend OK (https://127.0.0.1:$HTTPS_PORT/health)"
+else
+    warn "No responde /health por Caddy. Revisá: journalctl -u caddy -e"
+fi
+
+CADDY_ROOT_CA="/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt"
+
 # ─── Guardar credenciales ─────────────────────────────────────────────────────
 log "Guardando credenciales en $CREDS_FILE (0600)..."
 # Recargar el .env por si venía preexistente y no las teníamos en variables.
@@ -469,8 +586,8 @@ set -a; source "$ENV_FILE"; set +a
 cat > "$CREDS_FILE" <<EOF
 AnsiAuth — credenciales generadas $(date -Iseconds)
 ======================================================
-URL frontend:       http://$HOST_IP:3000
-URL API:            http://$HOST_IP:8000
+URL app (HTTPS):    https://$HOST_IP:$HTTPS_PORT
+URL API (HTTPS):    https://$HOST_IP:$HTTPS_PORT/api/v1
 
 Super-admin inicial:
   usuario:          ${BOOTSTRAP_ADMIN_USER:-admin}
@@ -483,8 +600,20 @@ Postgres (solo local, 127.0.0.1:5432):
 Archivos importantes:
   .env:             $ENV_FILE
   compose prod:     $COMPOSE_FILE
+  Caddyfile:        $CADDYFILE
   daemon.json:      /etc/docker/daemon.json
   ansible inv:      $INSTALL_DIR/backend/ansible/inventory/inventory.ini
+
+Certificado TLS (self-signed emitido por Caddy):
+  root CA:          $CADDY_ROOT_CA
+  Para eliminar el warning del browser en cada cliente:
+    1) Copiar ese archivo a la máquina del usuario.
+    2) Importarlo en el trust store del sistema o del browser.
+       — Windows: certmgr.msc → "Trusted Root Certification Authorities".
+       — macOS:   Keychain Access → System → import → marcar "Always Trust".
+       — Linux:   cp root.crt /usr/local/share/ca-certificates/ &&
+                  update-ca-certificates.
+    3) En corporate: IT puede empujar la root CA via GPO/MDM.
 
 Modo de ejecución: EXECUTION_MODE=${EXECUTION_MODE:-mock}
   * mock  → no se dispara ningún playbook real (default, seguro para probar).
@@ -492,10 +621,12 @@ Modo de ejecución: EXECUTION_MODE=${EXECUTION_MODE:-mock}
             de setear EXECUTION_MODE=real en $ENV_FILE y reiniciar el stack.
 
 Gestión:
-  systemctl status ansiauth-stack ansiauth-frontend
+  systemctl status ansiauth-stack ansiauth-frontend caddy
   systemctl restart ansiauth-stack
+  systemctl reload caddy       # tras editar $CADDYFILE
   journalctl -u ansiauth-stack -f
   journalctl -u ansiauth-frontend -f
+  journalctl -u caddy -f
   docker compose -f $COMPOSE_FILE logs -f backend
 
 Actualizar a la última versión de $BRANCH:
@@ -510,16 +641,16 @@ ok "═════════════════════════�
 ok "  Instalación completa."
 ok "══════════════════════════════════════════════════════════════════"
 echo
-echo "  Frontend:       http://$HOST_IP:3000"
-echo "  API:            http://$HOST_IP:8000"
+echo "  URL app:        https://$HOST_IP:$HTTPS_PORT"
 echo "  Usuario admin:  ${BOOTSTRAP_ADMIN_USER:-admin}"
 echo "  Password admin: ${BOOTSTRAP_ADMIN_PASSWORD}"
 echo
 echo "  Credenciales guardadas en:  $CREDS_FILE"
 echo "  (perms 0600 — solo root puede leerlas)"
 echo
-warn "El stack corre sobre HTTP. Para exponerlo fuera de la LAN interna,"
-warn "poné un reverse proxy (nginx/caddy) con TLS y cambiá COOKIE_SECURE=true."
+warn "El cert es self-signed (Caddy tls internal). La primera vez el browser"
+warn "va a mostrar warning — click 'Continuar' o importá la root CA:"
+warn "  $CADDY_ROOT_CA"
 echo
 if [[ "${EXECUTION_MODE:-mock}" != "real" ]]; then
     warn "EXECUTION_MODE=mock: no se dispararán playbooks reales."
