@@ -658,18 +658,13 @@ This resolves `no matching key exchange method` and `no matching host key type` 
 
 ### Ansible inventory configuration
 
-The Ansible inventory is located at `ansible/inventory/inventory.ini`. Ensure `ansible/ansible.cfg` points to it:
-
-```ini
-[defaults]
-inventory = inventory/inventory.ini
-```
+The Ansible inventory is located at `backend/ansible/inventory/hosts`, and the config at `backend/ansible/ansible.cfg`. At runtime, ansible-runner builds an isolated per-device inventory in its `private_data_dir`, so this file is only used for manual verification.
 
 ### Verify connectivity before running real jobs
 
 ```bash
-cd ansible
-ansible cisco -m ping
+cd backend/ansible
+ansible cisco -m ping -i inventory/hosts
 ```
 
 ---
