@@ -65,6 +65,11 @@ dist/
 build/
 
 # =========================
+# Ansible-runner artifacts (runtime output)
+# =========================
+artifacts/
+
+# =========================
 # Docker (optional)
 # =========================
 *.env.local
