@@ -29,7 +29,17 @@ export function RefreshButton({
       {progressLabel ? (
         <span className="text-xs text-muted tabular-nums">{progressLabel}</span>
       ) : syncError ? (
-        <span className="text-xs text-danger">Sync error</span>
+        // Bug real reportado por el usuario: este label solo decia "Sync
+        // error" sin ninguna forma de ver el detalle real -- a diferencia
+        // de las tabs de Global Config (ver GlobalConfigArpMac.tsx y
+        // hermanas), que muestran un banner completo con el mensaje. Los
+        // callers de RefreshButton (Ports/VLAN/Virtual-Interfaces) nunca
+        // tuvieron ese banner -- el tooltip nativo del navegador es el fix
+        // minimo que cubre los 3 de una sola vez sin agregar un banner
+        // nuevo en cada tab.
+        <span className="text-xs text-danger cursor-help" title={syncError}>
+          Sync error
+        </span>
       ) : syncedAt ? (
         <span className="text-xs text-muted">
           Last synced {formatSyncRelative(syncedAt)}

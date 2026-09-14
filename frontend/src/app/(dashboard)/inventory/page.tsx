@@ -212,7 +212,22 @@ export default function InventoryPage() {
     setEditingDeviceName(device.name);
     setEditingHost(device.host);
     setEditingVendor(device.vendor);
-    setEditingPlatform(device.platform);
+    // Bug real reportado por el usuario: devices creados antes de que
+    // existiera este selector (o con platform="ios" default del backend
+    // sin importar vendor, ver DeviceCreate.platform) pueden tener un
+    // platform guardado que ya NO es una opción válida para su vendor
+    // (ej. Huawei con platform="ios", cuando la única opción real es
+    // "ce"). El <select> del browser, al no encontrar ese value entre
+    // sus <option>, muestra visualmente la primera disponible -- pero el
+    // estado de React (editingPlatform) queda con el valor viejo/inválido
+    // sin que nadie lo note, así que "Save" no cambia nada realmente
+    // (manda el mismo platform roto de vuelta). Si el valor guardado no
+    // es válido para este vendor, arrancar directo con el default real
+    // del vendor en vez de con el dato inconsistente.
+    const validPlatforms = PLATFORMS_BY_VENDOR[device.vendor]?.map((p) => p.value) ?? [];
+    setEditingPlatform(
+      validPlatforms.includes(device.platform) ? device.platform : defaultPlatformFor(device.vendor),
+    );
     setEditingUsername(device.username);
     setEditingAuthMethod(device.auth_method);
     setEditingPassword('');
