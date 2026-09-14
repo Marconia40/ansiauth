@@ -25,7 +25,16 @@ _CISCO_ARP_RE = re.compile(r"^Internet\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s
 # fila real y descarta headers/separadores sin necesidad de saltear líneas a
 # mano. Confirmado en vivo: 49/49 filas reales parseadas (incluye las "All"
 # de multicast/protocolo reservado, no solo las dinámicas por-VLAN).
-_CISCO_MAC_RE = re.compile(r"^\s*(\S+)\s+(\S+\.\S+\.\S+)\s+(\S+)\s+(\S+)\s*$")
+#
+# "type" NO siempre es 1 sola palabra -- bug real encontrado en vivo contra
+# f2r11s1 (plataforma/IOS distinto a f3r9s1): "   7   bc24.114b.9732
+# dynamic ip,ipx,assigned,other Port-channel1" tiene un "type" de 2
+# palabras, el regex original (4 tokens fijos) no matcheaba esa fila en
+# absoluto -- se perdía en silencio (list.append() nunca corría, sin
+# error). ``(.+?)`` no-greedy captura "type" como lo que quede entre el mac
+# y el ÚLTIMO token (interface, siempre 1 sola palabra en ambos formatos
+# vistos) en vez de asumir un único word fijo.
+_CISCO_MAC_RE = re.compile(r"^\s*(\S+)\s+(\S+\.\S+\.\S+)\s+(.+?)\s+(\S+)\s*$")
 
 
 def parse_cisco_arp(raw: str) -> list[dict]:

@@ -840,6 +840,16 @@ class HuaweiVendor(VendorDriver):
         raw = self._leer(["display mac-address"], device, password)[0]
         return parse_huawei_mac(raw)
 
+    def search_mac_table(self, pattern: str, device: Device, password: str) -> list[dict]:
+        """Mismo criterio que ``CiscoVendor.search_mac_table()`` -- ver esa
+        docstring. No confirmado en vivo que VRP necesite esto (el
+        problema real hasta ahora es Cisco-específico), agregado por
+        paridad de interfaz entre vendors."""
+        from app.services.parsers.arp_mac_parser import parse_huawei_mac
+
+        raw = self._leer([f"display mac-address | include {pattern}"], device, password)[0]
+        return parse_huawei_mac(raw)
+
     def get_log_buffer(self, device: Device, password: str) -> str:
         """RF-GLOBAL fuera de alcance, pedido del usuario "de la misma
         forma que las tablas mac y arp". Confirmado en vivo contra

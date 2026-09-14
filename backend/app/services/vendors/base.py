@@ -1450,6 +1450,16 @@ class VendorDriver(ABC):
             f"{self.__class__.__name__} does not implement get_mac_table yet"
         )
 
+    def search_mac_table(self, pattern: str, device: Device, password: str) -> "list[dict]":
+        """Búsqueda en vivo (``| include {pattern}``) para cuando
+        ``get_mac_table()`` completa no es viable en un device grande --
+        ver ``CiscoVendor.search_mac_table()``. ``pattern`` llega ya
+        validado por el caller (whitelist alfanumérico, nunca texto libre
+        sin sanitizar)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement search_mac_table yet"
+        )
+
     def get_log_buffer(self, device: Device, password: str) -> str:
         """Log buffer local del device, texto crudo (sin parsear a
         entradas -- mismo criterio que ``running_config``, el formato de

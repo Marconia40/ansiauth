@@ -65,8 +65,21 @@ def test_validator_accepts_typical_interface_names():
         _validate_interface_name(name)
 
 
+def test_validator_accepts_huawei_speed_prefixed_interface_names():
+    """Bug real reportado por el usuario: las interfaces de alta velocidad
+    de Huawei nombran la velocidad COMO prefijo -- "10GE1/0/6",
+    "25GE1/0/48", "100GE1/0/1" -- a diferencia de GigabitEthernet/
+    XGigabitEthernet, no tienen una forma verbosa separada de la que
+    abreviarse (no están en _VRP_IFACE_ABBREV a propósito, ya son
+    cortas). El regex viejo exigía que el primer carácter fuera una
+    letra, rechazando las 3 en la API antes de llegar siquiera al
+    device."""
+    for name in ["10GE1/0/6", "25GE1/0/48", "100GE1/0/1"]:
+        _validate_interface_name(name)
+
+
 def test_validator_rejects_bad_interface_names():
-    for name in ["", " ", "1/0/1", "GigaBitEthernet 0/0/1", "Gi0\n0/1", "x"]:
+    for name in ["", " ", "1/0/1", "123", "GigaBitEthernet 0/0/1", "Gi0\n0/1", "x"]:
         with pytest.raises(ValueError):
             _validate_interface_name(name)
 

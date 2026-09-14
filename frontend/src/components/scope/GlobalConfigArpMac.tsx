@@ -4,8 +4,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   getArpTable,
+  getJob,
   getMacTable,
   refreshDeviceArpMac,
+  searchMacTable,
   type SyncedResource,
 } from '@/services/api';
 import type {
@@ -96,6 +98,49 @@ export function GlobalConfigArpMac({ deviceName }: Props) {
     }
   }
 
+  // Live, on-device MAC search -- fallback for devices where the full
+  // table never syncs at all (confirmed live: a large device's MAC table
+  // drops the interactive SSH session mid-stream, same failure mode
+  // get_log_buffer() used to hit before it was capped to "| last 500").
+  // Separate from the filter-cached-rows input above -- there's nothing
+  // cached to filter when the sync itself failed, so this fires a live
+  // `| include` query on the device instead.
+  const [macSearching, setMacSearching] = useState(false);
+  const [macSearchResult, setMacSearchResult] = useState<ArpMacEntry[] | null>(null);
+  const [macSearchError, setMacSearchError] = useState<string | null>(null);
+
+  async function handleMacLiveSearch() {
+    if (!includeValid || rawInclude === '') return;
+    setMacSearching(true);
+    setMacSearchResult(null);
+    setMacSearchError(null);
+    try {
+      const { job_id } = await searchMacTable(deviceName, rawInclude);
+      // Simple poll loop -- this is a one-off action (not react-query
+      // cached data), same 1.5s cadence as other job-tracking UI in this
+      // app. Bounded to ~30s (20 attempts) so a stuck job can't spin
+      // forever.
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const job = await getJob(job_id);
+        if (job.status === 'completed') {
+          const entries = (job.result as { entries?: ArpMacEntry[] } | null)?.entries ?? [];
+          setMacSearchResult(entries);
+          return;
+        }
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          setMacSearchError(job.error ?? 'Search failed.');
+          return;
+        }
+      }
+      setMacSearchError('Search timed out — try again.');
+    } catch (err) {
+      setMacSearchError(err instanceof Error ? err.message : 'Search failed.');
+    } finally {
+      setMacSearching(false);
+    }
+  }
+
   const loading = arpQuery.isLoading || macQuery.isLoading;
   // "Never synced" — the cache is empty (both entries null AND no
   // synced_at). If the user filters and the include yields no rows, we
@@ -136,7 +181,15 @@ export function GlobalConfigArpMac({ deviceName }: Props) {
         />
       </div>
 
-      {syncError && (
+      {/* Solo el banner grande cuando NINGUNA de las 2 tablas tiene algo
+          útil para mostrar -- si ARP sincronizó bien (caso típico: MAC es
+          la que se corta por volumen, ARP no) mostrar un banner rojo
+          "Last sync failed" arriba de una tabla con 1000+ filas reales es
+          engañoso. El panel de MAC ya explica su propio error puntual
+          cuando corresponde (ver más abajo), con su propia búsqueda en
+          vivo como alternativa -- no hace falta duplicarlo acá arriba. */}
+      {syncError && (arpEntries === null || arpEntries.length === 0)
+        && (macEntries === null || macEntries.length === 0) && (
         <div className="rounded-md border border-danger/60 bg-danger/10 text-danger px-3 py-2 text-sm">
           Last sync failed: {syncError}
         </div>
@@ -170,16 +223,49 @@ export function GlobalConfigArpMac({ deviceName }: Props) {
           title="MAC table"
           actions={
             <span className="text-xs text-muted tabular-nums">
-              {macEntries?.length ?? 0} row
-              {(macEntries?.length ?? 0) === 1 ? '' : 's'}
+              {(macSearchResult ?? macEntries)?.length ?? 0} row
+              {((macSearchResult ?? macEntries)?.length ?? 0) === 1 ? '' : 's'}
             </span>
           }
         >
-          <EntriesTable
-            entries={macEntries}
-            columns={MAC_COLUMNS}
-            loading={loading}
-          />
+          {!loading && syncError && (macEntries === null || macEntries.length === 0) ? (
+            <div className="flex flex-col gap-2">
+              <p className="text-sm text-muted">
+                Couldn&apos;t bring the full MAC table — large tables can drop
+                the SSH read mid-stream. Search for a specific value on the
+                device instead:
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleMacLiveSearch}
+                  disabled={!includeValid || rawInclude === '' || macSearching}
+                  className="rounded-md bg-info px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                >
+                  {macSearching ? 'Searching…' : 'Search on device'}
+                </button>
+                <span className="text-xs text-muted">
+                  Uses the filter box above — type a MAC/VLAN/interface value, then click Search.
+                </span>
+              </div>
+              {macSearchError && (
+                <p className="text-sm text-danger">{macSearchError}</p>
+              )}
+              {macSearchResult !== null && (
+                <EntriesTable
+                  entries={macSearchResult}
+                  columns={MAC_COLUMNS}
+                  loading={false}
+                />
+              )}
+            </div>
+          ) : (
+            <EntriesTable
+              entries={macEntries}
+              columns={MAC_COLUMNS}
+              loading={loading}
+            />
+          )}
         </Panel>
       </div>
     </div>

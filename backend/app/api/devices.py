@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Query
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.response import ok
@@ -12,6 +12,11 @@ from app.core.scope import (
 )
 from app.models.visibility_scope import VisibilityScope
 from app.schemas.device import DeviceCreate, DeviceMove, DevicePublic, DeviceUpdate
+
+# Reused from global_config.py's own `/mac`/`/arp` `include` query param --
+# same safe whitelist (no pipe/newline injection risk when embedded
+# directly into a device CLI command, see CiscoVendor.search_mac_table()).
+from app.api.global_config import _ARP_MAC_INCLUDE_RE
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -353,6 +358,53 @@ def refresh_device_arp_mac(
     visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
     result = sync_device_task.delay(name, "arp_mac")
     return ok({"device": name, "scope": "arp_mac", "task_id": result.id})
+
+
+@router.post(
+    "/{name}/global-config/mac/search",
+    status_code=202,
+    summary="Search the device's MAC address table live",
+    description=(
+        "Query the device directly for MAC entries matching `include` "
+        "(`show mac address-table | include ...` / `display mac-address | "
+        "include ...`), instead of relying on the cached full table. "
+        "Exists because a device with a very large MAC table can fail to "
+        "sync the full table at all (the interactive SSH read drops mid-"
+        "stream — confirmed live against a large device) while a filtered, "
+        "on-device search of the same table stays small enough to work. "
+        "Not cached, not part of `GET .../global-config/mac` — a one-off "
+        "live query, tracked like any other async operation: returns a "
+        "`job_id` immediately, poll `GET /api/v1/jobs/{job_id}` and read "
+        "`result.entries` once `status == \"completed\"`. Requires "
+        "observer role or higher on the device."
+    ),
+)
+def search_device_mac_table(
+    name: str,
+    include: str = Query(..., pattern=_ARP_MAC_INCLUDE_RE),
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    import uuid
+
+    from app.composition import inventory, job_repository
+    from app.models.job import Job
+    from app.tasks import search_mac_task
+
+    if inventory.get(name) is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
+
+    job = Job(
+        operation="mac_search",
+        device=name,
+        parameters={"pattern": include},
+        parameters_summary=f"Search MAC table on {name} for '{include}'",
+        group_job_id=str(uuid.uuid4()),
+    )
+    job_repository.add(job)
+    search_mac_task.delay(name, include, job.job_id)
+    return ok({"job_id": job.job_id, "group_job_id": job.group_job_id, "status": job.status})
 
 
 @router.post(

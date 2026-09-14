@@ -183,6 +183,39 @@ def sync_device_task(device_name: str, scope: str) -> None:
         )
 
 
+@celery_app.task(name="ansiauth.device.search_mac")
+def search_mac_task(device_name: str, pattern: str, job_id: str) -> None:
+    """Búsqueda puntual en vivo de la tabla MAC (``VendorDriver.
+    search_mac_table()``), para devices donde la tabla completa no es
+    viable (ver ``CiscoVendor.search_mac_table()`` -- confirmado en vivo
+    contra un device grande que la sesión SSH se corta con la tabla
+    entera). No usa ``DeviceSyncService``/``arp_mac_repository`` a
+    propósito -- esto es una consulta puntual on-demand, no algo que
+    tenga sentido cachear como "la tabla sincronizada" (pisaría el
+    significado de ``mac_table``, que representa la tabla completa).
+    Resultado vía el mecanismo genérico de Job (``GET /jobs/{id}``), igual
+    que cualquier otra operación async de esta app."""
+    from app.composition import device_repository, job_repository
+
+    job = job_repository.get(job_id)
+    if job is None:
+        logger.warning("search_mac_task: job '%s' no existe, saltando", job_id)
+        return
+    device = device_repository.get(device_name)
+    if device is None:
+        job.marcar_fallido(f"Device '{device_name}' not found", False, None)
+        job_repository.add(job)
+        return
+    job.marcar_iniciado()
+    job_repository.add(job)
+    try:
+        entries = device.driver.search_mac_table(pattern, device, device.password)
+        job.marcar_completado({"entries": entries, "pattern": pattern})
+    except Exception as exc:
+        job.marcar_fallido(str(exc), False, None)
+    job_repository.add(job)
+
+
 def _encolar_sync_si_no_pendiente(device_name: str, scope: str, countdown: int = 0) -> bool:
     """Encola ``sync_device_task(device_name, scope)`` sólo si no hay ya
     otra pending (coalescing). Devuelve ``True`` si encoló, ``False`` si

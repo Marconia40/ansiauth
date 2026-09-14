@@ -11,7 +11,19 @@ PortMode = Literal["access", "trunk", "unknown"]
 # whitelist rather than per-vendor format checks: rejecting outright weird
 # input is enough at the API boundary; vendor-specific shape (Gi0/0/1 vs
 # GigabitEthernet0/0/1) is the device's problem to refuse.
-_INTERFACE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_./:\-]{1,63}$")
+#
+# Bug real reportado por el usuario: Huawei's high-speed interfaces name
+# themselves with the speed AS the prefix -- "10GE1/0/6", "25GE1/0/48",
+# "100GE1/0/1" -- unlike GigabitEthernet/XGigabitEthernet, there's no
+# separate verbose form to expand from (see _VRP_IFACE_ABBREV above --
+# these speeds were never in that table because they don't need
+# abbreviating, they're already short). The old regex required the FIRST
+# character to be a letter, rejecting all 3 outright at the API boundary
+# before ever reaching the device. First char is now alphanumeric too --
+# but a lookahead still requires at least 1 letter SOMEWHERE in the name,
+# so pure-numeric noise like "1/0/1" (already covered by an existing
+# regression test) keeps getting rejected same as before.
+_INTERFACE_NAME_RE = re.compile(r"^(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9_./:\-]{1,63}$")
 
 # Cisco IOS description max is 200 chars; Huawei VRP max is 242 (S-series).
 # 200 is the conservative shared ceiling.
@@ -30,8 +42,8 @@ def _validate_interface_name(interface: str) -> None:
     if not _INTERFACE_NAME_RE.match(interface):
         raise ValueError(
             "Invalid interface name. Allowed characters are letters, digits, "
-            "'.', '/', ':', '_', and '-'; name must start with a letter and "
-            "be 2–64 characters long."
+            "'.', '/', ':', '_', and '-'; name must start with a letter or "
+            "digit and be 2–64 characters long."
         )
 
 

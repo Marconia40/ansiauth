@@ -1404,6 +1404,25 @@ export async function getMacTable(
   );
 }
 
+/** POST /devices/{name}/global-config/mac/search — live, on-device
+ * `| include` search of the MAC table, for devices where get_mac_table()
+ * (the full table) fails to sync at all (confirmed live against a large
+ * device: the interactive SSH read drops mid-stream). Not cached, doesn't
+ * touch the `arp_mac` sync scope — returns a job_id, poll getJob() and
+ * read `result.entries` once status is "completed". */
+export async function searchMacTable(
+  device: string,
+  include: string,
+): Promise<{ job_id: string; group_job_id: string; status: string }> {
+  return unwrap<{ job_id: string; group_job_id: string; status: string }>(
+    client.post<ApiResponse<{ job_id: string; group_job_id: string; status: string }>>(
+      `/devices/${device}/global-config/mac/search`,
+      null,
+      { params: { include } },
+    ),
+  );
+}
+
 /** GET /devices/{name}/global-config/logs — local log buffer as a list of
  * lines. Has its own `logs` sync scope, same criterion as ARP/MAC — has to
  * be refreshed explicitly the first time. */

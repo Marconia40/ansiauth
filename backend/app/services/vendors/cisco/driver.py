@@ -27,6 +27,12 @@ _SWITCHPORT_INDEX = 2
 _STORM_INDEX = 3
 _RUNNING_CONFIG_INDEX = 4
 
+# get_log_buffer(): tamaño de la ventana de fechas recientes a traer -- ver
+# esa docstring para el porqué (traer todo el buffer trae solo lo viejo, no
+# lo reciente, en devices grandes). 7 días confirmado en vivo que se queda
+# muy por debajo del punto de corte incluso con actividad real de por medio.
+_LOG_WINDOW_DAYS = 7
+
 # RF-GLOBAL-01 -- líneas de metadata al principio de "show running-config"
 # que no son config real, confirmadas en vivo contra f3r9s1 ("Building
 # configuration...", "Current configuration : N bytes", los 2 comentarios
@@ -680,24 +686,98 @@ class CiscoVendor(VendorDriver):
 
     def get_log_buffer(self, device: Device, password: str) -> str:
         """RF-GLOBAL fuera de alcance, pedido del usuario "de la misma
-        forma que las tablas mac y arp". El ``exclude`` es necesario, NO
-        opcional -- confirmado en vivo contra f3r9s1 que ``show logging``
-        solo (o filtrado por cualquier otra cosa, ej. ``| include %``)
-        corta la lectura a la mitad de una palabra y falla. Descartado
-        timeout/tamaño como causa (probado con 3x el timeout normal,
-        corte en el mismo punto exacto) -- el corte coincide siempre con
-        una línea ``%PARSER-5-CFGLOG_LOGGEDCMD`` (IOS logea el texto
-        completo de cada comando de configuración aplicado, incluye los
-        propios de esta app, algunos largos) -- esa línea específica
-        rompe la sesión SSH interactiva de esta lectura, mismo tipo de
-        problema que la corrupción de terminal ya documentada en Huawei
-        pero acá el contenido problemático lo genera el device, no
-        nosotros. Confirmado en vivo que excluyéndola la lectura
-        funciona limpia (~44 mil caracteres sin cortes) -- de paso, esas
-        líneas son ruido de auditoría (ya lo tenemos en nuestro propio
-        audit trail), no eventos operativos reales."""
-        raw = self._leer(["show logging | exclude CFGLOG_LOGGEDCMD"], device, password)[0]
+        forma que las tablas mac y arp".
+
+        Camino normal: ``show logging | exclude CFGLOG_LOGGEDCMD`` (confirmado
+        en vivo contra f3r9s1, ~44 mil caracteres sin cortes) -- el buffer
+        completo, sin restricción, para la enorme mayoría de devices.
+
+        Fallback, SOLO cuando ese read falla por corte de sesión (no
+        genérico a todos los devices, a propósito -- confirmado en vivo
+        contra un device real grande, f2r11s1, que el volumen total del
+        buffer completo tira la sesión SSH interactiva con "Connection
+        closed by remote host" a mitad de palabra): filtrar por fecha
+        reciente en vez de traer todo desde el principio. Importa
+        distinguir 2 intentos previos que NO funcionaron para entender por
+        qué el fallback es filtrar-por-fecha y no otra cosa:
+
+        1. ``partial_ok=True`` sin más (devolver lo parcial capturado antes
+           del corte): evita el error, pero ``show logging`` es cronológico
+           ASCENDENTE -- el corte pasa cerca del PRINCIPIO del buffer, así
+           que lo capturado eran siempre las entradas más viejas (de meses
+           atrás), nunca lo reciente -- que es lo único operacionalmente
+           útil. Por eso el fallback filtra por fecha en vez de solo
+           tolerar el corte.
+        2. ``| last 500`` (modifier de paginación por cantidad de líneas):
+           rechazado de entrada por este mismo device (``% Invalid input``)
+           -- no es un modifier universal en todos los trenes de IOS.
+
+        El fallback (``show clock`` + ``show logging | include ^(Mon
+        D|...)`` para los últimos ``_LOG_WINDOW_DAYS`` días, fecha real del
+        device para evitar desajustes de timezone) sólo se ejecuta cuando
+        el intento normal deja claro que se cortó (rc != 0 con contenido
+        parcial capturado) -- si el device está simplemente inalcanzable
+        (sin contenido en absoluto), el error sigue propagándose tal cual,
+        sin probar el fallback en vano."""
+        extravars = {
+            "commands": ["show logging | exclude CFGLOG_LOGGEDCMD"],
+            "tolerate_command_errors": True,
+        }
+        result = self._ejecutar(extravars, device, password)
+        stdouts = result.get("stdouts") or []
+        if result.get("rc") == 0:
+            if not stdouts:
+                raise RuntimeError(f"Cannot read state on device '{device.name}': no command output returned")
+            return stdouts[0].strip()
+        if not stdouts or not stdouts[0]:
+            error = result.get("stderr") or result.get("stdout") or "playbook exited non-zero"
+            raise RuntimeError(f"Cannot read state on device '{device.name}': {error}")
+        logger.warning(
+            "%s: get_log_buffer full read cut off on device=%s (buffer too large for 1 session) -- "
+            "falling back to a recent-dates-only read",
+            type(self).__name__, device.name,
+        )
+        return self._get_log_buffer_recent_dates(device, password)
+
+    def _get_log_buffer_recent_dates(self, device: Device, password: str) -> str:
+        """Fallback de ``get_log_buffer()`` -- ver esa docstring para
+        cuándo se usa y por qué filtrar por fecha en vez de otra cosa."""
+        from datetime import datetime, timedelta
+
+        import re
+
+        clock_raw = self._leer(["show clock"], device, password)[0].strip().lstrip("*")
+        # "19:00:57.437 AR Mon Sep 14 2026" -> mes=Sep, día=14, año=2026.
+        # Regex en vez de split()+unpacking posicional a propósito -- no
+        # confirmado en vivo que TODOS los IOS reporten exactamente los
+        # mismos campos antes de "Mon DD YYYY" (día de la semana, huso
+        # horario), buscar el patrón directo es más robusto que asumir un
+        # conteo fijo de tokens.
+        m = re.search(r"([A-Za-z]{3})\s+(\d{1,2})\s+(\d{4})", clock_raw)
+        if m is None:
+            raise RuntimeError(f"Cannot parse 'show clock' output on device '{device.name}': {clock_raw!r}")
+        mes, dia, anio = m.groups()
+        hoy = datetime.strptime(f"{mes} {dia} {anio}", "%b %d %Y")
+        dias = [(hoy - timedelta(days=i)).strftime("%b %-d") for i in range(_LOG_WINDOW_DAYS)]
+        patron = "|".join(dias)
+        raw = self._leer(
+            [f"show logging | include ^({patron}) "], device, password, partial_ok=True,
+        )[0]
         return raw.strip()
+
+    def search_mac_table(self, pattern: str, device: Device, password: str) -> list[dict]:
+        """Búsqueda puntual en vivo contra el device, para cuando
+        ``get_mac_table()`` (tabla completa) no es viable -- confirmado en
+        vivo contra f2r11s1 (device grande, tabla MAC completa corta la
+        sesión SSH igual que ``get_log_buffer()`` solía hacer con los
+        logs). ``pattern`` ya viene validado por el caller (regex
+        whitelist alfanumérico, ver ``_ARP_MAC_INCLUDE_RE`` en
+        ``api/global_config.py``) antes de embeberse en el comando --
+        nunca texto libre de usuario sin sanitizar."""
+        from app.services.parsers.arp_mac_parser import parse_cisco_mac
+
+        raw = self._leer([f"show mac address-table | include {pattern}"], device, password)[0]
+        return parse_cisco_mac(raw)
 
     def set_route(self, destination: str, next_hop: str, device: Device, password: str) -> dict:
         """RF-GLOBAL-06. Confirmado en vivo contra cisco01: ``ip route

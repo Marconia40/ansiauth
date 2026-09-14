@@ -42,31 +42,35 @@ logger = logging.getLogger(__name__)
 _SSH_CONNECT_TIMEOUT = int(os.environ.get("SSH_DIRECT_CONNECT_TIMEOUT", "15"))
 _SSH_COMMAND_TIMEOUT = int(os.environ.get("SSH_DIRECT_COMMAND_TIMEOUT", "60"))
 
-# Overrides de algoritmos legacy -- confirmados en vivo esta sesión contra
-# f3r9s2 y f3r9s1, los 2 devices reales probados. "+" agrega a la lista
-# default de OpenSSH en vez de reemplazarla, así que son inofensivos si
-# algún día se corre contra un device que no los necesita.
+# Adaptación real por-device -- pedido explícito del usuario tras encontrar
+# equipos donde un combo fijo de algoritmos legacy (lo que había acá antes,
+# confirmado solo contra f3r9s1/f3r9s2) NO sirve para un 3er device con su
+# propio firmware/plataforma. En vez de adivinar una lista estática,
+# ``_run_ssh_interactive()`` PARSEA la oferta real del device del propio
+# mensaje de error de OpenSSH -- "Unable to negotiate with HOST port PORT:
+# no matching FOO found. Their offer: A,B,C" -- y reintenta con
+# exactamente esos algoritmos, sea cual sea el device. Mismo criterio que
+# ``alternatives``/``triggered_by_error`` en commands.yaml (reintento
+# guiado por el error real, no una lista fija adivinada de antemano)
+# aplicado acá al nivel de transporte.
 #
-# KexAlgorithms usa "^" (prepende, no solo agrega) a propósito -- confirmado
-# en vivo que sin esto, f3r9s2 negocia "diffie-hellman-group-exchange-sha256"
-# (el device SÍ lo soporta, y el cliente lo prioriza por sobre lo que
-# agregábamos con "+") en vez de un grupo fijo -- "group-exchange" implica 1
-# round-trip extra (el server tiene que generar parámetros DH a medida) y es
-# más caro de computar, ~3.3s de conexión contra f3r9s2 vs ~1.2s forzando un
-# grupo fijo. "group14-sha1" (lo que había antes) ni siquiera es un algoritmo
-# que f3r9s2 ofrezca -- confirmado que su oferta real es
-# "diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256", el
-# "+group14-sha1" de antes era muerto para este device y por eso nunca se
-# usaba. f3r9s1 (Cisco) no ofrece ningún grupo fijo en sha256, solo
-# "diffie-hellman-group-exchange-sha1,diffie-hellman-group14-sha1" -- por
-# eso van los 2 prepend-eados, sha256 primero (gana en f3r9s2) y sha1 de
-# fallback (gana en f3r9s1), cada device se queda con el que sí soporta y
-# ambos evitan el group-exchange lento.
-_SSH_LEGACY_OPTS = [
-    "-o", "HostKeyAlgorithms=+ssh-rsa",
-    "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
-    "-o", "KexAlgorithms=^diffie-hellman-group14-sha256,diffie-hellman-group14-sha1",
-]
+# "no matching host key type" cubre tanto HostKeyAlgorithms como
+# PubkeyAcceptedKeyTypes -- confirmado en vivo (f3r9s2) que hace falta
+# setear los 2 con la misma oferta, uno solo no alcanza para autenticar
+# por clave pública.
+_NEGOTIATION_FAILURE_RE = re.compile(
+    r"no matching (key exchange method|host key type|cipher) found\. "
+    r"Their offer: ([\w@.,\-]+)"
+)
+_NEGOTIATION_OPTION_NAMES: "dict[str, list[str]]" = {
+    "key exchange method": ["KexAlgorithms"],
+    "host key type": ["HostKeyAlgorithms", "PubkeyAcceptedKeyTypes"],
+    "cipher": ["Ciphers"],
+}
+# Techo de reintentos -- 1 por categoría posible (kex/host key/cipher), no
+# más. Si después de adaptar las 3 el device SIGUE sin negociar, seguir
+# reintentando no cambiaría nada; se devuelve el error real tal cual.
+_MAX_NEGOTIATION_RETRIES = len(_NEGOTIATION_OPTION_NAMES)
 
 # Tablas de error por vendor -- reemplaza el regex único genérico que había
 # acá antes (r"^\s*(Error:|%\s)"), portado de los patrones `terminal_stderr_re`
@@ -202,12 +206,24 @@ def _agent_for(device):
 # esa pausa, así que un ``display``/``show`` con muchas líneas (ej.
 # ``display interface description`` en un device con varias decenas de
 # interfaces) se cuelga hasta el timeout aunque comandos cortos como
-# ``display clock`` anden bien. Se manda como 1ra línea de cada sesión
-# interactiva -- confirmado en vivo contra f3r9s2 que "no molesta" aunque
-# la salida sea corta.
+# ``display clock`` anden bien. Se manda como líneas previas de cada
+# sesión interactiva -- confirmado en vivo contra f3r9s2 que "no molesta"
+# aunque la salida sea corta.
+#
+# Cisco además gana "terminal width 0" -- bug real encontrado en vivo
+# contra f2r11s1: un comando de 1 sola línea pero largo (el include con
+# varias fechas alternadas de get_log_buffer()) se redibuja/corta al
+# tipearse si excede el ancho de terminal default (80 cols), y
+# ``_extraer_salida_comando()`` busca el eco EXACTO del comando para
+# recortar banner/prompt -- si el eco viene partido por el wrap, no lo
+# encuentra y el transcript crudo completo (incluido el comando corrupto)
+# se cuela en el resultado. "terminal width 0" desactiva el wrap, mismo
+# tipo de fix que ``screen-width 512`` ya usa Huawei para el mismo
+# problema en escrituras (ver commands.yaml). No confirmado si VRP
+# necesita el equivalente para reads -- no tocado acá, fuera de alcance.
 _PAGER_DISABLE = {
-    "huawei_vrp": "screen-length 0 temporary",
-    "cisco_ios": "terminal length 0",
+    "huawei_vrp": ["screen-length 0 temporary"],
+    "cisco_ios": ["terminal length 0", "terminal width 0"],
 }
 
 
@@ -222,30 +238,71 @@ def _run_ssh_interactive(device, lines: list[str]) -> tuple[int, str, str]:
     del comando real. Se agrega un ``quit`` final para cerrar la sesión
     del lado del cliente en vez de esperar el timeout completo --
     confirmado en vivo que ``quit`` en user-view (VRP) / privileged exec
-    (IOS, alias de ``exit``) corta la conexión limpio."""
+    (IOS, alias de ``exit``) corta la conexión limpio.
+
+    Intenta primero con los algoritmos DEFAULT de OpenSSH -- pedido
+    explícito del usuario: no todos los devices necesitan (o toleran) los
+    mismos overrides legacy, cada fabricante/firmware ofrece su propio
+    combo. Si falla por negociación de protocolo (``_NEGOTIATION_FAILURE_RE``
+    -- pasa ANTES de autenticación), el mensaje de error de OpenSSH ya
+    incluye la oferta REAL del device ("Their offer: A,B,C") -- se
+    reintenta agregando exactamente esos algoritmos a la categoría que
+    falló (KEX/host key/cipher), no una lista fija adivinada de antemano.
+    Se repite hasta ``_MAX_NEGOTIATION_RETRIES`` veces (1 por categoría) o
+    hasta que deje de haber progreso (misma categoría repetida = ya se
+    intentó, no tiene sentido seguir). Cualquier otro tipo de fallo (auth,
+    comando rechazado, timeout) no dispara ningún reintento -- cambiar de
+    algoritmos no arreglaría nada ahí.
+
+    ``LogLevel=INFO``, no ``ERROR`` -- bug real encontrado implementando
+    esto: confirmado en vivo que con ``LogLevel=ERROR`` (más silencioso
+    que el default real de OpenSSH, "INFO") el mensaje "Unable to
+    negotiate..." queda COMPLETAMENTE suprimido -- rc=255, stdout y
+    stderr vacíos, nada que parsear. Confirmado que ``INFO`` (el nivel
+    donde el mensaje sí aparece) no agrega ruido extra a una sesión
+    exitosa -- stdout queda igual de limpio."""
+    base_cmd = [
+        "ssh", "-tt",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=INFO",
+        "-o", f"ConnectTimeout={_SSH_CONNECT_TIMEOUT}",
+    ]
+    stdin_data = "\n".join([*lines, "quit"]) + "\n"
     with _agent_for(device) as agent_env:
-        cmd = [
-            "ssh", "-tt",
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "-o", f"ConnectTimeout={_SSH_CONNECT_TIMEOUT}",
-            *_SSH_LEGACY_OPTS,
-            f"{device.username}@{device.host}",
-        ]
-        stdin_data = "\n".join([*lines, "quit"]) + "\n"
-        try:
-            proc = subprocess.run(
-                cmd, input=stdin_data, capture_output=True, text=True,
-                timeout=_SSH_COMMAND_TIMEOUT, env=agent_env,
+        extra_opts: list[str] = []
+        categorias_probadas: set[str] = set()
+        for _ in range(_MAX_NEGOTIATION_RETRIES + 1):
+            cmd = [*base_cmd, *extra_opts, f"{device.username}@{device.host}"]
+            try:
+                proc = subprocess.run(
+                    cmd, input=stdin_data, capture_output=True, text=True,
+                    timeout=_SSH_COMMAND_TIMEOUT, env=agent_env,
+                )
+            except subprocess.TimeoutExpired:
+                return 1, "", f"ssh command timed out after {_SSH_COMMAND_TIMEOUT}s"
+            except Exception as exc:
+                logger.exception("ssh_direct_service: interactive ssh invocation failed device=%s", device.name)
+                return 1, "", str(exc)
+            m = _NEGOTIATION_FAILURE_RE.search(proc.stderr)
+            if m is None:
+                return proc.returncode, proc.stdout, proc.stderr
+            categoria, oferta = m.groups()
+            if categoria in categorias_probadas:
+                # Ya adaptamos esta categoría antes y sigue fallando (o el
+                # device ofrece algo que ninguna combinación resuelve) --
+                # más reintentos no cambiarían nada, devolver el error real.
+                return proc.returncode, proc.stdout, proc.stderr
+            categorias_probadas.add(categoria)
+            for opt_name in _NEGOTIATION_OPTION_NAMES.get(categoria, []):
+                extra_opts += ["-o", f"{opt_name}=+{oferta}"]
+            logger.info(
+                "ssh_direct_service: negotiation failed on device=%s (%s, their offer: %s) "
+                "-- retrying with that exact offer added to %s",
+                device.name, categoria, oferta, _NEGOTIATION_OPTION_NAMES.get(categoria, []),
             )
-            return proc.returncode, proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired:
-            return 1, "", f"ssh command timed out after {_SSH_COMMAND_TIMEOUT}s"
-        except Exception as exc:
-            logger.exception("ssh_direct_service: interactive ssh invocation failed device=%s", device.name)
-            return 1, "", str(exc)
+        return proc.returncode, proc.stdout, proc.stderr
 
 
 # VRP (y también IOS, mismo patrón confirmado en vivo contra f3r9s1) no
@@ -272,18 +329,32 @@ def _sesion_completa(raw: str) -> bool:
     return any(line.rstrip().endswith("quit") for line in lines[-5:])
 
 
-def _exito(rc: int, stdout: str, raw: str, vendor: "str | None" = None) -> bool:
+def _exito(stdout: str, raw: str, vendor: "str | None" = None) -> bool:
+    # Bug real encontrado en vivo contra f2r11s1: el shortcut "rc == 0 ->
+    # éxito" (ya sacado del todo, ni se recibe rc como parámetro) asumía
+    # que un rc limpio del cliente ssh local implica que la
+    # sesión remota llegó hasta el final -- falso para este device en un
+    # read de mucho volumen. El device a veces cierra el canal "prolijo"
+    # desde su lado cuando decide cortar la salida (no manda un RST/error,
+    # simplemente deja de escribir y cierra) -- OpenSSH lo interpreta como
+    # una terminación normal y el cliente sale con rc=0 igual, aunque el
+    # comando nunca terminó de verdad (nuestro "quit" final nunca llegó a
+    # ecoarse, confirmado comparando el mismo read repetido: a veces rc=0
+    # truncado a los ~57KB de siempre, a veces rc=1 con "Connection closed
+    # by remote host" -- mismo corte, señal de rc inconsistente). Por
+    # eso ya no se confía en rc en absoluto para decidir éxito -- solo
+    # importa si vimos nuestro propio terminador ecoado (ver
+    # _sesion_completa(), ya confiable en la dirección opuesta: VRP/IOS
+    # rc!=0 con la sesión en realidad completa).
     if _tiene_error(stdout, vendor):
         return False
-    if rc == 0:
-        return True
     return _sesion_completa(raw)
 
 
 def _run_write(device, block: str, *, op_label: str) -> dict:
     logger.info("ssh_direct_service: %s on device=%s", op_label, device.name)
-    rc, stdout, stderr = _run_ssh_interactive(device, block.split("\n"))
-    rc = 0 if _exito(rc, stdout, stdout, vendor=device.vendor) else 1
+    _, stdout, stderr = _run_ssh_interactive(device, block.split("\n"))
+    rc = 0 if _exito(stdout, stdout, vendor=device.vendor) else 1
     if rc == 0:
         logger.info("ssh_direct_service: %s OK on device=%s", op_label, device.name)
     else:
@@ -317,6 +388,15 @@ def _extraer_salida_comando(raw: str, command: str) -> str:
     es la ÚLTIMA línea que hacemos eco (se manda al final de todo), así
     que buscar desde el final es la señal confiable sin importar cuántos
     "quit" legítimos traiga el output real en el medio."""
+    # Bug real encontrado en vivo contra f2r11s1: un comando con un espacio
+    # final literal (el include-por-fecha de get_log_buffer(), construido
+    # con "...) " a propósito) nunca matcheaba -- ``line.rstrip()`` pela
+    # el espacio final del eco antes de comparar, pero *command* (sin
+    # rstrip) seguía terminando en espacio, así que ``endswith(command)``
+    # jamás daba True. Con ``command`` también rstripeado, ambos lados se
+    # comparan igual de "sin espacios finales", sin importar qué haya
+    # tipeado el caller.
+    command = command.rstrip()
     lines = raw.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -335,18 +415,18 @@ def _extraer_salida_comando(raw: str, command: str) -> str:
 
 def _run_reads(device, commands: list[str], *, op_label: str) -> dict:
     logger.info("ssh_direct_service: %s (%d command(s)) on device=%s", op_label, len(commands), device.name)
-    pager_disable = _PAGER_DISABLE.get(device.vendor)
+    pager_disable = _PAGER_DISABLE.get(device.vendor, [])
     stdouts: list[str] = []
     stderrs: list[str] = []
     rc = 0
     for command in commands:
-        lines = [pager_disable, command] if pager_disable else [command]
-        r, raw_out, err = _run_ssh_interactive(device, lines)
+        lines = [*pager_disable, command]
+        _, raw_out, err = _run_ssh_interactive(device, lines)
         out = _extraer_salida_comando(raw_out, command)
         stdouts.append(out)
         if err:
             stderrs.append(err)
-        if not _exito(r, out, raw_out, vendor=device.vendor):
+        if not _exito(out, raw_out, vendor=device.vendor):
             rc = 1
     if rc != 0:
         logger.error("ssh_direct_service: %s FAILED on device=%s", op_label, device.name)
