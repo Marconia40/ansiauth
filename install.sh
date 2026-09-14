@@ -24,6 +24,14 @@
 #   RUN_USER      — usuario que correrá node     (default: ansiauth)
 #   SKIP_UFW      — 1 para no tocar el firewall  (default: 0)
 #   HTTPS_PORT    — puerto público HTTPS         (default: 8443)
+#   HTTPS_HOST    — hostname/IP público (SAN cert) (default: IP detectada)
+#                   Poné el FQDN si tenés DNS interno o público apuntando a
+#                   esta VM (ej: HTTPS_HOST=ansiauth.tu-empresa.local). Se usa
+#                   para el site block del Caddyfile, CORS_ORIGINS y la
+#                   NEXT_PUBLIC_API_URL del frontend. Con hostnames públicos
+#                   (registrable domain), 'tls internal' NO funciona a menos
+#                   que el hostname esté fijo en el site block — de ahí la
+#                   necesidad de esta variable.
 
 set -euo pipefail
 
@@ -194,6 +202,19 @@ HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [[ -z "$HOST_IP" ]] && HOST_IP=$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)
 [[ -z "$HOST_IP" ]] && HOST_IP="127.0.0.1"
 
+# HTTPS_HOST cae a HOST_IP si el usuario no lo seteó. Cuando difieren (típico
+# con hostname DNS público), listamos ambos en el Caddyfile / CORS para que
+# accesos por IP también funcionen.
+HTTPS_HOST="${HTTPS_HOST:-$HOST_IP}"
+if [[ "$HTTPS_HOST" == "$HOST_IP" ]]; then
+    CADDY_SITE="$HTTPS_HOST:$HTTPS_PORT"
+    CORS_ORIGINS_VAL="https://$HTTPS_HOST:$HTTPS_PORT"
+else
+    CADDY_SITE="$HTTPS_HOST:$HTTPS_PORT, $HOST_IP:$HTTPS_PORT"
+    CORS_ORIGINS_VAL="https://$HTTPS_HOST:$HTTPS_PORT,https://$HOST_IP:$HTTPS_PORT"
+fi
+PUBLIC_URL="https://$HTTPS_HOST:$HTTPS_PORT"
+
 if [[ -f "$ENV_FILE" ]]; then
     ok ".env ya existe en $INSTALL_DIR, respetando valores actuales"
     warn "Si querés regenerar secretos, borrá $ENV_FILE antes de re-correr el script."
@@ -240,7 +261,7 @@ COOKIE_SAMESITE=strict
 # Con Caddy sirviendo /api/* y / bajo el mismo host:puerto, las llamadas del
 # frontend al backend son same-origin y no disparan CORS. Igual dejamos el
 # origen listado para peticiones directas o herramientas externas.
-CORS_ORIGINS=https://$HOST_IP:$HTTPS_PORT
+CORS_ORIGINS=$CORS_ORIGINS_VAL
 
 # ── Lifetimes de tokens y sesión ──
 # Cambiar acá si querés sesiones más largas/cortas sin recompilar la imagen.
@@ -384,7 +405,7 @@ FRONTEND_ENV="$INSTALL_DIR/frontend/.env.local"
 # al Caddy actual (útil si cambió HTTPS_PORT o HOST_IP entre corridas).
 log "Escribiendo $FRONTEND_ENV..."
 cat > "$FRONTEND_ENV" <<EOF
-NEXT_PUBLIC_API_URL=https://$HOST_IP:$HTTPS_PORT
+NEXT_PUBLIC_API_URL=$PUBLIC_URL
 EOF
 chown "$RUN_USER:$RUN_USER" "$FRONTEND_ENV"
 
@@ -457,7 +478,7 @@ log "Escribiendo $CADDYFILE (HTTPS :$HTTPS_PORT con tls internal)..."
 cat > "$CADDYFILE" <<EOF
 # Caddyfile — generado por install.sh
 #
-# Un único puerto público (:$HTTPS_PORT) que rutea por path:
+# Sirve $CADDY_SITE con TLS interno de Caddy y rutea por path:
 #   /api/*  → backend  (FastAPI en 127.0.0.1:8000)
 #   resto   → frontend (Next.js en 127.0.0.1:3000)
 #
@@ -465,20 +486,30 @@ cat > "$CADDYFILE" <<EOF
 # vive en /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
 # — importala en el trust store del cliente para eliminar el warning del
 # browser.
+#
+# IMPORTANTE: los subjects (hostname/IP) están explícitos en el site block
+# porque 'tls internal' con bare ':port' rechaza el handshake para dominios
+# públicos (public suffix) — Caddy no emite on-demand para nombres que no
+# controla. Fijándolos acá, la emisión ocurre al arrancar y los clientes
+# solo ven el warning normal de self-signed (con opción de continuar).
 
 {
 	# Redirecciones auto de HTTP→HTTPS deshabilitadas: no exponemos :80.
 	auto_https disable_redirects
 }
 
-:$HTTPS_PORT {
+$CADDY_SITE {
 	tls internal
 
 	# Compresión estándar.
 	encode gzip
 
-	# El backend expone /api/v1/* y /health; ambos van al mismo upstream.
-	@backend path /api/* /health /metrics
+	# Rutas del backend: la API bajo /api/v1/*, health/metrics, y las docs de
+	# FastAPI (/docs = Swagger UI, /redoc = ReDoc, /openapi.json = schema).
+	# Las docs quedan expuestas por HTTPS porque es una app interna detrás de
+	# login — si algún día se hace pública, deshabilitarlas en FastAPI con
+	# docs_url=None / redoc_url=None.
+	@backend path /api/* /health /metrics /docs /redoc /openapi.json
 	handle @backend {
 		reverse_proxy 127.0.0.1:8000
 	}
@@ -509,18 +540,21 @@ systemctl restart caddy
 ok "Caddy activo en :$HTTPS_PORT"
 
 # ─── Firewall (UFW en Debian/Ubuntu) ─────────────────────────────────────────
-# Solo abrimos SSH + el puerto público de Caddy. Backend/frontend bindean a
-# loopback, así que no hace falta abrir 3000/8000.
+# Solo agregamos reglas de forma idempotente. NO reseteamos el ruleset ni
+# cambiamos las policies default — eso borraría reglas que el usuario haya
+# configurado a mano (VPN, monitoring, backups, etc). Si UFW está inactivo,
+# tampoco lo forzamos a activarse: dejamos las reglas cargadas y avisamos.
 if [[ "$SKIP_UFW" != "1" && "$PKG" == "apt" ]]; then
-    log "Configurando UFW (SSH + $HTTPS_PORT/tcp)..."
+    log "UFW: agregando reglas SSH + $HTTPS_PORT/tcp (sin tocar reglas existentes)..."
     pkg_install ufw
-    ufw --force reset >/dev/null
-    ufw default deny incoming
-    ufw default allow outgoing
-    ufw allow OpenSSH
-    ufw allow "$HTTPS_PORT/tcp" comment 'AnsiAuth HTTPS (Caddy)'
-    ufw --force enable
-    ok "UFW activo"
+    ufw allow OpenSSH >/dev/null
+    ufw allow "$HTTPS_PORT/tcp" comment 'AnsiAuth HTTPS (Caddy)' >/dev/null
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
+        ok "UFW activo — reglas aplicadas"
+    else
+        warn "UFW está inactivo — las reglas quedaron cargadas pero no se aplican."
+        warn "Para activarlo (revisá antes que OpenSSH esté permitido): sudo ufw enable"
+    fi
 elif [[ "$SKIP_UFW" != "1" ]]; then
     warn "Saltando UFW: no está en apt-land. Abrí manualmente $HTTPS_PORT/tcp."
 fi
@@ -586,8 +620,8 @@ set -a; source "$ENV_FILE"; set +a
 cat > "$CREDS_FILE" <<EOF
 AnsiAuth — credenciales generadas $(date -Iseconds)
 ======================================================
-URL app (HTTPS):    https://$HOST_IP:$HTTPS_PORT
-URL API (HTTPS):    https://$HOST_IP:$HTTPS_PORT/api/v1
+URL app (HTTPS):    $PUBLIC_URL
+URL API (HTTPS):    $PUBLIC_URL/api/v1
 
 Super-admin inicial:
   usuario:          ${BOOTSTRAP_ADMIN_USER:-admin}
@@ -641,7 +675,7 @@ ok "═════════════════════════�
 ok "  Instalación completa."
 ok "══════════════════════════════════════════════════════════════════"
 echo
-echo "  URL app:        https://$HOST_IP:$HTTPS_PORT"
+echo "  URL app:        $PUBLIC_URL"
 echo "  Usuario admin:  ${BOOTSTRAP_ADMIN_USER:-admin}"
 echo "  Password admin: ${BOOTSTRAP_ADMIN_PASSWORD}"
 echo
