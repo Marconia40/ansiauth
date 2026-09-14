@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.role_assignment import RoleAssignmentCreate
+
 
 class UserCreate(BaseModel):
     model_config = ConfigDict(json_schema_extra={
@@ -11,6 +13,7 @@ class UserCreate(BaseModel):
             "password": "securepassword1",
             "email": "operator1@example.com",
             "is_system_admin": False,
+            "initial_grant": {"site_id": 1, "role": "observer"},
         }
     })
 
@@ -18,6 +21,10 @@ class UserCreate(BaseModel):
     password: str = Field(..., min_length=8)
     email: Optional[str] = None
     is_system_admin: bool = False
+    # Optional for system-admin callers (they can create bare users and add
+    # grants later); required for site-admin callers so the created user is
+    # visible to them under the scoped list filter.
+    initial_grant: Optional[RoleAssignmentCreate] = None
 
 
 class UserRead(BaseModel):

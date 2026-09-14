@@ -477,11 +477,20 @@ function parseAuthUser(token: string): AuthUser {
   const isSystemAdmin = Boolean(payload.is_system_admin);
   const role = payload.role ?? (isSystemAdmin ? 'admin' : 'observer');
   const id = typeof payload.id === 'number' ? payload.id : undefined;
+  // Backend-computed on login/refresh. Tokens issued before the claim
+  // landed fall back to is_system_admin so system-admins keep working
+  // during rollout; a scoped site-admin without the claim gets false
+  // and will regain the flag on the next refresh (≤ access token TTL).
+  const canManageUsers =
+    typeof payload.can_manage_users === 'boolean'
+      ? payload.can_manage_users
+      : isSystemAdmin;
   return {
     id,
     username: payload.sub,
     role,
     is_system_admin: isSystemAdmin,
+    can_manage_users: canManageUsers,
   };
 }
 

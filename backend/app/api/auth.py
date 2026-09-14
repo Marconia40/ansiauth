@@ -24,6 +24,22 @@ router = APIRouter()
 
 _COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_MINUTES * 60
 
+
+def _can_manage_users(user_id: int, is_system_admin: bool) -> bool:
+    """True when the user can see/manage other users.
+
+    System-admins bypass. Otherwise: any site-wide admin grant
+    (``device_group_id IS NULL``) — same criterion the grant/revoke
+    authorization uses (see ``RoleAssignmentService._authorize_grant_or_revoke``).
+    A group-scoped admin does not count."""
+    if is_system_admin:
+        return True
+    from app.composition import role_assignment_repository
+    scope = role_assignment_repository.scope_de(
+        {"id": user_id, "is_system_admin": False},
+    )
+    return any(gid is None and role == "admin" for _sid, gid, role in scope.grants)
+
 # Map service-level ``ValueError`` sentinels to stable ``detail`` codes the
 # frontend switches on (idle vs replay vs absolute → distinct banners). Any
 # unmapped string collapses to "invalid" so we never leak internals.
@@ -121,7 +137,12 @@ def login(request: Request, response: Response, form_data: OAuth2PasswordRequest
 
     login_attempt_repository.registrar_intento(username, ip, exitoso=True)
     login_attempt_repository.resetear(username)
-    access_token = create_access_token({"sub": user.username, "id": user.id, "is_system_admin": user.is_system_admin})
+    access_token = create_access_token({
+        "sub": user.username,
+        "id": user.id,
+        "is_system_admin": user.is_system_admin,
+        "can_manage_users": _can_manage_users(user.id, user.is_system_admin),
+    })
     refresh_token = refresh_token_service.create(
         user.username,
         ip_address=_client_ip(request),
@@ -179,7 +200,12 @@ def refresh(request: Request, response: Response):
         _clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    access_token = create_access_token({"sub": user.username, "id": user.id, "is_system_admin": user.is_system_admin})
+    access_token = create_access_token({
+        "sub": user.username,
+        "id": user.id,
+        "is_system_admin": user.is_system_admin,
+        "can_manage_users": _can_manage_users(user.id, user.is_system_admin),
+    })
     from app.composition import audit_repository
     audit_repository.append(AuditRecord(
         user=user.username,

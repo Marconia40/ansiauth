@@ -12,6 +12,11 @@ export interface AuthUser {
    * `observer` otherwise. Per-scope permissions live in role_assignments. */
   role: Role;
   is_system_admin: boolean;
+  /** True when the caller can see and manage other users: either
+   * system-admin, or holds at least one site-wide admin grant. Computed
+   * at login/refresh time on the backend and carried in the JWT so the
+   * Topbar and Users page gates do not require an extra round-trip. */
+  can_manage_users: boolean;
 }
 
 export interface TokenResponse {

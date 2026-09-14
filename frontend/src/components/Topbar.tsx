@@ -46,7 +46,7 @@ export function Topbar() {
 
       <div className="flex items-center gap-1 shrink-0">
         {TOP_LINKS.map((link) => {
-          if (link.adminOnly && !user?.is_system_admin) return null;
+          if (link.adminOnly && !user?.can_manage_users) return null;
           const active = pathname === link.href || pathname.startsWith(`${link.href}/`);
           return (
             <TopIconLink

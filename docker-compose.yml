@@ -63,6 +63,13 @@ services:
       EXECUTION_MODE: ${EXECUTION_MODE:-mock}
       # ── Celery + Redis ──
       REDIS_URL: redis://redis:6379/0
+      # ── Ansible timeouts (raised for devices with large configs:
+      # many VLANs / routes / interfaces can push a single read past 60s) ──
+      ANSIBLE_TIMEOUT: ${ANSIBLE_TIMEOUT:-300}
+      ANSIBLE_PERSISTENT_COMMAND_TIMEOUT: ${ANSIBLE_PERSISTENT_COMMAND_TIMEOUT:-300}
+      ANSIBLE_PERSISTENT_CONNECT_TIMEOUT: ${ANSIBLE_PERSISTENT_CONNECT_TIMEOUT:-120}
+      # ── Direct SSH (auth_method="key") command timeout ──
+      SSH_DIRECT_COMMAND_TIMEOUT: ${SSH_DIRECT_COMMAND_TIMEOUT:-300}
     ports:
       - "8000:8000"
 
@@ -87,6 +94,13 @@ services:
       EXECUTION_MODE: ${EXECUTION_MODE:-mock}
       # ── Celery + Redis ──
       REDIS_URL: redis://redis:6379/0
+      # ── Ansible timeouts (raised for devices with large configs:
+      # many VLANs / routes / interfaces can push a single read past 60s) ──
+      ANSIBLE_TIMEOUT: ${ANSIBLE_TIMEOUT:-300}
+      ANSIBLE_PERSISTENT_COMMAND_TIMEOUT: ${ANSIBLE_PERSISTENT_COMMAND_TIMEOUT:-300}
+      ANSIBLE_PERSISTENT_CONNECT_TIMEOUT: ${ANSIBLE_PERSISTENT_CONNECT_TIMEOUT:-120}
+      # ── Direct SSH (auth_method="key") command timeout ──
+      SSH_DIRECT_COMMAND_TIMEOUT: ${SSH_DIRECT_COMMAND_TIMEOUT:-300}
 
   # Celery Beat: scheduler process that fires periodic tasks
   # (currently only ``sync_stale_devices_task`` every SYNC_STALE_INTERVAL_MIN

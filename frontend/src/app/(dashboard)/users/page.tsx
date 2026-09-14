@@ -11,6 +11,7 @@ import { AccessBadges } from '@/components/AccessBadges';
 import { ManageUserModal } from '@/components/ManageUserModal';
 import { CreateUserModal } from '@/components/CreateUserModal';
 import { useScope } from '@/context/ScopeContext';
+import { useMyGrants } from '@/hooks/useAuthz';
 import {
   getUsers,
   deleteUser,
@@ -77,6 +78,31 @@ export default function UsersPage() {
   const siteList = sites ?? [];
   const { selectedScope } = useScope();
 
+  // For site-admin callers, the backend needs an initial_grant on POST
+  // /users so the new user shows up in the scoped list. Rather than
+  // asking the operator up front, we transparently bootstrap a minimum
+  // observer grant on the site they were browsing (or their first admin
+  // site) — the operator adjusts real permissions in step 2. System-admin
+  // callers skip this entirely; the backend accepts a bare create.
+  const { data: myGrants } = useMyGrants();
+  const adminSiteIds =
+    !currentUser?.is_system_admin && myGrants
+      ? myGrants
+          .filter((g) => g.device_group_id === null && g.role === 'admin')
+          .map((g) => g.site_id)
+      : [];
+  const bootstrapSiteId = currentUser?.is_system_admin
+    ? null
+    : selectedScope.kind === 'site' && adminSiteIds.includes(selectedScope.siteId)
+      ? selectedScope.siteId
+      : adminSiteIds[0] ?? null;
+  const bootstrapGrant =
+    bootstrapSiteId != null
+      ? ({ site_id: bootstrapSiteId, role: 'observer' as const })
+      : undefined;
+  const cannotBootstrap =
+    !currentUser?.is_system_admin && myGrants != null && bootstrapSiteId == null;
+
   const manageUser =
     manageUserId != null ? users.find((u) => u.id === manageUserId) ?? null : null;
 
@@ -114,12 +140,12 @@ export default function UsersPage() {
     scopedSiteId != null ? siteList.find((s) => s.id === scopedSiteId)?.name : null;
 
   useEffect(() => {
-    if (currentUser && currentUser.role !== 'admin' && currentUser.role !== 'super-admin') {
+    if (currentUser && !currentUser.can_manage_users) {
       router.push('/');
     }
   }, [currentUser, router]);
 
-  if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'super-admin')) {
+  if (!currentUser || !currentUser.can_manage_users) {
     return null;
   }
 
@@ -158,11 +184,10 @@ export default function UsersPage() {
     setJustCreatedUserId(null);
   }
 
-  // The JWT payload only carries `role`; every admin/super-admin becomes
-  // is_system_admin=True via Phase 3's create_user hook, so role is a safe
-  // proxy for UI-level "should the system-admin toggle appear" checks.
-  const viewerIsSystemAdmin =
-    currentUser.role === 'admin' || currentUser.role === 'super-admin';
+  // The system-admin toggle inside ManageUserModal is only meaningful for
+  // system-admin viewers — a site-admin who can manage users still cannot
+  // promote/demote system-admins.
+  const viewerIsSystemAdmin = currentUser.is_system_admin;
 
   const isStep2OfCreate =
     manageUser != null && justCreatedUserId === manageUser.id;
@@ -286,6 +311,8 @@ export default function UsersPage() {
         <CreateUserModal
           onClose={() => setCreateOpen(false)}
           onCreated={handleUserCreated}
+          bootstrapGrant={bootstrapGrant}
+          cannotBootstrap={cannotBootstrap}
         />
       )}
 

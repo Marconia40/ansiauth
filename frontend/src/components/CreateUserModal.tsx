@@ -2,27 +2,41 @@
 
 import { useState } from 'react';
 import { createUser, extractMessage } from '@/services/api';
-import type { User } from '@/types/user';
+import type { RoleAssignmentCreate, User } from '@/types/user';
 import { ErrorMessage } from '@/components/ErrorMessage';
 
 interface CreateUserModalProps {
   onClose: () => void;
   onCreated: (user: User) => void;
+  /** When present, the modal transparently attaches this grant to the
+   * ``createUser`` call. Used to make a newly-created user visible to a
+   * site-admin caller under their scoped list — the site-admin then
+   * fine-tunes the actual grants in step 2 (ManageUserModal). System-admin
+   * callers pass ``undefined`` here and skip the placeholder entirely. */
+  bootstrapGrant?: RoleAssignmentCreate;
+  /** True when the caller has no site to bootstrap the placeholder grant
+   * on (site-admin viewer whose admin sites list is empty / still
+   * loading). Shows a friendly error instead of a broken submit. */
+  cannotBootstrap?: boolean;
 }
 
 /**
- * Step 1 of the two-step create flow (§3.4). Captures only credentials
- * and creates the user with ``is_system_admin=false`` and zero grants.
- * The parent hands the returned user to ``ManageUserModal`` for step 2,
- * where per-scope grants and (for system-admin viewers) the system-wide
- * toggle are applied.
+ * Step 1 of the two-step create flow (§3.4). Captures only credentials.
+ * The actual per-scope grants are configured in step 2 (ManageUserModal,
+ * opened automatically by the parent). System-admin callers create a bare
+ * user; site-admin callers get a hidden observer grant attached on the
+ * scope they were browsing so the row shows up in their filtered list
+ * immediately — that grant is fully editable in step 2.
  *
- * Deliberately no role dropdown here — the legacy version mapped
- * observer/operator to "user with no access" and admin/super-admin to
- * ``is_system_admin=true``, which mixed two very different intents.
- * Both intents now live in step 2.
+ * Deliberately no ``is_system_admin`` toggle here — it lives in step 2 for
+ * system-admin viewers and is unavailable to site-admin viewers at all.
  */
-export function CreateUserModal({ onClose, onCreated }: CreateUserModalProps) {
+export function CreateUserModal({
+  onClose,
+  onCreated,
+  bootstrapGrant,
+  cannotBootstrap = false,
+}: CreateUserModalProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [email, setEmail] = useState('');
@@ -43,6 +57,7 @@ export function CreateUserModal({ onClose, onCreated }: CreateUserModalProps) {
         password: password.trim(),
         email: email.trim() || undefined,
         is_system_admin: false,
+        initial_grant: bootstrapGrant,
       });
       onCreated(user);
     } catch (err) {
@@ -76,6 +91,14 @@ export function CreateUserModal({ onClose, onCreated }: CreateUserModalProps) {
         </div>
 
         {error && <ErrorMessage error={`✗ ${error}`} />}
+
+        {cannotBootstrap && (
+          <ErrorMessage
+            error={
+              '✗ You do not hold a site-wide admin grant on any site, so you cannot create users. Ask a system-admin to grant you site-admin first.'
+            }
+          />
+        )}
 
         <div className="flex flex-col gap-3">
           <div className="flex flex-col">
@@ -124,7 +147,7 @@ export function CreateUserModal({ onClose, onCreated }: CreateUserModalProps) {
           </button>
           <button
             type="submit"
-            disabled={busy || !username.trim() || !password.trim()}
+            disabled={busy || !username.trim() || !password.trim() || cannotBootstrap}
             className="px-3 py-1.5 text-sm text-white bg-info rounded-md hover:bg-info disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {busy ? 'Creating…' : 'Create and configure access →'}

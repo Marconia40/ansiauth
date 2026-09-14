@@ -68,14 +68,17 @@ export interface User {
 }
 
 /**
- * Matches backend UserCreate. To grant per-scope roles, create the user then
- * issue `POST /users/{id}/grants`.
+ * Matches backend UserCreate. System-admin callers may omit
+ * ``initial_grant`` and issue ``POST /users/{id}/grants`` afterwards; a
+ * site-admin caller must supply ``initial_grant`` on a site they admin so
+ * the new user shows up under the scoped users list.
  */
 export interface UserCreate {
   username: string;
   password: string;
   email?: string;
   is_system_admin?: boolean;
+  initial_grant?: RoleAssignmentCreate;
 }
 
 /**
