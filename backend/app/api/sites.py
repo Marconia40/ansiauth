@@ -37,6 +37,8 @@ def _to_read(site, *, device_count=_UNSET) -> dict:
         device_count = site_repository.contar_devices(site.id)
     return SiteRead(
         id=site.id, name=site.name, description=site.description,
+        kind=site.kind,
+        default_group_id=getattr(site, "default_group_id", None),
         created_at=site.created_at, updated_at=site.updated_at,
         device_count=device_count,
     ).model_dump()

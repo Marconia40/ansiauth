@@ -45,6 +45,10 @@ class SiteRead(BaseModel):
     id: int
     name: str
     description: Optional[str]
+    # 'REGULAR' | 'BASE_INFRASTRUCTURE' — the frontend filters
+    # BASE_INFRASTRUCTURE out of grant pickers for non-system-admins.
+    kind: str = "REGULAR"
+    default_group_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
     device_count: int = 0
