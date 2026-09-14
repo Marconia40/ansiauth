@@ -28,10 +28,11 @@ Client → FastAPI → Ansible Runner → Playbooks → Network Devices
 
 network-automation-api/\
 |\
-├── backend/ # FastAPI application\
-├── ansible/ # Playbooks and inventory\
-├── scripts/ # Testing scripts\
-├── worker/ # Async jobs (future)\
+├── backend/ # FastAPI application + Ansible playbooks + Celery worker\
+├── frontend/ # Next.js UI\
+├── docs/ # Technical docs, runbooks, sequence diagrams\
+├── docker-compose.yml # Local + CI stack (db + backend + worker + beat + redis)\
+└── install.sh # One-shot installer\
 
 ---
 
@@ -83,13 +84,7 @@ ANSIBLE_PASSWORD=your_password
 
 ## Inventory
 
-An example inventory is provided:
-
-- ansible/inventory/inventory.example.ini
-
-You must create your own:
-
-- ansible/inventory/inventory.ini
+The Ansible inventory lives at `backend/ansible/inventory/hosts`. At runtime, ansible-runner builds an isolated per-device inventory in its `private_data_dir`, so this file is only used for manual verification / smoke tests.
 
 ## Running the API
 
