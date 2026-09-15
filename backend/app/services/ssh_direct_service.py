@@ -364,6 +364,25 @@ def _run_ssh_interactive(
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=INFO",
         "-o", f"ConnectTimeout={_SSH_CONNECT_TIMEOUT}",
+        # Bug real confirmado en vivo contra f3r10s1 (y el mismo grupo:
+        # f2r6s8/f2r6s9/f2r11s2/f2r11s3): "Permission denied" con la key
+        # CORRECTA (confirmado byte a byte contra la key registrada en el
+        # device, ``display rsa peer-public-key name proxy``) -- no era un
+        # problema de credencial. OpenSSH moderno (10.0p2 acá) deshabilita
+        # por default la firma ``ssh-rsa`` (SHA-1) para autenticación por
+        # clave pública desde hace varias versiones, y el firmware VRP de
+        # estos devices sólo sabe firmar con ese algoritmo viejo, no con
+        # rsa-sha2-256/512 -- el cliente ni intenta la firma legacy, así
+        # que nunca aparece un "Unable to negotiate" que
+        # ``_NEGOTIATION_FAILURE_RE`` pueda cachear (ese mecanismo sólo
+        # detecta rechazos explícitos del SERVIDOR durante kex/host-key/
+        # cipher, no una restricción del lado del CLIENTE en la firma de
+        # pubkey) -- confirmado con ``ssh -vv``: sin esto, "Offering
+        # public key" nunca llega a "Server accepts key"; con esto sí,
+        # login completo. Puramente aditivo (``+`` suma al default, no lo
+        # reemplaza) -- no afecta devices que ya negocian bien con los
+        # algoritmos modernos.
+        "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa",
     ]
     with _agent_for(device) as agent_env:
         extra_opts: list[str] = list(known_extra_opts) if known_extra_opts else []
