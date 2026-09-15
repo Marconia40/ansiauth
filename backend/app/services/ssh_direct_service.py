@@ -227,7 +227,9 @@ _PAGER_DISABLE = {
 }
 
 
-def _run_ssh_interactive(device, lines: list[str]) -> tuple[int, str, str]:
+def _run_ssh_interactive(
+    device, lines: list[str], known_extra_opts: "list[str] | None" = None,
+) -> tuple[int, str, str, list[str]]:
     """Sesión SSH real con PTY asignado (``-tt``), las *lines* se mandan
     por stdin igual que un humano tipeando -- necesario tanto para
     escrituras que entran a modo de configuración (``system-view``/
@@ -254,6 +256,20 @@ def _run_ssh_interactive(device, lines: list[str]) -> tuple[int, str, str]:
     comando rechazado, timeout) no dispara ningún reintento -- cambiar de
     algoritmos no arreglaría nada ahí.
 
+    *known_extra_opts*: algoritmos ya aprendidos en una llamada anterior
+    de la MISMA sesión de lectura (ver ``_run_reads()``) -- se usan como
+    punto de partida en vez de arrancar siempre desde los defaults de
+    OpenSSH. Bug real observado en vivo contra f3r9s1/f3r9s2/f2r11s1:
+    cada comando del batch (hasta 8 por read) reabre su propia conexión
+    SSH, y sin esto cada una repetía la MISMA negociación fallida +
+    retry desde cero -- 30-40s de negociación pura desperdiciada por
+    sync en devices con algoritmos legacy, comiéndose buena parte del
+    presupuesto de ``_SSH_COMMAND_TIMEOUT`` por comando y acercando esos
+    reads al timeout total (mecanismo real detrás del wipe de inventario
+    de f2r6s7 -- ver ``vendors/base.py::_leer()``). Se devuelve el
+    ``extra_opts`` final (con lo aprendido en ESTA llamada incluido) para
+    que el caller lo pase a la próxima invocación.
+
     ``LogLevel=INFO``, no ``ERROR`` -- bug real encontrado implementando
     esto: confirmado en vivo que con ``LogLevel=ERROR`` (más silencioso
     que el default real de OpenSSH, "INFO") el mensaje "Unable to
@@ -271,7 +287,7 @@ def _run_ssh_interactive(device, lines: list[str]) -> tuple[int, str, str]:
     ]
     stdin_data = "\n".join([*lines, "quit"]) + "\n"
     with _agent_for(device) as agent_env:
-        extra_opts: list[str] = []
+        extra_opts: list[str] = list(known_extra_opts) if known_extra_opts else []
         categorias_probadas: set[str] = set()
         for _ in range(_MAX_NEGOTIATION_RETRIES + 1):
             cmd = [*base_cmd, *extra_opts, f"{device.username}@{device.host}"]
@@ -281,19 +297,19 @@ def _run_ssh_interactive(device, lines: list[str]) -> tuple[int, str, str]:
                     timeout=_SSH_COMMAND_TIMEOUT, env=agent_env,
                 )
             except subprocess.TimeoutExpired:
-                return 1, "", f"ssh command timed out after {_SSH_COMMAND_TIMEOUT}s"
+                return 1, "", f"ssh command timed out after {_SSH_COMMAND_TIMEOUT}s", extra_opts
             except Exception as exc:
                 logger.exception("ssh_direct_service: interactive ssh invocation failed device=%s", device.name)
-                return 1, "", str(exc)
+                return 1, "", str(exc), extra_opts
             m = _NEGOTIATION_FAILURE_RE.search(proc.stderr)
             if m is None:
-                return proc.returncode, proc.stdout, proc.stderr
+                return proc.returncode, proc.stdout, proc.stderr, extra_opts
             categoria, oferta = m.groups()
             if categoria in categorias_probadas:
                 # Ya adaptamos esta categoría antes y sigue fallando (o el
                 # device ofrece algo que ninguna combinación resuelve) --
                 # más reintentos no cambiarían nada, devolver el error real.
-                return proc.returncode, proc.stdout, proc.stderr
+                return proc.returncode, proc.stdout, proc.stderr, extra_opts
             categorias_probadas.add(categoria)
             for opt_name in _NEGOTIATION_OPTION_NAMES.get(categoria, []):
                 extra_opts += ["-o", f"{opt_name}=+{oferta}"]
@@ -302,7 +318,7 @@ def _run_ssh_interactive(device, lines: list[str]) -> tuple[int, str, str]:
                 "-- retrying with that exact offer added to %s",
                 device.name, categoria, oferta, _NEGOTIATION_OPTION_NAMES.get(categoria, []),
             )
-        return proc.returncode, proc.stdout, proc.stderr
+        return proc.returncode, proc.stdout, proc.stderr, extra_opts
 
 
 # VRP (y también IOS, mismo patrón confirmado en vivo contra f3r9s1) no
@@ -353,7 +369,7 @@ def _exito(stdout: str, raw: str, vendor: "str | None" = None) -> bool:
 
 def _run_write(device, block: str, *, op_label: str) -> dict:
     logger.info("ssh_direct_service: %s on device=%s", op_label, device.name)
-    _, stdout, stderr = _run_ssh_interactive(device, block.split("\n"))
+    _, stdout, stderr, _ = _run_ssh_interactive(device, block.split("\n"))
     rc = 0 if _exito(stdout, stdout, vendor=device.vendor) else 1
     if rc == 0:
         logger.info("ssh_direct_service: %s OK on device=%s", op_label, device.name)
@@ -413,21 +429,101 @@ def _extraer_salida_comando(raw: str, command: str) -> str:
     return "\n".join(lines[start:end]).strip("\n")
 
 
+def _extraer_salidas_comandos(raw: str, commands: list[str]) -> list[str]:
+    """Generaliza ``_extraer_salida_comando()`` a N comandos mandados en UNA
+    sola sesión (ver ``_run_reads()``): busca el eco de cada *command*, EN
+    ORDEN, avanzando siempre hacia adelante desde donde terminó el anterior
+    -- así un comando repetido dos veces en el mismo batch igual se
+    resuelve contra su propia ocurrencia. La salida de cada comando va
+    desde su eco hasta el eco del PRÓXIMO comando encontrado (o hasta
+    nuestro "quit" final para el último) -- mismo criterio de "buscar el
+    terminador desde el final" que ya usa la versión de 1 solo comando
+    para no confundirse con un "quit" legítimo que venga en el medio del
+    output real (ej. bloques ``crypto pki certificate chain`` de Cisco).
+
+    Si el eco de un comando no aparece (la sesión se cortó antes de
+    llegar a tipearlo -- device se cayó a mitad del batch), ese slot
+    devuelve "" -- por construcción (la búsqueda de cada eco arranca
+    donde terminó la anterior, sobre un stream que se manda de una sola
+    vez), si el eco del comando N no aparece ninguno de los siguientes
+    puede aparecer tampoco, así que todo lo que sobró del transcript
+    (incluido un eventual mensaje de corte real, ej. "Connection reset by
+    peer", si llegó a aparecer en stdout antes de morir) queda atado al
+    ÚLTIMO comando cuyo eco sí se encontró -- mismo criterio que
+    ``_extraer_salida_comando()`` ya usaba para 1 comando (correr hasta
+    el final si nuestro "quit" nunca se ecoa)."""
+    lines = raw.splitlines()
+    quit_idx = len(lines)
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].rstrip().endswith("quit"):
+            quit_idx = i
+            break
+
+    echo_idxs: "list[int | None]" = []
+    search_from = 0
+    for command in commands:
+        cmd = command.rstrip()
+        found = None
+        for i in range(search_from, len(lines)):
+            if lines[i].rstrip().endswith(cmd):
+                found = i
+                break
+        echo_idxs.append(found)
+        if found is not None:
+            search_from = found + 1
+
+    outputs: list[str] = []
+    for pos, idx in enumerate(echo_idxs):
+        if idx is None:
+            outputs.append("")
+            continue
+        end = quit_idx
+        for later_idx in echo_idxs[pos + 1:]:
+            if later_idx is not None:
+                end = later_idx
+                break
+        outputs.append("\n".join(lines[idx + 1:end]).strip("\n"))
+    return outputs
+
+
 def _run_reads(device, commands: list[str], *, op_label: str) -> dict:
+    """Manda TODOS los *commands* del batch por stdin de UNA sola sesión
+    SSH (mismo mecanismo que ``_run_write()`` ya usa para bloques de
+    config multi-línea), en vez de abrir una conexión nueva por comando.
+
+    Bug real observado en vivo (f3r9s1/f3r9s2/f2r11s1/f2r10s1): con 1
+    conexión por comando, un read de 8 comandos contra un device con
+    algoritmos SSH legacy pagaba la negociación completa 8 veces --
+    ~24 conexiones TCP+SSH en ~16s para UN SOLO read (confirmado en el
+    log de producción), la clase de ráfaga que puede empujar a un device
+    con firmware viejo a resetear la conexión. Con 1 sola sesión para
+    todo el batch, la negociación se paga una sola vez por read (y el
+    lock del device se sostiene una fracción del tiempo).
+
+    Los outputs de cada comando se separan del transcript combinado con
+    ``_extraer_salidas_comandos()`` -- el contrato de salida (lista de N
+    strings, mismo orden que *commands*) no cambia, así que los parsers
+    (``CiscoPortParser``, etc.) no necesitan tocarse."""
     logger.info("ssh_direct_service: %s (%d command(s)) on device=%s", op_label, len(commands), device.name)
     pager_disable = _PAGER_DISABLE.get(device.vendor, [])
-    stdouts: list[str] = []
-    stderrs: list[str] = []
+    lines = [*pager_disable, *commands]
+    _, raw_out, err, _extra_opts = _run_ssh_interactive(device, lines)
+    stdouts = _extraer_salidas_comandos(raw_out, commands)
+    stderrs = [err] if err else []
+
+    # _sesion_completa() se evalúa 1 sola vez para todo el batch (antes
+    # era por comando, porque cada uno tenía su propia sesión/su propio
+    # "quit" propio) -- si la sesión compartida no llegó a nuestro
+    # terminador final, algo se cortó en algún punto del batch, así que
+    # el read completo se marca fallido aunque los comandos que sí
+    # llegaron a ecoarse conserven su contenido real (para que
+    # ``partial_ok`` los siga pudiendo usar).
+    session_ok = _sesion_completa(raw_out)
     rc = 0
-    for command in commands:
-        lines = [*pager_disable, command]
-        _, raw_out, err = _run_ssh_interactive(device, lines)
-        out = _extraer_salida_comando(raw_out, command)
-        stdouts.append(out)
-        if err:
-            stderrs.append(err)
-        if not _exito(out, raw_out, vendor=device.vendor):
+    for out in stdouts:
+        if not session_ok or _tiene_error(out, device.vendor):
             rc = 1
+            break
     if rc != 0:
         logger.error("ssh_direct_service: %s FAILED on device=%s", op_label, device.name)
     return {

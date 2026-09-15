@@ -302,7 +302,22 @@ class VendorDriver(ABC):
             # (rc suele ser 0), pero se mantiene como safety net por si
             # el playbook falla por otras razones (auth, timeout) y aún
             # así capturó algo.
-            if partial_ok and stdouts:
+            #
+            # Bug real contra f2r6s7 (job de 12:15-12:19, negociación SSH
+            # nunca convergió, los 8 comandos terminaron en "ssh command
+            # timed out after 60s"): ssh_direct_service._run_reads() sigue
+            # el mismo contrato que el playbook Ansible y devuelve una
+            # entrada por comando SIEMPRE, incluso cuando ese comando no
+            # produjo nada real -- entonces stdouts era ["", "", ..., ""]
+            # (8 strings vacíos), una lista NO vacía que pasaba este check
+            # tal cual estaba. sync_core() interpretó ese resultado como
+            # "el device tiene 0 VLANs/ports/SVIs" y lo persistió,
+            # borrando el inventario real conocido. `any(...)` exige que
+            # al menos un comando haya devuelto contenido real antes de
+            # tomar la rama tolerante; si son todos vacíos, es indistin-
+            # guible de "device inalcanzable" y debe caer al RuntimeError
+            # de abajo, igual que el caso stdouts=[].
+            if partial_ok and any(s.strip() for s in stdouts):
                 logger.warning(
                     "%s: read on device=%s reported failure but captured %d/%d command output(s); "
                     "returning them for per-command handling (error was: %s)",

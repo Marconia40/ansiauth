@@ -298,6 +298,37 @@ def refresh_device_svis(
 
 
 @router.post(
+    "/{name}/sync/refresh",
+    status_code=202,
+    summary="Refresh device VLAN + port + SVI caches together",
+    description=(
+        "Trigger a single background sync of *device*'s VLAN, port and SVI "
+        "caches from the equipment (``scope=\"all\"``, i.e. ``sync_core()``) "
+        "-- one device lock acquisition and one SSH read session (2 on "
+        "Huawei) instead of the 2-3 separate connections that calling "
+        "`/vlans/refresh` + `/ports/refresh` (+ `/svis/refresh`) "
+        "individually would open. Returns immediately with the task id; "
+        "the frontend polls the usual per-scope GETs and watches "
+        "`synced_at` / `sync_in_progress` on each to detect completion. "
+        "Requires observer role or higher on the device."
+    ),
+)
+def refresh_device_sync(
+    name: str,
+    current_user: dict = Depends(require_authenticated),
+    scope: VisibilityScope = Depends(obtener_scope),
+):
+    from app.composition import inventory
+    from app.tasks import sync_device_task
+
+    if inventory.get(name) is None:
+        raise NotFoundError(f"Device '{name}' not found")
+    visible_or_404(scope, name, "device", "observer", f"Device '{name}' not found")
+    result = sync_device_task.delay(name, "all")
+    return ok({"device": name, "scope": "all", "task_id": result.id})
+
+
+@router.post(
     "/{name}/global-config/refresh",
     status_code=202,
     summary="Refresh device global configuration cache",

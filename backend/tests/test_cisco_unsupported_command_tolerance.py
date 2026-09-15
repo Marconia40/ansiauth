@@ -198,6 +198,27 @@ def test_list_ports_still_raises_when_device_unreachable(monkeypatch):
         CiscoVendor().list_ports(_FakeDevice(), "pw")
 
 
+def test_list_ports_still_raises_when_all_slots_empty_string(monkeypatch):
+    """Bug real contra f2r6s7: la negociación SSH nunca convergió y los 8
+    comandos del batch terminaron en "ssh command timed out after 60s"
+    cada uno -- pero tanto ssh_direct_service como el playbook Ansible
+    devuelven una entrada por comando SIEMPRE, así que stdouts llegó como
+    ["", "", ..., ""] (8 strings vacíos, no una lista vacía). El check
+    viejo (``if partial_ok and stdouts``) sólo miraba si la lista tenía
+    elementos, no si tenían contenido -- tomaba la rama tolerante y
+    sync_core() terminaba persistiendo "0 VLANs/0 ports/0 SVIs", borrando
+    el inventario real conocido del device. Debe seguir lanzando
+    RuntimeError igual que stdouts=[]."""
+
+    def _fake_run(playbook, extravars, inventory=None, device=None):
+        return _make_run_result(rc=1, stdouts=[""] * 4)
+
+    monkeypatch.setattr(ansible_service, "run_playbook", _fake_run)
+
+    with pytest.raises(RuntimeError, match="cisco-01"):
+        CiscoVendor().list_ports(_FakeDevice(), "pw")
+
+
 # ── Case 3: same tolerance inside the fused read_core_state path ──────────
 
 def test_read_core_state_tolerates_unsupported_storm_control(monkeypatch):

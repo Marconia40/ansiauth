@@ -395,9 +395,9 @@ def test_cisco_reads_disable_both_pager_and_line_wrap(monkeypatch):
 
     captured = {}
 
-    def _fake_interactive(device, lines):
+    def _fake_interactive(device, lines, known_extra_opts=None):
         captured["lines"] = lines
-        return 0, "some output\nf2r11s1#quit", ""
+        return 0, "some output\nf2r11s1#quit", "", []
 
     monkeypatch.setattr(ssh_direct_service, "_run_ssh_interactive", _fake_interactive)
 
@@ -472,6 +472,102 @@ def test_exito_accepts_clean_rc_when_session_reached_our_quit():
     assert ssh_direct_service._exito(complete, complete, vendor="cisco_ios") is True
 
 
+# ── _run_reads(): algoritmos aprendidos se reusan entre comandos del batch ──
+
+def test_run_reads_fuses_all_commands_into_one_ssh_session(monkeypatch):
+    """Bug real observado en vivo (f3r9s1/f3r9s2/f2r11s1/f2r10s1): antes,
+    cada uno de los hasta 8 comandos de un read abría su PROPIA conexión
+    SSH -- confirmado en el log de producción como ~24 conexiones
+    TCP+SSH en ~16s para UN SOLO read contra un device con algoritmos
+    legacy, la clase de ráfaga que puede empujar a un device con
+    firmware viejo a resetear la conexión. Ahora ``_run_reads()`` manda
+    TODOS los comandos por stdin de una sola sesión (mismo mecanismo que
+    ``_run_write()`` ya usaba para bloques de config) -- 1 sola
+    negociación para todo el batch, sin importar cuántos comandos tenga."""
+    from app.services import ssh_direct_service
+
+    state = {"calls": 0}
+    transcript = (
+        "<f3r9s2>screen-length 0 temporary\n"
+        "<f3r9s2>display version\n"
+        "VRP version 5.130\n"
+        "<f3r9s2>display vlan\n"
+        "VLAN ID  Name\n"
+        "1        default\n"
+        "<f3r9s2>display interface brief\n"
+        "Eth0/0/1  up\n"
+        "<f3r9s2>quit"
+    )
+
+    def _fake_run(cmd, input, capture_output, text, timeout, env):
+        state["calls"] += 1
+        tiene_opcion = any("HostKeyAlgorithms=+ssh-rsa" in part for part in cmd)
+        class _Proc:
+            pass
+        proc = _Proc()
+        if tiene_opcion:
+            proc.returncode = 0
+            proc.stdout = transcript
+            proc.stderr = ""
+        else:
+            proc.returncode = 255
+            proc.stdout = ""
+            proc.stderr = (
+                "Unable to negotiate with 172.16.61.210 port 22: no matching "
+                "host key type found. Their offer: ssh-rsa"
+            )
+        return proc
+
+    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
+
+    class _Dev:
+        name = "f3r9s2"
+        host = "172.16.61.210"
+        username = "netconf"
+        vendor = "huawei_vrp"
+
+    result = ssh_direct_service._run_reads(
+        _Dev(), ["display version", "display vlan", "display interface brief"],
+        op_label="test",
+    )
+
+    # 1 sola sesión para los 3 comandos -- 1 intento fallido de
+    # negociación + 1 exitoso, sin importar cuántos comandos haya en el
+    # batch (antes: 2 por comando x 3 = 6).
+    assert state["calls"] == 2
+    assert result["rc"] == 0
+    assert result["stdouts"] == [
+        "VRP version 5.130",
+        "VLAN ID  Name\n1        default",
+        "Eth0/0/1  up",
+    ]
+
+
+def test_extraer_salidas_comandos_handles_session_cut_mid_batch():
+    """Si la sesión se corta antes de llegar a un comando (device se cae a
+    mitad del batch), ese comando y los que le siguen en la lista nunca
+    pueden haberse tipeado tampoco (se manda todo por el mismo stream de
+    una sola vez) -- devuelven "". Lo que haya sobrado del transcript
+    (acá, el mensaje de corte) queda atado al ÚLTIMO comando cuyo eco sí
+    se encontró, mismo criterio que ``_extraer_salida_comando()`` ya usa
+    para 1 comando cuando nuestro "quit" final nunca se ecoa."""
+    from app.services import ssh_direct_service
+
+    raw = (
+        "<dev>display version\n"
+        "VRP version 5.130\n"
+        "Connection reset by peer"
+    )
+    result = ssh_direct_service._extraer_salidas_comandos(
+        raw, ["display version", "display vlan", "display interface brief"],
+    )
+
+    assert result[0] == "VRP version 5.130\nConnection reset by peer"
+    assert result[1] == ""
+    assert result[2] == ""
+
+
 # ── SSH algorithm negotiation: adapta por device, no fuerza legacy siempre ──
 
 def test_run_ssh_interactive_tries_default_algorithms_first(monkeypatch):
@@ -540,7 +636,7 @@ def test_run_ssh_interactive_retries_with_devices_own_kex_offer(monkeypatch):
         host = "192.0.2.1"
         username = "admin"
 
-    rc, stdout, stderr = ssh_direct_service._run_ssh_interactive(_Dev(), ["show version"])
+    rc, stdout, stderr, _ = ssh_direct_service._run_ssh_interactive(_Dev(), ["show version"])
 
     assert len(captured_cmds) == 2
     assert not any("KexAlgorithms" in part for part in captured_cmds[0])
@@ -616,7 +712,7 @@ def test_run_ssh_interactive_stops_retrying_when_same_category_repeats(monkeypat
         host = "192.0.2.1"
         username = "admin"
 
-    rc, stdout, stderr = ssh_direct_service._run_ssh_interactive(_Dev(), ["show version"])
+    rc, stdout, stderr, _ = ssh_direct_service._run_ssh_interactive(_Dev(), ["show version"])
 
     # 1 intento default + 1 reintento adaptado -- la 3ra vez matchearía la
     # MISMA categoría otra vez, así que corta ahí sin un 3er intento.
@@ -659,3 +755,104 @@ class _NullAgentCtx:
 
     def __exit__(self, *a):
         return False
+
+
+def test_run_ssh_interactive_adapts_cipher_too(monkeypatch):
+    """Caso reportado por el usuario contra f2r6s3: el device solo ofrece
+    ciphers legacy (aes128-cbc, 3des-cbc, aes192-cbc, aes256-cbc) que
+    OpenSSH moderno no ofrece por default -- confirma que la categoria
+    'cipher' (la 3ra de _NEGOTIATION_OPTION_NAMES, no probada en vivo
+    todavia contra un device real) tambien se adapta con la oferta real,
+    no solo kex/host key."""
+    from app.services import ssh_direct_service
+
+    captured_cmds = []
+
+    def _fake_run(cmd, input, capture_output, text, timeout, env):
+        captured_cmds.append(cmd)
+        class _Proc:
+            pass
+        proc = _Proc()
+        if len(captured_cmds) == 1:
+            proc.returncode = 255
+            proc.stdout = ""
+            proc.stderr = (
+                "Unable to negotiate with 172.16.61.53 port 22: no matching "
+                "cipher found. Their offer: aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc"
+            )
+        else:
+            proc.returncode = 0
+            proc.stdout = "ok\nf2r6s3#quit"
+            proc.stderr = ""
+        return proc
+
+    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
+
+    class _Dev:
+        name = "f2r6s3"
+        host = "172.16.61.53"
+        username = "ansiauthtest"
+
+    rc, stdout, stderr, _ = ssh_direct_service._run_ssh_interactive(_Dev(), ["show version"])
+
+    assert len(captured_cmds) == 2
+    assert "Ciphers=+aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc" in captured_cmds[1]
+    assert rc == 0
+
+
+def test_run_ssh_interactive_adapts_all_three_categories_in_sequence(monkeypatch):
+    """Peor caso posible: un device que necesita adaptar KEX, host key Y
+    cipher, los 3 en secuencia (no confirmado en vivo contra ningun
+    device real todavia, pero f2r6s3 ya mostro que necesita al menos
+    KEX+host-key+cipher combinados via un test manual del usuario) --
+    confirma que _MAX_NEGOTIATION_RETRIES (3, uno por categoria) alcanza
+    para los 4 intentos totales que hacen falta."""
+    from app.services import ssh_direct_service
+
+    captured_cmds = []
+    failures = [
+        "Unable to negotiate with 172.16.61.53 port 22: no matching key "
+        "exchange method found. Their offer: diffie-hellman-group14-sha1",
+        "Unable to negotiate with 172.16.61.53 port 22: no matching host "
+        "key type found. Their offer: ssh-rsa",
+        "Unable to negotiate with 172.16.61.53 port 22: no matching "
+        "cipher found. Their offer: aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc",
+    ]
+
+    def _fake_run(cmd, input, capture_output, text, timeout, env):
+        captured_cmds.append(cmd)
+        class _Proc:
+            pass
+        proc = _Proc()
+        attempt = len(captured_cmds)
+        if attempt <= len(failures):
+            proc.returncode = 255
+            proc.stdout = ""
+            proc.stderr = failures[attempt - 1]
+        else:
+            proc.returncode = 0
+            proc.stdout = "ok\nf2r6s3#quit"
+            proc.stderr = ""
+        return proc
+
+    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
+
+    class _Dev:
+        name = "f2r6s3"
+        host = "172.16.61.53"
+        username = "ansiauthtest"
+
+    rc, stdout, stderr, _ = ssh_direct_service._run_ssh_interactive(_Dev(), ["show version"])
+
+    # 3 intentos fallidos (1 por categoria) + el 4to que ya trae las 3
+    # adaptadas y conecta -- justo el techo de _MAX_NEGOTIATION_RETRIES.
+    assert len(captured_cmds) == 4
+    final_cmd = captured_cmds[3]
+    assert "KexAlgorithms=+diffie-hellman-group14-sha1" in final_cmd
+    assert "HostKeyAlgorithms=+ssh-rsa" in final_cmd
+    assert "PubkeyAcceptedKeyTypes=+ssh-rsa" in final_cmd
+    assert "Ciphers=+aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc" in final_cmd
+    assert rc == 0
+    assert stdout == "ok\nf2r6s3#quit"

@@ -88,3 +88,20 @@ def test_dispatched_task_updates_job_record():
     assert job.status in ("completed", "failed"), (
         f"Expected terminal job status after eager dispatch, got {job.status!r}"
     )
+
+
+def test_sync_refresh_dispatches_single_all_scope_task():
+    """POST /devices/{name}/sync/refresh (bug real encontrado en vivo contra
+    ansiauth.psi.unc.edu.ar: el frontend refrescaba VLANs+ports con 2
+    llamadas concurrentes separadas -- 2 locks/2 sesiones SSH por click,
+    contribuyendo a los 'Connection reset'/'device busy' vistos en el log
+    de producción -- y nunca refrescaba SVIs) debe dispatchear UNA sola
+    task con scope='all' (sync_core, ya fusiona vlans+ports+svis en 1-2
+    sesiones SSH) en vez de requerir 2-3 POSTs separados."""
+    resp = _auth_client("observer").post("/api/v1/devices/mock_device/sync/refresh")
+
+    assert resp.status_code == 202, resp.text
+    body = resp.json()["data"]
+    assert body["device"] == "mock_device"
+    assert body["scope"] == "all"
+    assert body["task_id"]

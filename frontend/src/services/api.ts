@@ -878,6 +878,25 @@ export async function refreshDeviceSvis(
   );
 }
 
+/** Fires the async Celery refresh for a device's VLAN + port + SVI caches
+ * TOGETHER (`scope="all"`, i.e. `sync_core()` server-side) -- one device
+ * lock + one SSH read session (2 on Huawei) instead of the 2-3 separate
+ * connections that calling refreshDeviceVlans/refreshDevicePorts(/Svis)
+ * individually would open. Prefer this over combining the per-scope
+ * refreshes yourself -- see `scopeRefresh.ts`. Returns as soon as the task
+ * is queued (backend responds 202) — callers poll the per-scope GETs
+ * (getVlansSynced/getPortsSynced/getSVIsSynced) watching `sync_in_progress`
+ * to know when each is fresh. */
+export async function refreshDeviceSync(
+  device: string,
+): Promise<{ device: string; scope: 'all'; task_id: string }> {
+  return unwrap<{ device: string; scope: 'all'; task_id: string }>(
+    client.post<ApiResponse<{ device: string; scope: 'all'; task_id: string }>>(
+      `/devices/${device}/sync/refresh`,
+    ),
+  );
+}
+
 export async function createSVI(
   device: string,
   body: SVICreateRequest,
