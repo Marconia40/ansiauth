@@ -73,7 +73,19 @@ _VRP_VLAN_CONTINUATION_RE = re.compile(r"^\s*(\d+)/")
 # "0056-2b0f-996c 156/-/-                           GE0/0/48            dynamic"
 # -- 1 sola línea, sin ambigüedad. Confirmado en vivo: 52/52 filas reales
 # parseadas, matchea el "Total items displayed = 52" del propio device.
-_HUAWEI_MAC_RE = re.compile(r"^(\S{4}-\S{4}-\S{4})\s+(\S+)\s+(\S+)\s+(\S+)\s*$")
+#
+# Bug real encontrado en vivo contra f1r2s1 (device grande, 3080 entradas):
+# ese firmware agrega una 5ta columna "Age" al final ("... dynamic
+# 27") que el `$` de este regex no dejaba pasar -- 0 de 3080 filas
+# parseaban (el "Total items: 3080" del device nunca se acercaba al
+# resultado), sin ningún error visible (una tabla MAC vacía es
+# indistinguible de "el device no tiene entradas" sin mirar el raw).
+# El 4to campo (age u otra columna que algún firmware agregue) ahora es
+# opcional y no se captura -- no lo usa nadie del lado del modelo
+# todavía, y hacerlo opcional en vez de agregarlo como grupo capturado
+# mantiene compatible el formato de 4 campos ya confirmado en vivo
+# arriba (52/52, sin age) sin tener que tocar ese caso.
+_HUAWEI_MAC_RE = re.compile(r"^(\S{4}-\S{4}-\S{4})\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+\S+)?\s*$")
 
 
 def parse_huawei_arp(raw: str) -> list[dict]:
