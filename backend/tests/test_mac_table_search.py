@@ -544,6 +544,63 @@ def test_run_reads_fuses_all_commands_into_one_ssh_session(monkeypatch):
     ]
 
 
+def test_run_reads_flags_session_incomplete_when_truncated_mid_batch(monkeypatch):
+    """Bug real contra f2r10s1 (48 puertos, producción): con 1 sola sesión
+    para todo el batch de read_core_state, el transcript combinado se
+    corta ~57KB adentro (mismo límite que _exito() ya documenta) -- "show
+    interfaces switchport" SÍ devuelve contenido real, pero
+    storm-control/running-config nunca llegan a tipearse porque la
+    conexión murió antes, así que "quit" nunca se ecoa. Antes de este
+    fix, _run_reads() no distinguía esto de "comando individual
+    rechazado" -- ambos daban rc=1 con algún stdout poblado. La señal
+    nueva (session_complete) debe ser False acá, aunque el primer
+    comando SÍ tenga datos reales."""
+    from app.services import ssh_direct_service
+
+    transcript = (
+        "f2r10s1#terminal length 0\n"
+        "f2r10s1#terminal width 0\n"
+        "f2r10s1#show interfaces status\n"
+        "Port      Name               Status       Vlan       Duplex  Speed Type\n"
+        "Gi1/0/1                      connected    157        a-full  a-100 10/100/1000BaseTX\n"
+        "f2r10s1#"  # se corta acá -- ni siquiera llega a ecoar el próximo comando
+    )
+
+    def _fake_run(cmd, input, capture_output, text, timeout, env):
+        class _Proc:
+            returncode = 0
+            stdout = transcript
+            stderr = ""
+        return _Proc()
+
+    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
+
+    class _Dev:
+        name = "f2r10s1"
+        host = "192.0.2.1"
+        username = "admin"
+        vendor = "cisco_ios"
+
+    result = ssh_direct_service._run_reads(
+        _Dev(),
+        [
+            "show interfaces status", "show interfaces description",
+            "show interfaces switchport", "show storm-control broadcast",
+            "show running-config | section ^interface",
+        ],
+        op_label="test",
+    )
+
+    assert result["session_complete"] is False
+    assert result["rc"] == 1
+    # El 1er comando (el único que sí llegó a ecoarse y completar) SÍ
+    # conserva su contenido real -- lo que cambia es que _leer() ya no
+    # debe confiar en él para tomar la rama tolerante de partial_ok.
+    assert "Gi1/0/1" in result["stdouts"][0]
+    assert result["stdouts"][1:] == ["", "", "", ""]
+
+
 def test_extraer_salidas_comandos_handles_session_cut_mid_batch():
     """Si la sesión se corta antes de llegar a un comando (device se cae a
     mitad del batch), ese comando y los que le siguen en la lista nunca

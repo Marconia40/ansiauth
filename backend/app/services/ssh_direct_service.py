@@ -531,6 +531,23 @@ def _run_reads(device, commands: list[str], *, op_label: str) -> dict:
         "stdout": stdouts[0] if stdouts else "",
         "stderr": "\n".join(stderrs),
         "stdouts": stdouts,
+        # Bug real contra f2r10s1 (48 puertos): confirmado en vivo que el
+        # transcript combinado se corta siempre ~57KB adentro (mismo límite
+        # ya documentado en _exito()) -- con 1 sola sesión para TODO el
+        # batch de read_core_state, el output de "show interfaces
+        # switchport" (grande en devices con muchos puertos) alcanza para
+        # comerse el límite él solo, y storm-control/running-config/los
+        # comandos de SVI (que vienen DESPUÉS en la lista) nunca llegan a
+        # tipearse -- quedan en "" no porque el device los rechace (eso lo
+        # cubre _filter_unsupported() vía el marker en el texto), sino
+        # porque la sesión murió antes de mandarlos. ``_filter_unsupported()``
+        # no puede distinguir esos dos casos por texto (no hay marker en
+        # ""), así que ``_leer()`` necesita esta señal aparte para NO
+        # confundir "sesión cortada, no sabemos nada de los comandos que
+        # faltan" con "comando individual rechazado, el resto es
+        # confiable" -- sólo lo segundo debe tomar la rama tolerante de
+        # partial_ok.
+        "session_complete": session_ok,
     }
 
 

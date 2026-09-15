@@ -143,3 +143,46 @@ def test_huawei_list_ports_parses_correctly_via_single_fused_ssh_session(monkeyp
     assert p.access_vlan == 10
     assert p.admin_up is True
     assert p.operational_up is True
+
+
+# ── Sesión cortada a mitad del batch (no confundir con comando rechazado) ──
+
+def test_cisco_list_ports_raises_when_session_truncated_mid_batch(monkeypatch):
+    """Bug real contra f2r10s1 en producción (48 puertos): el transcript
+    combinado de ``list_ports`` se corta ~57KB adentro (mismo límite que
+    ``_exito()`` ya documenta) -- "show interfaces switchport" (grande,
+    48 puertos) sí devuelve contenido real, pero "show storm-control
+    broadcast" y "show running-config | section ^interface" nunca llegan
+    a tipearse porque la sesión murió antes. Antes de este fix,
+    ``_leer()`` sólo miraba si ALGÚN stdout tenía contenido (sí, el de
+    switchport) y tomaba la rama tolerante de ``partial_ok`` con
+    storm-control degradado a ``None`` -- comportamiento correcto para
+    un comando genuinamente rechazado, pero acá la sesión ni siquiera
+    llegó a intentar esos comandos. Con la señal ``session_complete``
+    debe levantar ``RuntimeError`` en vez de devolver datos parciales
+    silenciosos (mismo criterio que 'device inalcanzable': mejor fallar
+    ruidoso que fallar callado)."""
+    transcript = (
+        "cisco-01#terminal length 0\n"
+        "cisco-01#terminal width 0\n"
+        "cisco-01#show interfaces status\n"
+        "Port      Name               Status       Vlan       Duplex  Speed Type\n"
+        "Gi0/1                        connected    10         a-full  a-1000 10/100/1000BaseTX\n"
+        "cisco-01#show interfaces description\n"
+        "Interface                      Status         Protocol Description\n"
+        "Gi0/1                          up             up       \n"
+        "cisco-01#show interfaces switchport\n"
+        "Name: Gi0/1\n"
+        "Switchport: Enabled\n"
+        "Administrative Mode: static access\n"
+        "Operational Mode: static access\n"
+        "Access Mode VLAN: 10 (MGMT)\n"
+        "Trunking Native Mode VLAN: 1 (default)\n"
+        "Trunking VLANs Enabled: ALL\n"
+        "cisco-01#"  # se corta acá -- storm-control y running-config nunca se mandan
+    )
+    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run_factory(transcript))
+    monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
+
+    with pytest.raises(RuntimeError, match="cisco-01"):
+        CiscoVendor().list_ports(_FakeKeyDevice(), "pw")

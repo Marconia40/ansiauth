@@ -282,12 +282,14 @@ class VendorDriver(ABC):
         # _filter_unsupported(). Sin este flag Ansible descarta las
         # respuestas parciales, confirmado en vivo contra un IOSv sin
         # storm-control. Para devices en ``auth_method == "key"`` este
-        # flag no hace nada (``ssh_direct_service._run_reads()`` ya es
-        # tolerante por diseño -- corre cada comando en su propia sesión y
-        # siempre devuelve todos los stdouts, le pasa de largo sin usarlo)
-        # -- pasa igual por ``_ejecutar()``, el único punto de decisión de
-        # transporte, en vez de llamar a ansible_service directo acá (that
-        # bypassearía el soporte de clave SSH).
+        # flag no hace nada -- ``ssh_direct_service._run_reads()`` manda
+        # todos los comandos por 1 sola sesión y siempre devuelve un
+        # stdout por comando (ver su propia lógica de tolerancia y la
+        # señal ``session_complete`` que agrega al resultado), le pasa de
+        # largo sin usarlo -- pasa igual por ``_ejecutar()``, el único
+        # punto de decisión de transporte, en vez de llamar a
+        # ansible_service directo acá (eso bypassearía el soporte de
+        # clave SSH).
         extravars = {"commands": commands}
         if partial_ok:
             extravars["tolerate_command_errors"] = True
@@ -317,7 +319,27 @@ class VendorDriver(ABC):
             # tomar la rama tolerante; si son todos vacíos, es indistin-
             # guible de "device inalcanzable" y debe caer al RuntimeError
             # de abajo, igual que el caso stdouts=[].
-            if partial_ok and any(s.strip() for s in stdouts):
+            #
+            # Bug real contra f2r10s1 (48 puertos, transporte por clave):
+            # el batch fusionado de read_core_state se corta ~57KB adentro
+            # (ver comentario de ``session_complete`` en
+            # ssh_direct_service._run_reads()) -- "show interfaces
+            # switchport" sí devolvió contenido real, así que
+            # ``any(s.strip()...)`` por sí solo daba True y esto tomaba la
+            # rama tolerante con storm-control/running-config/TODOS los
+            # comandos de SVI en "" -- no porque el device los rechazara
+            # (_filter_unsupported() no tenía marker que filtrar), sino
+            # porque la sesión murió antes de mandarlos. sync_core()
+            # interpretó esos "" como "el device no tiene SVIs" y borró
+            # las SVIs reales ya conocidas -- mismo tipo de bug que el de
+            # f2r6s7, a nivel más granular. ``session_complete`` (ausente
+            # = True, para no romper el contrato de ansible_service, que
+            # no la conoce) es la señal que sólo ssh_direct_service puede
+            # dar: sesión terminó limpio (nuestro "quit" se ecoó) vs se
+            # cortó a mitad de camino. Sólo lo primero es confiable para
+            # partial_ok -- una sesión cortada no permite distinguir
+            # "comando rechazado" de "nunca llegó a mandarse".
+            if partial_ok and result.get("session_complete", True) and any(s.strip() for s in stdouts):
                 logger.warning(
                     "%s: read on device=%s reported failure but captured %d/%d command output(s); "
                     "returning them for per-command handling (error was: %s)",
