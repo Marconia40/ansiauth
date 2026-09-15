@@ -51,6 +51,21 @@ def _fake_run_factory(transcript: str):
     return _fake_run
 
 
+def _patch_ssh_paced(monkeypatch, fake_run):
+    """Ver la misma función en ``test_mac_table_search.py`` -- adapta un
+    ``_fake_run(cmd, input, capture_output, text, timeout, env)`` (para
+    mockear ``subprocess.run``) contra ``_run_ssh_paced(cmd, lines, env)``,
+    el seam real desde que ``_run_ssh_interactive()`` manda "quit" con
+    delay en vez de todo junto. También pone ``_SSH_DRAIN_DELAY_S`` en 0
+    para no esperar los 2s reales en cada test."""
+    monkeypatch.setattr(ssh_direct_service, "_SSH_DRAIN_DELAY_S", 0)
+
+    def _run_ssh_paced(cmd, lines, env):
+        return fake_run(cmd, "\n".join(lines) + "\nquit\n", True, True, None, env)
+
+    monkeypatch.setattr(ssh_direct_service, "_run_ssh_paced", _run_ssh_paced)
+
+
 # ── Cisco: storm-control rechazado a mitad del batch fusionado ────────────
 
 def test_cisco_list_ports_tolerates_unsupported_storm_control_via_ssh_direct(monkeypatch):
@@ -85,7 +100,7 @@ def test_cisco_list_ports_tolerates_unsupported_storm_control_via_ssh_direct(mon
         " switchport mode access\n"
         "cisco-01#quit"
     )
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run_factory(transcript))
+    _patch_ssh_paced(monkeypatch, _fake_run_factory(transcript))
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     ports = CiscoVendor().list_ports(_FakeKeyDevice(), "pw")
@@ -130,7 +145,7 @@ def test_huawei_list_ports_parses_correctly_via_single_fused_ssh_session(monkeyp
         "<huawei-01>display current-configuration interface\n"
         "<huawei-01>quit"
     )
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run_factory(transcript))
+    _patch_ssh_paced(monkeypatch, _fake_run_factory(transcript))
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     ports = HuaweiVendor().list_ports(_FakeKeyDeviceHuawei(), "pw")
@@ -181,7 +196,7 @@ def test_cisco_list_ports_raises_when_session_truncated_mid_batch(monkeypatch):
         "Trunking VLANs Enabled: ALL\n"
         "cisco-01#"  # se corta acá -- storm-control y running-config nunca se mandan
     )
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run_factory(transcript))
+    _patch_ssh_paced(monkeypatch, _fake_run_factory(transcript))
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     with pytest.raises(RuntimeError, match="cisco-01"):

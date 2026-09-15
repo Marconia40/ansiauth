@@ -33,6 +33,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import time
 
 from app.core.config import ANSIBLE_BASE_PATH
 from app.services.vendors.base import limpiar_ruido_benigno as _limpiar_ruido_benigno
@@ -41,6 +42,34 @@ logger = logging.getLogger(__name__)
 
 _SSH_CONNECT_TIMEOUT = int(os.environ.get("SSH_DIRECT_CONNECT_TIMEOUT", "15"))
 _SSH_COMMAND_TIMEOUT = int(os.environ.get("SSH_DIRECT_COMMAND_TIMEOUT", "60"))
+# Bug real confirmado en vivo contra f2r11s1/f2r10s1 (devices grandes,
+# 48+ puertos): el canal SSH de este IOS anuncia una ventana chica
+# (rwindow=8192, rmax=4096 -- confirmado con `ssh -vv`), y "show
+# interfaces switchport" solo (sin ningún otro comando en la sesión) ya
+# supera eso. Si mandamos TODO el stdin (comandos + "quit") de una y
+# cerramos de inmediato, el device a veces corta la conexión a mitad de
+# camino (~48-63KB de los ~66KB reales, confirmado reproducible con
+# datos EXACTOS del transcript real) -- parece interpretar el EOF de
+# nuestro lado como señal de "terminá ya" mientras todavía tiene mucho
+# buffer sin drenar por la ventana chica, y aborta en vez de seguir
+# flusheando. Confirmado en vivo que mantener stdin ABIERTO un rato
+# después de mandar los comandos reales -- sin mandar "quit" todavía --
+# le da tiempo al device a terminar de escribir antes de que cerremos.
+#
+# El valor tiene que alcanzar para el BATCH COMBINADO más grande
+# (read_core_state fusiona vlan+puertos+SVI en 1 sola sesión, ~100KB+ en
+# f2r11s1), no sólo para 1 comando suelto -- confirmado en vivo que 2s
+# alcanzaba para "show interfaces switchport" sola (66KB) pero NO para
+# el batch completo (falló 5/5 corridas reales vía sync_core(), mismo
+# device); 5s sí, 4/4 corridas consistentes con el conteo real de
+# puertos/SVIs (67/39). No es timeout (el corte pasa en ~0.5-1.5s, muy
+# por debajo de _SSH_COMMAND_TIMEOUT) -- es puramente timing de cuándo
+# mandamos el EOF, proporcional al volumen total de la sesión. Un
+# mecanismo adaptativo ("esperar hasta que el output se quede quieto"
+# en vez de un número fijo) sería más preciso y no penalizaría reads
+# chicos -- evaluado, evitado por ahora por el riesgo de introducir un
+# bug de I/O no bloqueante a las apuradas; queda como mejora futura.
+_SSH_DRAIN_DELAY_S = float(os.environ.get("SSH_DIRECT_DRAIN_DELAY", "5.0"))
 
 # Adaptación real por-device -- pedido explícito del usuario tras encontrar
 # equipos donde un combo fijo de algoritmos legacy (lo que había acá antes,
@@ -227,6 +256,57 @@ _PAGER_DISABLE = {
 }
 
 
+def _run_ssh_paced(cmd: list[str], lines: list[str], env: dict) -> subprocess.CompletedProcess:
+    """Corre *cmd* (ya arma el comando ``ssh`` completo) mandando *lines*
+    por stdin en 2 fases: las líneas reales primero, un margen de
+    ``_SSH_DRAIN_DELAY_S`` con stdin todavía ABIERTO (sin mandar
+    ``quit`` todavía), y recién ahí ``quit`` + cierre -- ver el comentario
+    de ``_SSH_DRAIN_DELAY_S`` para el motivo real (devices con ventana de
+    canal SSH chica que abortan si ven nuestro EOF antes de terminar de
+    drenar un output grande). Devuelve un ``CompletedProcess`` con la
+    misma forma que ``subprocess.run(capture_output=True, text=True)``
+    daba antes, así el resto de ``_run_ssh_interactive()`` no cambia."""
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=env, bufsize=1,
+    )
+    deadline = time.monotonic() + _SSH_COMMAND_TIMEOUT
+    try:
+        proc.stdin.write("\n".join(lines) + "\n")
+        proc.stdin.flush()
+        # Esperar en pasos cortos, no un solo time.sleep(_SSH_DRAIN_DELAY_S)
+        # -- si la conexión ya murió rápido (ej. negociación SSH rechazada,
+        # el caso común que dispara varios intentos seguidos en
+        # _run_ssh_interactive) no tiene sentido esperar el margen entero
+        # antes de darnos cuenta; cortar apenas el proceso ya terminó
+        # evita desperdiciar hasta 5s por CADA intento de negociación
+        # fallido.
+        drain_until = time.monotonic() + _SSH_DRAIN_DELAY_S
+        while time.monotonic() < drain_until:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        proc.stdin.write("quit\n")
+        proc.stdin.flush()
+        proc.stdin.close()
+        proc.stdin = None  # ya cerrado -- communicate() no debe volver a tocarlo
+        remaining = max(0.0, deadline - time.monotonic())
+        stdout, stderr = proc.communicate(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    except BrokenPipeError:
+        # El device ya cerró el canal de su lado antes de que termináramos
+        # de escribir -- mismo tipo de corte que este mecanismo intenta
+        # evitar, pero puede seguir pasando (network real, no un bug acá).
+        # Drenar lo que haya y devolverlo iguial que un cierre prolijo, en
+        # vez de que la excepción tumbe todo el read.
+        proc.stdin = None
+        stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def _run_ssh_interactive(
     device, lines: list[str], known_extra_opts: "list[str] | None" = None,
 ) -> tuple[int, str, str, list[str]]:
@@ -285,17 +365,13 @@ def _run_ssh_interactive(
         "-o", "LogLevel=INFO",
         "-o", f"ConnectTimeout={_SSH_CONNECT_TIMEOUT}",
     ]
-    stdin_data = "\n".join([*lines, "quit"]) + "\n"
     with _agent_for(device) as agent_env:
         extra_opts: list[str] = list(known_extra_opts) if known_extra_opts else []
         categorias_probadas: set[str] = set()
         for _ in range(_MAX_NEGOTIATION_RETRIES + 1):
             cmd = [*base_cmd, *extra_opts, f"{device.username}@{device.host}"]
             try:
-                proc = subprocess.run(
-                    cmd, input=stdin_data, capture_output=True, text=True,
-                    timeout=_SSH_COMMAND_TIMEOUT, env=agent_env,
-                )
+                proc = _run_ssh_paced(cmd, lines, agent_env)
             except subprocess.TimeoutExpired:
                 return 1, "", f"ssh command timed out after {_SSH_COMMAND_TIMEOUT}s", extra_opts
             except Exception as exc:

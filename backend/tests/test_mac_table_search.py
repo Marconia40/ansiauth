@@ -30,6 +30,30 @@ from app.services.vendors.cisco.driver import CiscoVendor
 from app.services.vendors.huawei.driver import HuaweiVendor
 
 
+def _patch_ssh_paced(monkeypatch, fake_run):
+    """Adapta los ``_fake_run(cmd, input, capture_output, text, timeout,
+    env)`` de este archivo (escritos para mockear ``subprocess.run``, que
+    ``_run_ssh_interactive()`` ya no llama) para que sigan sirviendo tal
+    cual contra ``_run_ssh_paced(cmd, lines, env)`` -- el nuevo seam que
+    manda las líneas reales por stdin, espera ``_SSH_DRAIN_DELAY_S`` con
+    stdin abierto (ver ese comentario en ``ssh_direct_service.py`` para
+    el motivo real: devices grandes cortando la conexión si ven nuestro
+    EOF antes de terminar de drenar un output grande) y recién ahí manda
+    "quit" + cierra. Ninguno de los fakes existentes mira
+    ``capture_output``/``timeout`` -- sólo ``cmd`` -- así que no hace
+    falta tocar sus cuerpos, sólo este punto de conexión. También pone
+    ``_SSH_DRAIN_DELAY_S`` en 0 para que los tests no esperen los 2s
+    reales en cada llamada."""
+    from app.services import ssh_direct_service
+
+    monkeypatch.setattr(ssh_direct_service, "_SSH_DRAIN_DELAY_S", 0)
+
+    def _run_ssh_paced(cmd, lines, env):
+        return fake_run(cmd, "\n".join(lines) + "\nquit\n", True, True, None, env)
+
+    monkeypatch.setattr(ssh_direct_service, "_run_ssh_paced", _run_ssh_paced)
+
+
 class _FakeDevice:
     name = "cisco-01"
     host = "192.0.2.10"
@@ -518,7 +542,7 @@ def test_run_reads_fuses_all_commands_into_one_ssh_session(monkeypatch):
             )
         return proc
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
@@ -573,7 +597,7 @@ def test_run_reads_flags_session_incomplete_when_truncated_mid_batch(monkeypatch
             stderr = ""
         return _Proc()
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
@@ -625,6 +649,115 @@ def test_extraer_salidas_comandos_handles_session_cut_mid_batch():
     assert result[2] == ""
 
 
+# ── _run_ssh_paced(): quit se manda con delay, no junto con el resto ───────
+
+def test_run_ssh_paced_delays_quit_after_draining_period(monkeypatch):
+    """Bug real confirmado en vivo contra f2r11s1/f2r10s1 (devices
+    grandes, 48+ puertos, canal SSH con ventana chica -- rwindow=8192
+    confirmado con ``ssh -vv``): si mandamos las líneas + "quit" juntos y
+    cerramos stdin de una, el device a veces corta la conexión a mitad de
+    un output grande (~48-63KB de los ~66KB reales) -- parece interpretar
+    nuestro EOF como "terminá ya" mientras todavía tiene mucho para
+    flushear por la ventana chica. Confirmado en vivo (8 corridas
+    repetidas) que mantener stdin abierto >=2s ANTES de mandar "quit" lo
+    evita de forma consistente. Este test fija ese contrato: "quit" debe
+    escribirse en una llamada a ``stdin.write()`` SEPARADA de las líneas
+    reales, después de haber esperado ``_SSH_DRAIN_DELAY_S`` -- en pasos
+    cortos (``poll()``eando si el proceso ya murió, para no desperdiciar
+    el margen entero cuando una negociación falla rápido), no un solo
+    ``time.sleep()`` de una. Usa un reloj falso controlado (``monotonic``
+    + ``sleep`` comparten un contador) en vez de un ``sleep`` no-op puro,
+    porque el loop de espera corta por tiempo real transcurrido -- un
+    no-op puro lo dejaría girando sin avanzar nunca."""
+    from app.services import ssh_direct_service
+
+    writes: list[str] = []
+
+    class _FakeClock:
+        def __init__(self):
+            self.t = 0.0
+        def monotonic(self):
+            return self.t
+        def sleep(self, s):
+            self.t += s
+
+    clock = _FakeClock()
+
+    class _FakeStdin:
+        def write(self, data):
+            writes.append(data)
+        def flush(self):
+            pass
+        def close(self):
+            pass
+
+    class _FakePopen:
+        def __init__(self, cmd, stdin=None, stdout=None, stderr=None, text=None, env=None, bufsize=None):
+            self.stdin = _FakeStdin()
+            self.returncode = 0
+        def poll(self):
+            return None  # sigue "corriendo" durante todo el margen de espera
+        def communicate(self, timeout=None):
+            return "ok\ndev#quit", ""
+
+    monkeypatch.setattr(ssh_direct_service.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(ssh_direct_service.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(ssh_direct_service.time, "sleep", clock.sleep)
+    monkeypatch.setattr(ssh_direct_service, "_SSH_DRAIN_DELAY_S", 2.0)
+
+    proc = ssh_direct_service._run_ssh_paced(
+        ["ssh", "dev"], ["terminal length 0", "show interfaces switchport"], {},
+    )
+
+    # Las líneas reales van en 1 write, "quit" en otro SEPARADO y
+    # POSTERIOR -- nunca concatenados en la misma escritura (eso volvería
+    # a juntar todo antes del delay, exactamente lo que causaba el corte).
+    assert writes == ["terminal length 0\nshow interfaces switchport\n", "quit\n"]
+    # El reloj falso avanzó al menos los 2.0s del margen antes de mandar
+    # "quit" (en pasos de 0.1s, ver el loop real).
+    assert clock.t >= 2.0
+    assert proc.returncode == 0
+    assert proc.stdout == "ok\ndev#quit"
+
+
+def test_run_ssh_paced_survives_broken_pipe_on_late_write(monkeypatch):
+    """Si el device ya cerró el canal de su lado antes de que termináramos
+    de escribir (mismo tipo de corte que este mecanismo intenta evitar,
+    pero la red real puede seguir haciéndolo alguna vez), no debe
+    reventar con una excepción sin manejar -- debe drenar lo que haya y
+    devolverlo, dejando que el resto del pipeline (``_sesion_completa()``
+    vía la ausencia del eco de "quit") lo trate como sesión incompleta,
+    igual que cualquier otro corte."""
+    from app.services import ssh_direct_service
+
+    class _FakeStdin:
+        def write(self, data):
+            if data == "quit\n":
+                raise BrokenPipeError("device closed the channel")
+        def flush(self):
+            pass
+        def close(self):
+            pass
+
+    class _FakePopen:
+        def __init__(self, cmd, stdin=None, stdout=None, stderr=None, text=None, env=None, bufsize=None):
+            self.stdin = _FakeStdin()
+            self.returncode = 1
+        def poll(self):
+            return None
+        def communicate(self, timeout=None):
+            return "partial output before the cut", "Connection closed by remote host"
+
+    monkeypatch.setattr(ssh_direct_service.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(ssh_direct_service.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ssh_direct_service, "_SSH_DRAIN_DELAY_S", 0)
+
+    proc = ssh_direct_service._run_ssh_paced(["ssh", "dev"], ["show interfaces switchport"], {})
+
+    assert proc.returncode == 1
+    assert proc.stdout == "partial output before the cut"
+
+
 # ── SSH algorithm negotiation: adapta por device, no fuerza legacy siempre ──
 
 def test_run_ssh_interactive_tries_default_algorithms_first(monkeypatch):
@@ -643,7 +776,7 @@ def test_run_ssh_interactive_tries_default_algorithms_first(monkeypatch):
             stderr = ""
         return _Proc()
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
@@ -685,7 +818,7 @@ def test_run_ssh_interactive_retries_with_devices_own_kex_offer(monkeypatch):
             proc.stderr = ""
         return proc
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
@@ -728,7 +861,7 @@ def test_run_ssh_interactive_retries_host_key_type_sets_both_options(monkeypatch
             proc.stderr = ""
         return proc
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
@@ -761,7 +894,7 @@ def test_run_ssh_interactive_stops_retrying_when_same_category_repeats(monkeypat
             )
         return _Proc()
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
@@ -793,7 +926,7 @@ def test_run_ssh_interactive_does_not_retry_on_unrelated_failure(monkeypatch):
             stderr = "Permission denied (publickey)."
         return _Proc()
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
@@ -843,7 +976,7 @@ def test_run_ssh_interactive_adapts_cipher_too(monkeypatch):
             proc.stderr = ""
         return proc
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
@@ -893,7 +1026,7 @@ def test_run_ssh_interactive_adapts_all_three_categories_in_sequence(monkeypatch
             proc.stderr = ""
         return proc
 
-    monkeypatch.setattr(ssh_direct_service.subprocess, "run", _fake_run)
+    _patch_ssh_paced(monkeypatch, _fake_run)
     monkeypatch.setattr(ssh_direct_service, "_agent_for", lambda device: _NullAgentCtx())
 
     class _Dev:
